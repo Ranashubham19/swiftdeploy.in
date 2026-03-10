@@ -1644,6 +1644,12 @@ const callAiWorkerService = async (
   return data;
 };
 
+const setNoStore = (res: express.Response) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+};
+
 // Configure session
 const sessionConfig = {
   secret: SESSION_SECRET,
@@ -17064,6 +17070,7 @@ app.get('/logout', (req, res) => {
 });
 
 app.get('/worker/tasks', requireAuth, (req, res) => {
+  setNoStore(res);
   const { email } = getAuthenticatedUserContext(req);
   if (!email) {
     return res.status(401).json({ success: false, message: 'Authentication required' });
@@ -17088,6 +17095,7 @@ app.get('/worker/tasks', requireAuth, (req, res) => {
 });
 
 app.post('/worker/interpret', requireAuth, (req, res) => {
+  setNoStore(res);
   const description = String(req.body?.description || '').trim();
   if (!description) {
     return res.status(400).json({ success: false, message: 'Task description is required.' });
@@ -17120,6 +17128,7 @@ app.post('/worker/interpret', requireAuth, (req, res) => {
 });
 
 app.post('/worker/tasks', requireAuth, async (req, res) => {
+  setNoStore(res);
   const { email } = getAuthenticatedUserContext(req);
   const description = String(req.body?.description || '').trim();
   const runNow = req.body?.runNow !== false;
@@ -17176,6 +17185,7 @@ app.post('/worker/tasks', requireAuth, async (req, res) => {
 });
 
 app.get('/worker/tasks/:taskId/history', requireAuth, (req, res) => {
+  setNoStore(res);
   const { email } = getAuthenticatedUserContext(req);
   const taskId = String(req.params.taskId || '').trim();
   if (!email) {
@@ -17184,19 +17194,14 @@ app.get('/worker/tasks/:taskId/history', requireAuth, (req, res) => {
   if (hasAiWorkerBridge) {
     return void (async () => {
       try {
-        const dashboardPayload = await callAiWorkerService(req, 'GET', '/api/v1/tasks');
-        const mappedDashboard = mapAiWorkerDashboard(dashboardPayload);
-        const task = mappedDashboard.tasks.find((entry: any) => entry.id === taskId);
-        if (!task) {
-          return res.status(404).json({ success: false, message: 'Task not found.' });
-        }
-        const [resultsPayload, logsPayload] = await Promise.all([
+        const [taskPayload, resultsPayload, logsPayload] = await Promise.all([
+          callAiWorkerService(req, 'GET', `/api/v1/tasks/${taskId}`),
           callAiWorkerService(req, 'GET', `/api/v1/tasks/${taskId}/results`),
           callAiWorkerService(req, 'GET', `/api/v1/tasks/${taskId}/logs`)
         ]);
         return res.json({
           success: true,
-          task,
+          task: mapAiWorkerTask(taskPayload),
           results: Array.isArray(resultsPayload) ? resultsPayload.map(mapAiWorkerResult) : [],
           logs: Array.isArray(logsPayload) ? logsPayload.map(mapAiWorkerLog) : []
         });
@@ -17216,6 +17221,7 @@ app.get('/worker/tasks/:taskId/history', requireAuth, (req, res) => {
 });
 
 app.patch('/worker/tasks/:taskId', requireAuth, (req, res) => {
+  setNoStore(res);
   const { email } = getAuthenticatedUserContext(req);
   const taskId = String(req.params.taskId || '').trim();
   if (!email) {
@@ -17278,6 +17284,7 @@ app.patch('/worker/tasks/:taskId', requireAuth, (req, res) => {
 });
 
 app.delete('/worker/tasks/:taskId', requireAuth, (req, res) => {
+  setNoStore(res);
   const { email } = getAuthenticatedUserContext(req);
   const taskId = String(req.params.taskId || '').trim();
   if (!email) {
@@ -17307,6 +17314,7 @@ app.delete('/worker/tasks/:taskId', requireAuth, (req, res) => {
 });
 
 app.post('/worker/tasks/:taskId/run', requireAuth, async (req, res) => {
+  setNoStore(res);
   const { email } = getAuthenticatedUserContext(req);
   const taskId = String(req.params.taskId || '').trim();
   if (!email) {

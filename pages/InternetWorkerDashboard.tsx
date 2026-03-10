@@ -10,6 +10,12 @@ type FeedbackState = {
   message: string;
 } | null;
 
+type WorkerTaskHistoryData = {
+  task: WorkerTask;
+  results: WorkerTaskResult[];
+  logs: WorkerExecutionLog[];
+};
+
 const taskTemplates = [
   {
     label: 'Price tracker',
@@ -110,9 +116,15 @@ const buildDashboardState = (result: any): WorkerDashboardData => ({
   }
 });
 
+const buildNoStoreUrl = (path: string): string => {
+  const separator = path.includes('?') ? '&' : '?';
+  return `${apiUrl(path)}${separator}_=${Date.now()}`;
+};
+
 const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
   const [dashboard, setDashboard] = useState<WorkerDashboardData | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string>('');
+  const [selectedTaskHistory, setSelectedTaskHistory] = useState<WorkerTaskHistoryData | null>(null);
   const [prompt, setPrompt] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isCreating, setIsCreating] = useState(false);
@@ -126,20 +138,33 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
     [dashboard?.tasks, selectedTaskId]
   );
 
+  const selectedTaskDetails = useMemo(
+    () => (selectedTaskHistory?.task?.id === selectedTask?.id ? selectedTaskHistory.task : selectedTask),
+    [selectedTask, selectedTaskHistory]
+  );
+
   const selectedTaskResults = useMemo(
-    () => dashboard?.recentResults.filter((result) => result.taskId === selectedTask?.id).slice(0, 6) || [],
-    [dashboard?.recentResults, selectedTask?.id]
+    () => (
+      selectedTaskHistory?.task?.id === selectedTask?.id
+        ? selectedTaskHistory.results.slice(0, 6)
+        : dashboard?.recentResults.filter((result) => result.taskId === selectedTask?.id).slice(0, 6) || []
+    ),
+    [dashboard?.recentResults, selectedTask?.id, selectedTaskHistory]
   );
 
   const selectedTaskLogs = useMemo(
-    () => dashboard?.recentLogs.filter((log) => log.taskId === selectedTask?.id).slice(0, 8) || [],
-    [dashboard?.recentLogs, selectedTask?.id]
+    () => (
+      selectedTaskHistory?.task?.id === selectedTask?.id
+        ? selectedTaskHistory.logs.slice(0, 8)
+        : dashboard?.recentLogs.filter((log) => log.taskId === selectedTask?.id).slice(0, 8) || []
+    ),
+    [dashboard?.recentLogs, selectedTask?.id, selectedTaskHistory]
   );
 
   const selectedTaskSuccessRate = useMemo(() => {
-    if (!selectedTask || selectedTask.runCount === 0) return 0;
-    return (selectedTask.successCount / selectedTask.runCount) * 100;
-  }, [selectedTask]);
+    if (!selectedTaskDetails || selectedTaskDetails.runCount === 0) return 0;
+    return (selectedTaskDetails.successCount / selectedTaskDetails.runCount) * 100;
+  }, [selectedTaskDetails]);
 
   const selectedTaskChangeCount = useMemo(
     () => selectedTaskResults.filter((result) => result.detectedChange).length,
@@ -169,21 +194,51 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
     [dashboard?.tasks]
   );
 
+  const loadTaskHistory = async (taskId: string) => {
+    if (!taskId) {
+      setSelectedTaskHistory(null);
+      return;
+    }
+
+    const response = await fetch(buildNoStoreUrl(`/worker/tasks/${taskId}/history`), {
+      credentials: 'include',
+      cache: 'no-store'
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(String(result?.message || 'Failed to load task history.'));
+    }
+    setSelectedTaskHistory({
+      task: result.task,
+      results: Array.isArray(result.results) ? result.results : [],
+      logs: Array.isArray(result.logs) ? result.logs : []
+    });
+  };
+
   const loadDashboard = async (showSpinner = false) => {
     if (showSpinner) setIsRefreshing(true);
     try {
-      const response = await fetch(apiUrl('/worker/tasks'), { credentials: 'include' });
+      const response = await fetch(buildNoStoreUrl('/worker/tasks'), {
+        credentials: 'include',
+        cache: 'no-store'
+      });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(String(result?.message || 'Failed to load worker dashboard.'));
       }
-      setDashboard(buildDashboardState(result));
-      setSelectedTaskId((current) => {
-        if (current && result.tasks?.some((task: WorkerTask) => task.id === current)) {
-          return current;
-        }
-        return result.tasks?.[0]?.id || '';
-      });
+      const nextDashboard = buildDashboardState(result);
+      setDashboard(nextDashboard);
+      const nextSelectedTaskId = (
+        selectedTaskId && nextDashboard.tasks.some((task) => task.id === selectedTaskId)
+          ? selectedTaskId
+          : nextDashboard.tasks[0]?.id || ''
+      );
+      setSelectedTaskId(nextSelectedTaskId);
+      if (nextSelectedTaskId) {
+        await loadTaskHistory(nextSelectedTaskId);
+      } else {
+        setSelectedTaskHistory(null);
+      }
     } catch (error) {
       setFeedback({
         type: 'error',
@@ -198,6 +253,19 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
   useEffect(() => {
     void loadDashboard();
   }, []);
+
+  useEffect(() => {
+    if (!selectedTaskId) {
+      setSelectedTaskHistory(null);
+      return;
+    }
+    void loadTaskHistory(selectedTaskId).catch((error) => {
+      setFeedback({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Failed to load task history.'
+      });
+    });
+  }, [selectedTaskId]);
 
   useEffect(() => {
     if (!hasRunningTasks && !isPolling) return;
@@ -227,6 +295,7 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
+        cache: 'no-store',
         body: JSON.stringify({
           description: prompt.trim(),
           runNow: true
@@ -240,6 +309,7 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
       setDashboard(nextDashboard);
       if (result.task?.id) {
         setSelectedTaskId(result.task.id);
+        await loadTaskHistory(result.task.id);
       }
       if (nextDashboard.tasks.some((task) => task.runStatus === 'RUNNING')) {
         setIsPolling(true);
@@ -267,20 +337,23 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
         action === 'run'
           ? fetch(apiUrl(`/worker/tasks/${taskId}/run`), {
               method: 'POST',
-              credentials: 'include'
+              credentials: 'include',
+              cache: 'no-store'
             })
           : action === 'toggle'
             ? fetch(apiUrl(`/worker/tasks/${taskId}`), {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 credentials: 'include',
+                cache: 'no-store',
                 body: JSON.stringify({
                   status: task?.status === 'ACTIVE' ? 'PAUSED' : 'ACTIVE'
                 })
               })
             : fetch(apiUrl(`/worker/tasks/${taskId}`), {
                 method: 'DELETE',
-                credentials: 'include'
+                credentials: 'include',
+                cache: 'no-store'
               });
 
       const response = await request;
@@ -296,6 +369,16 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
         }
         return current;
       });
+      if (action === 'delete') {
+        const nextTaskId = result.tasks?.[0]?.id || '';
+        if (nextTaskId) {
+          await loadTaskHistory(nextTaskId);
+        } else {
+          setSelectedTaskHistory(null);
+        }
+      } else {
+        await loadTaskHistory(taskId);
+      }
       const taskIsRunning = action === 'run'
         ? true
         : Array.isArray(result.tasks) && result.tasks.some((entry: WorkerTask) => entry.runStatus === 'RUNNING');
@@ -544,32 +627,32 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
                     <div>
                       <p className="text-sm font-medium text-red-100">Selected task</p>
                       <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">
-                        {selectedTask ? selectedTask.title : 'Choose a worker task'}
+                        {selectedTaskDetails ? selectedTaskDetails.title : 'Choose a worker task'}
                       </h2>
                     </div>
-                    {selectedTask ? (
+                    {selectedTaskDetails ? (
                       <button
                         type="button"
-                        onClick={() => void handleTaskAction(selectedTask.id, 'run', selectedTask)}
-                        disabled={actionTaskId === selectedTask.id}
+                        onClick={() => void handleTaskAction(selectedTaskDetails.id, 'run', selectedTaskDetails)}
+                        disabled={actionTaskId === selectedTaskDetails.id}
                         className="btn-deploy-gradient rounded-full px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-70"
                       >
-                        {actionTaskId === selectedTask.id ? 'Running...' : 'Run task'}
+                        {actionTaskId === selectedTaskDetails.id ? 'Running...' : 'Run task'}
                       </button>
                     ) : null}
                   </div>
 
-                  {selectedTask ? (
+                  {selectedTaskDetails ? (
                     <>
                       <div className="mt-5 grid gap-3 sm:grid-cols-2">
                         {[
-                          ['Website', selectedTask.structuredInstructions.website],
-                          ['Keyword', selectedTask.structuredInstructions.keyword || 'None'],
-                          ['Schedule', scheduleLabel(selectedTask.schedule)],
-                          ['Delivery', selectedTask.structuredInstructions.deliveryChannel],
-                          ['Workflow', selectedTask.structuredInstructions.steps?.length ? `${selectedTask.structuredInstructions.steps.length} steps` : 'Legacy extractor'],
-                          ['Next run', formatRelativeLabel(selectedTask.nextRunAt)],
-                          ['Last success', formatRelativeLabel(selectedTask.lastSuccessfulRunAt)]
+                          ['Website', selectedTaskDetails.structuredInstructions.website],
+                          ['Keyword', selectedTaskDetails.structuredInstructions.keyword || 'None'],
+                          ['Schedule', scheduleLabel(selectedTaskDetails.schedule)],
+                          ['Delivery', selectedTaskDetails.structuredInstructions.deliveryChannel],
+                          ['Workflow', selectedTaskDetails.structuredInstructions.steps?.length ? `${selectedTaskDetails.structuredInstructions.steps.length} steps` : 'Legacy extractor'],
+                          ['Next run', formatRelativeLabel(selectedTaskDetails.nextRunAt)],
+                          ['Last success', formatRelativeLabel(selectedTaskDetails.lastSuccessfulRunAt)]
                         ].map(([label, value]) => (
                           <div key={label} className="rounded-[22px] border border-white/8 bg-[#08080a] px-4 py-4">
                             <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">{label}</p>
@@ -582,11 +665,11 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
                         <div className="rounded-[22px] border border-white/8 bg-[#08080a] px-4 py-4">
                           <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">Success rate</p>
                           <p className="mt-2 text-lg font-semibold text-white">{formatPercent(selectedTaskSuccessRate)}</p>
-                          <p className="mt-1 text-xs text-zinc-500">{selectedTask.successCount} of {selectedTask.runCount} runs succeeded</p>
+                          <p className="mt-1 text-xs text-zinc-500">{selectedTaskDetails.successCount} of {selectedTaskDetails.runCount} runs succeeded</p>
                         </div>
                         <div className="rounded-[22px] border border-white/8 bg-[#08080a] px-4 py-4">
                           <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">Repairs learned</p>
-                          <p className="mt-2 text-lg font-semibold text-white">{selectedTask.repairCount}</p>
+                          <p className="mt-2 text-lg font-semibold text-white">{selectedTaskDetails.repairCount}</p>
                           <p className="mt-1 text-xs text-zinc-500">Automatic selector recoveries saved for reuse</p>
                         </div>
                         <div className="rounded-[22px] border border-white/8 bg-[#08080a] px-4 py-4">
@@ -629,15 +712,15 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
                       <div className="mt-5 rounded-[24px] border border-white/8 bg-[#08080a] p-4">
                         <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">Structured instructions</p>
                         <pre className="mt-3 overflow-x-auto whitespace-pre-wrap text-xs leading-6 text-zinc-300">
-                          {JSON.stringify(selectedTask.structuredInstructions, null, 2)}
+                          {JSON.stringify(selectedTaskDetails.structuredInstructions, null, 2)}
                         </pre>
                       </div>
 
-                      {selectedTask.structuredInstructions.steps?.length ? (
+                      {selectedTaskDetails.structuredInstructions.steps?.length ? (
                         <div className="mt-5 rounded-[24px] border border-white/8 bg-[#08080a] p-4">
                           <p className="text-xs uppercase tracking-[0.14em] text-zinc-500">Workflow steps</p>
                           <div className="mt-4 space-y-3">
-                            {selectedTask.structuredInstructions.steps.map((step, index) => (
+                            {selectedTaskDetails.structuredInstructions.steps.map((step, index) => (
                               <div
                                 key={`${step.action}-${index}`}
                                 className="flex items-start gap-3 rounded-[20px] border border-white/8 bg-[#050507] px-4 py-3"

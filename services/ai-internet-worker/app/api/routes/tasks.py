@@ -142,6 +142,18 @@ def task_logs(
     return [ExecutionLogRead.model_validate(item) for item in logs]
 
 
+@router.get("/{task_id}", response_model=TaskRead)
+def get_task(
+    task_id: str,
+    current_user: User = Depends(get_request_user),
+    db: Session = Depends(get_db),
+) -> TaskRead:
+    task = db.scalar(select(AutomationTask).where(AutomationTask.id == task_id, AutomationTask.user_id == current_user.id))
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    return _serialize_task(task)
+
+
 @router.patch("/{task_id}", response_model=TaskRead)
 def update_task(
     task_id: str,

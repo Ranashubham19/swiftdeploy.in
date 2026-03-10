@@ -106,10 +106,9 @@ module.exports = async (req, res) => {
     if (contentType) {
       res.setHeader("content-type", contentType);
     }
-    const cacheControl = upstream.headers.get("cache-control");
-    if (cacheControl) {
-      res.setHeader("cache-control", cacheControl);
-    }
+    res.setHeader("cache-control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0");
+    res.setHeader("pragma", "no-cache");
+    res.setHeader("expires", "0");
 
     const body = Buffer.from(await upstream.arrayBuffer());
     res.status(upstream.status).send(body);
