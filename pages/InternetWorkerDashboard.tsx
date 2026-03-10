@@ -138,27 +138,33 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
     [dashboard?.tasks, selectedTaskId]
   );
 
+  const hasSelectedTaskHistory = Boolean(
+    selectedTaskHistory?.task?.id &&
+    selectedTask?.id &&
+    selectedTaskHistory.task.id === selectedTask.id
+  );
+
   const selectedTaskDetails = useMemo(
-    () => (selectedTaskHistory?.task?.id === selectedTask?.id ? selectedTaskHistory.task : selectedTask),
-    [selectedTask, selectedTaskHistory]
+    () => (hasSelectedTaskHistory ? selectedTaskHistory!.task : selectedTask),
+    [hasSelectedTaskHistory, selectedTask, selectedTaskHistory]
   );
 
   const selectedTaskResults = useMemo(
     () => (
-      selectedTaskHistory?.task?.id === selectedTask?.id
-        ? selectedTaskHistory.results.slice(0, 6)
+      hasSelectedTaskHistory
+        ? selectedTaskHistory!.results.slice(0, 6)
         : dashboard?.recentResults.filter((result) => result.taskId === selectedTask?.id).slice(0, 6) || []
     ),
-    [dashboard?.recentResults, selectedTask?.id, selectedTaskHistory]
+    [dashboard?.recentResults, hasSelectedTaskHistory, selectedTask?.id, selectedTaskHistory]
   );
 
   const selectedTaskLogs = useMemo(
     () => (
-      selectedTaskHistory?.task?.id === selectedTask?.id
-        ? selectedTaskHistory.logs.slice(0, 8)
+      hasSelectedTaskHistory
+        ? selectedTaskHistory!.logs.slice(0, 8)
         : dashboard?.recentLogs.filter((log) => log.taskId === selectedTask?.id).slice(0, 8) || []
     ),
-    [dashboard?.recentLogs, selectedTask?.id, selectedTaskHistory]
+    [dashboard?.recentLogs, hasSelectedTaskHistory, selectedTask?.id, selectedTaskHistory]
   );
 
   const selectedTaskSuccessRate = useMemo(() => {
