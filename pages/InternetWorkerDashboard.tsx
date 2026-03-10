@@ -130,7 +130,7 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
   const [isCreating, setIsCreating] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [actionTaskId, setActionTaskId] = useState('');
-  const [isPolling, setIsPolling] = useState(false);
+  const [pollUntil, setPollUntil] = useState(0);
   const [feedback, setFeedback] = useState<FeedbackState>(null);
 
   const selectedTask = useMemo(
@@ -268,14 +268,18 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
   }, [selectedTaskId]);
 
   useEffect(() => {
-    if (!hasRunningTasks && !isPolling) return;
+    const shouldPoll = hasRunningTasks || pollUntil > Date.now();
+    if (!shouldPoll) return;
 
     const interval = window.setInterval(() => {
       void loadDashboard();
+      if (!hasRunningTasks && pollUntil > 0 && Date.now() >= pollUntil) {
+        setPollUntil(0);
+      }
     }, 5000);
 
     return () => window.clearInterval(interval);
-  }, [hasRunningTasks, isPolling]);
+  }, [hasRunningTasks, pollUntil]);
 
   useEffect(() => {
     if (!feedback) return;
@@ -311,9 +315,7 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
         setSelectedTaskId(result.task.id);
         await loadTaskHistory(result.task.id);
       }
-      if (nextDashboard.tasks.some((task) => task.runStatus === 'RUNNING')) {
-        setIsPolling(true);
-      }
+      setPollUntil(Date.now() + 120000);
       setPrompt('');
       setFeedback({ type: 'success', message: 'Worker task created successfully.' });
     } catch (error) {
@@ -362,13 +364,21 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
         throw new Error(String(result?.message || 'Task action failed.'));
       }
 
-      setDashboard(buildDashboardState(result));
-      setSelectedTaskId((current) => {
-        if (action === 'delete' && current === taskId) {
-          return result.tasks?.[0]?.id || '';
-        }
-        return current;
-      });
+      if (action === 'run') {
+        setPollUntil(Date.now() + 120000);
+        await loadDashboard();
+        setSelectedTaskId(taskId);
+        await loadTaskHistory(taskId);
+      } else {
+        setDashboard(buildDashboardState(result));
+        setSelectedTaskId((current) => {
+          if (action === 'delete' && current === taskId) {
+            return result.tasks?.[0]?.id || '';
+          }
+          return current;
+        });
+      }
+
       if (action === 'delete') {
         const nextTaskId = result.tasks?.[0]?.id || '';
         if (nextTaskId) {
@@ -376,13 +386,9 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
         } else {
           setSelectedTaskHistory(null);
         }
-      } else {
+      } else if (action !== 'run') {
         await loadTaskHistory(taskId);
       }
-      const taskIsRunning = action === 'run'
-        ? true
-        : Array.isArray(result.tasks) && result.tasks.some((entry: WorkerTask) => entry.runStatus === 'RUNNING');
-      setIsPolling(taskIsRunning);
       setFeedback({
         type: 'success',
         message:
@@ -401,13 +407,6 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
       setActionTaskId('');
     }
   };
-
-  useEffect(() => {
-    if (!isPolling) return;
-    if (!hasRunningTasks) {
-      setIsPolling(false);
-    }
-  }, [hasRunningTasks, isPolling]);
 
   return (
     <>
