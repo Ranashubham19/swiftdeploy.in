@@ -399,7 +399,8 @@ class AutomationRunner:
                 raise RuntimeError("No product price could be extracted from the workflow.")
 
             current_price = float(match.group(1).replace(",", ""))
-            previous_price = float((previous_result.result_data or {}).get("numeric_price", 0) or 0)
+            previous_result_data = previous_result.result_data if previous_result and previous_result.result_data else {}
+            previous_price = float(previous_result_data.get("numeric_price", 0) or 0)
             detected_change = bool(previous_price) and current_price != previous_price
             dropped = bool(previous_price) and current_price < previous_price
             summary = (
@@ -528,7 +529,8 @@ class AutomationRunner:
             raise RuntimeError("No product price could be extracted from the target page.")
 
         current_price = float(match.group(1).replace(",", ""))
-        previous_price = float((previous_result.result_data or {}).get("numeric_price", 0) or 0)
+        previous_result_data = previous_result.result_data if previous_result and previous_result.result_data else {}
+        previous_price = float(previous_result_data.get("numeric_price", 0) or 0)
         detected_change = bool(previous_price) and current_price != previous_price
         dropped = bool(previous_price) and current_price < previous_price
         summary = (
