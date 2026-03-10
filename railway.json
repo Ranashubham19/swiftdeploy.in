@@ -1,0 +1,11 @@
+{
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "Dockerfile"
+  },
+  "deploy": {
+    "startCommand": "npm --prefix backend run start:railway:legacy",
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 300
+  }
+}

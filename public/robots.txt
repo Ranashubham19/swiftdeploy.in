@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://swift-deploy.in/sitemap.xml
+Host: swift-deploy.in

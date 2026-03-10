@@ -1,0 +1,86 @@
+[
+  {
+    "id": "general_tcp_udp",
+    "category": "general",
+    "prompt": "Explain the difference between TCP and UDP with practical real-world examples.",
+    "minChars": 250,
+    "mustIncludeAny": ["TCP", "UDP"]
+  },
+  {
+    "id": "general_microservices",
+    "category": "general",
+    "prompt": "Compare monolith vs microservices architecture. Include pros, cons, and when to choose each.",
+    "minChars": 350,
+    "mustIncludeAny": ["monolith", "microservices"]
+  },
+  {
+    "id": "coding_js_palindrome",
+    "category": "coding",
+    "prompt": "Write a JavaScript function to check whether a string is a palindrome. Ignore spaces and case. Include examples.",
+    "minChars": 180,
+    "mustIncludeAny": ["```", "function", "palindrome"]
+  },
+  {
+    "id": "coding_python_lru",
+    "category": "coding",
+    "prompt": "Implement an LRU cache in Python with get and put methods. Explain time complexity.",
+    "minChars": 220,
+    "mustIncludeAny": ["```", "class", "LRU"]
+  },
+  {
+    "id": "coding_sql_top_customers",
+    "category": "coding",
+    "prompt": "Write an SQL query to get the top 5 customers by total order amount from orders(customer_id, amount).",
+    "minChars": 80,
+    "mustIncludeAny": ["SELECT", "customer_id", "SUM"]
+  },
+  {
+    "id": "math_probability",
+    "category": "math",
+    "prompt": "A bag has 5 red balls and 3 blue balls. If 2 balls are drawn without replacement, what is the probability both are red?",
+    "minChars": 120,
+    "mustIncludeAny": ["probability", "red"]
+  },
+  {
+    "id": "reasoning_study_plan",
+    "category": "general",
+    "prompt": "Create a 30-day study plan to learn Python for a beginner with 1 hour per day.",
+    "minChars": 300,
+    "mustIncludeAny": ["30", "Python"]
+  },
+  {
+    "id": "debug_node_memory",
+    "category": "coding",
+    "prompt": "My Node.js app memory usage keeps growing over time. Give a debugging checklist and common causes.",
+    "minChars": 260,
+    "mustIncludeAny": ["Node.js", "memory"]
+  },
+  {
+    "id": "current_fastest_car",
+    "category": "current_event",
+    "prompt": "Fastest car in the world as of 2026 (production car).",
+    "minChars": 100,
+    "mustIncludeAny": ["production", "speed", "mph", "km/h"]
+  },
+  {
+    "id": "general_health_nonmedical",
+    "category": "general",
+    "prompt": "What are practical ways to improve sleep quality without medication?",
+    "minChars": 220,
+    "mustIncludeAny": ["sleep"]
+  },
+  {
+    "id": "writing_email",
+    "category": "general",
+    "prompt": "Draft a professional email asking for an extension on a project deadline due to unexpected technical issues.",
+    "minChars": 160,
+    "mustIncludeAny": ["email", "deadline", "extension"]
+  },
+  {
+    "id": "multi_part_network",
+    "category": "general",
+    "prompt": "What is DNS, how does DNS caching work, and what are common DNS troubleshooting steps?",
+    "minChars": 300,
+    "mustIncludeAny": ["DNS", "cache", "troubleshooting"]
+  }
+]
