@@ -118,6 +118,7 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
   const [isCreating, setIsCreating] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [actionTaskId, setActionTaskId] = useState('');
+  const [isPolling, setIsPolling] = useState(false);
   const [feedback, setFeedback] = useState<FeedbackState>(null);
 
   const selectedTask = useMemo(
@@ -163,6 +164,11 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
     };
   }, [selectedTaskPriceSeries]);
 
+  const hasRunningTasks = useMemo(
+    () => Boolean(dashboard?.tasks.some((task) => task.runStatus === 'RUNNING')),
+    [dashboard?.tasks]
+  );
+
   const loadDashboard = async (showSpinner = false) => {
     if (showSpinner) setIsRefreshing(true);
     try {
@@ -194,6 +200,16 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
   }, []);
 
   useEffect(() => {
+    if (!hasRunningTasks && !isPolling) return;
+
+    const interval = window.setInterval(() => {
+      void loadDashboard();
+    }, 5000);
+
+    return () => window.clearInterval(interval);
+  }, [hasRunningTasks, isPolling]);
+
+  useEffect(() => {
     if (!feedback) return;
     const timer = window.setTimeout(() => setFeedback(null), 3500);
     return () => window.clearTimeout(timer);
@@ -220,9 +236,13 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
       if (!response.ok) {
         throw new Error(String(result?.message || 'Failed to create worker task.'));
       }
-      setDashboard(buildDashboardState(result));
+      const nextDashboard = buildDashboardState(result);
+      setDashboard(nextDashboard);
       if (result.task?.id) {
         setSelectedTaskId(result.task.id);
+      }
+      if (nextDashboard.tasks.some((task) => task.runStatus === 'RUNNING')) {
+        setIsPolling(true);
       }
       setPrompt('');
       setFeedback({ type: 'success', message: 'Worker task created successfully.' });
@@ -276,6 +296,10 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
         }
         return current;
       });
+      const taskIsRunning = action === 'run'
+        ? true
+        : Array.isArray(result.tasks) && result.tasks.some((entry: WorkerTask) => entry.runStatus === 'RUNNING');
+      setIsPolling(taskIsRunning);
       setFeedback({
         type: 'success',
         message:
@@ -294,6 +318,13 @@ const InternetWorkerDashboard: React.FC<{ user: User }> = ({ user }) => {
       setActionTaskId('');
     }
   };
+
+  useEffect(() => {
+    if (!isPolling) return;
+    if (!hasRunningTasks) {
+      setIsPolling(false);
+    }
+  }, [hasRunningTasks, isPolling]);
 
   return (
     <>

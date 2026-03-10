@@ -201,5 +201,16 @@ def run_task(
     task = db.scalar(select(AutomationTask).where(AutomationTask.id == task_id, AutomationTask.user_id == current_user.id))
     if not task:
         raise HTTPException(status_code=404, detail="Task not found.")
+    task.run_status = "RUNNING"
+    task.last_error = None
+    db.add(
+        ExecutionLog(
+            task_id=task.id,
+            status="INFO",
+            message="Execution queued.",
+            details={"trigger": "manual"},
+        )
+    )
+    db.commit()
     execute_automation_task.delay(task.id, "manual")
     return {"status": "queued", "task_id": task.id}
