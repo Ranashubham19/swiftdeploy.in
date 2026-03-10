@@ -28,3 +28,14 @@ backend/.env
 *.sw?
 
 .vercel
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Generated backend bundles
+backend/dist-bot/
+
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
