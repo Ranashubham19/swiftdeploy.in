@@ -1,25 +1,13 @@
-FROM node:20-alpine AS build
+FROM mcr.microsoft.com/playwright/python:v1.54.0-jammy
+
 WORKDIR /app
 
-# Install backend dependencies first for better layer caching.
-COPY backend/package*.json ./backend/
-RUN npm ci --prefix backend
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Build backend TypeScript.
-COPY backend/. ./backend/
-RUN npm run build --prefix backend
-RUN npm prune --omit=dev --prefix backend
+COPY . /app
 
-FROM node:20-alpine AS runtime
-WORKDIR /app
-ENV NODE_ENV=production
+ENV PYTHONPATH=/app
+EXPOSE 8080
 
-COPY --from=build /app/backend/package*.json ./backend/
-COPY --from=build /app/backend/node_modules ./backend/node_modules
-COPY --from=build /app/backend/dist-bot ./backend/dist-bot
-COPY --from=build /app/backend/dist ./backend/dist
-COPY --from=build /app/backend/prisma ./backend/prisma
-COPY --from=build /app/backend/env-preload.mjs ./backend/env-preload.mjs
-
-EXPOSE 4000
-CMD ["npm", "--prefix", "backend", "run", "start:railway:legacy"]
+CMD ["python", "entrypoint.py"]
