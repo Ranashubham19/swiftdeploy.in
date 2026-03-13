@@ -375,7 +375,9 @@ if (getAppUrl() && process.env.CRON_SECRET) {
   });
 }
 
-const port = Number(process.env.AGENT_PORT || 3001);
+const rawPort = Number(process.env.PORT || process.env.AGENT_PORT || 3001);
+const port = Number.isFinite(rawPort) && rawPort > 0 ? rawPort : 3001;
+
 app.listen(port, () => {
   console.log(`ClawCloud agent server running on port ${port}`);
 });
