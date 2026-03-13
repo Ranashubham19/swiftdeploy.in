@@ -468,7 +468,21 @@ if (!agentServerUrl) {
     if (!response.ok || !json) {
       record(WARN, "Agent server health", formatHttpError(response, text));
     } else {
-      record(PASS, "Agent server health", `status=${json.status ?? "ok"}`);
+      const status = String(json.status ?? "unknown");
+      const configured =
+        typeof json.configured === "boolean" ? json.configured : status === "ok";
+      const missingRequiredEnv = Array.isArray(json.missingRequiredEnv)
+        ? json.missingRequiredEnv
+        : [];
+
+      if (status === "ok" && configured) {
+        record(PASS, "Agent server health", `status=${status}`);
+      } else {
+        const detail = missingRequiredEnv.length
+          ? `status=${status}; missing ${missingRequiredEnv.join(", ")}`
+          : `status=${status}`;
+        record(FAIL, "Agent server health", detail);
+      }
     }
   } catch (error) {
     record(
