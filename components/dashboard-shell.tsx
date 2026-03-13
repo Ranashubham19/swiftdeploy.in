@@ -550,6 +550,11 @@ export function DashboardShell({ config }: DashboardShellProps) {
     setSidebarOpen(false);
   }
 
+  function openSettings() {
+    closeSidebar();
+    router.push("/settings");
+  }
+
   function handleTaskToggle(taskId: string, nextEnabled: boolean) {
     const targetTask = tasks.find((task) => task.id === taskId);
 
@@ -721,7 +726,10 @@ export function DashboardShell({ config }: DashboardShellProps) {
           <button
             type="button"
             className={styles.navItem}
-            onClick={() => showToast("Opening activity log...")}
+            onClick={() => {
+              closeSidebar();
+              router.push("/activity");
+            }}
           >
             <span className={styles.navIcon}>{ICONS.chartBar}</span>
             Activity log
@@ -739,7 +747,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
           <button
             type="button"
             className={styles.navItem}
-            onClick={() => showToast("Opening settings...")}
+            onClick={openSettings}
           >
             <span className={styles.navIcon}>{ICONS.gear}</span>
             Settings
@@ -802,7 +810,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
               type="button"
               className={styles.iconButton}
               title="Settings"
-              onClick={() => showToast("Opening settings...")}
+              onClick={openSettings}
             >
               {ICONS.gear}
             </button>

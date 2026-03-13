@@ -71,10 +71,10 @@ function authMiddleware(
 
 async function callNextInternal(pathname: string, body: Record<string, unknown>) {
   if (!getAppUrl()) {
-    return;
+    return null;
   }
 
-  await fetch(`${getAppUrl()}${pathname}`, {
+  return fetch(`${getAppUrl()}${pathname}`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${process.env.AGENT_SECRET}`,
@@ -98,6 +98,24 @@ async function sendWelcomeMessage(sock: WASocket, phone: string) {
   });
 }
 
+async function sendSessionWhatsAppMessage(userId: string, message: string) {
+  const session = sessions.get(userId);
+  if (!session?.phone) {
+    return false;
+  }
+
+  await session.sock.sendMessage(`${session.phone}@s.whatsapp.net`, { text: message });
+  await supabase.from("whatsapp_messages").insert({
+    user_id: userId,
+    direction: "outbound",
+    content: message,
+    message_type: "text",
+    sent_at: new Date().toISOString(),
+  });
+
+  return true;
+}
+
 async function handleInboundMessage(userId: string, text: string, waMessageId: string | null) {
   await supabase.from("whatsapp_messages").insert({
     user_id: userId,
@@ -108,31 +126,23 @@ async function handleInboundMessage(userId: string, text: string, waMessageId: s
     sent_at: new Date().toISOString(),
   });
 
-  const normalized = text.toLowerCase();
-  let taskType: string | null = null;
+  const response = await callNextInternal("/api/agent/message", {
+    userId,
+    message: text,
+    _internal: true,
+  });
 
-  if (normalized.includes("draft") || normalized.includes("reply")) {
-    taskType = "draft_replies";
-  } else if (
-    normalized.includes("search") ||
-    normalized.includes("find") ||
-    normalized.includes("what did")
-  ) {
-    taskType = "email_search";
-  } else if (normalized.includes("remind")) {
-    taskType = "custom_reminder";
-  }
-
-  if (!taskType) {
+  if (!response?.ok) {
     return;
   }
 
-  await callNextInternal("/api/agent/run", {
-    userId,
-    taskType,
-    userMessage: text,
-    _internal: true,
-  });
+  const json = (await response.json().catch(() => ({}))) as {
+    response?: string | null;
+  };
+
+  if (json.response) {
+    await sendSessionWhatsAppMessage(userId, json.response);
+  }
 }
 
 async function connectWhatsAppSession(userId: string) {

@@ -6,7 +6,8 @@ export type ClawCloudTaskType =
   | "meeting_reminders"
   | "email_search"
   | "evening_summary"
-  | "custom_reminder";
+  | "custom_reminder"
+  | "weekly_spend";
 
 export type ClawCloudProvider =
   | "gmail"
@@ -95,6 +96,13 @@ export const clawCloudDefaultTaskSeeds: readonly ClawCloudTaskSeed[] = [
     enabledByDefault: false,
     scheduleTime: null,
     scheduleDays: null,
+    config: {},
+  },
+  {
+    taskType: "weekly_spend",
+    enabledByDefault: false,
+    scheduleTime: "09:00",
+    scheduleDays: ["sun"],
     config: {},
   },
 ] as const;

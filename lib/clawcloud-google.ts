@@ -394,6 +394,48 @@ export async function createClawCloudGmailDraft(
   return json.id;
 }
 
+export async function sendClawCloudGmailReply(
+  userId: string,
+  input: {
+    to: string;
+    subject: string;
+    body: string;
+    inReplyTo?: string | null;
+  },
+) {
+  const accessToken = await getValidGoogleAccessToken(userId, "gmail");
+
+  const rawLines = [
+    `To: ${input.to}`,
+    `Subject: ${input.subject}`,
+    input.inReplyTo ? `In-Reply-To: ${input.inReplyTo}` : "",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    input.body,
+  ].filter(Boolean);
+
+  const raw = Buffer.from(rawLines.join("\r\n")).toString("base64url");
+  const response = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ raw }),
+  });
+
+  const json = (await response.json().catch(() => ({}))) as {
+    id?: string;
+    error?: { message?: string };
+  };
+
+  if (!response.ok || !json.id) {
+    throw new Error(json.error?.message || "Failed to send Gmail reply.");
+  }
+
+  return json.id;
+}
+
 export async function getClawCloudCalendarEvents(
   userId: string,
   options: {

@@ -1,11 +1,19 @@
-import OpenAI from "openai";
-
 import {
   createClawCloudGmailDraft,
   getClawCloudCalendarEvents,
   getClawCloudGmailMessages,
 } from "@/lib/clawcloud-google";
+import { upsertAnalyticsDaily } from "@/lib/clawcloud-analytics";
+import { completeClawCloudPrompt } from "@/lib/clawcloud-ai";
+import { handleReplyApprovalCommand, sendReplyApprovalRequests } from "@/lib/clawcloud-reply-approval";
+import { answerSpendingQuestion, runWeeklySpendSummary } from "@/lib/clawcloud-spending";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
+import {
+  buildMultilingualBriefingSystem,
+  getUserLocale,
+  translateMessage,
+} from "@/lib/clawcloud-i18n";
+import { sendClawCloudTelegramMessage } from "@/lib/clawcloud-telegram";
 import {
   clawCloudActiveTaskLimits,
   clawCloudDefaultTaskSeeds,
@@ -15,7 +23,6 @@ import {
   type ClawCloudTaskConfig,
   type ClawCloudTaskType,
 } from "@/lib/clawcloud-types";
-import { env } from "@/lib/env";
 import { sendClawCloudWhatsAppMessage } from "@/lib/clawcloud-whatsapp";
 
 type AgentTaskRow = {
@@ -36,43 +43,6 @@ type RunTaskInput = {
   userMessage?: string | null;
   bypassEnabledCheck?: boolean;
 };
-
-let cachedOpenAIClient: OpenAI | null = null;
-
-function getOpenAIClient() {
-  if (!env.OPENAI_API_KEY) {
-    return null;
-  }
-
-  if (!cachedOpenAIClient) {
-    cachedOpenAIClient = new OpenAI({ apiKey: env.OPENAI_API_KEY });
-  }
-
-  return cachedOpenAIClient;
-}
-
-async function completeClawCloudPrompt(input: {
-  user: string;
-  system?: string;
-  maxTokens?: number;
-  fallback: string;
-}) {
-  const client = getOpenAIClient();
-  if (!client) {
-    return input.fallback;
-  }
-
-  const response = await client.chat.completions.create({
-    model: env.OPENAI_MODEL || "gpt-4o-mini",
-    max_tokens: input.maxTokens ?? 300,
-    messages: [
-      ...(input.system ? [{ role: "system" as const, content: input.system }] : []),
-      { role: "user" as const, content: input.user },
-    ],
-  });
-
-  return response.choices[0]?.message?.content?.trim() || input.fallback;
-}
 
 async function getTaskRow(userId: string, taskType: ClawCloudTaskType) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
@@ -109,41 +79,6 @@ async function getTodayRunCount(userId: string) {
     .gte("started_at", todayStart.toISOString());
 
   return count ?? 0;
-}
-
-async function upsertAnalyticsDaily(
-  userId: string,
-  updates: Partial<{
-    emails_processed: number;
-    drafts_created: number;
-    tasks_run: number;
-    minutes_saved: number;
-    wa_messages_sent: number;
-  }>,
-) {
-  const supabaseAdmin = getClawCloudSupabaseAdmin();
-  const date = formatDateKey();
-
-  const { data: current } = await supabaseAdmin
-    .from("analytics_daily")
-    .select("*")
-    .eq("user_id", userId)
-    .eq("date", date)
-    .maybeSingle();
-
-  const nextRecord = {
-    user_id: userId,
-    date,
-    emails_processed: (current?.emails_processed ?? 0) + (updates.emails_processed ?? 0),
-    drafts_created: (current?.drafts_created ?? 0) + (updates.drafts_created ?? 0),
-    tasks_run: (current?.tasks_run ?? 0) + (updates.tasks_run ?? 0),
-    minutes_saved: (current?.minutes_saved ?? 0) + (updates.minutes_saved ?? 0),
-    wa_messages_sent: (current?.wa_messages_sent ?? 0) + (updates.wa_messages_sent ?? 0),
-  };
-
-  await supabaseAdmin
-    .from("analytics_daily")
-    .upsert(nextRecord, { onConflict: "user_id,date" });
 }
 
 async function seedClawCloudDefaultTasks(userId: string) {
@@ -199,14 +134,17 @@ async function runMorningBriefing(
   userId: string,
   config: ClawCloudTaskConfig,
 ) {
-  const emails = await getClawCloudGmailMessages(userId, {
-    query: "is:unread",
-    maxResults: Number(config.max_emails ?? 50),
-  });
-  const events = await getClawCloudCalendarEvents(userId, {
-    timeMin: new Date().toISOString(),
-    timeMax: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-  });
+  const [emails, events, locale] = await Promise.all([
+    getClawCloudGmailMessages(userId, {
+      query: "is:unread",
+      maxResults: Number(config.max_emails ?? 50),
+    }),
+    getClawCloudCalendarEvents(userId, {
+      timeMin: new Date().toISOString(),
+      timeMax: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    }),
+    getUserLocale(userId),
+  ]);
 
   const emailContext = emails
     .slice(0, 20)
@@ -220,14 +158,18 @@ async function runMorningBriefing(
     .join("\n");
 
   const message = await completeClawCloudPrompt({
-    system:
-      "You are ClawCloud AI, a concise personal assistant writing a WhatsApp morning briefing.",
+    system: buildMultilingualBriefingSystem(locale),
     user: `Create a concise morning briefing.\n\nUnread emails: ${emails.length}\n${emailContext}\n\nToday's events:\n${eventContext || "No events today"}\n\nKeep it under 300 words and mention which emails need replies.`,
     maxTokens: 500,
     fallback: `Good morning. You have ${emails.length} unread emails and ${events.length} event${events.length === 1 ? "" : "s"} today.`,
   });
 
   await sendClawCloudWhatsAppMessage(userId, message);
+  try {
+    await sendClawCloudTelegramMessage(userId, message);
+  } catch {
+    // Telegram is optional, so skip delivery errors silently.
+  }
   await upsertAnalyticsDaily(userId, {
     emails_processed: emails.length,
     tasks_run: 1,
@@ -468,6 +410,53 @@ async function runCustomReminder(
   };
 }
 
+export async function routeInboundAgentMessage(
+  userId: string,
+  message: string,
+): Promise<string | null> {
+  const trimmed = message.trim();
+
+  const approvalResult = await handleReplyApprovalCommand(userId, trimmed);
+  if (approvalResult.handled) {
+    return approvalResult.response;
+  }
+
+  if (/spend|spent|cost|paid|transaction|receipt|budget|how much/i.test(trimmed)) {
+    return answerSpendingQuestion(userId, trimmed);
+  }
+
+  if (/draft|reply|respond|write.*email/i.test(trimmed)) {
+    await sendReplyApprovalRequests(userId, /all|every|each/i.test(trimmed) ? 3 : 1);
+    return null;
+  }
+
+  if (/search|find|what did|did.*say|email from/i.test(trimmed)) {
+    await runClawCloudTask({ userId, taskType: "email_search", userMessage: trimmed });
+    return null;
+  }
+
+  if (/remind me|set reminder|alert me/i.test(trimmed)) {
+    await runClawCloudTask({ userId, taskType: "custom_reminder", userMessage: trimmed });
+    return null;
+  }
+
+  if (/meeting|calendar|schedule|event|today|tomorrow/i.test(trimmed)) {
+    await runClawCloudTask({ userId, taskType: "meeting_reminders" });
+    return null;
+  }
+
+  const locale = await getUserLocale(userId);
+  const answer = await completeClawCloudPrompt({
+    system: "You are ClawCloud AI, a concise personal assistant. Answer helpfully and briefly.",
+    user: trimmed,
+    maxTokens: 300,
+    fallback:
+      "I did not quite understand that. Try: draft reply to John, search emails from Sarah, or remind me at 3pm to call Mike.",
+  });
+
+  return translateMessage(answer, locale);
+}
+
 export async function runClawCloudTask(input: RunTaskInput) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const task = await getTaskRow(input.userId, input.taskType);
@@ -527,6 +516,9 @@ export async function runClawCloudTask(input: RunTaskInput) {
         break;
       case "custom_reminder":
         result = await runCustomReminder(input.userId, input.userMessage);
+        break;
+      case "weekly_spend":
+        result = await runWeeklySpendSummary(input.userId);
         break;
       default:
         throw new Error(`Unsupported task type: ${input.taskType}`);
@@ -681,6 +673,58 @@ export async function getClawCloudDashboardData(userId: string) {
       runs_remaining: Math.max(0, clawCloudRunLimits[userPlan] - todayRuns),
       active_task_limit: clawCloudActiveTaskLimits[userPlan],
     },
+  };
+}
+
+export async function getClawCloudActivityData(input: {
+  userId: string;
+  limit?: number;
+  days?: number;
+}) {
+  const supabaseAdmin = getClawCloudSupabaseAdmin();
+  const nextLimit =
+    typeof input.limit === "number" && Number.isFinite(input.limit) ? input.limit : 100;
+  const nextDays =
+    typeof input.days === "number" && Number.isFinite(input.days) ? input.days : 30;
+  const limit = Math.min(Math.max(nextLimit, 1), 500);
+  const days = Math.min(Math.max(nextDays, 1), 365);
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const statsFrom = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+
+  const [runsResult, statsResult] = await Promise.all([
+    supabaseAdmin
+      .from("task_runs")
+      .select(
+        "id, task_type, status, duration_ms, tokens_used, started_at, completed_at, error_message, output_data",
+      )
+      .eq("user_id", input.userId)
+      .gte("started_at", since)
+      .order("started_at", { ascending: false })
+      .limit(limit),
+    supabaseAdmin
+      .from("analytics_daily")
+      .select(
+        "date, tasks_run, emails_processed, drafts_created, minutes_saved, wa_messages_sent",
+      )
+      .eq("user_id", input.userId)
+      .gte("date", statsFrom)
+      .order("date", { ascending: false })
+      .limit(30),
+  ]);
+
+  if (runsResult.error) {
+    throw new Error(runsResult.error.message);
+  }
+
+  if (statsResult.error) {
+    throw new Error(statsResult.error.message);
+  }
+
+  return {
+    runs: runsResult.data ?? [],
+    stats: statsResult.data ?? [],
   };
 }
 
