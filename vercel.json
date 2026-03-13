@@ -1,21 +1,12 @@
 {
-  "framework": "vite",
-  "buildCommand": "npm run build:frontend",
-  "outputDirectory": "dist",
-  "rewrites": [
-    { "source": "/robots.txt", "destination": "/robots.txt" },
-    { "source": "/sitemap.xml", "destination": "/sitemap.xml" },
-    { "source": "/features", "destination": "/features/index.html" },
-    { "source": "/pricing", "destination": "/pricing/index.html" },
-    { "source": "/telegram-ai-bot", "destination": "/telegram-ai-bot/index.html" },
-    { "source": "/telegram-customer-support-bot", "destination": "/telegram-customer-support-bot/index.html" },
-    { "source": "/telegram-lead-generation-bot", "destination": "/telegram-lead-generation-bot/index.html" },
-    { "source": "/multilingual-telegram-bot", "destination": "/multilingual-telegram-bot/index.html" },
-    { "source": "/swiftdeploy-vs-custom-telegram-bot-development", "destination": "/swiftdeploy-vs-custom-telegram-bot-development/index.html" },
-    { "source": "/telegram-bot-platform-comparison", "destination": "/telegram-bot-platform-comparison/index.html" },
-    { "source": "/contact", "destination": "/contact/index.html" },
-    { "source": "/privacy", "destination": "/privacy/index.html" },
-    { "source": "/terms", "destination": "/terms/index.html" },
-    { "source": "/((?!api/).*)", "destination": "/index.html" }
+  "framework": "nextjs",
+  "installCommand": "npm install",
+  "buildCommand": "npm run build",
+  "outputDirectory": ".next",
+  "crons": [
+    {
+      "path": "/api/agent/cron",
+      "schedule": "* * * * *"
+    }
   ]
 }

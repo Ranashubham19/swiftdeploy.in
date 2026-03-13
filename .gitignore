@@ -28,6 +28,10 @@ backend/.env
 *.sw?
 
 .vercel
+.next
+.next/
+.next-dev
+.next-dev/
 
 # Python caches
 __pycache__/
@@ -39,3 +43,7 @@ backend/dist-bot/
 # Python tooling caches
 .pytest_cache/
 .mypy_cache/
+
+# Local scratch outputs
+tmp-*
+*.tsbuildinfo

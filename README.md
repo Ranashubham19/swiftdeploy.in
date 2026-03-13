@@ -1,100 +1,46 @@
+# Adaptive AI Search
 
-# SwiftDeploy AI — Production Deployment Guide
+Adaptive AI Search is a full-stack Next.js platform for production-grade search, research, and retrieval-backed answers. It resolves follow-up questions with conversation memory, rewrites the query, searches the live web, extracts source content, stores and retrieves evidence from a vector store, and returns structured answers with sources over a streaming UI.
 
-This guide will help you deploy your AI bot for global production use.
+## Core stack
 
-## 🚀 1. Local Development Setup
+- Next.js App Router for the product UI and API routes
+- NVIDIA AI for reasoning and embeddings
+- Tavily, SerpAPI, and Jina Search for live search
+- Firecrawl, Jina Reader, Apify, and ScraperAPI for extraction
+- Pinecone with Weaviate fallback for vector storage and retrieval
+- Firebase Auth for browser-side authentication
+- Supabase REST for optional thread and research-run persistence
 
-To develop and test your bot locally:
+## API surface
 
-1.  **Install dependencies**:
-    ```bash
-    npm install
-    cd backend && npm install
-    ```
-2.  **Setup Environment**:
-    Create a `.env.local` file in the root directory with your local configuration:
-    ```env
-    # Local development settings
-    NODE_ENV=development
-    BASE_URL=http://localhost:3001
-    FRONTEND_URL=http://localhost:3000
-    VITE_API_URL=http://localhost:3001
-    TELEGRAM_BOT_TOKEN=your_local_bot_token
-    OPENROUTER_API_KEY=your_openrouter_api_key
-    PORT=3001
-    GOOGLE_CLIENT_ID=your_google_client_id
-    GOOGLE_CLIENT_SECRET=your_google_client_secret
-    SESSION_SECRET=your_session_secret
-    ```
-3.  **Run Development Servers**:
-    ```bash
-    npm run dev
-    ```
-4.  **Test**:
-    Access the application at `http://localhost:3000` and test your bot functionality.
+- `POST /api/research`
+- `POST /api/search`
+- `POST /api/crawl`
+- `POST /api/embed`
+- `POST /api/retrieve`
+- `GET /api/health`
 
-## 🌍 2. Production Deployment
+## Runtime flow
 
-### Option A: Railway Deployment (Backend)
+1. Build conversation memory from recent thread history.
+2. Rewrite ambiguous follow-ups into standalone search questions.
+3. Fan out live search across multiple providers.
+4. Crawl and normalize the strongest sources.
+5. Chunk, embed, index, retrieve, and rerank evidence.
+6. Generate a structured answer or report with source grounding.
+7. Persist research runs and stream the result to the UI.
 
-1.  **Configure Environment Variables**:
-    - Push your code to a GitHub repository
-    - Connect your repository to Railway
-    - Set the required environment variables in Railway dashboard using the `.env.example` file as reference
+## Smoke tests
 
-2.  **Deployment Configuration**:
-    - The `railway.toml` file is already configured for automatic deployment
-    - Railway will automatically detect and build your Node.js application
+- `node scripts/live-smoke.mjs`
+- `node scripts/category-smoke.mjs`
 
-3.  **Post-Deployment**:
-    - Once deployed, visit `https://your-production-domain.com/set-webhook` to activate the Telegram webhook
-    - Your bot backend will be accessible
+These verify greeting, live search, follow-up memory, research, website analysis, document retrieval, and coding-mode routing against the running app.
 
-### Option B: Vercel Deployment (Frontend)
+## Notes
 
-1.  **Prepare for Frontend Deployment**:
-    - Make sure `VITE_API_URL` or `BACKEND_API_URL` is set to your backend production URL
-    - The `vercel.json` file is configured for static hosting
-
-2.  **Deploy to Vercel**:
-    - Connect your repository to Vercel
-    - Use the build command: `npm run build:frontend`
-    - Output directory: `dist`
-
-3.  **Environment Variables**:
-    - Set `VITE_API_URL` or `BACKEND_API_URL` to your backend URL (e.g., `https://your-backend-domain.up.railway.app`)
-
-### Option C: Combined Deployment Approach
-
-For a complete setup with frontend on Vercel and backend on Railway:
-
-1.  Deploy the backend first to Railway
-2.  Take note of your Railway backend URL
-3.  Deploy the frontend to Vercel with `VITE_API_URL` or `BACKEND_API_URL` set to your Railway backend URL
-4.  The frontend will communicate with the backend via API calls
-
-### Option D: Manual Deployment
-
-1.  **Build the Application**:
-    ```bash
-    npm run build
-    ```
-2.  **Set Environment Variables**:
-    Configure all required environment variables on your hosting platform
-3.  **Start the Application**:
-    ```bash
-    npm start
-    ```
-
-## 🔒 Security
-- The `/webhook` endpoint is public, but only Telegram should know the token path.
-- All AI processing happens server-side, keeping your API keys secure.
-- Session secrets and JWT tokens should be strong and kept confidential.
-
-## 📋 Required Environment Variables
-See `.env.example` for a complete list of required environment variables for production deployment.
-
-## Telegram OpenRouter Bot Docs
-For the new ChatGPT-style Telegram bot implementation (Telegraf + OpenRouter + Prisma), see:
-- `backend/README.md`
+- The UI streams research progress and renders a structured report with sources.
+- If the chat model is unavailable, the search, research, website, and document flows still fall back to deterministic source-backed synthesis.
+- Thread sync is best-effort. If the Supabase `chat_threads` table is missing, the app falls back to local browser history.
+- The included `supabase/schema.sql` creates the `chat_threads` and `research_runs` tables expected by the app.

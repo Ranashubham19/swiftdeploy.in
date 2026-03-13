@@ -1,0 +1,685 @@
+.page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 20px;
+  background:
+    radial-gradient(circle at top left, rgba(255, 77, 77, 0.16), transparent 26%),
+    radial-gradient(circle at 85% 12%, rgba(255, 77, 77, 0.08), transparent 24%),
+    linear-gradient(180deg, #09090f 0%, #05050a 100%);
+  color: var(--text);
+  position: relative;
+  overflow: hidden;
+}
+
+.page::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(255, 255, 255, 0.3));
+  pointer-events: none;
+}
+
+.page::after {
+  content: "";
+  position: absolute;
+  width: 520px;
+  height: 520px;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 77, 77, 0.12) 0%, transparent 68%);
+  pointer-events: none;
+  animation: orbFloat 10s ease-in-out infinite;
+}
+
+.leftLogo,
+.mobileLogo {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-display), sans-serif;
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.22;
+  padding-bottom: 0.1em;
+  color: var(--text);
+  text-decoration: none;
+  position: relative;
+  z-index: 1;
+}
+
+.mobileLogo {
+  display: inline-flex;
+  justify-content: center;
+  margin: 0 auto 24px;
+}
+
+.logoMark {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #ff4d4d 0%, #ff6b6b 100%);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  box-shadow: 0 12px 24px rgba(255, 77, 77, 0.24);
+}
+
+.brandAccent {
+  color: #ff4d4d;
+}
+
+.leftPanel {
+  width: min(100%, 560px);
+  min-height: 760px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 36px 40px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 30px;
+  background:
+    linear-gradient(180deg, rgba(15, 16, 25, 0.96), rgba(8, 9, 15, 0.98)),
+    radial-gradient(circle at top left, rgba(255, 77, 77, 0.12), transparent 42%);
+  box-shadow:
+    0 40px 90px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  position: relative;
+  overflow: hidden;
+  z-index: 1;
+}
+
+.leftPanel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.25));
+  pointer-events: none;
+}
+
+.leftHero {
+  position: relative;
+  z-index: 1;
+}
+
+.leftHero h1 {
+  font-family: var(--font-display), sans-serif;
+  font-size: clamp(32px, 3.8vw, 48px);
+  line-height: 1.22;
+  letter-spacing: -0.03em;
+  margin-bottom: calc(18px - 0.22em);
+  padding-bottom: 0.22em;
+  font-kerning: normal;
+  font-synthesis: none;
+  text-rendering: auto;
+  overflow: visible;
+}
+
+.leftHero h1 span {
+  color: #ff4d4d;
+}
+
+.leftHero p {
+  max-width: 380px;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.75;
+  margin-bottom: 32px;
+}
+
+.chatPreview {
+  max-width: 400px;
+  background: rgba(26, 26, 36, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 18px;
+  padding: 18px;
+  position: relative;
+  box-shadow: 0 30px 60px rgba(0, 0, 0, 0.35);
+}
+
+.chatPreview::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: 19px;
+  background: linear-gradient(140deg, rgba(255, 77, 77, 0.18), transparent 60%);
+  z-index: -1;
+}
+
+.chatHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 12px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.chatAvatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #ff4d4d;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.chatName {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.chatOnline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #00e676;
+  font-size: 11px;
+}
+
+.chatOnline::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #00e676;
+  animation: blink 2s infinite;
+}
+
+.bubble,
+.bubbleMine {
+  max-width: 92%;
+  margin-bottom: 8px;
+  border-radius: 8px 8px 8px 2px;
+  padding: 10px 13px;
+  background: #202c33;
+  color: #e9edef;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.bubbleMine {
+  margin-left: auto;
+  border-radius: 8px 8px 2px 8px;
+  background: #005c4b;
+}
+
+.bubble strong,
+.bubbleMine strong {
+  color: #fff;
+}
+
+.bubbleTime {
+  margin-top: 4px;
+  color: #8696a0;
+  font-size: 10px;
+  text-align: right;
+}
+
+.leftFooter {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.trustBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.trustBadge strong {
+  color: var(--text);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+}
+
+.rightPanel {
+  width: min(100%, 620px);
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
+}
+
+.rightPanel::before {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  border-radius: 30px;
+  background: linear-gradient(140deg, rgba(255, 77, 77, 0.22), rgba(255, 255, 255, 0.04) 46%, rgba(255, 77, 77, 0.12));
+  filter: blur(12px);
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.authBox {
+  width: 100%;
+  max-width: 620px;
+  position: relative;
+  z-index: 1;
+  padding: 34px 34px 30px;
+  border-radius: 28px;
+  background: linear-gradient(180deg, rgba(15, 16, 25, 0.94), rgba(7, 8, 14, 0.98));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 38px 90px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(18px);
+  animation: fadeUp 0.45s ease both;
+}
+
+.authBox::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 18%);
+  pointer-events: none;
+}
+
+.authTabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 32px;
+  background: rgba(26, 26, 36, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 12px;
+}
+
+.tabButton {
+  flex: 1;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 14px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.tabButtonActive {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+
+.title {
+  font-family: var(--font-display), sans-serif;
+  font-size: clamp(30px, 4vw, 38px);
+  line-height: 1.22;
+  letter-spacing: -0.03em;
+  margin-bottom: calc(10px - 0.22em);
+  padding-bottom: 0.22em;
+  font-kerning: normal;
+  font-synthesis: none;
+  text-rendering: auto;
+  overflow: visible;
+}
+
+.subtitle {
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.7;
+  margin-bottom: 28px;
+}
+
+.configNote,
+.errorBanner,
+.successBox {
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.55;
+  margin-bottom: 18px;
+}
+
+.configNote {
+  color: #ffd08a;
+  background: rgba(255, 170, 51, 0.08);
+  border: 1px solid rgba(255, 170, 51, 0.2);
+}
+
+.errorBanner {
+  color: #ff8c8c;
+  background: rgba(255, 77, 77, 0.08);
+  border: 1px solid rgba(255, 77, 77, 0.2);
+}
+
+.successBox {
+  color: #8af0b9;
+  background: rgba(0, 230, 118, 0.08);
+  border: 1px solid rgba(0, 230, 118, 0.2);
+}
+
+.googleButton,
+.submitButton {
+  width: 100%;
+  border-radius: 10px;
+  font: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  transition: transform 0.2s ease, border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.googleButton {
+  background: rgba(26, 26, 36, 0.94);
+  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  padding: 14px 16px;
+  cursor: pointer;
+  margin-bottom: 22px;
+}
+
+.googleButton:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(30, 30, 42, 0.96);
+}
+
+.submitButton {
+  border: none;
+  background: linear-gradient(135deg, #ff4d4d 0%, #ff6363 100%);
+  color: #fff;
+  padding: 15px 16px;
+  cursor: pointer;
+  box-shadow: 0 14px 30px rgba(255, 77, 77, 0.24);
+}
+
+.submitButton:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 18px 36px rgba(255, 77, 77, 0.28);
+}
+
+.submitButton:disabled,
+.googleButton:disabled,
+.secondaryLinkButton:disabled,
+.pwToggle:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  color: var(--muted2);
+  font-size: 12px;
+}
+
+.divider::before,
+.divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.nameRow {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.label {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.input {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(26, 26, 36, 0.92);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  padding: 12px 14px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.input::placeholder {
+  color: var(--muted2);
+}
+
+.input:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.input:focus {
+  outline: none;
+  background: rgba(30, 30, 42, 0.95);
+  border-color: #ff4d4d;
+  box-shadow: 0 0 0 3px rgba(255, 77, 77, 0.2);
+}
+
+.inputError {
+  border-color: #ff6b6b;
+  box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.14);
+}
+
+.pwWrap {
+  position: relative;
+}
+
+.pwWrap .input {
+  padding-right: 68px;
+}
+
+.pwToggle {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  transform: translateY(-50%);
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.fieldError {
+  color: #ff8c8c;
+  font-size: 12px;
+}
+
+.forgotRow {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -4px;
+}
+
+.secondaryLinkButton,
+.inlineLink {
+  border: none;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+
+.secondaryLinkButton {
+  font-size: 12px;
+}
+
+.inlineLink {
+  color: #d3d3df;
+}
+
+.secondaryLinkButton:hover:not(:disabled),
+.inlineLink:hover {
+  color: #ff7070;
+}
+
+.strengthBar {
+  display: flex;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.strengthSegment {
+  flex: 1;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.strengthLabel {
+  min-height: 16px;
+  color: var(--muted2);
+  font-size: 11px;
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.28);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+.terms {
+  color: var(--muted2);
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.65;
+  margin-top: 16px;
+}
+
+@media (max-width: 860px) {
+  .page {
+    min-height: 100dvh;
+    padding: 20px 16px;
+  }
+
+  .leftPanel {
+    display: none;
+  }
+
+  .rightPanel {
+    width: 100%;
+  }
+
+  .mobileLogo {
+    display: inline-flex;
+  }
+}
+
+@media (max-width: 520px) {
+  .authBox {
+    padding: 24px 18px 22px;
+    border-radius: 22px;
+  }
+
+  .nameRow {
+    grid-template-columns: 1fr;
+  }
+
+  .title {
+    font-size: 24px;
+  }
+
+  .authTabs {
+    margin-bottom: 24px;
+  }
+}
+
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes gridMove {
+  from {
+    background-position: 0 0;
+  }
+
+  to {
+    background-position: 48px 48px;
+  }
+}
+
+@keyframes orbFloat {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+
+  50% {
+    transform: translate(36px, 28px);
+  }
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
