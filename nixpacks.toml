@@ -1,5 +1,11 @@
+[variables]
+NIXPACKS_NODE_VERSION = "22"
+
 [phases.install]
 cmds = ["npm ci"]
+
+[phases.build]
+cmds = ["echo Skipping Next.js build for Railway agent service"]
 
 [start]
 cmd = "npm run agent"

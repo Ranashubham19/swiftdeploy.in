@@ -12,6 +12,7 @@ Use Railway to run `agent-server.ts` as the always-on ClawCloud agent service.
 
 The service will:
 - install dependencies with `npm ci`
+- use Node `22`
 - start with `npm run agent`
 - expose `/health` as the healthcheck route
 - bind to Railway's injected `PORT` automatically
