@@ -625,6 +625,35 @@
   opacity: 0.3;
 }
 
+.qrImage {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  image-rendering: pixelated;
+  border-radius: 8px;
+}
+
+.qrPlaceholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+  color: var(--text2);
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 16px;
+}
+
+.qrPlaceholder b {
+  color: var(--text);
+  font-size: 13px;
+}
+
 .qrGrid {
   display: grid;
   grid-template-columns: repeat(19, 9px);

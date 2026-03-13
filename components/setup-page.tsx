@@ -19,6 +19,12 @@ type ConnectionStatus = "idle" | "connecting" | "done";
 type TaskId = "morning" | "drafts" | "calendar" | "search" | "evening" | "remind";
 type StepNumber = 1 | 2 | 3;
 type ScanPhase = "waiting" | "verifying" | "connected";
+type WhatsAppQrPayload = {
+  status?: "connecting" | "waiting" | "connected";
+  qr?: string;
+  phone?: string | null;
+  error?: string;
+};
 
 type TaskDefinition = {
   id: TaskId;
@@ -173,8 +179,14 @@ export function SetupPage({ config }: SetupPageProps) {
   const [gmailStatus, setGmailStatus] = useState<ConnectionStatus>("idle");
   const [calendarStatus, setCalendarStatus] = useState<ConnectionStatus>("idle");
   const [googleConnecting, setGoogleConnecting] = useState(false);
+  const [authUserId, setAuthUserId] = useState<string | null>(null);
+  const [authAccessToken, setAuthAccessToken] = useState<string | null>(null);
   const [stepOneComplete, setStepOneComplete] = useState(false);
   const [waConnected, setWaConnected] = useState(false);
+  const [waPhone, setWaPhone] = useState<string | null>(null);
+  const [waQrImage, setWaQrImage] = useState<string | null>(null);
+  const [waQrError, setWaQrError] = useState("");
+  const [waLoading, setWaLoading] = useState(false);
   const [stepTwoComplete, setStepTwoComplete] = useState(false);
   const [qrSeed, setQrSeed] = useState(1);
   const [qrSeconds, setQrSeconds] = useState(299);
@@ -234,17 +246,24 @@ export function SetupPage({ config }: SetupPageProps) {
     let cancelled = false;
 
     async function loadUser() {
-      const { data, error } = await client.auth.getUser();
+      const [{ data: userData, error }, { data: sessionData }] = await Promise.all([
+        client.auth.getUser(),
+        client.auth.getSession(),
+      ]);
 
       if (cancelled) {
         return;
       }
 
-      if (error || !data.user) {
+      if (error || !userData.user) {
+        setAuthUserId(null);
+        setAuthAccessToken(null);
         router.replace("/auth");
         return;
       }
 
+      setAuthUserId(userData.user.id);
+      setAuthAccessToken(sessionData.session?.access_token ?? null);
       setSessionNotice("");
       setIsCheckingSession(false);
     }
@@ -254,6 +273,8 @@ export function SetupPage({ config }: SetupPageProps) {
         return;
       }
 
+      setAuthUserId(null);
+      setAuthAccessToken(null);
       setIsCheckingSession(false);
       setSessionNotice(error instanceof Error ? error.message : "Unable to verify your session.");
     });
@@ -262,8 +283,14 @@ export function SetupPage({ config }: SetupPageProps) {
       data: { subscription },
     } = client.auth.onAuthStateChange((event, session) => {
       if (event === "SIGNED_OUT" || !session) {
+        setAuthUserId(null);
+        setAuthAccessToken(null);
         router.replace("/auth");
+        return;
       }
+
+      setAuthUserId(session.user.id);
+      setAuthAccessToken(session.access_token);
     });
 
     return () => {
@@ -291,7 +318,16 @@ export function SetupPage({ config }: SetupPageProps) {
     setQrSeconds(299);
     setQrSeed((seed) => seed + 1);
     setScanPhase("waiting");
+    setWaQrError("");
   }, [currentStep, stepTwoComplete, waConnected]);
+
+  useEffect(() => {
+    if (currentStep !== 2 || !waQrImage) {
+      return;
+    }
+
+    setQrSeconds(299);
+  }, [currentStep, waQrImage]);
 
   useEffect(() => {
     if (currentStep !== 2 || waConnected || stepTwoComplete || scanPhase !== "waiting") {
@@ -315,6 +351,84 @@ export function SetupPage({ config }: SetupPageProps) {
       window.clearInterval(timerId);
     };
   }, [currentStep, scanPhase, stepTwoComplete, waConnected]);
+
+  useEffect(() => {
+    if (currentStep !== 2 || !isConfigured || !authAccessToken || waConnected || stepTwoComplete) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function pollWhatsAppQr(showErrors: boolean) {
+      if (cancelled) {
+        return;
+      }
+
+      setWaLoading(true);
+
+      try {
+        const response = await fetch("/api/whatsapp/connect", {
+          headers: {
+            Authorization: `Bearer ${authAccessToken}`,
+          },
+        });
+
+        const payload = (await response.json().catch(() => null)) as WhatsAppQrPayload | null;
+        if (cancelled) {
+          return;
+        }
+
+        if (!response.ok) {
+          const message = payload?.error || "Unable to start WhatsApp connection.";
+          setWaQrError(message);
+          setWaLoading(false);
+          if (showErrors) {
+            showToastRef.current(message);
+          }
+          return;
+        }
+
+        setWaQrError("");
+        setWaPhone(payload?.phone ?? null);
+
+        if (payload?.status === "connected") {
+          setWaConnected(true);
+          setStepTwoComplete(true);
+          setScanPhase("connected");
+          setWaQrImage(payload.qr ?? null);
+          setWaLoading(false);
+          showToastRef.current("WhatsApp connected successfully ✓");
+          return;
+        }
+
+        setScanPhase(payload?.status === "connecting" ? "verifying" : "waiting");
+        setWaQrImage(payload?.qr ?? null);
+        setWaLoading(false);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        const message =
+          error instanceof Error ? error.message : "Unable to reach the WhatsApp agent server.";
+        setWaQrError(message);
+        setWaLoading(false);
+        if (showErrors) {
+          showToastRef.current(message);
+        }
+      }
+    }
+
+    void pollWhatsAppQr(true);
+    const pollId = window.setInterval(() => {
+      void pollWhatsAppQr(false);
+    }, 4000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(pollId);
+    };
+  }, [authAccessToken, currentStep, isConfigured, stepTwoComplete, waConnected]);
 
   useEffect(() => {
     const gmailConnectedFromSearch = searchParams.get("gmail") === "connected";
@@ -360,15 +474,9 @@ export function SetupPage({ config }: SetupPageProps) {
       return;
     }
 
-    if (supabase) {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (user?.id) {
-        window.location.assign(`/api/auth/google?userId=${encodeURIComponent(user.id)}`);
-        return;
-      }
+    if (authUserId) {
+      window.location.assign(`/api/auth/google?userId=${encodeURIComponent(authUserId)}`);
+      return;
     }
 
     clearGoogleTimeouts();
@@ -401,7 +509,7 @@ export function SetupPage({ config }: SetupPageProps) {
   }
 
   function handleSimulateScan() {
-    if (scanPhase !== "waiting" || waConnected) {
+    if (isConfigured || scanPhase !== "waiting" || waConnected) {
       return;
     }
 
@@ -802,7 +910,8 @@ export function SetupPage({ config }: SetupPageProps) {
                   <div className={styles.connectedIcon}>✅</div>
                   <div className={styles.connectedTitle}>WhatsApp connected!</div>
                   <div className={styles.connectedSub}>
-                    Your agent is now linked to your phone number <b>+91 98765 43210</b>
+                    Your agent is now linked to your phone number{" "}
+                    <b>{waPhone || "on WhatsApp"}</b>
                   </div>
                   <div className={styles.connectedMessageCard}>
                     <div className={styles.connectedMessageLabel}>
@@ -824,15 +933,46 @@ export function SetupPage({ config }: SetupPageProps) {
                             scanPhase === "verifying" ? styles.qrCodeFaded : ""
                           }`}
                         >
-                          <div className={styles.qrGrid}>
-                            {qrCells.map((filled, index) => (
-                              <div
-                                key={`${qrSeed}-${index}`}
-                                className={`${styles.qrCell} ${filled ? "" : styles.qrCellBlank}`}
+                          {isConfigured ? (
+                            waQrImage ? (
+                              <img
+                                src={waQrImage}
+                                alt="WhatsApp QR code"
+                                className={styles.qrImage}
                               />
-                            ))}
-                          </div>
-                          {scanPhase === "waiting" ? <div className={styles.qrScanLine} /> : null}
+                            ) : (
+                              <div className={styles.qrPlaceholder}>
+                                {waQrError ? (
+                                  <>
+                                    <b>Couldn&apos;t load QR</b>
+                                    <span>{waQrError}</span>
+                                  </>
+                                ) : waLoading ? (
+                                  <>
+                                    <b>Generating QR…</b>
+                                    <span>Preparing your live WhatsApp session</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <b>Waiting for QR…</b>
+                                    <span>The agent server is starting your session</span>
+                                  </>
+                                )}
+                              </div>
+                            )
+                          ) : (
+                            <>
+                              <div className={styles.qrGrid}>
+                                {qrCells.map((filled, index) => (
+                                  <div
+                                    key={`${qrSeed}-${index}`}
+                                    className={`${styles.qrCell} ${filled ? "" : styles.qrCellBlank}`}
+                                  />
+                                ))}
+                              </div>
+                              {scanPhase === "waiting" ? <div className={styles.qrScanLine} /> : null}
+                            </>
+                          )}
                         </div>
                         <div className={styles.qrTimer}>
                           {qrMinutes}:{qrRemainingSeconds < 10 ? "0" : ""}
@@ -883,20 +1023,28 @@ export function SetupPage({ config }: SetupPageProps) {
                           : "Waiting for scan…"}
                       </div>
                       <div className={styles.qrStatusSub}>
-                        {scanPhase === "verifying"
-                          ? "This usually takes just a second"
-                          : "The QR code refreshes automatically"}
+                        {waQrError
+                          ? "Check the agent server or refresh the QR by waiting a few seconds"
+                          : scanPhase === "verifying"
+                            ? isConfigured
+                              ? "Preparing the live QR or verifying your phone"
+                              : "This usually takes just a second"
+                            : isConfigured
+                              ? "The live QR refreshes automatically until your phone links"
+                              : "The QR code refreshes automatically"}
                       </div>
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    className={styles.demoButton}
-                    onClick={handleSimulateScan}
-                  >
-                    🔧 Demo: simulate phone scan →
-                  </button>
+                  {!isConfigured ? (
+                    <button
+                      type="button"
+                      className={styles.demoButton}
+                      onClick={handleSimulateScan}
+                    >
+                      🔧 Demo: simulate phone scan →
+                    </button>
+                  ) : null}
                 </div>
               )}
             </div>
