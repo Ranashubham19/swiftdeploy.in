@@ -61,27 +61,49 @@ const requiredEnv = [
   "AGENT_SECRET",
 ] as const;
 
-for (const envName of requiredEnv) {
-  if (!process.env[envName]) {
-    throw new Error(`Missing required env var: ${envName}`);
-  }
-}
-
 const app = express();
 app.use(express.json());
 
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  },
-);
+let supabase: ReturnType<typeof createClient<any>> | null = null;
 
 const sessions = new Map<string, SessionRecord>();
+
+function getMissingRequiredEnv() {
+  return requiredEnv.filter((envName) => !process.env[envName]?.trim());
+}
+
+function getConfigurationError() {
+  const missing = getMissingRequiredEnv();
+  return missing.length
+    ? `Agent server is missing required env vars: ${missing.join(", ")}`
+    : null;
+}
+
+function assertConfigured() {
+  const configurationError = getConfigurationError();
+  if (configurationError) {
+    throw new Error(configurationError);
+  }
+}
+
+function getSupabase() {
+  assertConfigured();
+
+  if (!supabase) {
+    supabase = createClient(
+      process.env.SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+      {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+        },
+      },
+    );
+  }
+
+  return supabase;
+}
 
 function getSessionsDir() {
   return process.env.WA_SESSION_DIR || path.join(process.cwd(), "wa-sessions");
@@ -96,6 +118,15 @@ function authMiddleware(
   response: express.Response,
   next: express.NextFunction,
 ) {
+  const configurationError = getConfigurationError();
+  if (configurationError) {
+    response.status(503).json({
+      error: configurationError,
+      missingRequiredEnv: getMissingRequiredEnv(),
+    });
+    return;
+  }
+
   const header = request.headers.authorization?.trim() ?? "";
   if (header !== `Bearer ${process.env.AGENT_SECRET}`) {
     response.status(401).json({ error: "Unauthorized" });
@@ -106,7 +137,7 @@ function authMiddleware(
 }
 
 async function callNextInternal(pathname: string, body: Record<string, unknown>) {
-  if (!getAppUrl()) {
+  if (!getAppUrl() || !process.env.AGENT_SECRET?.trim()) {
     return null;
   }
 
@@ -121,7 +152,7 @@ async function callNextInternal(pathname: string, body: Record<string, unknown>)
 }
 
 async function markWhatsAppDisconnected(userId: string) {
-  await supabase
+  await getSupabase()
     .from("connected_accounts")
     .update({ is_active: false })
     .eq("user_id", userId)
@@ -141,7 +172,7 @@ async function sendSessionWhatsAppMessage(userId: string, message: string) {
   }
 
   await session.sock.sendMessage(`${session.phone}@s.whatsapp.net`, { text: message });
-  await supabase.from("whatsapp_messages").insert({
+  await getSupabase().from("whatsapp_messages").insert({
     user_id: userId,
     direction: "outbound",
     content: message,
@@ -153,7 +184,7 @@ async function sendSessionWhatsAppMessage(userId: string, message: string) {
 }
 
 async function handleInboundMessage(userId: string, text: string, waMessageId: string | null) {
-  await supabase.from("whatsapp_messages").insert({
+  await getSupabase().from("whatsapp_messages").insert({
     user_id: userId,
     direction: "inbound",
     content: text,
@@ -182,6 +213,8 @@ async function handleInboundMessage(userId: string, text: string, waMessageId: s
 }
 
 async function connectWhatsAppSession(userId: string) {
+  assertConfigured();
+
   const existing = sessions.get(userId);
   if (existing && (existing.status === "waiting" || existing.status === "connected")) {
     return existing;
@@ -229,7 +262,7 @@ async function connectWhatsAppSession(userId: string) {
       current.qr = null;
       sessions.set(userId, current);
 
-      await supabase.from("connected_accounts").upsert(
+      await getSupabase().from("connected_accounts").upsert(
         {
           user_id: userId,
           provider: "whatsapp",
@@ -354,8 +387,12 @@ app.post("/wa/send", authMiddleware, async (request, response) => {
 });
 
 app.get("/health", (_request, response) => {
+  const missingRequiredEnv = getMissingRequiredEnv();
+
   response.json({
-    status: "ok",
+    status: missingRequiredEnv.length ? "degraded" : "ok",
+    configured: missingRequiredEnv.length === 0,
+    missingRequiredEnv,
     connections: sessions.size,
   });
 });
@@ -380,5 +417,10 @@ const port = Number.isFinite(rawPort) && rawPort > 0 ? rawPort : 3001;
 const host = "0.0.0.0";
 
 app.listen(port, host, () => {
+  const configurationError = getConfigurationError();
+  if (configurationError) {
+    console.warn(configurationError);
+  }
+
   console.log(`ClawCloud agent server running on ${host}:${port}`);
 });
