@@ -790,3 +790,158 @@
     flex: 1;
   }
 }
+
+.mobileTopbar {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  height: 54px;
+  flex-shrink: 0;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+}
+
+.mobileTopbarLeft {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mobileBackBtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--card);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-sm);
+  color: var(--text2);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: none;
+  transition: all 0.18s;
+}
+
+.mobileBackBtn:hover {
+  border-color: var(--border3);
+  color: var(--text);
+}
+
+.mobilePageTitle {
+  font-family: var(--font-display), sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+
+.mobileTabRow {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.mobileTabRow::-webkit-scrollbar {
+  display: none;
+}
+
+.mobileDetailBack {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  background: var(--bg2);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text3);
+  font-size: 12px;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+  transition: color 0.18s;
+}
+
+.mobileDetailBack:hover {
+  color: var(--text2);
+}
+
+@media (max-width: 900px) {
+  .mobileTopbar {
+    display: flex;
+  }
+
+  .listPane {
+    width: 260px;
+  }
+}
+
+@media (max-width: 640px) {
+  .mobileDetailBack {
+    display: flex;
+  }
+
+  .mobileTabRow {
+    display: flex;
+  }
+
+  .detailPane {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .actionBar {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 12px 16px;
+  }
+
+  .buttonSend,
+  .buttonSkip,
+  .buttonEdit,
+  .buttonCancel {
+    flex: 1;
+    min-width: 0;
+    justify-content: center;
+    padding: 10px 12px;
+  }
+
+  .draftWrap {
+    padding: 16px;
+  }
+
+  .draftBody {
+    padding: 14px 16px;
+  }
+
+  .detailHeader {
+    padding: 14px 16px;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .detailHeaderRight {
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .listPaneMobileVisible {
+    display: flex;
+  }
+
+  .detailPaneMobileHidden {
+    display: none;
+  }
+
+  .toast {
+    max-width: calc(100vw - 24px);
+    white-space: normal;
+    text-align: center;
+    bottom: 16px;
+  }
+}

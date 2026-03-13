@@ -1245,6 +1245,145 @@
   box-shadow: 0 4px 16px rgba(255, 77, 77, 0.3);
 }
 
+.limitBanner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: -6px;
+  border-radius: var(--radius);
+  background: rgba(255, 77, 77, 0.08);
+  border: 1px solid rgba(255, 77, 77, 0.22);
+  color: #ff9d9d;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+
+.limitBannerWarning {
+  background: rgba(255, 179, 71, 0.08);
+  border-color: rgba(255, 179, 71, 0.22);
+  color: var(--amber);
+}
+
+.limitBannerButton {
+  padding: 6px 14px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.18s;
+}
+
+.limitBannerButton:hover:not(:disabled) {
+  background: var(--accent2);
+}
+
+.limitBannerButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.progressFillDanger {
+  background: var(--accent) !important;
+}
+
+.progressFillWarning {
+  background: var(--amber) !important;
+}
+
+.runUsageBar {
+  padding: 10px 16px 12px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.runUsageTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.runUsageLabel {
+  font-size: 12px;
+  color: var(--text3);
+}
+
+.runUsageCount {
+  font-size: 12px;
+  color: var(--text2);
+  font-weight: 500;
+}
+
+.runUsageCountDanger {
+  color: var(--accent);
+}
+
+.runUsageCountWarning {
+  color: var(--amber);
+}
+
+.runUsagePlanNote {
+  font-weight: 400;
+  color: var(--text3);
+}
+
+.taskItemLocked {
+  opacity: 0.72;
+}
+
+.taskLockedBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 6px;
+  background: rgba(255, 179, 71, 0.12);
+  border: 1px solid rgba(255, 179, 71, 0.25);
+  border-radius: 999px;
+  color: var(--amber);
+  vertical-align: middle;
+}
+
+.taskUpgradeButton {
+  padding: 5px 12px;
+  background: rgba(255, 179, 71, 0.1);
+  border: 1px solid rgba(255, 179, 71, 0.25);
+  border-radius: var(--radius-sm);
+  color: var(--amber);
+  font-family: var(--font-sans), sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.18s;
+}
+
+.taskUpgradeButton:hover {
+  background: rgba(255, 179, 71, 0.18);
+}
+
+.toggleLoading {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.tasksLoading {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--text3);
+  font-size: 13px;
+}
+
 .toast {
   position: fixed;
   left: 50%;

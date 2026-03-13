@@ -6,8 +6,13 @@ import {
 } from "@/lib/clawcloud-agent";
 import {
   getClawCloudErrorMessage,
+  getClawCloudSupabaseAdmin,
   requireClawCloudAuth,
 } from "@/lib/clawcloud-supabase";
+import {
+  clawCloudActiveTaskLimits,
+  type ClawCloudPlan,
+} from "@/lib/clawcloud-types";
 
 export const runtime = "nodejs";
 
@@ -29,6 +34,39 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       config?: Record<string, unknown>;
     };
     const { id } = await context.params;
+
+    if (body.is_enabled === true) {
+      const supabaseAdmin = getClawCloudSupabaseAdmin();
+      const [planResult, activeResult] = await Promise.all([
+        supabaseAdmin
+          .from("users")
+          .select("plan")
+          .eq("id", auth.user.id)
+          .maybeSingle(),
+        supabaseAdmin
+          .from("agent_tasks")
+          .select("id")
+          .eq("user_id", auth.user.id)
+          .eq("is_enabled", true)
+          .neq("id", id),
+      ]);
+
+      const plan = (planResult.data?.plan ?? "free") as ClawCloudPlan;
+      const currentActiveCount = activeResult.data?.length ?? 0;
+      const limit = clawCloudActiveTaskLimits[plan];
+
+      if (currentActiveCount >= limit) {
+        return NextResponse.json(
+          {
+            error: `Your ${plan} plan allows ${limit} active task${limit === 1 ? "" : "s"}. Upgrade to enable more.`,
+            code: "TASK_LIMIT_REACHED",
+            limit,
+            plan,
+          },
+          { status: 403 },
+        );
+      }
+    }
 
     const task = await updateClawCloudTask(auth.user.id, id, {
       ...(typeof body.is_enabled === "boolean"

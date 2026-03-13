@@ -44,6 +44,8 @@ type RunTaskInput = {
   bypassEnabledCheck?: boolean;
 };
 
+type SupabaseAdminClient = ReturnType<typeof getClawCloudSupabaseAdmin>;
+
 async function getTaskRow(userId: string, taskType: ClawCloudTaskType) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const { data } = await supabaseAdmin
@@ -128,6 +130,181 @@ function parseReminderMessage(message: string) {
     fireAt: fireAt.toISOString(),
     reminderText: reminderText || "Reminder",
   };
+}
+
+function getCurrentTimeInTz(timeZone: string) {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(new Date());
+
+    const hour = parts.find((part) => part.type === "hour")?.value ?? "00";
+    const minute = parts.find((part) => part.type === "minute")?.value ?? "00";
+    return `${hour === "24" ? "00" : hour.padStart(2, "0")}:${minute.padStart(2, "0")}`;
+  } catch {
+    const now = new Date();
+    return `${now.getUTCHours().toString().padStart(2, "0")}:${now
+      .getUTCMinutes()
+      .toString()
+      .padStart(2, "0")}`;
+  }
+}
+
+function getCurrentDayInTz(timeZone: string) {
+  const fallbackDays = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
+
+  try {
+    const weekday = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      weekday: "short",
+    })
+      .format(new Date())
+      .toLowerCase()
+      .slice(0, 3);
+
+    return fallbackDays.includes(weekday as (typeof fallbackDays)[number])
+      ? weekday
+      : fallbackDays[new Date().getUTCDay()] ?? "sun";
+  } catch {
+    return fallbackDays[new Date().getUTCDay()] ?? "sun";
+  }
+}
+
+function getTaskTimezone(
+  relation:
+    | { timezone?: string | null }
+    | Array<{ timezone?: string | null }>
+    | null
+    | undefined,
+) {
+  if (Array.isArray(relation)) {
+    return relation[0]?.timezone ?? "Asia/Kolkata";
+  }
+
+  return relation?.timezone ?? "Asia/Kolkata";
+}
+
+function minuteBucket(date: Date) {
+  const bucket = new Date(date);
+  bucket.setSeconds(0, 0);
+  return bucket.toISOString();
+}
+
+async function claimCronSlot(
+  supabaseAdmin: SupabaseAdminClient,
+  taskId: string,
+  userId: string,
+  bucket: string,
+) {
+  const { error } = await supabaseAdmin.from("cron_log").insert({
+    task_id: taskId,
+    user_id: userId,
+    minute_bucket: bucket,
+  });
+
+  if (!error) {
+    return true;
+  }
+
+  if (error.code === "23505") {
+    return false;
+  }
+
+  console.warn("[cron] cron_log insert error:", error.message);
+  return true;
+}
+
+async function isMeetingAlreadyReminded(
+  supabaseAdmin: SupabaseAdminClient,
+  userId: string,
+  eventId: string,
+) {
+  const { data } = await supabaseAdmin
+    .from("meeting_reminder_log")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("event_id", eventId)
+    .maybeSingle();
+
+  return data !== null;
+}
+
+async function markMeetingReminded(
+  supabaseAdmin: SupabaseAdminClient,
+  userId: string,
+  eventId: string,
+) {
+  await supabaseAdmin.from("meeting_reminder_log").upsert(
+    {
+      user_id: userId,
+      event_id: eventId,
+    },
+    { onConflict: "user_id,event_id" },
+  );
+}
+
+async function updateCronHealth(
+  supabaseAdmin: SupabaseAdminClient,
+  fired: number,
+  errors: number,
+) {
+  await supabaseAdmin
+    .from("cron_health")
+    .update({
+      last_run_at: new Date().toISOString(),
+      last_fired: fired,
+      last_errors: errors,
+    })
+    .eq("id", 1);
+
+  await supabaseAdmin.rpc("increment_cron_health_total_runs" as never).maybeSingle().catch(() => {
+    // Ignore if the RPC is not installed yet.
+  });
+}
+
+async function insertCronTaskRun(
+  supabaseAdmin: SupabaseAdminClient,
+  input: {
+    userId: string;
+    taskId: string;
+    taskType: ClawCloudTaskType;
+    status: "success" | "failed";
+    startedAt: string;
+    completedAt: string;
+    durationMs: number;
+    outputData?: Record<string, unknown>;
+    errorMessage?: string;
+  },
+) {
+  await supabaseAdmin.from("task_runs").insert({
+    user_id: input.userId,
+    task_id: input.taskId,
+    task_type: input.taskType,
+    status: input.status,
+    output_data: input.outputData,
+    error_message: input.errorMessage,
+    duration_ms: input.durationMs,
+    started_at: input.startedAt,
+    completed_at: input.completedAt,
+  });
+}
+
+async function bumpCronTaskTotals(
+  supabaseAdmin: SupabaseAdminClient,
+  taskId: string,
+  totalRuns: number | null | undefined,
+  increment = 1,
+) {
+  await supabaseAdmin
+    .from("agent_tasks")
+    .update({
+      total_runs: (totalRuns ?? 0) + increment,
+      last_run_at: new Date().toISOString(),
+    })
+    .eq("id", taskId);
 }
 
 async function runMorningBriefing(
@@ -828,37 +1005,47 @@ export async function deleteClawCloudTask(userId: string, taskId: string) {
 export async function runDueClawCloudTasks() {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const now = new Date();
-  const currentTime = `${now.getHours().toString().padStart(2, "0")}:${now
-    .getMinutes()
-    .toString()
-    .padStart(2, "0")}`;
-  const currentDay = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][now.getDay()] ?? "sun";
-
-  const { data: scheduledTasks, error } = await supabaseAdmin
-    .from("agent_tasks")
-    .select("id, user_id, task_type, schedule_time, schedule_days, is_enabled")
-    .eq("is_enabled", true)
-    .eq("schedule_time", currentTime);
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
+  const bucket = minuteBucket(now);
   const fired: Array<{ userId: string; taskType: ClawCloudTaskType }> = [];
   const errors: Array<{ userId: string; taskType: ClawCloudTaskType; error: string }> = [];
 
-  for (const task of (scheduledTasks ?? []) as AgentTaskRow[]) {
-    const scheduledDays = task.schedule_days ?? [
-      "mon",
-      "tue",
-      "wed",
-      "thu",
-      "fri",
-      "sat",
-      "sun",
-    ];
+  const { data: scheduledTasks, error: scheduledError } = await supabaseAdmin
+    .from("agent_tasks")
+    .select(`
+      id,
+      user_id,
+      task_type,
+      schedule_time,
+      schedule_days,
+      is_enabled,
+      users!inner (
+        timezone
+      )
+    `)
+    .eq("is_enabled", true)
+    .not("schedule_time", "is", null);
 
-    if (!scheduledDays.includes(currentDay)) {
+  if (scheduledError) {
+    throw new Error(scheduledError.message);
+  }
+
+  for (const task of (scheduledTasks ?? []) as Array<
+    AgentTaskRow & {
+      users?: { timezone?: string | null } | Array<{ timezone?: string | null }> | null;
+    }
+  >) {
+    const timeZone = getTaskTimezone(task.users);
+    const userLocalTime = getCurrentTimeInTz(timeZone);
+    const userLocalDay = getCurrentDayInTz(timeZone);
+    const storedTime = task.schedule_time?.slice(0, 5);
+    const scheduledDays = task.schedule_days ?? ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
+    if (storedTime !== userLocalTime || !scheduledDays.includes(userLocalDay)) {
+      continue;
+    }
+
+    const claimed = await claimCronSlot(supabaseAdmin, task.id, task.user_id, bucket);
+    if (!claimed) {
       continue;
     }
 
@@ -878,33 +1065,170 @@ export async function runDueClawCloudTasks() {
     }
   }
 
+  const { data: meetingTasks } = await supabaseAdmin
+    .from("agent_tasks")
+    .select("id, user_id, config, total_runs")
+    .eq("task_type", "meeting_reminders")
+    .eq("is_enabled", true);
+
+  for (const meetingTask of (meetingTasks ?? []) as Array<{
+    id: string;
+    user_id: string;
+    config: ClawCloudTaskConfig | null;
+    total_runs: number | null;
+  }>) {
+    const minutesBefore = Number(meetingTask.config?.minutes_before ?? 30);
+    const windowStart = new Date(now.getTime() + minutesBefore * 60 * 1000);
+    const windowEnd = new Date(windowStart.getTime() + 2 * 60 * 1000);
+    let remindersSent = 0;
+
+    try {
+      const events = await getClawCloudCalendarEvents(meetingTask.user_id, {
+        timeMin: windowStart.toISOString(),
+        timeMax: windowEnd.toISOString(),
+      });
+
+      for (const event of events) {
+        if (!event.id) {
+          continue;
+        }
+
+        const alreadySent = await isMeetingAlreadyReminded(
+          supabaseAdmin,
+          meetingTask.user_id,
+          event.id,
+        );
+        if (alreadySent) {
+          continue;
+        }
+
+        const startedAt = new Date();
+        const message = `Meeting in ${minutesBefore} minutes\n\n${event.summary}\n${event.start}${
+          event.hangoutLink ? `\n${event.hangoutLink}` : ""
+        }`;
+
+        await sendClawCloudWhatsAppMessage(meetingTask.user_id, message);
+        await markMeetingReminded(supabaseAdmin, meetingTask.user_id, event.id);
+        await insertCronTaskRun(supabaseAdmin, {
+          userId: meetingTask.user_id,
+          taskId: meetingTask.id,
+          taskType: "meeting_reminders",
+          status: "success",
+          startedAt: startedAt.toISOString(),
+          completedAt: new Date().toISOString(),
+          durationMs: Date.now() - startedAt.getTime(),
+          outputData: {
+            event_id: event.id,
+            summary: event.summary,
+            start: event.start,
+          },
+        });
+
+        remindersSent += 1;
+        fired.push({ userId: meetingTask.user_id, taskType: "meeting_reminders" });
+      }
+
+      if (remindersSent > 0) {
+        await bumpCronTaskTotals(
+          supabaseAdmin,
+          meetingTask.id,
+          meetingTask.total_runs,
+          remindersSent,
+        );
+        await upsertAnalyticsDaily(meetingTask.user_id, {
+          tasks_run: remindersSent,
+          wa_messages_sent: remindersSent,
+        });
+      }
+    } catch (error) {
+      if (error instanceof Error && /token|credentials|not connected/i.test(error.message)) {
+        continue;
+      }
+
+      errors.push({
+        userId: meetingTask.user_id,
+        taskType: "meeting_reminders",
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+
   const { data: reminderTasks } = await supabaseAdmin
     .from("agent_tasks")
-    .select("id, user_id, config")
+    .select("id, user_id, config, total_runs")
     .eq("task_type", "custom_reminder")
     .eq("is_enabled", true);
 
-  for (const reminder of reminderTasks ?? []) {
-    const fireAt = (reminder.config as { fire_at?: string })?.fire_at;
+  for (const reminder of (reminderTasks ?? []) as Array<{
+    id: string;
+    user_id: string;
+    config: ClawCloudTaskConfig | null;
+    total_runs: number | null;
+  }>) {
+    const fireAt =
+      typeof reminder.config?.fire_at === "string" ? reminder.config.fire_at : null;
     if (!fireAt) {
       continue;
     }
 
     const fireTime = new Date(fireAt).getTime();
-    if (fireTime > Date.now() || fireTime < Date.now() - 60 * 1000) {
+    const diff = now.getTime() - fireTime;
+    if (diff < 0 || diff > 60 * 1000) {
+      continue;
+    }
+
+    const claimed = await claimCronSlot(supabaseAdmin, reminder.id, reminder.user_id, bucket);
+    if (!claimed) {
       continue;
     }
 
     try {
+      const startedAt = new Date();
       const reminderText =
-        (reminder.config as { reminder_text?: string })?.reminder_text || "Reminder";
+        typeof reminder.config?.reminder_text === "string"
+          ? reminder.config.reminder_text
+          : "Reminder";
       await sendClawCloudWhatsAppMessage(reminder.user_id, `Reminder\n\n${reminderText}`);
       await supabaseAdmin
         .from("agent_tasks")
-        .update({ is_enabled: false })
+        .update({
+          is_enabled: false,
+          total_runs: (reminder.total_runs ?? 0) + 1,
+          last_run_at: new Date().toISOString(),
+        })
         .eq("id", reminder.id);
+      await insertCronTaskRun(supabaseAdmin, {
+        userId: reminder.user_id,
+        taskId: reminder.id,
+        taskType: "custom_reminder",
+        status: "success",
+        startedAt: startedAt.toISOString(),
+        completedAt: new Date().toISOString(),
+        durationMs: Date.now() - startedAt.getTime(),
+        outputData: {
+          reminder_text: reminderText,
+          fire_at: fireAt,
+        },
+      });
+      await upsertAnalyticsDaily(reminder.user_id, {
+        tasks_run: 1,
+        wa_messages_sent: 1,
+      });
       fired.push({ userId: reminder.user_id, taskType: "custom_reminder" });
     } catch (error) {
+      await insertCronTaskRun(supabaseAdmin, {
+        userId: reminder.user_id,
+        taskId: reminder.id,
+        taskType: "custom_reminder",
+        status: "failed",
+        startedAt: now.toISOString(),
+        completedAt: new Date().toISOString(),
+        durationMs: 0,
+        errorMessage: error instanceof Error ? error.message : "Unknown error",
+      }).catch(() => {
+        // Ignore secondary logging failures.
+      });
+
       errors.push({
         userId: reminder.user_id,
         taskType: "custom_reminder",
@@ -913,23 +1237,11 @@ export async function runDueClawCloudTasks() {
     }
   }
 
-  const { data: meetingTasks } = await supabaseAdmin
-    .from("agent_tasks")
-    .select("user_id")
-    .eq("task_type", "meeting_reminders")
-    .eq("is_enabled", true);
-
-  for (const meetingTask of meetingTasks ?? []) {
-    try {
-      await runClawCloudTask({
-        userId: meetingTask.user_id,
-        taskType: "meeting_reminders",
-        bypassEnabledCheck: true,
-      });
-    } catch {
-      // Meeting reminders are silent when nothing is due.
-    }
+  if (now.getMinutes() === 0) {
+    supabaseAdmin.rpc("cleanup_cron_logs" as never).then(() => {}).catch(() => {});
   }
+
+  await updateCronHealth(supabaseAdmin, fired.length, errors.length).catch(() => {});
 
   return {
     timestamp: now.toISOString(),

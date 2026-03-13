@@ -235,6 +235,7 @@ export function ApprovalsPage({ config }: ApprovalsPageProps) {
   const [toast, setToast] = useState("");
   const [toastVisible, setToastVisible] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [mobileListVisible, setMobileListVisible] = useState(true);
 
   useEffect(() => {
     return () => {
@@ -337,6 +338,13 @@ export function ApprovalsPage({ config }: ApprovalsPageProps) {
   function handleSelect(id: string) {
     setSelectedId(id);
     setEditing(false);
+    setMobileListVisible(false);
+  }
+
+  function handleFilterChange(nextFilter: FilterTab) {
+    setFilter(nextFilter);
+    setEditing(false);
+    setMobileListVisible(true);
   }
 
   function handleStartEdit() {
@@ -389,6 +397,9 @@ export function ApprovalsPage({ config }: ApprovalsPageProps) {
         (approval) => approval.id !== selected.id && approval.status === "pending",
       );
       setSelectedId(remaining[0]?.id ?? null);
+      if (remaining.length === 0) {
+        setMobileListVisible(true);
+      }
     }
 
     showToast(
@@ -412,6 +423,7 @@ export function ApprovalsPage({ config }: ApprovalsPageProps) {
       const freshApprovals = await fetchApprovals(token);
       setApprovals(freshApprovals);
       setSelectedId(freshApprovals[0]?.id ?? null);
+      setMobileListVisible(true);
       showToast("Drafts generated from your inbox.");
     } catch {
       showToast("Unable to generate drafts right now.");
@@ -424,6 +436,41 @@ export function ApprovalsPage({ config }: ApprovalsPageProps) {
 
   return (
     <div className={styles.shell}>
+      <div className={styles.mobileTopbar}>
+        <div className={styles.mobileTopbarLeft}>
+          <Link href="/dashboard" className={styles.mobileBackBtn}>
+            {"<- Dashboard"}
+          </Link>
+          <span className={styles.mobilePageTitle}>Reply approvals</span>
+        </div>
+        <button
+          type="button"
+          className={styles.generateButton}
+          onClick={handleGenerate}
+          disabled={generating}
+        >
+          {generating ? "Scanning..." : "Generate"}
+        </button>
+      </div>
+
+      <div className={styles.mobileTabRow}>
+        {filterTabs.map((tab) => {
+          const label = tab.key === "pending" ? `${tab.label} (${pendingCount})` : tab.label;
+
+          return (
+            <button
+              key={tab.key}
+              type="button"
+              className={cx(styles.tabButton, filter === tab.key && styles.tabButtonActive)}
+              onClick={() => handleFilterChange(tab.key)}
+            >
+              <span className={styles.tabDot} data-status={tab.key} />
+              {label}
+            </button>
+          );
+        })}
+      </div>
+
       <aside className={styles.sidebar}>
         <div className={styles.sidebarTop}>
           <Link href="/dashboard" className={styles.backLink}>
@@ -456,10 +503,7 @@ export function ApprovalsPage({ config }: ApprovalsPageProps) {
                 key={tab.key}
                 type="button"
                 className={cx(styles.tabButton, filter === tab.key && styles.tabButtonActive)}
-                onClick={() => {
-                  setFilter(tab.key);
-                  setEditing(false);
-                }}
+                onClick={() => handleFilterChange(tab.key)}
               >
                 <span className={styles.tabDot} data-status={tab.key} />
                 {label}
@@ -491,7 +535,12 @@ export function ApprovalsPage({ config }: ApprovalsPageProps) {
         </div>
       </aside>
 
-      <div className={styles.listPane}>
+      <div
+        className={cx(
+          styles.listPane,
+          mobileListVisible && styles.listPaneMobileVisible,
+        )}
+      >
         <div className={styles.listHeader}>
           <span className={styles.listTitle}>
             {filter === "all" ? "All approvals" : `${filter[0]?.toUpperCase()}${filter.slice(1)}`}
@@ -587,7 +636,12 @@ export function ApprovalsPage({ config }: ApprovalsPageProps) {
         )}
       </div>
 
-      <div className={styles.detailPane}>
+      <div
+        className={cx(
+          styles.detailPane,
+          mobileListVisible && styles.detailPaneMobileHidden,
+        )}
+      >
         {!selected ? (
           <div className={styles.detailEmpty}>
             <div className={styles.detailEmptyIcon} aria-hidden="true">
@@ -601,6 +655,17 @@ export function ApprovalsPage({ config }: ApprovalsPageProps) {
           </div>
         ) : (
           <div className={styles.detail}>
+            <button
+              type="button"
+              className={styles.mobileDetailBack}
+              onClick={() => {
+                setEditing(false);
+                setMobileListVisible(true);
+              }}
+            >
+              {"<- Back to list"}
+            </button>
+
             <div className={styles.detailHeader}>
               <div className={styles.detailHeaderLeft}>
                 <div

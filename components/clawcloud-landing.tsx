@@ -715,6 +715,8 @@ export function ClawCloudLanding() {
           <a href="#pricing">Pricing</a>
           <a href="#faq">FAQ</a>
           <a href="/auth">Get started</a>
+          <a href="/privacy">Privacy</a>
+          <a href="/terms">Terms</a>
         </div>
         <div className="footer-copy">&copy; 2026 ClawCloud. All rights reserved.</div>
       </footer>

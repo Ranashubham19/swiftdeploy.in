@@ -453,6 +453,8 @@ export function ActivityLogPage({ config }: ActivityLogPageProps) {
   const groupedRuns = groupRunsByDay(filteredRuns);
   const successCount = filteredRuns.filter((run) => run.status === "success").length;
   const failedCount = filteredRuns.filter((run) => run.status === "failed").length;
+  const successRuns = runs.filter((run) => run.status === "success").length;
+  const failedRuns = runs.filter((run) => run.status === "failed").length;
   const totalDuration = filteredRuns.reduce((sum, run) => sum + (run.duration_ms ?? 0), 0);
   const totalTokens = filteredRuns.reduce((sum, run) => sum + (run.tokens_used ?? 0), 0);
   const sparkData = [...stats].sort((left, right) => left.date.localeCompare(right.date)).slice(-7);
@@ -470,6 +472,10 @@ export function ActivityLogPage({ config }: ActivityLogPageProps) {
 
   return (
     <div className={styles.shell}>
+      <Link href="/dashboard" className={styles.mobileBackLink}>
+        {"<- Back to dashboard"}
+      </Link>
+
       <header className={styles.topbar}>
         <div className={styles.topbarLeft}>
           <Link href="/dashboard" className={styles.backLink}>
@@ -518,6 +524,21 @@ export function ActivityLogPage({ config }: ActivityLogPageProps) {
           </div>
         </div>
       </header>
+
+      <div className={styles.statusTabsScroll}>
+        {(["all", "success", "failed"] as FilterStatus[]).map((status) => (
+          <button
+            key={status}
+            type="button"
+            className={`${styles.statusTab} ${statusFilter === status ? styles.statusTabActive : ""} ${status !== "all" ? styles[`statusTab${status[0]?.toUpperCase()}${status.slice(1)}`] : ""}`}
+            onClick={() => setStatusFilter(status)}
+          >
+            {status === "all" ? `All (${runs.length})` : null}
+            {status === "success" ? `Success (${successRuns})` : null}
+            {status === "failed" ? `Failed (${failedRuns})` : null}
+          </button>
+        ))}
+      </div>
 
       <div className={styles.body}>
         <aside className={styles.sidebar}>
@@ -654,8 +675,8 @@ export function ActivityLogPage({ config }: ActivityLogPageProps) {
                 onClick={() => setStatusFilter(status)}
               >
                 {status === "all" ? `All (${runs.length})` : null}
-                {status === "success" ? `Success (${runs.filter((run) => run.status === "success").length})` : null}
-                {status === "failed" ? `Failed (${runs.filter((run) => run.status === "failed").length})` : null}
+                {status === "success" ? `Success (${successRuns})` : null}
+                {status === "failed" ? `Failed (${failedRuns})` : null}
               </button>
             ))}
             <span className={styles.statusTabsSpacer} />

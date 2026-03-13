@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { Fragment, useEffect, useRef, useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
 
+import { useDashboardData } from "@/hooks/useDashboardData";
+import { useUpgrade } from "@/hooks/useUpgrade";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 import type { PublicAppConfig } from "@/lib/types";
 
@@ -12,18 +14,6 @@ import styles from "./dashboard-shell.module.css";
 
 type DashboardShellProps = {
   config: PublicAppConfig;
-};
-
-type Task = {
-  id: string;
-  icon: string;
-  name: string;
-  toastName: string;
-  description: string;
-  tags: string[];
-  runs?: string;
-  timing?: string;
-  enabled: boolean;
 };
 
 type ChatMessage = {
@@ -66,107 +56,73 @@ const ICONS = {
   clipboard: "\u{1F4CB}",
   menu: "\u2630",
   dots: "\u22EF",
+  lock: "\u{1F512}",
 } as const;
 
-const TOTAL_RUNS = 847;
-const FREE_ACTIVE_LIMIT = 3;
+const TASK_LABELS: Record<
+  string,
+  { name: string; description: string; icon: string; tags: string[] }
+> = {
+  morning_briefing: {
+    name: "Morning email briefing",
+    description: "Summarises your inbox and sends a daily briefing to WhatsApp at 7:00 AM",
+    icon: ICONS.sun,
+    tags: [`${ICONS.mail} Gmail`, `${ICONS.chat} WhatsApp`, "\u{1F556} 7:00 AM daily"],
+  },
+  draft_replies: {
+    name: "Draft email replies",
+    description: 'Say "draft reply to [name]" on WhatsApp and your AI writes it to Gmail drafts',
+    icon: ICONS.pencil,
+    tags: [`${ICONS.mail} Gmail`, `${ICONS.chat} WhatsApp`, `${ICONS.zap} On demand`],
+  },
+  meeting_reminders: {
+    name: "Meeting reminders",
+    description: "Sends a WhatsApp reminder 30 mins before each meeting with email context",
+    icon: ICONS.calendar,
+    tags: [`${ICONS.calendar} Calendar`, `${ICONS.chat} WhatsApp`, `${ICONS.alarm} 30min before`],
+  },
+  email_search: {
+    name: "Search my email",
+    description: 'Ask "what did [person] say about [topic]?" and get an instant summary',
+    icon: ICONS.search,
+    tags: [`${ICONS.mail} Gmail`, `${ICONS.chat} WhatsApp`, `${ICONS.zap} On demand`],
+  },
+  evening_summary: {
+    name: "Evening summary",
+    description: "End-of-day recap: what you did, what needs attention tomorrow",
+    icon: ICONS.moon,
+    tags: [`${ICONS.mail} Gmail`, `${ICONS.calendar} Calendar`, "\u{1F558} 9:00 PM daily"],
+  },
+  custom_reminder: {
+    name: "Smart reminders",
+    description: 'Say "Remind me at 5pm to call Priya" on WhatsApp',
+    icon: ICONS.alarm,
+    tags: [`${ICONS.chat} WhatsApp`, `${ICONS.zap} On demand`],
+  },
+  weekly_spend: {
+    name: "Weekly spend summary",
+    description: "Summarises your recent spending and sends a weekly update",
+    icon: "\u{1F4B3}",
+    tags: [`${ICONS.chat} WhatsApp`, `${ICONS.zap} Weekly`],
+  },
+};
+
+const TASK_TYPE_ORDER = [
+  "morning_briefing",
+  "draft_replies",
+  "meeting_reminders",
+  "email_search",
+  "evening_summary",
+  "custom_reminder",
+  "weekly_spend",
+];
+
+const STARTER_TASKS = new Set(["evening_summary", "draft_replies"]);
 
 const timeFormatter = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
   minute: "2-digit",
 });
-
-const initialTasks: Task[] = [
-  {
-    id: "task-morning",
-    icon: ICONS.sun,
-    name: "Morning email briefing",
-    toastName: "Morning briefing",
-    description: "Summarises your inbox and sends a daily briefing to WhatsApp at 7:00 AM",
-    tags: [`${ICONS.mail} Gmail`, `${ICONS.chat} WhatsApp`, "\u{1F556} 7:00 AM daily"],
-    runs: "\u21BA 14 runs",
-    timing: "Last: today 7:01 AM",
-    enabled: true,
-  },
-  {
-    id: "task-drafts",
-    icon: ICONS.pencil,
-    name: "Draft email replies",
-    toastName: "Draft replies",
-    description: 'Say "draft reply to [name]" on WhatsApp and your AI writes it to Gmail drafts',
-    tags: [`${ICONS.mail} Gmail`, `${ICONS.chat} WhatsApp`, `${ICONS.zap} On demand`],
-    runs: "\u21BA 4 runs today",
-    timing: "Last: 7:01 AM",
-    enabled: true,
-  },
-  {
-    id: "task-calendar",
-    icon: ICONS.calendar,
-    name: "Meeting reminders",
-    toastName: "Meeting reminders",
-    description: "Sends a WhatsApp reminder 30 mins before each meeting with email context",
-    tags: [`${ICONS.calendar} Calendar`, `${ICONS.chat} WhatsApp`, `${ICONS.alarm} 30min before`],
-    runs: "\u21BA 2 today",
-    timing: "Next: 9:30 AM",
-    enabled: true,
-  },
-  {
-    id: "task-search",
-    icon: ICONS.search,
-    name: "Search my email",
-    toastName: "Email search",
-    description: 'Ask "what did [person] say about [topic]?" and get an instant summary',
-    tags: [`${ICONS.mail} Gmail`, `${ICONS.chat} WhatsApp`, `${ICONS.zap} On demand`],
-    enabled: false,
-  },
-  {
-    id: "task-evening",
-    icon: ICONS.moon,
-    name: "Evening summary",
-    toastName: "Evening summary",
-    description: "End-of-day recap: what you did, what needs attention tomorrow",
-    tags: [`${ICONS.mail} Gmail`, `${ICONS.calendar} Calendar`, "\u{1F558} 9:00 PM daily"],
-    enabled: false,
-  },
-];
-
-const activityItems: ActivityItem[] = [
-  {
-    id: "activity-1",
-    tone: "green",
-    title: "Morning briefing sent",
-    detail: "31 emails summarised",
-    time: "Today, 7:00 AM",
-  },
-  {
-    id: "activity-2",
-    tone: "blue",
-    title: "4 email drafts",
-    detail: "created and saved to Gmail",
-    time: "Today, 7:01 AM",
-  },
-  {
-    id: "activity-3",
-    tone: "amber",
-    title: "Meeting reminder",
-    detail: "Priya call at 10:00 AM",
-    time: "Today, 9:30 AM",
-  },
-  {
-    id: "activity-4",
-    tone: "green",
-    title: "Email search",
-    detail: '"budget from Priya" answered',
-    time: "Yesterday, 3:14 PM",
-  },
-  {
-    id: "activity-5",
-    tone: "blue",
-    title: "Gmail connected",
-    detail: "successfully",
-    time: "3 days ago",
-  },
-];
 
 const suggestionButtons = [
   {
@@ -207,6 +163,38 @@ function getTimeGreeting(date = new Date()) {
 
 function formatMessageTime(date = new Date()) {
   return `${timeFormatter.format(date)} \u2713\u2713`;
+}
+
+function formatRelativeTime(iso: string) {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const minutes = Math.floor(diffMs / 60_000);
+
+  if (minutes < 1) {
+    return "just now";
+  }
+
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function activityToneForTask(taskType: string, status: string): "green" | "blue" | "amber" {
+  if (status === "failed") {
+    return "amber";
+  }
+
+  if (taskType === "draft_replies") {
+    return "blue";
+  }
+
+  return "green";
 }
 
 function extractDisplayName(
@@ -329,6 +317,13 @@ export function DashboardShell({ config }: DashboardShellProps) {
     supabaseUrl: config.supabaseUrl,
     supabaseAnonKey: config.supabaseAnonKey,
   });
+  const { upgrade, loading: upgradeLoading } = useUpgrade();
+  const {
+    data: dashboardData,
+    loading: dashboardLoading,
+    error: dashboardError,
+    refetch,
+  } = useDashboardData(config);
 
   const commandInputRef = useRef<HTMLInputElement | null>(null);
   const toastTimerRef = useRef<number | null>(null);
@@ -343,43 +338,86 @@ export function DashboardShell({ config }: DashboardShellProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [agentOn, setAgentOn] = useState(true);
   const [greeting, setGreeting] = useState("Welcome back");
-  const [totalRunsDisplay, setTotalRunsDisplay] = useState(0);
-  const [tasks, setTasks] = useState(initialTasks);
   const [messages, setMessages] = useState<ChatMessage[]>(() => createSeedMessages("Rahul"));
   const [hasInteractiveMessages, setHasInteractiveMessages] = useState(false);
   const [typingVisible, setTypingVisible] = useState(false);
   const [commandInput, setCommandInput] = useState("");
   const [toastMessage, setToastMessage] = useState("");
   const [toastVisible, setToastVisible] = useState(false);
+  const [taskToggling, setTaskToggling] = useState<Record<string, boolean>>({});
 
-  const displayName = userName || "Rahul Kumar";
-  const displayEmail = userEmail || "rahul.kumar@gmail.com";
+  const plan = (dashboardData?.user?.plan ?? "free") as "free" | "starter" | "pro";
+  const planLabel = plan.toUpperCase();
+  const agentStatus = dashboardData?.agent_status;
+  const analytics = dashboardData?.analytics?.today;
+  const todayRuns = agentStatus?.today_runs ?? 0;
+  const dailyLimit = agentStatus?.daily_limit ?? 10;
+  const runsRemaining = agentStatus?.runs_remaining ?? dailyLimit;
+  const activeTaskLimit = agentStatus?.active_task_limit ?? 3;
+  const isLimitReached = runsRemaining <= 0;
+  const isLimitWarning = !isLimitReached && runsRemaining <= 2;
+  const runPercentage = dailyLimit > 0 ? Math.min((todayRuns / dailyLimit) * 100, 100) : 0;
+
+  const liveTasks = dashboardData?.tasks ?? [];
+  const sortedTasks = TASK_TYPE_ORDER
+    .map((taskType) => liveTasks.find((task) => task.task_type === taskType))
+    .filter((task): task is (typeof liveTasks)[number] => Boolean(task));
+
+  const displayName = userName || dashboardData?.user?.full_name || "Rahul Kumar";
+  const displayEmail = userEmail || dashboardData?.user?.email || "rahul.kumar@gmail.com";
   const firstName = displayName.split(" ")[0] || "Rahul";
   const initials = getInitials(displayName, displayEmail);
-  const activeCount = tasks.filter((task) => task.enabled).length;
+  const activeCount = liveTasks.filter((task) => task.is_enabled).length;
+
+  const connectedProviders = new Set(
+    (dashboardData?.connected_accounts ?? [])
+      .filter((account) => account.is_active)
+      .map((account) => account.provider),
+  );
 
   const accounts = [
-    { id: "gmail", icon: ICONS.mail, name: "Gmail", detail: displayEmail, status: "connected" as const },
+    {
+      id: "gmail",
+      icon: ICONS.mail,
+      name: "Gmail",
+      detail:
+        dashboardData?.connected_accounts.find((account) => account.provider === "gmail")
+          ?.account_email || displayEmail,
+      status: connectedProviders.has("gmail") ? ("connected" as const) : ("upgrade" as const),
+      upgradeCopy: "Connect Gmail in settings",
+    },
     {
       id: "calendar",
       icon: ICONS.calendar,
       name: "Google Calendar",
-      detail: "2 events today",
-      status: "connected" as const,
+      detail: connectedProviders.has("google_calendar") ? "Connected" : "Connect in settings",
+      status: connectedProviders.has("google_calendar")
+        ? ("connected" as const)
+        : ("upgrade" as const),
+      upgradeCopy: "Connect Calendar in settings",
     },
     {
       id: "whatsapp",
       icon: ICONS.chat,
       name: "WhatsApp",
-      detail: "+91 98765 43210 - Active",
-      status: "connected" as const,
+      detail:
+        dashboardData?.connected_accounts.find((account) => account.provider === "whatsapp")
+          ?.phone_number || "Connect in settings",
+      status: connectedProviders.has("whatsapp")
+        ? ("connected" as const)
+        : ("upgrade" as const),
+      upgradeCopy: "Connect WhatsApp in settings",
     },
     {
       id: "telegram",
       icon: ICONS.phone,
       name: "Telegram",
-      detail: "Available on Starter plan",
-      status: "upgrade" as const,
+      detail: connectedProviders.has("telegram")
+        ? "Connected"
+        : "Available on Starter plan",
+      status: connectedProviders.has("telegram")
+        ? ("connected" as const)
+        : ("upgrade" as const),
       upgradeCopy: "Upgrade to Starter to connect Telegram",
     },
     {
@@ -392,33 +430,56 @@ export function DashboardShell({ config }: DashboardShellProps) {
     },
   ];
 
+  const recentActivity: ActivityItem[] = (dashboardData?.recent_activity ?? [])
+    .slice(0, 5)
+    .map((run) => ({
+      id: run.id,
+      tone: activityToneForTask(run.task_type, run.status),
+      title: TASK_LABELS[run.task_type]?.name ?? run.task_type,
+      detail:
+        run.status === "failed"
+          ? "Failed"
+          : run.status === "running"
+            ? "Running..."
+            : "Completed",
+      time: formatRelativeTime(run.started_at),
+    }));
+
+  const displayActivity =
+    recentActivity.length > 0
+      ? recentActivity
+      : [
+          {
+            id: "activity-1",
+            tone: "green" as const,
+            title: "Morning briefing sent",
+            detail: "Summary delivered to WhatsApp",
+            time: "Today, 7:00 AM",
+          },
+          {
+            id: "activity-2",
+            tone: "blue" as const,
+            title: "Draft replies",
+            detail: "Saved to Gmail drafts",
+            time: "Today, 7:01 AM",
+          },
+        ];
+
   useEffect(() => {
     setGreeting(getTimeGreeting());
   }, []);
+
+  useEffect(() => {
+    if (agentStatus) {
+      setAgentOn(agentStatus.is_active);
+    }
+  }, [agentStatus]);
 
   useEffect(() => {
     if (!hasInteractiveMessages) {
       setMessages(createSeedMessages(firstName));
     }
   }, [firstName, hasInteractiveMessages]);
-
-  useEffect(() => {
-    let current = 0;
-    const step = Math.ceil(TOTAL_RUNS / 40);
-
-    const timer = window.setInterval(() => {
-      current = Math.min(current + step, TOTAL_RUNS);
-      setTotalRunsDisplay(current);
-
-      if (current >= TOTAL_RUNS) {
-        window.clearInterval(timer);
-      }
-    }, 30);
-
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, []);
 
   useEffect(() => {
     if (!supabase) {
@@ -555,23 +616,67 @@ export function DashboardShell({ config }: DashboardShellProps) {
     router.push("/settings");
   }
 
-  function handleTaskToggle(taskId: string, nextEnabled: boolean) {
-    const targetTask = tasks.find((task) => task.id === taskId);
-
-    if (!targetTask) {
+  async function handleTaskToggle(taskId: string, nextEnabled: boolean) {
+    if (!supabase) {
+      showToast("Auth not configured.");
       return;
     }
 
-    if (nextEnabled && !targetTask.enabled && activeCount >= FREE_ACTIVE_LIMIT) {
-      showToast(`Free plan supports ${FREE_ACTIVE_LIMIT} active tasks. Upgrade to enable more.`);
+    if (nextEnabled && activeCount >= activeTaskLimit) {
+      showToast(
+        `Your ${plan} plan allows ${activeTaskLimit} active task${activeTaskLimit === 1 ? "" : "s"}. Upgrade to enable more.`,
+      );
+      if (plan === "free") {
+        await upgrade({ plan: "starter", period: "monthly", currency: "inr" });
+      }
       return;
     }
 
-    setTasks((current) =>
-      current.map((task) => (task.id === taskId ? { ...task, enabled: nextEnabled } : task)),
-    );
+    if (nextEnabled && isLimitReached) {
+      showToast(`Daily limit reached (${dailyLimit} runs). Upgrade for more runs.`);
+      return;
+    }
 
-    showToast(nextEnabled ? `${targetTask.toastName} enabled \u2713` : `${targetTask.toastName} paused`);
+    setTaskToggling((current) => ({ ...current, [taskId]: true }));
+
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+
+      if (!token) {
+        router.replace("/auth");
+        return;
+      }
+
+      const response = await fetch(`/api/tasks/${taskId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ is_enabled: nextEnabled }),
+      });
+
+      const json = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        code?: string;
+      };
+
+      if (!response.ok) {
+        showToast(json.error || "Failed to update task.");
+        if (json.code === "TASK_LIMIT_REACHED" && plan === "free") {
+          await upgrade({ plan: "starter", period: "monthly", currency: "inr" });
+        }
+        return;
+      }
+
+      showToast(nextEnabled ? "Task enabled \u2713" : "Task disabled");
+      refetch();
+    } catch {
+      showToast("Network error. Please try again.");
+    } finally {
+      setTaskToggling((current) => ({ ...current, [taskId]: false }));
+    }
   }
 
   function handleAgentToggle() {
@@ -625,6 +730,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
       300,
       1200,
     );
+    showToast("Test message sent \u2713");
   }
 
   async function handleSignOut() {
@@ -768,7 +874,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
           <div className={styles.userInfo}>
             <div className={styles.userName}>{displayName}</div>
             <div className={styles.userPlan}>
-              <span className={styles.planTag}>FREE</span>
+              <span className={styles.planTag}>{planLabel}</span>
             </div>
           </div>
           <span className={styles.userMenu}>{ICONS.dots}</span>
@@ -822,13 +928,50 @@ export function DashboardShell({ config }: DashboardShellProps) {
             <div className={`${styles.statusNote} ${styles.statusLoading}`}>Checking your session...</div>
           ) : null}
           {error ? <div className={`${styles.statusNote} ${styles.statusError}`}>{error}</div> : null}
+          {dashboardError ? (
+            <div className={`${styles.statusNote} ${styles.statusError}`}>{dashboardError}</div>
+          ) : null}
+
+          {isLimitReached && !loading ? (
+            <div className={styles.limitBanner}>
+              <span>
+                {ICONS.lock} Daily limit reached - {dailyLimit} runs used on {planLabel} plan.
+              </span>
+              <button
+                type="button"
+                className={styles.limitBannerButton}
+                disabled={upgradeLoading}
+                onClick={() => void upgrade({ plan: "starter", period: "monthly", currency: "inr" })}
+              >
+                {upgradeLoading ? "Opening..." : "Upgrade to Starter ->"}
+              </button>
+            </div>
+          ) : null}
+
+          {isLimitWarning && !isLimitReached && !loading ? (
+            <div className={`${styles.limitBanner} ${styles.limitBannerWarning}`}>
+              <span>
+                {ICONS.alarm} Only {runsRemaining} run{runsRemaining === 1 ? "" : "s"} remaining today.
+              </span>
+              <button
+                type="button"
+                className={styles.limitBannerButton}
+                disabled={upgradeLoading}
+                onClick={() => void upgrade({ plan: "starter", period: "monthly", currency: "inr" })}
+              >
+                {upgradeLoading ? "Opening..." : "Upgrade ->"}
+              </button>
+            </div>
+          ) : null}
 
           <div className={styles.greeting}>
             <h1 className={styles.greetingTitle}>
               {greeting}, {firstName} {"\u{1F44B}"}
             </h1>
             <p className={styles.greetingText}>
-              Your agent has been running for 3 days. Here&apos;s what&apos;s happening today.
+              {dashboardLoading
+                ? "Loading your agent data..."
+                : `Your agent is ${agentOn ? "active" : "paused"}. ${runsRemaining} of ${dailyLimit} daily runs remaining.`}
             </p>
           </div>
 
@@ -836,28 +979,32 @@ export function DashboardShell({ config }: DashboardShellProps) {
             <div className={styles.statCard}>
               <div className={styles.statTop}>
                 <div className={`${styles.statIcon} ${styles.statIconGreen}`}>{ICONS.zap}</div>
-                <div className={`${styles.statChange} ${styles.statChangeUp}`}>+12%</div>
+                <div className={`${styles.statChange} ${styles.statChangeUp}`}>today</div>
               </div>
-              <div className={styles.statNumber}>{totalRunsDisplay.toLocaleString()}</div>
-              <div className={styles.statLabel}>Total task runs</div>
+              <div className={styles.statNumber}>{dashboardLoading ? "-" : todayRuns}</div>
+              <div className={styles.statLabel}>Task runs today</div>
             </div>
 
             <div className={styles.statCard}>
               <div className={styles.statTop}>
                 <div className={`${styles.statIcon} ${styles.statIconBlue}`}>{ICONS.mail}</div>
-                <div className={`${styles.statChange} ${styles.statChangeUp}`}>+8</div>
+                <div className={`${styles.statChange} ${styles.statChangeUp}`}>today</div>
               </div>
-              <div className={styles.statNumber}>31</div>
-              <div className={styles.statLabel}>Emails processed today</div>
+              <div className={styles.statNumber}>
+                {dashboardLoading ? "-" : (analytics?.emails_processed ?? 0)}
+              </div>
+              <div className={styles.statLabel}>Emails processed</div>
             </div>
 
             <div className={styles.statCard}>
               <div className={styles.statTop}>
                 <div className={`${styles.statIcon} ${styles.statIconAccent}`}>{ICONS.clock}</div>
-                <div className={`${styles.statChange} ${styles.statChangeUp}`}>+22min</div>
               </div>
               <div className={styles.statNumber}>
-                1.5<span className={styles.statUnit}>hr</span>
+                {dashboardLoading
+                  ? "-"
+                  : Math.round(((analytics?.minutes_saved ?? 0) / 60) * 10) / 10}
+                {!dashboardLoading ? <span className={styles.statUnit}>hr</span> : null}
               </div>
               <div className={styles.statLabel}>Time saved today</div>
             </div>
@@ -865,9 +1012,10 @@ export function DashboardShell({ config }: DashboardShellProps) {
             <div className={styles.statCard}>
               <div className={styles.statTop}>
                 <div className={`${styles.statIcon} ${styles.statIconAmber}`}>{ICONS.check}</div>
-                <div className={`${styles.statChange} ${styles.statChangeUp}`}>+2</div>
               </div>
-              <div className={styles.statNumber}>4</div>
+              <div className={styles.statNumber}>
+                {dashboardLoading ? "-" : (analytics?.drafts_created ?? 0)}
+              </div>
               <div className={styles.statLabel}>Drafts created today</div>
             </div>
           </div>
@@ -931,7 +1079,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
                   <div className={styles.cardTitle}>
                     {ICONS.zap} AI tasks
                     <span className={styles.cardTitleMeta}>
-                      {activeCount} of {FREE_ACTIVE_LIMIT} active
+                      {activeCount} of {activeTaskLimit} active
                     </span>
                   </div>
                   <button
@@ -943,44 +1091,135 @@ export function DashboardShell({ config }: DashboardShellProps) {
                   </button>
                 </div>
 
-                <div className={styles.tasksList}>
-                  {tasks.map((task) => (
-                    <div
-                      key={task.id}
-                      className={`${styles.taskItem} ${task.enabled ? styles.taskItemOn : styles.taskItemMuted}`}
+                <div className={styles.runUsageBar}>
+                  <div className={styles.runUsageTop}>
+                    <span className={styles.runUsageLabel}>Daily task runs</span>
+                    <span
+                      className={`${styles.runUsageCount} ${
+                        isLimitReached
+                          ? styles.runUsageCountDanger
+                          : isLimitWarning
+                            ? styles.runUsageCountWarning
+                            : ""
+                      }`}
                     >
-                      <div className={styles.taskTop}>
-                        <div className={styles.taskLeft}>
-                          <span className={styles.taskEmoji}>{task.icon}</span>
-                          <div>
-                            <div className={styles.taskName}>{task.name}</div>
-                            <div className={styles.taskDescription}>{task.description}</div>
+                      {todayRuns} / {dailyLimit}
+                      <span className={styles.runUsagePlanNote}> ({plan.toLowerCase()} limit)</span>
+                    </span>
+                  </div>
+                  <div className={styles.progressTrack}>
+                    <div
+                      className={`${styles.progressFill} ${
+                        isLimitReached
+                          ? styles.progressFillDanger
+                          : isLimitWarning
+                            ? styles.progressFillWarning
+                            : ""
+                      }`}
+                      style={{ width: `${runPercentage}%` }}
+                    />
+                  </div>
+                  <div className={styles.progressMeta}>
+                    {isLimitReached
+                      ? "Limit reached - upgrade for more runs"
+                      : `${runsRemaining} run${runsRemaining === 1 ? "" : "s"} remaining today`}
+                  </div>
+                </div>
+
+                <div className={styles.tasksList}>
+                  {dashboardLoading ? (
+                    <div className={styles.tasksLoading}>Loading your tasks...</div>
+                  ) : (
+                    sortedTasks.map((task) => {
+                      const label = TASK_LABELS[task.task_type];
+                      if (!label) {
+                        return null;
+                      }
+
+                      const isStarterOnly = STARTER_TASKS.has(task.task_type) && plan === "free";
+                      const isToggling = taskToggling[task.id] ?? false;
+
+                      return (
+                        <div
+                          key={task.id}
+                          className={`${styles.taskItem} ${
+                            task.is_enabled ? styles.taskItemOn : styles.taskItemMuted
+                          } ${isStarterOnly ? styles.taskItemLocked : ""}`}
+                        >
+                          <div className={styles.taskTop}>
+                            <div className={styles.taskLeft}>
+                              <span className={styles.taskEmoji}>{label.icon}</span>
+                              <div>
+                                <div className={styles.taskName}>
+                                  {label.name}
+                                  {isStarterOnly ? (
+                                    <span className={styles.taskLockedBadge}>
+                                      {ICONS.lock} Starter
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <div className={styles.taskDescription}>{label.description}</div>
+                              </div>
+                            </div>
+
+                            {isStarterOnly ? (
+                              <button
+                                type="button"
+                                className={styles.taskUpgradeButton}
+                                onClick={() =>
+                                  void upgrade({
+                                    plan: "starter",
+                                    period: "monthly",
+                                    currency: "inr",
+                                  })
+                                }
+                              >
+                                Upgrade
+                              </button>
+                            ) : (
+                              <label
+                                className={`${styles.toggle} ${
+                                  isToggling ? styles.toggleLoading : ""
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  className={styles.toggleInput}
+                                  checked={task.is_enabled}
+                                  disabled={
+                                    isToggling ||
+                                    (!task.is_enabled &&
+                                      (isLimitReached || activeCount >= activeTaskLimit))
+                                  }
+                                  onChange={(event) =>
+                                    void handleTaskToggle(task.id, event.target.checked)
+                                  }
+                                />
+                                <span className={styles.toggleTrack} />
+                                <span className={styles.toggleThumb} />
+                              </label>
+                            )}
+                          </div>
+
+                          <div className={styles.taskMeta}>
+                            {label.tags.map((tag) => (
+                              <span key={`${task.id}-${tag}`} className={styles.taskTag}>
+                                {tag}
+                              </span>
+                            ))}
+                            {task.total_runs > 0 ? (
+                              <span className={styles.taskRuns}>{`\u21BA ${task.total_runs} runs`}</span>
+                            ) : null}
+                            {task.last_run_at ? (
+                              <span className={styles.taskLast}>
+                                {`Last: ${formatRelativeTime(task.last_run_at)}`}
+                              </span>
+                            ) : null}
                           </div>
                         </div>
-
-                        <label className={styles.toggle}>
-                          <input
-                            type="checkbox"
-                            className={styles.toggleInput}
-                            checked={task.enabled}
-                            onChange={(event) => handleTaskToggle(task.id, event.target.checked)}
-                          />
-                          <span className={styles.toggleTrack} />
-                          <span className={styles.toggleThumb} />
-                        </label>
-                      </div>
-
-                      <div className={styles.taskMeta}>
-                        {task.tags.map((tag) => (
-                          <span key={`${task.id}-${tag}`} className={styles.taskTag}>
-                            {tag}
-                          </span>
-                        ))}
-                        {task.runs ? <span className={styles.taskRuns}>{task.runs}</span> : null}
-                        {task.timing ? <span className={styles.taskLast}>{task.timing}</span> : null}
-                      </div>
-                    </div>
-                  ))}
+                      );
+                    })
+                  )}
                 </div>
               </div>
             </div>
@@ -1010,20 +1249,18 @@ export function DashboardShell({ config }: DashboardShellProps) {
                       </div>
                     </div>
                     <div className={styles.statusRow}>
-                      <span className={styles.statusLabel}>Uptime</span>
-                      <span className={styles.statusValue}>3d 4h 12m</span>
+                      <span className={styles.statusLabel}>Plan</span>
+                      <span className={styles.statusValue}>{planLabel}</span>
                     </div>
                     <div className={styles.statusRow}>
-                      <span className={styles.statusLabel}>Region</span>
-                      <span className={styles.statusValue}>Mumbai (ap-south-1)</span>
+                      <span className={styles.statusLabel}>Runs today</span>
+                      <span className={styles.statusValue}>{`${todayRuns} / ${dailyLimit}`}</span>
                     </div>
                     <div className={styles.statusRow}>
                       <span className={styles.statusLabel}>Active tasks</span>
-                      <span className={styles.statusValueAccent}>{activeCount} running</span>
-                    </div>
-                    <div className={styles.statusRow}>
-                      <span className={styles.statusLabel}>Next scheduled run</span>
-                      <span className={styles.statusValue}>9:30 AM today</span>
+                      <span className={styles.statusValueAccent}>
+                        {`${activeCount} / ${activeTaskLimit}`}
+                      </span>
                     </div>
                   </div>
 
@@ -1031,13 +1268,27 @@ export function DashboardShell({ config }: DashboardShellProps) {
                     <div className={styles.usageHeader}>
                       <span className={styles.statusLabel}>Daily task runs</span>
                       <span className={styles.statusValue}>
-                        7 / 10 <span className={styles.inlineMuted}>(free limit)</span>
+                        {todayRuns} / {dailyLimit}
+                        <span className={styles.inlineMuted}>{` (${plan.toLowerCase()} limit)`}</span>
                       </span>
                     </div>
                     <div className={styles.progressTrack}>
-                      <div className={styles.progressFill} />
+                      <div
+                        className={`${styles.progressFill} ${
+                          isLimitReached
+                            ? styles.progressFillDanger
+                            : isLimitWarning
+                              ? styles.progressFillWarning
+                              : ""
+                        }`}
+                        style={{ width: `${runPercentage}%` }}
+                      />
                     </div>
-                    <div className={styles.progressMeta}>3 runs remaining today</div>
+                    <div className={styles.progressMeta}>
+                      {isLimitReached
+                        ? "Limit reached - upgrade to continue"
+                        : `${runsRemaining} run${runsRemaining === 1 ? "" : "s"} remaining today`}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1093,14 +1344,14 @@ export function DashboardShell({ config }: DashboardShellProps) {
                   <button
                     type="button"
                     className={styles.cardAction}
-                    onClick={() => showToast("Opening full activity log...")}
+                    onClick={() => router.push("/activity")}
                   >
                     View all
                   </button>
                 </div>
 
                 <div className={styles.activityList}>
-                  {activityItems.map((item) => (
+                  {displayActivity.map((item) => (
                     <div key={item.id} className={styles.activityItem}>
                       <div
                         className={`${styles.activityDot} ${
@@ -1156,22 +1407,35 @@ export function DashboardShell({ config }: DashboardShellProps) {
             </div>
           </div>
 
-          <div className={styles.upgradeBanner}>
-            <div className={styles.upgradeInfo}>
-              <h3 className={styles.upgradeTitle}>You&apos;re on the Free plan - 3 runs left today</h3>
-              <p className={styles.upgradeText}>
-                Upgrade to Starter for unlimited runs, Telegram, draft sending, and more - just
-                {" \u20B9"}799/month
-              </p>
+          {plan === "free" ? (
+            <div className={styles.upgradeBanner}>
+              <div className={styles.upgradeInfo}>
+                <h3 className={styles.upgradeTitle}>
+                  {`You're on the Free plan - ${
+                    runsRemaining > 0 ? `${runsRemaining} runs left today` : "limit reached"
+                  }`}
+                </h3>
+                <p className={styles.upgradeText}>
+                  Upgrade to Starter for unlimited runs, Telegram, draft sending, and more -
+                  just {" \u20B9"}799/month
+                </p>
+              </div>
+              <button
+                type="button"
+                className={styles.upgradeButton}
+                disabled={upgradeLoading}
+                onClick={() =>
+                  void upgrade({
+                    plan: "starter",
+                    period: "monthly",
+                    currency: "inr",
+                  })
+                }
+              >
+                {upgradeLoading ? "Opening..." : "Upgrade to Starter ->"}
+              </button>
             </div>
-            <button
-              type="button"
-              className={styles.upgradeButton}
-              onClick={() => showToast("Opening upgrade flow...")}
-            >
-              Upgrade to Starter -&gt;
-            </button>
-          </div>
+          ) : null}
         </div>
       </div>
 
