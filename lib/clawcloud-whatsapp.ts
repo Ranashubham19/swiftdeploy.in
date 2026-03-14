@@ -93,21 +93,32 @@ export async function sendClawCloudWhatsAppToPhone(phone: string, message: strin
 }
 
 export async function sendClawCloudWhatsAppMessage(userId: string, message: string) {
-  const account = await getClawCloudWhatsAppAccount(userId);
-  if (!account?.phone_number) {
-    return false;
+  const primaryResponse = await agentServerFetch(`/wa/send-user/${encodeURIComponent(userId)}`, {
+    method: "POST",
+    body: JSON.stringify({ message }),
+  });
+  let shouldLogLocally = false;
+
+  if (!primaryResponse.ok) {
+    const account = await getClawCloudWhatsAppAccount(userId);
+    if (!account?.phone_number) {
+      return false;
+    }
+
+    await sendClawCloudWhatsAppToPhone(account.phone_number, message);
+    shouldLogLocally = true;
   }
 
-  await sendClawCloudWhatsAppToPhone(account.phone_number, message);
-
-  const supabaseAdmin = getClawCloudSupabaseAdmin();
-  await supabaseAdmin.from("whatsapp_messages").insert({
-    user_id: userId,
-    direction: "outbound",
-    content: message,
-    message_type: "text",
-    sent_at: new Date().toISOString(),
-  });
+  if (shouldLogLocally) {
+    const supabaseAdmin = getClawCloudSupabaseAdmin();
+    await supabaseAdmin.from("whatsapp_messages").insert({
+      user_id: userId,
+      direction: "outbound",
+      content: message,
+      message_type: "text",
+      sent_at: new Date().toISOString(),
+    });
+  }
 
   return true;
 }

@@ -251,6 +251,56 @@ async function shouldSendWelcome(userId: string, phone: string | null) {
   return !Boolean(data.is_active);
 }
 
+function normalizePhone(value: string | null | undefined) {
+  const digits = String(value ?? "").replace(/\D/g, "");
+  return digits || null;
+}
+
+function phoneFromJid(jid: string | null | undefined) {
+  const digits = String(jid ?? "").split("@")[0]?.replace(/\D/g, "") ?? "";
+  return digits || null;
+}
+
+function jidFromPhone(phone: string | null | undefined) {
+  const digits = normalizePhone(phone);
+  return digits ? `${digits}@s.whatsapp.net` : null;
+}
+
+async function loadPreferredChatJid(userId: string) {
+  const { data } = await db()
+    .from("connected_accounts")
+    .select("account_email")
+    .eq("user_id", userId)
+    .eq("provider", "whatsapp")
+    .maybeSingle()
+    .catch(() => ({ data: null }));
+
+  return jidFromPhone(data?.account_email);
+}
+
+async function persistPreferredChatTarget(
+  userId: string,
+  sessionPhone: string | null,
+  remoteJid: string | null,
+) {
+  const remotePhone = phoneFromJid(remoteJid);
+  const linkedPhone = normalizePhone(sessionPhone);
+
+  if (!remotePhone || !linkedPhone || remotePhone === linkedPhone) {
+    return;
+  }
+
+  await db()
+    .from("connected_accounts")
+    .update({
+      account_email: remotePhone,
+      last_used_at: new Date().toISOString(),
+    })
+    .eq("user_id", userId)
+    .eq("provider", "whatsapp")
+    .catch(() => null);
+}
+
 // ─── Welcome message ──────────────────────────────────────────────────────────
 
 async function sendWelcome(sock: WASocket, phone: string) {
@@ -372,6 +422,7 @@ async function handleInbound(
   if (session && remoteJid) {
     session.lastChatJid = remoteJid;
     sessions.set(userId, session);
+    void persistPreferredChatTarget(userId, session.phone, remoteJid);
   }
   const jid = remoteJid || session?.lastChatJid || (session?.phone ? `${session.phone}@s.whatsapp.net` : null);
 
@@ -466,6 +517,7 @@ async function getActiveUserIds(): Promise<string[]> {
 
 async function connectSession(userId: string): Promise<SessionRecord> {
   assertConfigured();
+  const preferredChatJid = await loadPreferredChatJid(userId);
 
   const existing = sessions.get(userId);
   if (existing && (existing.status === "waiting" || existing.status === "connected")) return existing;
@@ -493,7 +545,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
     status: "connecting",
     qr: null,
     phone: null,
-    lastChatJid: null,
+    lastChatJid: preferredChatJid,
     startedAt: Date.now(),
   };
   sessions.set(userId, record);
@@ -639,6 +691,26 @@ app.post("/wa/send", auth, async (req, res) => {
   const jid = `${phone.replace(/\D/g, "")}@s.whatsapp.net`;
   await sendStreamingMessage(session.sock, jid, message);
   res.json({ success: true });
+});
+
+app.post("/wa/send-user/:userId", auth, async (req, res) => {
+  const userId = readParam(req.params.userId);
+  const message = String(req.body.message ?? "").trim();
+  if (!userId || !message) {
+    res.status(400).json({ error: "userId and message required" });
+    return;
+  }
+
+  const ok = await sendReply(userId, message);
+  if (!ok) {
+    res.status(503).json({ error: "No active session for this user" });
+    return;
+  }
+
+  res.json({
+    success: true,
+    target: sessions.get(userId)?.lastChatJid || sessions.get(userId)?.phone || null,
+  });
 });
 
 app.get("/health", (_req, res) => {

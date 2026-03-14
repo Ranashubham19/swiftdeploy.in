@@ -160,6 +160,15 @@ function GoogleIcon() {
   );
 }
 
+function buildWhatsAppChatLink(phone: string | null) {
+  const digits = String(phone ?? "").replace(/\D/g, "");
+  if (!digits) {
+    return null;
+  }
+
+  return `https://wa.me/${digits}?text=${encodeURIComponent("Hi ClawCloud AI")}`;
+}
+
 export function SetupPage({ config }: SetupPageProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -201,6 +210,7 @@ export function SetupPage({ config }: SetupPageProps) {
   const isConfigured = Boolean(supabase);
   const gmailConnected = gmailStatus === "done";
   const calendarConnected = calendarStatus === "done";
+  const waChatLink = buildWhatsAppChatLink(waPhone);
 
   function showToast(message: string) {
     setToastMessage(message);
@@ -899,20 +909,33 @@ export function SetupPage({ config }: SetupPageProps) {
           <div className={styles.panel}>
             <div className={styles.stepHead}>
               <div className={styles.stepNumTag}>Step 2 of 3</div>
-              <h2>Link your WhatsApp 💬</h2>
+              <h2>Connect your WhatsApp or AI number 💬</h2>
               <p>
-                This is how your AI agent talks to you. Scan the QR code with your phone — it takes
-                about 30 seconds.
+                Scan the QR with the WhatsApp account you want ClawCloud to run on. Use your own
+                number for the fastest setup, or use a second number if you want ClawCloud to appear
+                as a separate chat contact.
               </p>
             </div>
 
             <div className={styles.stepBody}>
+              <div className={styles.modeNote}>
+                <div className={styles.modeNoteTitle}>
+                  Want a separate ClawCloud AI chat like a normal person?
+                </div>
+                <div className={styles.modeNoteText}>
+                  Scan this QR with a second WhatsApp number dedicated to ClawCloud. After it
+                  connects, open a chat to that number from your personal WhatsApp and send{" "}
+                  <b>hi</b> once. From then on, ClawCloud can reply in that separate thread and use
+                  it for future briefings.
+                </div>
+              </div>
+
               {waConnected ? (
                 <div className={styles.phoneConnected}>
                   <div className={styles.connectedIcon}>✅</div>
                   <div className={styles.connectedTitle}>WhatsApp connected!</div>
                   <div className={styles.connectedSub}>
-                    Your agent is now linked to your phone number{" "}
+                    Your agent is now running on WhatsApp number{" "}
                     <b>{waPhone || "on WhatsApp"}</b>
                   </div>
                   <div className={styles.connectedMessageCard}>
@@ -924,6 +947,20 @@ export function SetupPage({ config }: SetupPageProps) {
                       helping you once you finish setup. See you on the other side! 🎉
                     </div>
                   </div>
+                  <div className={styles.connectedTip}>
+                    If you used a dedicated AI number, message <b>{waPhone || "that number"}</b>{" "}
+                    from your personal WhatsApp once. ClawCloud will keep that as your live chat.
+                  </div>
+                  {waChatLink ? (
+                    <a
+                      href={waChatLink}
+                      target="_blank"
+                      rel="noreferrer"
+                      className={styles.openChatButton}
+                    >
+                      Open agent chat in WhatsApp <span>→</span>
+                    </a>
+                  ) : null}
                 </div>
               ) : (
                 <div className={styles.qrContainer}>
