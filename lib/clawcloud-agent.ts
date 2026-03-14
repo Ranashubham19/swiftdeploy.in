@@ -4,7 +4,12 @@ import {
   getClawCloudGmailMessages,
 } from "@/lib/clawcloud-google";
 import { upsertAnalyticsDaily } from "@/lib/clawcloud-analytics";
-import { completeClawCloudPrompt } from "@/lib/clawcloud-ai";
+import {
+  completeClawCloudFast,
+  completeClawCloudPrompt,
+  hasClawCloudChatProvider,
+  type IntentType,
+} from "@/lib/clawcloud-ai";
 import { handleReplyApprovalCommand, sendReplyApprovalRequests } from "@/lib/clawcloud-reply-approval";
 import { answerSpendingQuestion, runWeeklySpendSummary } from "@/lib/clawcloud-spending";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
@@ -52,17 +57,90 @@ type ConversationHistoryMessage = {
 
 type SupabaseAdminClient = ReturnType<typeof getClawCloudSupabaseAdmin>;
 
+type AgentIntentKind =
+  | "help"
+  | "spending"
+  | "draft_email"
+  | "email_search"
+  | "reminder"
+  | "calendar"
+  | "greeting"
+  | "coding"
+  | "math"
+  | "creative"
+  | "research"
+  | "general";
+
+type DetectedAgentIntent = {
+  kind: AgentIntentKind;
+  aiIntent: IntentType;
+};
+
 const conversationalFallbackMessage =
-  "Hi! I'm your ClawCloud AI assistant. I can answer questions, help with coding and writing, search your inbox, set reminders, summarize meetings, and answer spending questions.";
+  "I can help with questions, coding, writing, Gmail search, reminders, calendar summaries, and spending analysis.";
 const repeatedReplyRecoveryMessage =
   "Tell me the exact task or question and I'll handle it. For reminders, include the time, for example: 'Remind me at 5pm to call Priya.'";
+const capabilityHelpMessage =
+  "I can answer questions, write and debug code, draft replies, search Gmail, summarize your calendar, set reminders, and explain spending patterns from receipts and invoices.";
 const conversationalSystemPrompt =
-  "You are ClawCloud AI, a capable WhatsApp assistant. You can help with general questions, explanations, coding help, writing, emails, reminders, meeting summaries, and spending questions. Reply in concise, WhatsApp-friendly prose. Be warm, direct, practical, and avoid repeating generic fallback wording.";
-const greetingPattern = /^(?:hi+|hello|hey|good\s+(?:morning|afternoon|evening))\b/i;
+  [
+    "You are ClawCloud AI, a world-class personal assistant for chat.",
+    "Give the answer first, then add only the most useful context.",
+    "Be accurate, practical, and direct.",
+    "Format for chat: short paragraphs, clear bullets when helpful, no rambling, no filler.",
+    "For WhatsApp or Telegram style replies, keep sections easy to scan and naturally human.",
+    "Never say you completed an external action unless the system already triggered it.",
+    "Never fall back to generic boilerplate when the user asked a specific question.",
+    "If uncertainty exists, say what is certain and what is uncertain.",
+  ].join(" ");
+const specialistSystemPrompts: Partial<Record<IntentType, string>> = {
+  greeting:
+    "For greetings, reply warmly, sound energetic but professional, and mention 4 or 5 concrete things you can help with in one short message.",
+  general:
+    "For general questions, lead with the direct answer, then add only the most useful context, examples, or nuance.",
+  coding:
+    "For coding help, prefer complete working examples, strong debugging guidance, exact fixes, and explicit next steps. Avoid pseudocode unless the user asks for high-level design only.",
+  math:
+    "For math, show the reasoning step by step, keep notation readable in plain text, and end with a clear final answer.",
+  email:
+    "For email help, be polished, concise, and ready to send. When summarizing email results, stay factual and specific about sender, subject, and next action.",
+  reminder:
+    "For reminders, be explicit about the task and the time so the user can confirm it quickly. If reminder details are incomplete, say exactly what is missing.",
+  calendar:
+    "For calendar help, surface schedule status first, then times, titles, links, and locations. Highlight conflicts, gaps, and urgent upcoming meetings when relevant.",
+  spending:
+    "For spending questions, answer only from the available evidence, summarize the numbers clearly, and call out uncertainty or missing data.",
+  research:
+    "For research or analysis, structure the answer with a clear conclusion, key points, and practical takeaway. Be comprehensive without becoming verbose.",
+  creative:
+    "For creative writing, match the requested tone closely, be vivid and specific, and finish the piece cleanly without trailing off.",
+};
+const greetingPattern =
+  /^(?:hi+|hello+|hey+|good\s+(?:morning|afternoon|evening)|namaste|hola|howdy|yo|sup|what'?s up)\b/i;
 const helpIntentPattern =
-  /\b(help|what can you do|what else can you do|can you do more|capabilities|features)\b/i;
+  /^(?:help|\?)$|\b(what can you do|what else can you do|can you do more|capabilities|features|how can you help|what do you do)\b/i;
 const reminderIntentPattern =
-  /\b(remind me|set reminder|set up (?:a )?reminder|setup (?:a )?reminder|alert me|notify me)\b/i;
+  /\b(remind me|set reminder|set up (?:a )?reminder|setup (?:a )?reminder|alert me|notify me|don'?t let me forget)\b/i;
+const emailDraftIntentPattern =
+  /\b(draft|reply|respond|write|compose|create|send)\b[\s\S]{0,40}\b(email|mail|message|response|follow.?up)\b/i;
+const emailSearchIntentPattern =
+  /\b(search|find|check|show|get|look\s+up)\b[\s\S]{0,40}\b(email|emails|inbox|mail|messages?)\b/i;
+const emailSearchFollowPattern =
+  /\b(email from|what did .+ (say|write|send|email)|did .+ (reply|respond|email|send))\b/i;
+const calendarIntentPattern =
+  /\b(calendar|schedule|agenda|meeting|meetings|appointment|appointments|event|events)\b/i;
+const calendarQuestionPattern =
+  /\bwhat('s|\s+is)\s+(on\s+)?(my\s+)?(calendar|schedule|agenda|plate)\b/i;
+const spendingIntentPattern =
+  /\b(spend|spent|spending|budget|expense|expenses|transaction|transactions|receipt|receipts|invoice|invoices|merchant|payment|payments|cost me|how much)\b/i;
+const codingIntentPattern =
+  /\b(code|coding|debug|bug|exception|error|stack trace|traceback|syntax error|typescript|javascript|python|java|react|next\.js|node|sql|api|function|component|endpoint|schema|query|algorithm)\b/i;
+const mathIntentPattern =
+  /\b(calculate|solve|equation|formula|derivative|integral|probability|statistics|percentage|percent|mean|median)\b/i;
+const creativeIntentPattern =
+  /\b(story|poem|poetry|script|caption|tagline|slogan|joke|lyrics|creative|fiction)\b/i;
+const researchIntentPattern =
+  /\b(explain|analyze|compare|summarize|summary|difference|pros and cons|overview|tell me about|research|describe|history of|meaning of|advantages|disadvantages)\b/i;
 
 function ensureAgentReply(message: string | null | undefined) {
   const trimmed = message?.trim();
@@ -82,7 +160,7 @@ function stripReminderLeadIn(message: string) {
     .trim();
 }
 
-function clipConversationMessage(message: string, maxLength = 320) {
+function clipConversationMessage(message: string, maxLength = 500) {
   const trimmed = message.trim();
   if (trimmed.length <= maxLength) {
     return trimmed;
@@ -93,7 +171,7 @@ function clipConversationMessage(message: string, maxLength = 320) {
 
 async function getRecentWhatsAppConversation(
   userId: string,
-  limit = 6,
+  limit = 10,
 ): Promise<ConversationHistoryMessage[]> {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const { data, error } = await supabaseAdmin
@@ -161,12 +239,138 @@ function resolveRepeatedAgentReply(
   return `${safeReply}\n\nTell me the next specific thing you want me to do.`;
 }
 
+function buildConversationalSystemPrompt(
+  intent: IntentType,
+  extraSystemPrompt?: string,
+) {
+  return [
+    conversationalSystemPrompt,
+    specialistSystemPrompts[intent] ?? specialistSystemPrompts.general,
+    extraSystemPrompt,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function detectAgentIntent(message: string): DetectedAgentIntent {
+  const trimmed = message.trim();
+  const normalized = trimmed.toLowerCase();
+
+  if (helpIntentPattern.test(trimmed)) {
+    return { kind: "help", aiIntent: "general" };
+  }
+
+  if (emailDraftIntentPattern.test(trimmed)) {
+    return { kind: "draft_email", aiIntent: "email" };
+  }
+
+  if (
+    emailSearchIntentPattern.test(trimmed) ||
+    emailSearchFollowPattern.test(trimmed)
+  ) {
+    return { kind: "email_search", aiIntent: "email" };
+  }
+
+  if (reminderIntentPattern.test(trimmed)) {
+    return { kind: "reminder", aiIntent: "reminder" };
+  }
+
+  if (spendingIntentPattern.test(trimmed)) {
+    return { kind: "spending", aiIntent: "spending" };
+  }
+
+  if (
+    calendarIntentPattern.test(trimmed) ||
+    calendarQuestionPattern.test(trimmed)
+  ) {
+    return { kind: "calendar", aiIntent: "calendar" };
+  }
+
+  if (greetingPattern.test(trimmed) && trimmed.split(/\s+/).length <= 6) {
+    return { kind: "greeting", aiIntent: "greeting" };
+  }
+
+  if (
+    codingIntentPattern.test(trimmed) ||
+    /\b(write|build|create|implement|fix|refactor|optimize)\b[\s\S]{0,24}\b(function|script|component|endpoint|query|api|app|bot|tool)\b/i.test(
+      trimmed,
+    )
+  ) {
+    return { kind: "coding", aiIntent: "coding" };
+  }
+
+  if (
+    mathIntentPattern.test(trimmed) ||
+    /\d+\s*[\+\-\*\/\^%]\s*\d+/.test(trimmed) ||
+    /\bwhat is\s+\d+/i.test(trimmed)
+  ) {
+    return { kind: "math", aiIntent: "math" };
+  }
+
+  if (creativeIntentPattern.test(trimmed)) {
+    return { kind: "creative", aiIntent: "creative" };
+  }
+
+  if (researchIntentPattern.test(trimmed) || normalized.length > 120) {
+    return { kind: "research", aiIntent: "research" };
+  }
+
+  return { kind: "general", aiIntent: "general" };
+}
+
+async function createFastAcknowledgement(
+  locale: SupportedLocale,
+  instruction: string,
+) {
+  const reply = await completeClawCloudFast({
+    system: [
+      conversationalSystemPrompt,
+      "Write a short acknowledgement in one or two sentences.",
+      "Be specific about the action that is already being triggered.",
+      "Sound polished and confident.",
+      "Do not mention internal systems or hidden implementation details.",
+    ].join(" "),
+    user: instruction,
+    maxTokens: 100,
+    fallback: "On it. Give me a moment.",
+  });
+
+  return translateMessage(ensureAgentReply(reply), locale);
+}
+
+async function createMissingAiProviderResponse(
+  locale: SupportedLocale,
+  intent: DetectedAgentIntent,
+) {
+  const intentHint =
+    intent.kind === "coding"
+      ? "After that, send the exact code, error, or task you want help with."
+      : intent.kind === "math"
+        ? "After that, send the exact problem and I will work it through in the strong formatted style."
+        : intent.kind === "creative"
+          ? "After that, send the exact tone, format, and prompt you want."
+          : "After that, send your message again and the agent will answer in the upgraded professional format.";
+
+  return translateMessage(
+    [
+      "Chat AI is not configured in the runtime that is currently answering this message.",
+      "",
+      "Add NVIDIA_API_KEY or OPENAI_API_KEY, then restart the Next.js app and the WhatsApp agent.",
+      "If you are testing through the deployed WhatsApp connection, redeploy or restart the live app and Railway agent too.",
+      "",
+      intentHint,
+    ].join("\n"),
+    locale,
+  );
+}
+
 async function generateConversationalReply(
   userId: string,
   userMessage: string,
   options?: {
     locale?: SupportedLocale;
     maxTokens?: number;
+    intent?: IntentType;
     extraSystemPrompt?: string;
     fallback?: string;
   },
@@ -176,16 +380,20 @@ async function generateConversationalReply(
     await getRecentWhatsAppConversation(userId),
     userMessage,
   );
-  const systemPrompt = [conversationalSystemPrompt, options?.extraSystemPrompt]
-    .filter(Boolean)
-    .join(" ");
+  const intent = options?.intent ?? "general";
+  const systemPrompt = buildConversationalSystemPrompt(
+    intent,
+    options?.extraSystemPrompt,
+  );
 
   const reply = await completeClawCloudPrompt({
     system: systemPrompt,
     history,
     user: userMessage,
     maxTokens: options?.maxTokens ?? 350,
+    intent,
     fallback: options?.fallback ?? conversationalFallbackMessage,
+    skipCache: history.length > 0,
   });
 
   const finalReply = resolveRepeatedAgentReply(reply, history);
@@ -509,7 +717,9 @@ async function runMorningBriefing(
     system: buildMultilingualBriefingSystem(locale),
     user: `Create a concise morning briefing.\n\nUnread emails: ${emails.length}\n${emailContext}\n\nToday's events:\n${eventContext || "No events today"}\n\nKeep it under 300 words and mention which emails need replies.`,
     maxTokens: 500,
+    intent: "research",
     fallback: `Good morning. You have ${emails.length} unread emails and ${events.length} event${events.length === 1 ? "" : "s"} today.`,
+    skipCache: true,
   });
 
   await sendClawCloudWhatsAppMessage(userId, message);
@@ -562,7 +772,9 @@ async function runDraftReplies(
         "You write polished, concise email drafts. Return only the reply body without a subject line.",
       user: `Write a professional reply to this email.\n\nFrom: ${email.from}\nSubject: ${email.subject}\nBody:\n${email.body || email.snippet}\n\nTone: ${String(config.tone ?? "professional")}`,
       maxTokens: 400,
+      intent: "email",
       fallback: `Hi,\n\nThanks for your email. I have reviewed this and will get back to you shortly.\n\nBest regards,`,
+      skipCache: true,
     });
 
     const draftId = await createClawCloudGmailDraft(userId, {
@@ -627,51 +839,184 @@ async function runMeetingReminders(
   return { reminded: events.length };
 }
 
+function resolveCalendarAgendaWindow(userMessage: string | null | undefined) {
+  const now = new Date();
+  const normalized = (userMessage ?? "").toLowerCase();
+
+  if (/\btomorrow\b/.test(normalized)) {
+    const start = new Date(now);
+    start.setDate(start.getDate() + 1);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setHours(23, 59, 59, 999);
+    return { label: "tomorrow", start, end };
+  }
+
+  if (/\b(this week|next week|next 7 days)\b/.test(normalized)) {
+    const start = new Date(now);
+    const end = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    return { label: "the next 7 days", start, end };
+  }
+
+  const start = new Date(now);
+  const end = new Date(now);
+  end.setHours(23, 59, 59, 999);
+
+  if (end.getTime() <= start.getTime()) {
+    end.setTime(start.getTime() + 24 * 60 * 60 * 1000);
+  }
+
+  return { label: "today", start, end };
+}
+
+async function runCalendarAgenda(
+  userId: string,
+  userMessage: string | null | undefined,
+) {
+  const locale = await getUserLocale(userId);
+  const { label, start, end } = resolveCalendarAgendaWindow(userMessage);
+  const events = await getClawCloudCalendarEvents(userId, {
+    timeMin: start.toISOString(),
+    timeMax: end.toISOString(),
+  });
+
+  if (events.length === 0) {
+    const message = await translateMessage(
+      `Your calendar is clear for ${label}.`,
+      locale,
+    );
+    await sendClawCloudWhatsAppMessage(userId, message);
+    await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+    return { eventCount: 0, message };
+  }
+
+  const fallback = [
+    `Calendar for ${label}`,
+    "",
+    ...events.map((event) => {
+      const startText = new Date(event.start).toLocaleString("en-IN", {
+        weekday: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      const locationOrLink = event.hangoutLink || event.location;
+      return locationOrLink
+        ? `- ${startText}: ${event.summary} (${locationOrLink})`
+        : `- ${startText}: ${event.summary}`;
+    }),
+  ].join("\n");
+
+  const message = await completeClawCloudPrompt({
+    system: [
+      buildMultilingualBriefingSystem(locale),
+      "Summarize the calendar agenda for chat.",
+      "Lead with schedule status, then list times, titles, and any meeting links or locations.",
+      "Keep it concise and actionable.",
+    ].join(" "),
+    user: [
+      `Create a concise calendar agenda for ${label}.`,
+      "",
+      ...events.map((event) =>
+        [
+          `Title: ${event.summary}`,
+          `Starts: ${event.start}`,
+          `Ends: ${event.end}`,
+          `Location: ${event.location || "None"}`,
+          `Link: ${event.hangoutLink || "None"}`,
+          `Description: ${event.description || "None"}`,
+        ].join("\n"),
+      ),
+    ].join("\n\n"),
+    intent: "calendar",
+    maxTokens: 450,
+    fallback,
+    skipCache: true,
+  });
+
+  await sendClawCloudWhatsAppMessage(userId, message);
+  await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+
+  return { eventCount: events.length, message };
+}
+
 async function runEmailSearch(
   userId: string,
   userMessage: string | null | undefined,
 ) {
+  const locale = await getUserLocale(userId);
+
   if (!userMessage?.trim()) {
-    const message = "Tell me what you want me to search for in Gmail.";
+    const message = await translateMessage(
+      "Tell me what you want me to search for in Gmail.",
+      locale,
+    );
     await sendClawCloudWhatsAppMessage(userId, message);
     await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
     return { found: 0, answer: message };
   }
 
   const gmailQuery = await completeClawCloudPrompt({
-    user: `Convert this natural language request into a concise Gmail search query string: "${userMessage}"`,
-    maxTokens: 50,
+    system:
+      "Convert the request into a concise Gmail search query. Return only the query string with no explanation.",
+    user: userMessage,
+    maxTokens: 60,
+    intent: "email",
     fallback: userMessage,
+    skipCache: true,
   });
 
   const emails = await getClawCloudGmailMessages(userId, {
     query: gmailQuery,
-    maxResults: 5,
+    maxResults: 6,
   });
 
   if (emails.length === 0) {
-    const message = `No emails found for: ${userMessage}`;
+    const message = await translateMessage(
+      `No emails found for: ${userMessage}`,
+      locale,
+    );
     await sendClawCloudWhatsAppMessage(userId, message);
     await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
     return { found: 0, answer: message };
   }
 
   const answer = await completeClawCloudPrompt({
-    user: `Answer this question based on the email snippets.\nQuestion: ${userMessage}\n\n${emails.map((email) => `${email.from}: ${email.snippet}`).join("\n\n")}`,
-    maxTokens: 250,
+    system: [
+      buildMultilingualBriefingSystem(locale),
+      "Answer strictly from the provided email snippets.",
+      "Mention uncertainty when the snippets are incomplete.",
+      "Keep the response concise and scannable.",
+    ].join(" "),
+    user: `Question: ${userMessage}\n\nEmail snippets:\n${emails
+      .map(
+        (email) =>
+          `From: ${email.from}\nSubject: ${email.subject}\nSnippet: ${email.snippet}`,
+      )
+      .join("\n\n")}`,
+    maxTokens: 320,
+    intent: "email",
     fallback: emails[0]?.snippet || "Relevant emails found.",
+    skipCache: true,
   });
+
+  const summaryMessage = [
+    `Search results for: ${userMessage}`,
+    "",
+    answer,
+    "",
+    `Found ${emails.length} relevant email(s).`,
+  ].join("\n");
 
   await sendClawCloudWhatsAppMessage(
     userId,
-    `Search: ${userMessage}\n\n${answer}\n\nFound ${emails.length} relevant email(s).`,
+    summaryMessage,
   );
   await upsertAnalyticsDaily(userId, {
     tasks_run: 1,
     wa_messages_sent: 1,
   });
 
-  return { found: emails.length, answer };
+  return { found: emails.length, answer: summaryMessage };
 }
 
 async function runEveningSummary(
@@ -699,7 +1044,9 @@ async function runEveningSummary(
   const summary = await completeClawCloudPrompt({
     user: `Create a concise evening summary.\nEmails today: ${emails.length}\nMeetings today: ${events.length}\nAI tasks run: ${taskRuns.data?.length ?? 0}\n\nEmails needing attention:\n${emails.filter((email) => !email.isRead).slice(0, 5).map((email) => `- ${email.from}: ${email.subject}`).join("\n") || "None"}`,
     maxTokens: 250,
+    intent: "research",
     fallback: `Today you received ${emails.length} emails, attended ${events.length} meetings, and ran ${taskRuns.data?.length ?? 0} AI task(s).`,
+    skipCache: true,
   });
 
   await sendClawCloudWhatsAppMessage(userId, summary);
@@ -716,6 +1063,7 @@ async function runCustomReminder(
   userId: string,
   userMessage: string | null | undefined,
 ) {
+  const locale = await getUserLocale(userId);
   const rawMessage = userMessage?.trim() ?? "";
   if (!rawMessage) {
     throw new Error("Custom reminder requires a message.");
@@ -723,8 +1071,17 @@ async function runCustomReminder(
 
   const parsed = parseReminderMessage(rawMessage);
   if (!parsed) {
-    const message =
-      "I can set that reminder, but I need the time and task. Try: Remind me at 5pm to call Priya.";
+    const message = await translateMessage(
+      [
+        "I can set that reminder, but I need both the time and the task.",
+        "",
+        "Try messages like:",
+        "• Remind me at 5pm to call Priya",
+        "• Remind me in 30 minutes to send the invoice",
+        "• Remind me tomorrow to review the report",
+      ].join("\n"),
+      locale,
+    );
     await sendClawCloudWhatsAppMessage(userId, message);
     await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
     return { set: false, message };
@@ -747,7 +1104,15 @@ async function runCustomReminder(
       { onConflict: "user_id,task_type" },
     );
 
-  const confirmation = `Reminder set for ${new Date(parsed.fireAt).toLocaleString("en-IN")}.\n\n${parsed.reminderText}`;
+  const confirmation = await translateMessage(
+    [
+      "Reminder set.",
+      "",
+      `Task: ${parsed.reminderText}`,
+      `When: ${new Date(parsed.fireAt).toLocaleString("en-IN")}`,
+    ].join("\n"),
+    locale,
+  );
   await sendClawCloudWhatsAppMessage(userId, confirmation);
   await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
 
@@ -763,71 +1128,125 @@ export async function routeInboundAgentMessage(
   message: string,
 ): Promise<string | null> {
   const trimmed = message.trim();
+  if (!trimmed) {
+    return null;
+  }
 
   const approvalResult = await handleReplyApprovalCommand(userId, trimmed);
   if (approvalResult.handled) {
     return approvalResult.response;
   }
 
-  if (/spend|spent|cost|paid|transaction|receipt|budget|how much/i.test(trimmed)) {
-    return answerSpendingQuestion(userId, trimmed);
-  }
-
-  if (/draft|reply|respond|write.*email/i.test(trimmed)) {
-    await sendReplyApprovalRequests(userId, /all|every|each/i.test(trimmed) ? 3 : 1);
-    return null;
-  }
-
-  if (/search|find|what did|did.*say|email from/i.test(trimmed)) {
-    await runClawCloudTask({
-      userId,
-      taskType: "email_search",
-      userMessage: trimmed,
-      bypassEnabledCheck: true,
-    });
-    return null;
-  }
-
-  if (reminderIntentPattern.test(trimmed)) {
-    await runClawCloudTask({
-      userId,
-      taskType: "custom_reminder",
-      userMessage: trimmed,
-      bypassEnabledCheck: true,
-    });
-    return null;
-  }
-
-  if (/meeting|calendar|schedule|event|today|tomorrow/i.test(trimmed)) {
-    await runClawCloudTask({
-      userId,
-      taskType: "meeting_reminders",
-      bypassEnabledCheck: true,
-    });
-    return null;
-  }
-
   const locale = await getUserLocale(userId);
-  if (helpIntentPattern.test(trimmed)) {
-    return translateMessage(
-      "I can answer questions, help with coding and writing, draft email replies, search your inbox, set reminders like 'remind me at 5pm to call Priya', share meeting summaries, and answer spending questions.",
-      locale,
-    );
+  const intent = detectAgentIntent(trimmed);
+
+  if (
+    !hasClawCloudChatProvider() &&
+    !["help", "spending", "draft_email", "email_search", "reminder", "calendar"].includes(
+      intent.kind,
+    )
+  ) {
+    return createMissingAiProviderResponse(locale, intent);
   }
 
-  if (greetingPattern.test(trimmed)) {
-    return generateConversationalReply(userId, trimmed, {
-      locale,
-      maxTokens: 180,
-      extraSystemPrompt:
-        "If the user greets you, greet them back and mention 3-5 concrete things you can help with.",
-    });
-  }
+  switch (intent.kind) {
+    case "help":
+      return translateMessage(capabilityHelpMessage, locale);
 
-  return generateConversationalReply(userId, trimmed, {
-    locale,
-    maxTokens: 500,
-  });
+    case "spending":
+      return answerSpendingQuestion(userId, trimmed);
+
+    case "draft_email": {
+      const response = await createFastAcknowledgement(
+        locale,
+        `The user asked for email help: "${trimmed}". Confirm that reply drafts are being prepared now.`,
+      );
+      void sendReplyApprovalRequests(
+        userId,
+        /all|every|each/i.test(trimmed) ? 3 : 1,
+      ).catch(() => undefined);
+      return response;
+    }
+
+    case "email_search": {
+      const response = await createFastAcknowledgement(
+        locale,
+        `The user asked to search Gmail for: "${trimmed}". Confirm that the inbox search is running now.`,
+      );
+      void runClawCloudTask({
+        userId,
+        taskType: "email_search",
+        userMessage: trimmed,
+        bypassEnabledCheck: true,
+      }).catch(() => undefined);
+      return response;
+    }
+
+    case "reminder": {
+      const response = await createFastAcknowledgement(
+        locale,
+        `The user asked for a reminder: "${trimmed}". Confirm that the reminder is being scheduled now.`,
+      );
+      void runClawCloudTask({
+        userId,
+        taskType: "custom_reminder",
+        userMessage: trimmed,
+        bypassEnabledCheck: true,
+      }).catch(() => undefined);
+      return response;
+    }
+
+    case "calendar": {
+      const response = await createFastAcknowledgement(
+        locale,
+        `The user asked for calendar details: "${trimmed}". Confirm that the schedule is being checked now.`,
+      );
+      void runCalendarAgenda(userId, trimmed).catch(() => undefined);
+      return response;
+    }
+
+    case "greeting":
+      return generateConversationalReply(userId, trimmed, {
+        locale,
+        intent: "greeting",
+        maxTokens: 180,
+      });
+
+    case "coding":
+      return generateConversationalReply(userId, trimmed, {
+        locale,
+        intent: "coding",
+        maxTokens: 950,
+      });
+
+    case "math":
+      return generateConversationalReply(userId, trimmed, {
+        locale,
+        intent: "math",
+        maxTokens: 500,
+      });
+
+    case "creative":
+      return generateConversationalReply(userId, trimmed, {
+        locale,
+        intent: "creative",
+        maxTokens: 700,
+      });
+
+    case "research":
+      return generateConversationalReply(userId, trimmed, {
+        locale,
+        intent: "research",
+        maxTokens: 750,
+      });
+
+    default:
+      return generateConversationalReply(userId, trimmed, {
+        locale,
+        intent: intent.aiIntent,
+        maxTokens: 450,
+      });
+  }
 }
 
 export async function runClawCloudTask(input: RunTaskInput) {

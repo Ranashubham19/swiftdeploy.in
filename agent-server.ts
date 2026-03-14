@@ -72,6 +72,8 @@ let supabase: ReturnType<typeof createClient<any>> | null = null;
 const sessions = new Map<string, SessionRecord>();
 const STALE_CONNECTING_MS = 15_000;
 const WA_VERSION_CACHE_MS = 6 * 60 * 60 * 1000;
+const STREAMING_MIN_LENGTH = 140;
+const STREAMING_TARGET_CHUNK_LENGTH = 220;
 
 let cachedWaVersion: [number, number, number] | null = null;
 let cachedWaVersionAt = 0;
@@ -261,14 +263,174 @@ async function restoreActiveWhatsAppSessions() {
   }
 }
 
-async function sendWelcomeMessage(sock: WASocket, phone: string) {
-  const sentMessage = await sock.sendMessage(`${phone}@s.whatsapp.net`, {
-    text: "Your ClawCloud AI agent is connected. Finish setup and I will start helping here.",
-  });
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
+function normalizeOutboundMessage(message: string) {
+  return message.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function splitSentenceChunks(section: string) {
+  if (section.length <= STREAMING_TARGET_CHUNK_LENGTH) {
+    return [section];
+  }
+
+  const sentences = section.split(/(?<=[.!?])\s+/);
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const sentence of sentences) {
+    if (!sentence.trim()) {
+      continue;
+    }
+
+    if (
+      current &&
+      `${current} ${sentence}`.trim().length > STREAMING_TARGET_CHUNK_LENGTH
+    ) {
+      chunks.push(current.trim());
+      current = sentence;
+      continue;
+    }
+
+    current = current ? `${current} ${sentence}` : sentence;
+  }
+
+  if (current.trim()) {
+    chunks.push(current.trim());
+  }
+
+  return chunks.length ? chunks : [section];
+}
+
+function splitBulletChunks(section: string) {
+  const lines = section.split("\n").map((line) => line.trimEnd());
+  const chunks: string[] = [];
+  let current: string[] = [];
+
+  for (const line of lines) {
+    const next = [...current, line].join("\n").trim();
+    if (current.length && next.length > STREAMING_TARGET_CHUNK_LENGTH) {
+      chunks.push(current.join("\n").trim());
+      current = [line];
+      continue;
+    }
+
+    current.push(line);
+  }
+
+  if (current.length) {
+    chunks.push(current.join("\n").trim());
+  }
+
+  return chunks.filter(Boolean);
+}
+
+function splitIntoStreamChunks(message: string) {
+  const normalized = normalizeOutboundMessage(message);
+  if (!normalized) {
+    return [];
+  }
+
+  const sections = normalized.split(/\n{2,}/);
+  const chunks: string[] = [];
+
+  for (const section of sections) {
+    const trimmed = section.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    if (trimmed.includes("```")) {
+      chunks.push(trimmed);
+      continue;
+    }
+
+    const lines = trimmed.split("\n");
+    const looksLikeList =
+      lines.length > 1 &&
+      lines.every((line) => /^([*-]|\d+\.)\s+/.test(line.trim()));
+
+    if (looksLikeList) {
+      chunks.push(...splitBulletChunks(trimmed));
+      continue;
+    }
+
+    chunks.push(...splitSentenceChunks(trimmed));
+  }
+
+  return chunks.filter(Boolean);
+}
+
+function estimateChunkDelayMs(chunk: string) {
+  const words = chunk.trim().split(/\s+/).filter(Boolean).length;
+  return Math.min(1100, Math.max(300, 220 + words * 45));
+}
+
+async function sendSocketTextMessage(sock: WASocket, jid: string, text: string) {
+  const sentMessage = await sock.sendMessage(jid, { text });
   if (sentMessage?.key?.id) {
     outboundMessageIds.add(sentMessage.key.id);
   }
+}
+
+async function sendSocketMessageWithTyping(
+  sock: WASocket,
+  jid: string,
+  message: string,
+  options: { typingAlreadyStarted?: boolean } = {},
+) {
+  const cleaned = normalizeOutboundMessage(message);
+  if (!cleaned) {
+    return;
+  }
+
+  const chunks = splitIntoStreamChunks(cleaned);
+  const shouldStream = cleaned.length >= STREAMING_MIN_LENGTH && chunks.length > 1;
+  const firstDelay = estimateChunkDelayMs(chunks[0] ?? cleaned);
+
+  try {
+    if (!options.typingAlreadyStarted) {
+      await sock.sendPresenceUpdate("composing", jid).catch(() => null);
+    }
+
+    await sleep(Math.min(firstDelay, 800));
+
+    if (!shouldStream) {
+      await sendSocketTextMessage(sock, jid, cleaned);
+      return;
+    }
+
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index]!;
+
+      if (index > 0) {
+        await sock.sendPresenceUpdate("composing", jid).catch(() => null);
+        await sleep(estimateChunkDelayMs(chunk));
+      }
+
+      await sendSocketTextMessage(sock, jid, chunk);
+
+      if (index < chunks.length - 1) {
+        await sleep(250);
+      }
+    }
+  } finally {
+    await sock.sendPresenceUpdate("paused", jid).catch(() => null);
+  }
+}
+
+async function sendWelcomeMessage(sock: WASocket, phone: string) {
+  const welcomeMessage = [
+    "ClawCloud AI is connected.",
+    "",
+    "You can chat naturally here for coding help, email workflows, reminders, calendar summaries, research, writing, and quick analysis.",
+    "",
+    "Finish setup in the app to unlock the full workflow and connected tools.",
+  ].join("\n");
+
+  await sendSocketMessageWithTyping(sock, `${phone}@s.whatsapp.net`, welcomeMessage);
 }
 
 async function sendSessionWhatsAppMessage(userId: string, message: string) {
@@ -277,12 +439,11 @@ async function sendSessionWhatsAppMessage(userId: string, message: string) {
     return false;
   }
 
-  const sentMessage = await session.sock.sendMessage(`${session.phone}@s.whatsapp.net`, {
-    text: message,
-  });
-  if (sentMessage?.key?.id) {
-    outboundMessageIds.add(sentMessage.key.id);
-  }
+  await sendSocketMessageWithTyping(
+    session.sock,
+    `${session.phone}@s.whatsapp.net`,
+    message,
+  );
 
   await getSupabase().from("whatsapp_messages").insert({
     user_id: userId,
@@ -305,6 +466,12 @@ async function handleInboundMessage(userId: string, text: string, waMessageId: s
     sent_at: new Date().toISOString(),
   });
 
+  const session = sessions.get(userId);
+  const jid = session?.phone ? `${session.phone}@s.whatsapp.net` : null;
+  if (session && jid) {
+    void session.sock.sendPresenceUpdate("composing", jid).catch(() => null);
+  }
+
   let response: Response | null = null;
 
   try {
@@ -318,6 +485,9 @@ async function handleInboundMessage(userId: string, text: string, waMessageId: s
       `[agent] Failed to call app backend for inbound WhatsApp message (${userId}):`,
       error instanceof Error ? error.message : error,
     );
+    if (session && jid) {
+      void session.sock.sendPresenceUpdate("paused", jid).catch(() => null);
+    }
     return;
   }
 
@@ -325,6 +495,9 @@ async function handleInboundMessage(userId: string, text: string, waMessageId: s
     console.error(
       `[agent] Skipping inbound WhatsApp reply for ${userId}: NEXT_PUBLIC_APP_URL/NEXTJS_URL or AGENT_SECRET is not configured.`,
     );
+    if (session && jid) {
+      void session.sock.sendPresenceUpdate("paused", jid).catch(() => null);
+    }
     return;
   }
 
@@ -333,6 +506,9 @@ async function handleInboundMessage(userId: string, text: string, waMessageId: s
     console.error(
       `[agent] App backend rejected inbound WhatsApp message for ${userId}: HTTP ${response.status}${body ? ` - ${body.slice(0, 200)}` : ""}`,
     );
+    if (session && jid) {
+      void session.sock.sendPresenceUpdate("paused", jid).catch(() => null);
+    }
     return;
   }
 
@@ -341,8 +517,25 @@ async function handleInboundMessage(userId: string, text: string, waMessageId: s
   };
 
   if (json.response?.trim()) {
-    await sendSessionWhatsAppMessage(userId, json.response);
+    if (session && jid) {
+      await sendSocketMessageWithTyping(session.sock, jid, json.response, {
+        typingAlreadyStarted: true,
+      });
+      await getSupabase().from("whatsapp_messages").insert({
+        user_id: userId,
+        direction: "outbound",
+        content: json.response,
+        message_type: "text",
+        sent_at: new Date().toISOString(),
+      });
+    } else {
+      await sendSessionWhatsAppMessage(userId, json.response);
+    }
     return;
+  }
+
+  if (session && jid) {
+    void session.sock.sendPresenceUpdate("paused", jid).catch(() => null);
   }
 
   console.log(
@@ -563,23 +756,30 @@ app.post("/wa/send", authMiddleware, async (request, response) => {
     return;
   }
 
-  const sentMessage = await session.sock.sendMessage(`${phone.replace(/\D/g, "")}@s.whatsapp.net`, {
-    text: message,
-  });
-  if (sentMessage?.key?.id) {
-    outboundMessageIds.add(sentMessage.key.id);
-  }
+  await sendSocketMessageWithTyping(
+    session.sock,
+    `${phone.replace(/\D/g, "")}@s.whatsapp.net`,
+    message,
+  );
   response.json({ success: true });
 });
 
 app.get("/health", (_request, response) => {
   const missingRequiredEnv = getMissingRequiredEnv();
+  const chatProvider = process.env.NVIDIA_API_KEY?.trim()
+    ? "nvidia"
+    : process.env.OPENAI_API_KEY?.trim()
+      ? "openai"
+      : null;
 
   response.json({
     status: missingRequiredEnv.length ? "degraded" : "ok",
     configured: missingRequiredEnv.length === 0,
     missingRequiredEnv,
     connections: sessions.size,
+    appUrl: getAppUrl() || null,
+    chatProviderConfigured: Boolean(chatProvider),
+    chatProvider,
   });
 });
 
@@ -606,6 +806,11 @@ app.listen(port, host, () => {
   const configurationError = getConfigurationError();
   if (configurationError) {
     console.warn(configurationError);
+  }
+  if (!process.env.NVIDIA_API_KEY?.trim() && !process.env.OPENAI_API_KEY?.trim()) {
+    console.warn(
+      "[agent] No chat provider configured. Add NVIDIA_API_KEY or OPENAI_API_KEY for professional AI replies.",
+    );
   }
 
   console.log(`ClawCloud agent server running on ${host}:${port}`);
