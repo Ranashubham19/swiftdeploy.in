@@ -3,13 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import {
-  GoogleAuthProvider,
-  signInWithPopup,
-  signOut as signOutOfFirebase,
-} from "firebase/auth";
 
-import { getFirebaseAuth } from "@/lib/firebase-client";
 import { getPostAuthRedirectPath } from "@/lib/onboarding";
 import { getPublicRedirectUrl } from "@/lib/public-app-url";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
@@ -66,18 +60,6 @@ function normalizeAuthErrorMessage(message: string) {
   }
 
   return message;
-}
-
-function isFirebasePopupCancelled(error: unknown) {
-  const code = error instanceof Error ? error.message : String(error ?? "");
-  return /popup-closed-by-user|cancelled-popup-request/i.test(code);
-}
-
-function shouldFallbackToRedirectAuth(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error ?? "");
-  return /popup-blocked|unauthorized-domain|operation-not-supported|auth-domain-config-required|network-request-failed/i.test(
-    message,
-  );
 }
 
 function exchangeAuthCodeOnce(
@@ -343,7 +325,6 @@ export function AuthPage({ config }: AuthPageProps) {
 
     const loadingKey = mode === "login" ? "google-login" : "google-signup";
     setLoadingAction(loadingKey);
-    const redirectUrl = getPublicRedirectUrl(config, "/auth");
 
     try {
       const settingsResponse = await fetch(`${config.supabaseUrl}/auth/v1/settings`, {
@@ -365,59 +346,9 @@ export function AuthPage({ config }: AuthPageProps) {
       // If the settings check fails, fall back to Supabase's normal OAuth flow.
     }
 
-    try {
-      const auth = getFirebaseAuth(config.firebase);
-      const provider = new GoogleAuthProvider();
-      provider.addScope("email");
-      provider.addScope("profile");
-      provider.setCustomParameters({ prompt: "select_account" });
-
-      const result = await signInWithPopup(auth, provider);
-      const idToken = await result.user.getIdToken();
-      const { error } = await supabase.auth.signInWithIdToken({
-        provider: "google",
-        token: idToken,
-      });
-
-      await signOutOfFirebase(auth).catch(() => null);
-
-      if (!error) {
-        setSuccessMessage("Signed in. Redirecting...");
-        const { data } = await supabase.auth.getUser();
-        router.replace(await resolvePostAuthRedirectPath(data.user?.id));
-        return;
-      }
-
-      throw new Error(error.message);
-    } catch (error) {
-      if (isFirebasePopupCancelled(error)) {
-        setLoadingAction(null);
-        setGlobalError("Google sign-in was cancelled before it completed.");
-        return;
-      }
-
-      if (!shouldFallbackToRedirectAuth(error)) {
-        setLoadingAction(null);
-        setGlobalError(
-          normalizeAuthErrorMessage(
-            error instanceof Error ? error.message : "Unable to complete Google sign-in.",
-          ),
-        );
-        return;
-      }
-    }
-
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: {
-        redirectTo: redirectUrl,
-      },
-    });
-
-    if (error) {
-      setLoadingAction(null);
-      setGlobalError(error.message);
-    }
+    const startUrl = new URL("/api/auth/google/start", window.location.origin);
+    startUrl.searchParams.set("mode", mode);
+    window.location.assign(startUrl.toString());
   }
 
   async function handleLogin(event: React.FormEvent<HTMLFormElement>) {
