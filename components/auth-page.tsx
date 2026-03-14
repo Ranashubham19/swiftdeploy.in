@@ -3,8 +3,15 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import {
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut as signOutOfFirebase,
+} from "firebase/auth";
 
+import { getFirebaseAuth } from "@/lib/firebase-client";
 import { getPostAuthRedirectPath } from "@/lib/onboarding";
+import { getPublicRedirectUrl } from "@/lib/public-app-url";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 import { buildSupabaseHeaders } from "@/lib/supabase-headers";
 import type { PublicAppConfig } from "@/lib/types";
@@ -55,10 +62,22 @@ const authCodeExchangeCache = new Map<string, Promise<AuthExchangeResult>>();
 
 function normalizeAuthErrorMessage(message: string) {
   if (message === "Failed to fetch") {
-    return "Could not reach Supabase to finish Google sign-in. Retry once, and if it still fails make sure your browser can reach your Supabase project and that localhost:3000 is allowed in Supabase Authentication URL configuration.";
+    return "Could not reach Supabase to finish sign-in. Retry once, and if it still fails make sure the production auth redirect URL is allowed in Supabase Authentication settings.";
   }
 
   return message;
+}
+
+function isFirebasePopupCancelled(error: unknown) {
+  const code = error instanceof Error ? error.message : String(error ?? "");
+  return /popup-closed-by-user|cancelled-popup-request/i.test(code);
+}
+
+function shouldFallbackToRedirectAuth(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /popup-blocked|unauthorized-domain|operation-not-supported|auth-domain-config-required|network-request-failed/i.test(
+    message,
+  );
 }
 
 function exchangeAuthCodeOnce(
@@ -190,14 +209,6 @@ export function AuthPage({ config }: AuthPageProps) {
       delete next[name];
       return next;
     });
-  }
-
-  function getRedirectUrl(path: string) {
-    if (typeof window === "undefined") {
-      return path;
-    }
-
-    return `${window.location.origin}${path}`;
   }
 
   async function resolvePostAuthRedirectPath(userId?: string) {
@@ -332,6 +343,7 @@ export function AuthPage({ config }: AuthPageProps) {
 
     const loadingKey = mode === "login" ? "google-login" : "google-signup";
     setLoadingAction(loadingKey);
+    const redirectUrl = getPublicRedirectUrl(config, "/auth");
 
     try {
       const settingsResponse = await fetch(`${config.supabaseUrl}/auth/v1/settings`, {
@@ -353,10 +365,52 @@ export function AuthPage({ config }: AuthPageProps) {
       // If the settings check fails, fall back to Supabase's normal OAuth flow.
     }
 
+    try {
+      const auth = getFirebaseAuth(config.firebase);
+      const provider = new GoogleAuthProvider();
+      provider.addScope("email");
+      provider.addScope("profile");
+      provider.setCustomParameters({ prompt: "select_account" });
+
+      const result = await signInWithPopup(auth, provider);
+      const idToken = await result.user.getIdToken();
+      const { error } = await supabase.auth.signInWithIdToken({
+        provider: "google",
+        token: idToken,
+      });
+
+      await signOutOfFirebase(auth).catch(() => null);
+
+      if (!error) {
+        setSuccessMessage("Signed in. Redirecting...");
+        const { data } = await supabase.auth.getUser();
+        router.replace(await resolvePostAuthRedirectPath(data.user?.id));
+        return;
+      }
+
+      throw new Error(error.message);
+    } catch (error) {
+      if (isFirebasePopupCancelled(error)) {
+        setLoadingAction(null);
+        setGlobalError("Google sign-in was cancelled before it completed.");
+        return;
+      }
+
+      if (!shouldFallbackToRedirectAuth(error)) {
+        setLoadingAction(null);
+        setGlobalError(
+          normalizeAuthErrorMessage(
+            error instanceof Error ? error.message : "Unable to complete Google sign-in.",
+          ),
+        );
+        return;
+      }
+    }
+
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {
-        redirectTo: getRedirectUrl("/auth"),
+        redirectTo: redirectUrl,
       },
     });
 
@@ -452,7 +506,7 @@ export function AuthPage({ config }: AuthPageProps) {
           first_name: signup.firstName.trim(),
           last_name: signup.lastName.trim(),
         },
-        emailRedirectTo: getRedirectUrl("/auth"),
+        emailRedirectTo: getPublicRedirectUrl(config, "/auth"),
       },
     });
     setLoadingAction(null);
@@ -490,7 +544,7 @@ export function AuthPage({ config }: AuthPageProps) {
 
     setLoadingAction("forgot");
     const { error } = await supabase.auth.resetPasswordForEmail(forgot.email.trim(), {
-      redirectTo: getRedirectUrl("/reset-password"),
+      redirectTo: getPublicRedirectUrl(config, "/reset-password"),
     });
     setLoadingAction(null);
 

@@ -168,6 +168,7 @@ export function getPublicAppConfig(): PublicAppConfig {
   return {
     supabaseUrl: env.SUPABASE_URL,
     supabaseAnonKey: env.SUPABASE_ANON_KEY,
+    appUrl: env.NEXT_PUBLIC_APP_URL,
     firebase: {
       apiKey: env.FIREBASE_API_KEY,
       authDomain: env.FIREBASE_AUTH_DOMAIN,
