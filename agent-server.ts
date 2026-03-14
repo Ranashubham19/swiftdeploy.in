@@ -215,6 +215,52 @@ async function markWhatsAppDisconnected(userId: string) {
     .eq("provider", "whatsapp");
 }
 
+async function getActiveWhatsAppUserIds() {
+  const { data, error } = await getSupabase()
+    .from("connected_accounts")
+    .select("user_id")
+    .eq("provider", "whatsapp")
+    .eq("is_active", true);
+
+  if (error) {
+    console.error("[agent] Failed to load active WhatsApp accounts:", error.message);
+    return [];
+  }
+
+  return (data ?? [])
+    .map((row) => String(row.user_id ?? "").trim())
+    .filter(Boolean);
+}
+
+async function restoreActiveWhatsAppSessions() {
+  if (getConfigurationError()) {
+    return;
+  }
+
+  try {
+    const userIds = await getActiveWhatsAppUserIds();
+    if (!userIds.length) {
+      console.log("[agent] No active WhatsApp sessions to restore");
+      return;
+    }
+
+    console.log(`[agent] Restoring ${userIds.length} WhatsApp session(s)`);
+    for (const userId of userIds) {
+      void connectWhatsAppSession(userId).catch((error) => {
+        console.error(
+          `[agent] Failed to restore WhatsApp session for ${userId}:`,
+          error instanceof Error ? error.message : error,
+        );
+      });
+    }
+  } catch (error) {
+    console.error(
+      "[agent] Unexpected error while restoring WhatsApp sessions:",
+      error,
+    );
+  }
+}
+
 async function sendWelcomeMessage(sock: WASocket, phone: string) {
   const sentMessage = await sock.sendMessage(`${phone}@s.whatsapp.net`, {
     text: "Your ClawCloud AI agent is connected. Finish setup and I will start helping here.",
@@ -367,7 +413,9 @@ async function connectWhatsAppSession(userId: string) {
       const shouldReconnect = disconnectCode !== DisconnectReason.loggedOut;
 
       sessions.delete(userId);
-      await markWhatsAppDisconnected(userId);
+      if (!shouldReconnect) {
+        await markWhatsAppDisconnected(userId);
+      }
       console.warn(
         `[agent] WhatsApp connection closed for ${userId} (code: ${disconnectCode ?? "unknown"})`,
       );
@@ -529,4 +577,5 @@ app.listen(port, host, () => {
   }
 
   console.log(`ClawCloud agent server running on ${host}:${port}`);
+  void restoreActiveWhatsAppSessions();
 });
