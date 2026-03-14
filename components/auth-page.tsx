@@ -346,9 +346,24 @@ export function AuthPage({ config }: AuthPageProps) {
       // If the settings check fails, fall back to Supabase's normal OAuth flow.
     }
 
-    const startUrl = new URL("/api/auth/google/start", window.location.origin);
-    startUrl.searchParams.set("mode", mode);
-    window.location.assign(startUrl.toString());
+    const redirectUrl = new URL("/auth", window.location.origin).toString();
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: redirectUrl,
+        skipBrowserRedirect: true,
+      },
+    });
+
+    if (error || !data?.url) {
+      setLoadingAction(null);
+      setGlobalError(
+        error?.message || "Unable to start Google sign-in. Please try again.",
+      );
+      return;
+    }
+
+    window.location.assign(data.url);
   }
 
   async function handleLogin(event: React.FormEvent<HTMLFormElement>) {
