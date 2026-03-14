@@ -51,6 +51,10 @@ const conversationalFallbackMessage =
 const conversationalSystemPrompt =
   "You are ClawCloud AI, a concise personal assistant on WhatsApp. Reply in 1-3 short sentences. Be warm, direct, and practical.";
 const greetingPattern = /^(?:hi+|hello|hey|good\s+(?:morning|afternoon|evening))\b/i;
+const helpIntentPattern =
+  /\b(help|what can you do|what else can you do|can you do more|capabilities|features)\b/i;
+const reminderIntentPattern =
+  /\b(remind me|set reminder|set up (?:a )?reminder|setup (?:a )?reminder|alert me)\b/i;
 
 function ensureAgentReply(message: string | null | undefined) {
   const trimmed = message?.trim();
@@ -619,21 +623,42 @@ export async function routeInboundAgentMessage(
   }
 
   if (/search|find|what did|did.*say|email from/i.test(trimmed)) {
-    await runClawCloudTask({ userId, taskType: "email_search", userMessage: trimmed });
+    await runClawCloudTask({
+      userId,
+      taskType: "email_search",
+      userMessage: trimmed,
+      bypassEnabledCheck: true,
+    });
     return null;
   }
 
-  if (/remind me|set reminder|alert me/i.test(trimmed)) {
-    await runClawCloudTask({ userId, taskType: "custom_reminder", userMessage: trimmed });
+  if (reminderIntentPattern.test(trimmed)) {
+    await runClawCloudTask({
+      userId,
+      taskType: "custom_reminder",
+      userMessage: trimmed,
+      bypassEnabledCheck: true,
+    });
     return null;
   }
 
   if (/meeting|calendar|schedule|event|today|tomorrow/i.test(trimmed)) {
-    await runClawCloudTask({ userId, taskType: "meeting_reminders" });
+    await runClawCloudTask({
+      userId,
+      taskType: "meeting_reminders",
+      bypassEnabledCheck: true,
+    });
     return null;
   }
 
   const locale = await getUserLocale(userId);
+  if (helpIntentPattern.test(trimmed)) {
+    return translateMessage(
+      "I can draft email replies, search your inbox, set reminders like 'remind me at 5pm to call Priya', share meeting summaries, and answer spending questions.",
+      locale,
+    );
+  }
+
   if (greetingPattern.test(trimmed)) {
     const greeting = await completeClawCloudPrompt({
       system: `${conversationalSystemPrompt} If the user greets you, greet them back and briefly mention what you can help with.`,

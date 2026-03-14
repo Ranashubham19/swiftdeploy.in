@@ -1,10 +1,21 @@
 import { env } from "@/lib/env";
 
+function getNvidiaApiUrl() {
+  const rawBaseUrl = (env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1").trim();
+  const normalizedBaseUrl = rawBaseUrl.replace(/\/+$/, "");
+
+  // Support either a base URL like ".../v1" or a full endpoint like
+  // ".../v1/chat/completions" without duplicating the path.
+  if (/\/chat\/completions$/i.test(normalizedBaseUrl)) {
+    return normalizedBaseUrl;
+  }
+
+  return `${normalizedBaseUrl}/chat/completions`;
+}
+
 // NVIDIA's API is fully OpenAI-compatible.
 // We call it directly via fetch so there is no OpenAI SDK dependency.
-const NVIDIA_API_URL = `${
-  env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1"
-}/chat/completions`;
+const NVIDIA_API_URL = getNvidiaApiUrl();
 
 // Use the fast chat model for agent tasks (briefings, drafts, search).
 // Falls back to the base chat model if no fast model is configured.
