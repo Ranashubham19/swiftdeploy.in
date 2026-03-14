@@ -99,6 +99,7 @@ async function callNvidiaChat(
 export async function completeClawCloudPrompt(input: {
   user: string;
   system?: string;
+  history?: Array<{ role: "user" | "assistant"; content: string }>;
   maxTokens?: number;
   fallback: string;
 }): Promise<string> {
@@ -106,6 +107,15 @@ export async function completeClawCloudPrompt(input: {
 
   if (input.system) {
     messages.push({ role: "system", content: input.system });
+  }
+
+  for (const message of input.history ?? []) {
+    const content = message.content?.trim();
+    if (!content) {
+      continue;
+    }
+
+    messages.push({ role: message.role, content });
   }
 
   messages.push({ role: "user", content: input.user });

@@ -12,6 +12,7 @@ import {
   buildMultilingualBriefingSystem,
   getUserLocale,
   translateMessage,
+  type SupportedLocale,
 } from "@/lib/clawcloud-i18n";
 import { sendClawCloudTelegramMessage } from "@/lib/clawcloud-telegram";
 import {
@@ -44,21 +45,142 @@ type RunTaskInput = {
   bypassEnabledCheck?: boolean;
 };
 
+type ConversationHistoryMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
 type SupabaseAdminClient = ReturnType<typeof getClawCloudSupabaseAdmin>;
 
 const conversationalFallbackMessage =
-  "Hi! I'm your ClawCloud AI assistant. I can help with emails, reminders, meeting summaries, and spending questions.";
+  "Hi! I'm your ClawCloud AI assistant. I can answer questions, help with coding and writing, search your inbox, set reminders, summarize meetings, and answer spending questions.";
+const repeatedReplyRecoveryMessage =
+  "Tell me the exact task or question and I'll handle it. For reminders, include the time, for example: 'Remind me at 5pm to call Priya.'";
 const conversationalSystemPrompt =
-  "You are ClawCloud AI, a concise personal assistant on WhatsApp. Reply in 1-3 short sentences. Be warm, direct, and practical.";
+  "You are ClawCloud AI, a capable WhatsApp assistant. You can help with general questions, explanations, coding help, writing, emails, reminders, meeting summaries, and spending questions. Reply in concise, WhatsApp-friendly prose. Be warm, direct, practical, and avoid repeating generic fallback wording.";
 const greetingPattern = /^(?:hi+|hello|hey|good\s+(?:morning|afternoon|evening))\b/i;
 const helpIntentPattern =
   /\b(help|what can you do|what else can you do|can you do more|capabilities|features)\b/i;
 const reminderIntentPattern =
-  /\b(remind me|set reminder|set up (?:a )?reminder|setup (?:a )?reminder|alert me)\b/i;
+  /\b(remind me|set reminder|set up (?:a )?reminder|setup (?:a )?reminder|alert me|notify me)\b/i;
 
 function ensureAgentReply(message: string | null | undefined) {
   const trimmed = message?.trim();
   return trimmed ? trimmed : conversationalFallbackMessage;
+}
+
+function normalizeAgentReply(message: string) {
+  return message.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function stripReminderLeadIn(message: string) {
+  return message
+    .replace(/^(?:please\s+)?remind me\b/i, "")
+    .replace(/^(?:please\s+)?set(?:\s+up)?\s+(?:a\s+)?reminder\b/i, "")
+    .replace(/^(?:please\s+)?alert me\b/i, "")
+    .replace(/^(?:please\s+)?notify me\b/i, "")
+    .trim();
+}
+
+async function getRecentWhatsAppConversation(
+  userId: string,
+  limit = 10,
+): Promise<ConversationHistoryMessage[]> {
+  const supabaseAdmin = getClawCloudSupabaseAdmin();
+  const { data, error } = await supabaseAdmin
+    .from("whatsapp_messages")
+    .select("direction, content, sent_at")
+    .eq("user_id", userId)
+    .order("sent_at", { ascending: false })
+    .limit(limit);
+
+  if (error || !data?.length) {
+    return [];
+  }
+
+  return (data as Array<{ direction: string; content: string | null }>)
+    .slice()
+    .reverse()
+    .map((row) => ({
+      role: (row.direction === "inbound" ? "user" : "assistant") as
+        | "user"
+        | "assistant",
+      content: String(row.content ?? "").trim(),
+    }))
+    .filter((row) => row.content.length > 0);
+}
+
+function removeDuplicateCurrentUserMessage(
+  history: ConversationHistoryMessage[],
+  message: string,
+) {
+  const nextHistory = history.slice();
+  const lastMessage = nextHistory[nextHistory.length - 1];
+
+  if (
+    lastMessage?.role === "user" &&
+    normalizeAgentReply(lastMessage.content) === normalizeAgentReply(message)
+  ) {
+    nextHistory.pop();
+  }
+
+  return nextHistory;
+}
+
+function resolveRepeatedAgentReply(
+  reply: string,
+  history: ConversationHistoryMessage[],
+) {
+  const safeReply = ensureAgentReply(reply);
+  const lastAssistantReply = [...history]
+    .reverse()
+    .find((message) => message.role === "assistant")
+    ?.content?.trim();
+
+  if (!lastAssistantReply) {
+    return safeReply;
+  }
+
+  if (normalizeAgentReply(lastAssistantReply) !== normalizeAgentReply(safeReply)) {
+    return safeReply;
+  }
+
+  if (normalizeAgentReply(safeReply) === normalizeAgentReply(conversationalFallbackMessage)) {
+    return repeatedReplyRecoveryMessage;
+  }
+
+  return `${safeReply}\n\nTell me the next specific thing you want me to do.`;
+}
+
+async function generateConversationalReply(
+  userId: string,
+  userMessage: string,
+  options?: {
+    locale?: SupportedLocale;
+    maxTokens?: number;
+    extraSystemPrompt?: string;
+    fallback?: string;
+  },
+) {
+  const locale = options?.locale ?? (await getUserLocale(userId));
+  const history = removeDuplicateCurrentUserMessage(
+    await getRecentWhatsAppConversation(userId),
+    userMessage,
+  );
+  const systemPrompt = [conversationalSystemPrompt, options?.extraSystemPrompt]
+    .filter(Boolean)
+    .join(" ");
+
+  const reply = await completeClawCloudPrompt({
+    system: systemPrompt,
+    history,
+    user: userMessage,
+    maxTokens: options?.maxTokens ?? 350,
+    fallback: options?.fallback ?? conversationalFallbackMessage,
+  });
+
+  const finalReply = resolveRepeatedAgentReply(reply, history);
+  return ensureAgentReply(await translateMessage(finalReply, locale));
 }
 
 async function getTaskRow(userId: string, taskType: ClawCloudTaskType) {
@@ -116,6 +238,32 @@ async function seedClawCloudDefaultTasks(userId: string) {
 
 function parseReminderMessage(message: string) {
   const trimmed = message.trim();
+  const relativeMatch = trimmed.match(/\bin\s+(\d{1,3})\s+(minute|minutes|hour|hours)\b/i);
+  if (relativeMatch) {
+    const amount = Number(relativeMatch[1] ?? "0");
+    const unit = (relativeMatch[2] ?? "").toLowerCase();
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return null;
+    }
+
+    const fireAt = new Date();
+    fireAt.setSeconds(0, 0);
+    fireAt.setTime(
+      fireAt.getTime() + amount * (unit.startsWith("hour") ? 60 * 60 * 1000 : 60 * 1000),
+    );
+
+    const reminderText = stripReminderLeadIn(trimmed)
+      .replace(relativeMatch[0], "")
+      .replace(/^\s*to\b/i, "")
+      .trim();
+
+    return {
+      fireAt: fireAt.toISOString(),
+      reminderText: reminderText || "Reminder",
+    };
+  }
+
   const atMatch = trimmed.match(/at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i);
   if (!atMatch) {
     return null;
@@ -135,10 +283,9 @@ function parseReminderMessage(message: string) {
     fireAt.setDate(fireAt.getDate() + 1);
   }
 
-  const reminderText = trimmed
-    .replace(/^remind me/i, "")
+  const reminderText = stripReminderLeadIn(trimmed)
     .replace(atMatch[0], "")
-    .replace(/\bto\b/i, "")
+    .replace(/^\s*to\b/i, "")
     .trim();
 
   return {
@@ -568,7 +715,7 @@ async function runCustomReminder(
   const parsed = parseReminderMessage(rawMessage);
   if (!parsed) {
     const message =
-      "I could not parse that reminder. Try: Remind me at 5pm to call Priya.";
+      "I can set that reminder, but I need the time and task. Try: Remind me at 5pm to call Priya.";
     await sendClawCloudWhatsAppMessage(userId, message);
     await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
     return { set: false, message };
@@ -654,30 +801,24 @@ export async function routeInboundAgentMessage(
   const locale = await getUserLocale(userId);
   if (helpIntentPattern.test(trimmed)) {
     return translateMessage(
-      "I can draft email replies, search your inbox, set reminders like 'remind me at 5pm to call Priya', share meeting summaries, and answer spending questions.",
+      "I can answer questions, help with coding and writing, draft email replies, search your inbox, set reminders like 'remind me at 5pm to call Priya', share meeting summaries, and answer spending questions.",
       locale,
     );
   }
 
   if (greetingPattern.test(trimmed)) {
-    const greeting = await completeClawCloudPrompt({
-      system: `${conversationalSystemPrompt} If the user greets you, greet them back and briefly mention what you can help with.`,
-      user: trimmed,
-      maxTokens: 150,
-      fallback: conversationalFallbackMessage,
+    return generateConversationalReply(userId, trimmed, {
+      locale,
+      maxTokens: 180,
+      extraSystemPrompt:
+        "If the user greets you, greet them back and mention 3-5 concrete things you can help with.",
     });
-
-    return ensureAgentReply(await translateMessage(greeting, locale));
   }
 
-  const answer = await completeClawCloudPrompt({
-    system: conversationalSystemPrompt,
-    user: trimmed,
-    maxTokens: 300,
-    fallback: conversationalFallbackMessage,
+  return generateConversationalReply(userId, trimmed, {
+    locale,
+    maxTokens: 500,
   });
-
-  return ensureAgentReply(await translateMessage(answer, locale));
 }
 
 export async function runClawCloudTask(input: RunTaskInput) {
