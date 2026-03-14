@@ -42,6 +42,7 @@ const sessions = new Map<string, SessionRecord>();
 const outboundIds = new Set<string>();
 const DIRECT_REPLY_TIMEOUT_MS = 15_000;
 const HTTP_REPLY_TIMEOUT_MS = 10_000;
+const STREAM_REPLY_MIN_LENGTH = 900;
 
 type RouteInboundAgentMessageFn = (userId: string, message: string) => Promise<string | null>;
 let cachedRouteInboundAgentMessage: RouteInboundAgentMessageFn | null = null;
@@ -229,6 +230,27 @@ async function logOutbound(userId: string, content: string) {
   }).catch(() => null);
 }
 
+async function shouldSendWelcome(userId: string, phone: string | null) {
+  const { data } = await db()
+    .from("connected_accounts")
+    .select("phone_number, is_active")
+    .eq("user_id", userId)
+    .eq("provider", "whatsapp")
+    .maybeSingle()
+    .catch(() => ({ data: null }));
+
+  if (!data) return true;
+
+  const existingPhone = String(data.phone_number ?? "").replace(/\D/g, "");
+  const nextPhone = String(phone ?? "").replace(/\D/g, "");
+
+  if (!existingPhone || !nextPhone || existingPhone !== nextPhone) {
+    return true;
+  }
+
+  return !Boolean(data.is_active);
+}
+
 // ─── Welcome message ──────────────────────────────────────────────────────────
 
 async function sendWelcome(sock: WASocket, phone: string) {
@@ -266,15 +288,16 @@ async function sendReply(userId: string, message: string, targetJid?: string | n
   const jid = targetJid || session.lastChatJid || `${session.phone}@s.whatsapp.net`;
   const cleaned = message.replace(/\n{3,}/g, "\n\n").trim();
 
-  // Use streaming for messages over 100 chars
-  if (cleaned.length > 100) {
+  // Send normal replies as a single message for the fastest delivery.
+  // Keep streaming only for very long outputs where chunking helps readability.
+  if (cleaned.length >= STREAM_REPLY_MIN_LENGTH) {
     await sendStreamingMessage(session.sock, jid, cleaned);
   } else {
     const sent = await session.sock.sendMessage(jid, { text: cleaned });
     if (sent?.key?.id) outboundIds.add(sent.key.id);
   }
 
-  await logOutbound(userId, message);
+  void logOutbound(userId, message);
   return true;
 }
 
@@ -336,7 +359,7 @@ async function handleInbound(
   remoteJid: string | null,
 ) {
   // 1. Log inbound
-  await db().from("whatsapp_messages").insert({
+  void db().from("whatsapp_messages").insert({
     user_id: userId,
     direction: "inbound",
     content: text,
@@ -495,13 +518,14 @@ async function connectSession(userId: string): Promise<SessionRecord> {
       cur.qr = null;
       sessions.set(userId, cur);
 
+      const sendWelcomeNow = await shouldSendWelcome(userId, phone);
       await db().from("connected_accounts").upsert({
         user_id: userId, provider: "whatsapp", phone_number: phone,
         display_name: sock.user?.name || phone, is_active: true,
         connected_at: new Date().toISOString(),
       }, { onConflict: "user_id,provider" }).catch(() => null);
 
-      if (phone) await sendWelcome(sock, phone);
+      if (phone && sendWelcomeNow) await sendWelcome(sock, phone);
     }
 
     if (connection === "close") {
