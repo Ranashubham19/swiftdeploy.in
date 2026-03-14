@@ -401,7 +401,9 @@ export function SetupPage({ config }: SetupPageProps) {
           return;
         }
 
-        setScanPhase(payload?.status === "connecting" ? "verifying" : "waiting");
+        const nextScanPhase: ScanPhase = payload?.phone ? "verifying" : "waiting";
+
+        setScanPhase(nextScanPhase);
         setWaQrImage(payload?.qr ?? null);
         setWaLoading(false);
       } catch (error) {

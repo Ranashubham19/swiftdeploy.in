@@ -53,6 +53,7 @@ type SessionRecord = {
   status: "connecting" | "waiting" | "connected";
   qr: string | null;
   phone: string | null;
+  startedAt: number;
 };
 
 const requiredEnv = [
@@ -67,6 +68,7 @@ app.use(express.json());
 let supabase: ReturnType<typeof createClient<any>> | null = null;
 
 const sessions = new Map<string, SessionRecord>();
+const STALE_CONNECTING_MS = 15_000;
 
 function getMissingRequiredEnv() {
   return requiredEnv.filter((envName) => !process.env[envName]?.trim());
@@ -107,6 +109,36 @@ function getSupabase() {
 
 function getSessionsDir() {
   return process.env.WA_SESSION_DIR || path.join(process.cwd(), "wa-sessions");
+}
+
+function getSessionDirectory(userId: string) {
+  return path.join(getSessionsDir(), userId);
+}
+
+function clearSessionDirectory(userId: string) {
+  fs.rmSync(getSessionDirectory(userId), { recursive: true, force: true });
+}
+
+async function discardSession(
+  userId: string,
+  session: SessionRecord | undefined,
+  options: { deleteAuth?: boolean } = {},
+) {
+  if (sessions.get(userId) === session) {
+    sessions.delete(userId);
+  }
+
+  if (session) {
+    try {
+      await session.sock.logout();
+    } catch {
+      // Ignore logout failures during stale-session cleanup.
+    }
+  }
+
+  if (options.deleteAuth) {
+    clearSessionDirectory(userId);
+  }
 }
 
 function getAppUrl() {
@@ -220,7 +252,17 @@ async function connectWhatsAppSession(userId: string) {
     return existing;
   }
 
-  const sessionDir = path.join(getSessionsDir(), userId);
+  if (existing && existing.status === "connecting") {
+    const isStale = Date.now() - existing.startedAt >= STALE_CONNECTING_MS;
+    if (!isStale) {
+      return existing;
+    }
+
+    console.warn(`[agent] Resetting stale WhatsApp session for ${userId}`);
+    await discardSession(userId, existing, { deleteAuth: true });
+  }
+
+  const sessionDir = getSessionDirectory(userId);
   fs.mkdirSync(sessionDir, { recursive: true });
 
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
@@ -235,6 +277,7 @@ async function connectWhatsAppSession(userId: string) {
     status: "connecting",
     qr: null,
     phone: null,
+    startedAt: Date.now(),
   };
 
   sessions.set(userId, record);
@@ -242,7 +285,7 @@ async function connectWhatsAppSession(userId: string) {
 
   sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
     const current = sessions.get(userId);
-    if (!current) {
+    if (current !== record) {
       return;
     }
 
@@ -283,9 +326,14 @@ async function connectWhatsAppSession(userId: string) {
       const shouldReconnect =
         (lastDisconnect?.error as Boom | undefined)?.output?.statusCode !==
         DisconnectReason.loggedOut;
+      const hadLinkedPhone = Boolean(current.phone);
 
       sessions.delete(userId);
       await markWhatsAppDisconnected(userId);
+
+      if (!hadLinkedPhone) {
+        clearSessionDirectory(userId);
+      }
 
       if (shouldReconnect) {
         setTimeout(() => {
@@ -356,10 +404,7 @@ app.get("/wa/qr/:userId", authMiddleware, async (request, response) => {
 app.delete("/wa/session/:userId", authMiddleware, async (request, response) => {
   const userId = readRouteParam(request.params.userId);
   const session = sessions.get(userId);
-  if (session) {
-    await session.sock.logout();
-    sessions.delete(userId);
-  }
+  await discardSession(userId, session, { deleteAuth: true });
 
   await markWhatsAppDisconnected(userId);
   response.json({ success: true });
