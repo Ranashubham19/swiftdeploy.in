@@ -75,6 +75,7 @@ const WA_VERSION_CACHE_MS = 6 * 60 * 60 * 1000;
 
 let cachedWaVersion: [number, number, number] | null = null;
 let cachedWaVersionAt = 0;
+const outboundMessageIds = new Set<string>();
 
 function getMissingRequiredEnv() {
   return requiredEnv.filter((envName) => !process.env[envName]?.trim());
@@ -215,9 +216,13 @@ async function markWhatsAppDisconnected(userId: string) {
 }
 
 async function sendWelcomeMessage(sock: WASocket, phone: string) {
-  await sock.sendMessage(`${phone}@s.whatsapp.net`, {
+  const sentMessage = await sock.sendMessage(`${phone}@s.whatsapp.net`, {
     text: "Your ClawCloud AI agent is connected. Finish setup and I will start helping here.",
   });
+
+  if (sentMessage?.key?.id) {
+    outboundMessageIds.add(sentMessage.key.id);
+  }
 }
 
 async function sendSessionWhatsAppMessage(userId: string, message: string) {
@@ -226,7 +231,13 @@ async function sendSessionWhatsAppMessage(userId: string, message: string) {
     return false;
   }
 
-  await session.sock.sendMessage(`${session.phone}@s.whatsapp.net`, { text: message });
+  const sentMessage = await session.sock.sendMessage(`${session.phone}@s.whatsapp.net`, {
+    text: message,
+  });
+  if (sentMessage?.key?.id) {
+    outboundMessageIds.add(sentMessage.key.id);
+  }
+
   await getSupabase().from("whatsapp_messages").insert({
     user_id: userId,
     direction: "outbound",
@@ -375,7 +386,18 @@ async function connectWhatsAppSession(userId: string) {
     }
 
     for (const message of messages) {
-      if (message.key.fromMe) {
+      const current = sessions.get(userId);
+      if (current !== record) {
+        return;
+      }
+
+      const messageId = message.key.id ?? "";
+      if (messageId && outboundMessageIds.has(messageId)) {
+        outboundMessageIds.delete(messageId);
+        continue;
+      }
+
+      if (message.key.fromMe && !isSelfChatMessage(message, current)) {
         continue;
       }
 
@@ -405,6 +427,16 @@ function findSessionByPhone(phone: string) {
   }
 
   return null;
+}
+
+function isSelfChatMessage(
+  message: { key?: { remoteJid?: string | null } },
+  session: SessionRecord,
+) {
+  const remoteJid = message.key?.remoteJid ?? "";
+  const sessionDigits = session.phone?.replace(/\D/g, "") ?? "";
+  const remoteDigits = String(remoteJid).split("@")[0]?.replace(/\D/g, "") ?? "";
+  return Boolean(sessionDigits && remoteDigits && sessionDigits === remoteDigits);
 }
 
 function readRouteParam(value: string | string[] | undefined) {
@@ -451,9 +483,12 @@ app.post("/wa/send", authMiddleware, async (request, response) => {
     return;
   }
 
-  await session.sock.sendMessage(`${phone.replace(/\D/g, "")}@s.whatsapp.net`, {
+  const sentMessage = await session.sock.sendMessage(`${phone.replace(/\D/g, "")}@s.whatsapp.net`, {
     text: message,
   });
+  if (sentMessage?.key?.id) {
+    outboundMessageIds.add(sentMessage.key.id);
+  }
   response.json({ success: true });
 });
 
