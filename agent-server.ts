@@ -290,6 +290,7 @@ async function connectWhatsAppSession(userId: string) {
     }
 
     if (qr) {
+      console.log(`[agent] QR generated for ${userId}`);
       current.qr = await QRCode.toDataURL(qr, {
         width: 220,
         margin: 1,
@@ -300,6 +301,7 @@ async function connectWhatsAppSession(userId: string) {
 
     if (connection === "open") {
       const phone = sock.user?.id?.split(":")[0] ?? null;
+      console.log(`[agent] WhatsApp connected for ${userId}${phone ? ` (${phone})` : ""}`);
       current.status = "connected";
       current.phone = phone;
       current.qr = null;
@@ -323,17 +325,15 @@ async function connectWhatsAppSession(userId: string) {
     }
 
     if (connection === "close") {
-      const shouldReconnect =
-        (lastDisconnect?.error as Boom | undefined)?.output?.statusCode !==
-        DisconnectReason.loggedOut;
-      const hadLinkedPhone = Boolean(current.phone);
+      const disconnectCode =
+        (lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
+      const shouldReconnect = disconnectCode !== DisconnectReason.loggedOut;
 
       sessions.delete(userId);
       await markWhatsAppDisconnected(userId);
-
-      if (!hadLinkedPhone) {
-        clearSessionDirectory(userId);
-      }
+      console.warn(
+        `[agent] WhatsApp connection closed for ${userId} (code: ${disconnectCode ?? "unknown"})`,
+      );
 
       if (shouldReconnect) {
         setTimeout(() => {
