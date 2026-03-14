@@ -1,6 +1,8 @@
 import { Boom } from "@hapi/boom";
 import {
+  Browsers,
   DisconnectReason,
+  fetchLatestWaWebVersion,
   makeWASocket,
   useMultiFileAuthState,
   type WASocket,
@@ -69,6 +71,10 @@ let supabase: ReturnType<typeof createClient<any>> | null = null;
 
 const sessions = new Map<string, SessionRecord>();
 const STALE_CONNECTING_MS = 15_000;
+const WA_VERSION_CACHE_MS = 6 * 60 * 60 * 1000;
+
+let cachedWaVersion: [number, number, number] | null = null;
+let cachedWaVersionAt = 0;
 
 function getMissingRequiredEnv() {
   return requiredEnv.filter((envName) => !process.env[envName]?.trim());
@@ -143,6 +149,23 @@ async function discardSession(
 
 function getAppUrl() {
   return process.env.NEXT_PUBLIC_APP_URL || process.env.NEXTJS_URL || "";
+}
+
+async function getWhatsAppWebVersion() {
+  const now = Date.now();
+  if (cachedWaVersion && now - cachedWaVersionAt < WA_VERSION_CACHE_MS) {
+    return cachedWaVersion;
+  }
+
+  const latest = await fetchLatestWaWebVersion({ timeout: 10_000 });
+  cachedWaVersion = latest.version;
+  cachedWaVersionAt = now;
+
+  console.log(
+    `[agent] Using WA Web version ${latest.version.join(".")} (latest=${latest.isLatest})`,
+  );
+
+  return latest.version;
 }
 
 function authMiddleware(
@@ -266,10 +289,13 @@ async function connectWhatsAppSession(userId: string) {
   fs.mkdirSync(sessionDir, { recursive: true });
 
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+  const version = await getWhatsAppWebVersion();
   const sock = makeWASocket({
     auth: state,
     printQRInTerminal: false,
-    browser: ["ClawCloud", "Chrome", "1.0.0"],
+    version,
+    browser: Browsers.ubuntu("Chrome"),
+    markOnlineOnConnect: false,
   });
 
   const record: SessionRecord = {
