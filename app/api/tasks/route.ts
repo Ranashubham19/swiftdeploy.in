@@ -6,7 +6,11 @@ import {
   getClawCloudSupabaseAdmin,
   requireClawCloudAuth,
 } from "@/lib/clawcloud-supabase";
-import type { ClawCloudTaskType } from "@/lib/clawcloud-types";
+import {
+  normalizeClawCloudTaskType,
+  presentClawCloudTaskType,
+  type ClawCloudTaskType,
+} from "@/lib/clawcloud-types";
 
 export const runtime = "nodejs";
 
@@ -57,13 +61,21 @@ export async function POST(request: NextRequest) {
 
     const task = await createClawCloudTask({
       userId: auth.user.id,
-      taskType: body.task_type,
+      taskType: normalizeClawCloudTaskType(body.task_type),
       scheduleTime: body.schedule_time ?? null,
       scheduleDays: body.schedule_days ?? null,
       config: body.config ?? {},
     });
 
-    return NextResponse.json({ task }, { status: 201 });
+    return NextResponse.json(
+      {
+        task: {
+          ...task,
+          task_type: presentClawCloudTaskType(task.task_type as ClawCloudTaskType),
+        },
+      },
+      { status: 201 },
+    );
   } catch (error) {
     const message = getClawCloudErrorMessage(error);
     const status = /limit/i.test(message) ? 403 : 500;

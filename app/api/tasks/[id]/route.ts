@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   deleteClawCloudTask,
   updateClawCloudTask,
-} from "@/lib/clawcloud-agent";
+} from "@/lib/clawcloud-agent-compat";
 import {
   getClawCloudErrorMessage,
   getClawCloudSupabaseAdmin,

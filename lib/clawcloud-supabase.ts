@@ -1,3 +1,5 @@
+import "@/lib/postgrest-builder-catch";
+
 import { createClient, type User } from "@supabase/supabase-js";
 import type { NextRequest } from "next/server";
 

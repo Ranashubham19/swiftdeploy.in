@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { completeClawCloudOnboarding } from "@/lib/clawcloud-agent";
+import { completeClawCloudOnboarding } from "@/lib/clawcloud-agent-compat";
 import {
   getClawCloudErrorMessage,
   requireClawCloudAuth,

@@ -7,7 +7,8 @@ export type ClawCloudTaskType =
   | "email_search"
   | "evening_summary"
   | "custom_reminder"
-  | "weekly_spend";
+  | "weekly_spend"
+  | "weekly_spend_summary";
 
 export type ClawCloudProvider =
   | "gmail"
@@ -27,7 +28,6 @@ export type FrontendSetupTaskId =
 export type ClawCloudTaskConfig = Record<string, unknown>;
 
 export type ClawCloudTaskSeed = {
-  taskType: ClawCloudTaskType;
   scheduleTime: string | null;
   scheduleDays: string[] | null;
   config: ClawCloudTaskConfig;
@@ -55,57 +55,25 @@ export const clawCloudActiveTaskLimits: Record<ClawCloudPlan, number> = {
   pro: 999,
 };
 
-export const clawCloudDefaultTaskSeeds: readonly ClawCloudTaskSeed[] = [
+export const clawCloudDefaultTaskSeeds: Readonly<Record<ClawCloudTaskType, ClawCloudTaskConfig>> =
   {
-    taskType: "morning_briefing",
-    enabledByDefault: true,
-    scheduleTime: "07:00",
-    scheduleDays: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
-    config: { max_emails: 50, tone: "concise" },
-  },
-  {
-    taskType: "draft_replies",
-    enabledByDefault: true,
-    scheduleTime: null,
-    scheduleDays: null,
-    config: { tone: "professional", auto_send: false },
-  },
-  {
-    taskType: "meeting_reminders",
-    enabledByDefault: true,
-    scheduleTime: null,
-    scheduleDays: null,
-    config: { minutes_before: 30, include_context: true },
-  },
-  {
-    taskType: "email_search",
-    enabledByDefault: false,
-    scheduleTime: null,
-    scheduleDays: null,
-    config: {},
-  },
-  {
-    taskType: "evening_summary",
-    enabledByDefault: false,
-    scheduleTime: "21:00",
-    scheduleDays: ["mon", "tue", "wed", "thu", "fri"],
-    config: {},
-  },
-  {
-    taskType: "custom_reminder",
-    enabledByDefault: false,
-    scheduleTime: null,
-    scheduleDays: null,
-    config: {},
-  },
-  {
-    taskType: "weekly_spend",
-    enabledByDefault: false,
-    scheduleTime: "09:00",
-    scheduleDays: ["sun"],
-    config: {},
-  },
-] as const;
+    morning_briefing: { max_emails: 50, tone: "concise" },
+    draft_replies: { tone: "professional", auto_send: false },
+    meeting_reminders: { minutes_before: 30, include_context: true },
+    email_search: {},
+    evening_summary: {},
+    custom_reminder: {},
+    weekly_spend: {},
+    weekly_spend_summary: {},
+  } as const;
+
+export function normalizeClawCloudTaskType(taskType: ClawCloudTaskType): ClawCloudTaskType {
+  return taskType === "weekly_spend" ? "weekly_spend_summary" : taskType;
+}
+
+export function presentClawCloudTaskType(taskType: ClawCloudTaskType): ClawCloudTaskType {
+  return taskType === "weekly_spend_summary" ? "weekly_spend" : taskType;
+}
 
 export function parseMeridiemTimeTo24Hour(value: string) {
   const normalized = value.trim();

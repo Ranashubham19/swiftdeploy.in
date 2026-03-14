@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { runDueClawCloudTasks } from "@/lib/clawcloud-agent";
+import { runDueClawCloudTasks } from "@/lib/clawcloud-agent-compat";
 import {
   getClawCloudErrorMessage,
   isValidSharedSecret,

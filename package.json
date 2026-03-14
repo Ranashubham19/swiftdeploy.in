@@ -10,7 +10,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "agent": "tsx agent-server.ts",
+    "agent": "tsx --import ./lib/postgrest-builder-catch.ts agent-server.ts",
     "typecheck": "tsc --noEmit",
     "verify:setup": "node verify-setup.mjs",
     "smoke:live": "node scripts/live-smoke.mjs",

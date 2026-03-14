@@ -6,7 +6,10 @@ import {
   isValidSharedSecret,
   requireClawCloudAuth,
 } from "@/lib/clawcloud-supabase";
-import type { ClawCloudTaskType } from "@/lib/clawcloud-types";
+import {
+  normalizeClawCloudTaskType,
+  type ClawCloudTaskType,
+} from "@/lib/clawcloud-types";
 import { env } from "@/lib/env";
 
 export const runtime = "nodejs";
@@ -35,7 +38,7 @@ export async function POST(request: NextRequest) {
 
       const result = await runClawCloudTask({
         userId: body.userId,
-        taskType: body.taskType,
+        taskType: normalizeClawCloudTaskType(body.taskType),
         userMessage: body.userMessage ?? null,
         bypassEnabledCheck: true,
       });
@@ -55,7 +58,7 @@ export async function POST(request: NextRequest) {
 
     const result = await runClawCloudTask({
       userId,
-      taskType: body.taskType,
+      taskType: normalizeClawCloudTaskType(body.taskType),
       userMessage: body.userMessage ?? null,
     });
 
