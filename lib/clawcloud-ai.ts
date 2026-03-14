@@ -43,7 +43,7 @@ type NvidiaCompletionResponse = {
 async function callNvidiaChat(
   messages: NvidiaMessage[],
   maxTokens: number,
-  timeoutMs = 12000,
+  timeoutMs = 20000,
 ): Promise<string | null> {
   if (!env.NVIDIA_API_KEY) {
     return null;
@@ -109,7 +109,7 @@ export async function completeClawCloudPrompt(input: {
     messages.push({ role: "system", content: input.system });
   }
 
-  for (const message of input.history ?? []) {
+  for (const message of (input.history ?? []).slice(-6)) {
     const content = message.content?.trim();
     if (!content) {
       continue;

@@ -82,9 +82,18 @@ function stripReminderLeadIn(message: string) {
     .trim();
 }
 
+function clipConversationMessage(message: string, maxLength = 320) {
+  const trimmed = message.trim();
+  if (trimmed.length <= maxLength) {
+    return trimmed;
+  }
+
+  return `${trimmed.slice(0, maxLength).trimEnd()}...`;
+}
+
 async function getRecentWhatsAppConversation(
   userId: string,
-  limit = 10,
+  limit = 6,
 ): Promise<ConversationHistoryMessage[]> {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const { data, error } = await supabaseAdmin
@@ -105,7 +114,7 @@ async function getRecentWhatsAppConversation(
       role: (row.direction === "inbound" ? "user" : "assistant") as
         | "user"
         | "assistant",
-      content: String(row.content ?? "").trim(),
+      content: clipConversationMessage(String(row.content ?? "")),
     }))
     .filter((row) => row.content.length > 0);
 }
