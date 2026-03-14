@@ -305,13 +305,34 @@ async function handleInboundMessage(userId: string, text: string, waMessageId: s
     sent_at: new Date().toISOString(),
   });
 
-  const response = await callNextInternal("/api/agent/message", {
-    userId,
-    message: text,
-    _internal: true,
-  });
+  let response: Response | null = null;
 
-  if (!response?.ok) {
+  try {
+    response = await callNextInternal("/api/agent/message", {
+      userId,
+      message: text,
+      _internal: true,
+    });
+  } catch (error) {
+    console.error(
+      `[agent] Failed to call app backend for inbound WhatsApp message (${userId}):`,
+      error instanceof Error ? error.message : error,
+    );
+    return;
+  }
+
+  if (!response) {
+    console.error(
+      `[agent] Skipping inbound WhatsApp reply for ${userId}: NEXT_PUBLIC_APP_URL/NEXTJS_URL or AGENT_SECRET is not configured.`,
+    );
+    return;
+  }
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    console.error(
+      `[agent] App backend rejected inbound WhatsApp message for ${userId}: HTTP ${response.status}${body ? ` - ${body.slice(0, 200)}` : ""}`,
+    );
     return;
   }
 
@@ -429,7 +450,7 @@ async function connectWhatsAppSession(userId: string) {
   });
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") {
+    if (type !== "notify" && type !== "append") {
       return;
     }
 
@@ -457,6 +478,12 @@ async function connectWhatsAppSession(userId: string) {
       if (!text) {
         continue;
       }
+
+      console.log(
+        `[agent] Processing WhatsApp message for ${userId} (type=${type}, fromMe=${Boolean(
+          message.key.fromMe,
+        )}, selfChat=${isSelfChatMessage(message, current)})`,
+      );
 
       await handleInboundMessage(userId, text, message.key.id ?? null);
     }

@@ -144,6 +144,24 @@ function formatHttpError(response, text) {
   return `HTTP ${response.status}${text ? ` - ${text.slice(0, 180)}` : ""}`;
 }
 
+function parseUrlSafe(value) {
+  try {
+    return new URL(value);
+  } catch {
+    return null;
+  }
+}
+
+function isLocalHostname(hostname) {
+  const normalized = hostname.trim().toLowerCase();
+  return (
+    normalized === "localhost" ||
+    normalized === "127.0.0.1" ||
+    normalized === "::1" ||
+    normalized.endsWith(".local")
+  );
+}
+
 section("1. Checking .env.local");
 
 if (!existsSync(envPath)) {
@@ -459,10 +477,25 @@ try {
 section("7. Checking agent server");
 
 const agentServerUrl = firstConfigured(envVars, ["AGENT_SERVER_URL"]);
+const parsedAgentServerUrl = parseUrlSafe(agentServerUrl);
+const parsedBaseUrl = parseUrlSafe(baseUrl);
 
 if (!agentServerUrl) {
   record(WARN, "AGENT_SERVER_URL", "Not configured. WhatsApp and background automations will stay offline.");
 } else {
+  if (
+    parsedAgentServerUrl &&
+    parsedBaseUrl &&
+    !isLocalHostname(parsedAgentServerUrl.hostname) &&
+    isLocalHostname(parsedBaseUrl.hostname)
+  ) {
+    record(
+      FAIL,
+      "Agent callback URL",
+      `AGENT_SERVER_URL points to a remote host, but NEXT_PUBLIC_APP_URL/NEXTJS_URL is ${baseUrl}. A remote WhatsApp agent cannot call back to localhost.`,
+    );
+  }
+
   try {
     const { response, json, text } = await fetchJson(`${agentServerUrl}/health`);
     if (!response.ok || !json) {
