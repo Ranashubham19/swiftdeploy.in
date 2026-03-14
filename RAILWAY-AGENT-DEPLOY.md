@@ -26,7 +26,8 @@ SUPABASE_URL=https://your-project-ref.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 AGENT_SECRET=the-same-secret-as-your-app
 CRON_SECRET=the-same-cron-secret-as-your-app
-NEXT_PUBLIC_APP_URL=https://your-public-app-domain
+NEXT_PUBLIC_APP_URL=https://swift-deploy.in
+NEXTJS_URL=https://swift-deploy.in
 WA_SESSION_DIR=/data/wa-sessions
 ```
 
@@ -34,9 +35,24 @@ WA_SESSION_DIR=/data/wa-sessions
 
 - Do not set `NEXT_PUBLIC_APP_URL` to `http://localhost:3000` on Railway.
   The Railway service must call a public app URL that it can actually reach.
+- Do not point `NEXT_PUBLIC_APP_URL` / `NEXTJS_URL` at the Railway agent URL.
+  They must point to the public Next.js app so inbound WhatsApp messages can reach
+  `/api/agent/message`.
+- In this project the public app domain is `https://swift-deploy.in`.
+- Do not use `https://swiftdeploy.in` without the hyphen; that hostname does not resolve.
 - Railway provides `PORT` automatically. You do not need to hardcode `AGENT_PORT`.
 - WhatsApp session files should live on a persistent Railway volume.
-  Mount a volume and point `WA_SESSION_DIR` to that mounted path, for example `/data/wa-sessions`.
+  Attach a volume to the agent service and point `WA_SESSION_DIR` to the mounted path,
+  for example `/data/wa-sessions`.
+
+## Attach the volume
+
+1. Open the Railway project canvas.
+2. Right-click the agent service tile.
+3. Click `Attach volume`.
+4. Create or attach a volume.
+5. Set the mount path to `/data/wa-sessions`.
+6. Save and redeploy the service.
 
 ## After deploy
 
@@ -63,4 +79,16 @@ Expected response:
 
 ```json
 {"status":"ok","connections":0}
+```
+
+## If replies still do not send
+
+Check Railway logs:
+
+- If you see repeated `QR generated` lines and `code: 408`, the agent is not logged into WhatsApp yet.
+- If you see `Cannot POST /api/agent/message`, your Railway app URL variables point to the wrong host.
+- The success line is:
+
+```text
+[agent] WhatsApp connected for ...
 ```
