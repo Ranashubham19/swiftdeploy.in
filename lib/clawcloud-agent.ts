@@ -46,6 +46,17 @@ type RunTaskInput = {
 
 type SupabaseAdminClient = ReturnType<typeof getClawCloudSupabaseAdmin>;
 
+const conversationalFallbackMessage =
+  "Hi! I'm your ClawCloud AI assistant. I can help with emails, reminders, meeting summaries, and spending questions.";
+const conversationalSystemPrompt =
+  "You are ClawCloud AI, a concise personal assistant on WhatsApp. Reply in 1-3 short sentences. Be warm, direct, and practical.";
+const greetingPattern = /^(?:hi+|hello|hey|good\s+(?:morning|afternoon|evening))\b/i;
+
+function ensureAgentReply(message: string | null | undefined) {
+  const trimmed = message?.trim();
+  return trimmed ? trimmed : conversationalFallbackMessage;
+}
+
 async function getTaskRow(userId: string, taskType: ClawCloudTaskType) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const { data } = await supabaseAdmin
@@ -623,15 +634,25 @@ export async function routeInboundAgentMessage(
   }
 
   const locale = await getUserLocale(userId);
+  if (greetingPattern.test(trimmed)) {
+    const greeting = await completeClawCloudPrompt({
+      system: `${conversationalSystemPrompt} If the user greets you, greet them back and briefly mention what you can help with.`,
+      user: trimmed,
+      maxTokens: 150,
+      fallback: conversationalFallbackMessage,
+    });
+
+    return ensureAgentReply(await translateMessage(greeting, locale));
+  }
+
   const answer = await completeClawCloudPrompt({
-    system: "You are ClawCloud AI, a concise personal assistant. Answer helpfully and briefly.",
+    system: conversationalSystemPrompt,
     user: trimmed,
     maxTokens: 300,
-    fallback:
-      "I did not quite understand that. Try: draft reply to John, search emails from Sarah, or remind me at 3pm to call Mike.",
+    fallback: conversationalFallbackMessage,
   });
 
-  return translateMessage(answer, locale);
+  return ensureAgentReply(await translateMessage(answer, locale));
 }
 
 export async function runClawCloudTask(input: RunTaskInput) {

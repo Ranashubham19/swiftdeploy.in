@@ -340,9 +340,14 @@ async function handleInboundMessage(userId: string, text: string, waMessageId: s
     response?: string | null;
   };
 
-  if (json.response) {
+  if (json.response?.trim()) {
     await sendSessionWhatsAppMessage(userId, json.response);
+    return;
   }
+
+  console.log(
+    `[agent] Inbound WhatsApp message for ${userId} completed without a direct reply.`,
+  );
 }
 
 async function connectWhatsAppSession(userId: string) {
