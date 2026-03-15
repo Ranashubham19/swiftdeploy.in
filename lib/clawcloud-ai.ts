@@ -818,8 +818,13 @@ export async function completeClawCloudPrompt(input: {
 }): Promise<string> {
   if (!env.NVIDIA_API_KEY) return input.fallback;
 
+  const intent = input.intent ?? "general";
+  const responseMode = input.responseMode ?? "fast";
+  const extraGuardrails = QUALITY_GUARDRAILS[intent];
+  const mergedSystem = [input.system, extraGuardrails].filter(Boolean).join("\n\n").trim();
+
   const useCache = !input.skipCache && !input.history?.length;
-  const ck = _ck(input.system ?? "", input.user);
+  const ck = _ck(mergedSystem, input.user);
   if (useCache) {
     const hit = _get(ck);
     if (hit) {
@@ -828,10 +833,8 @@ export async function completeClawCloudPrompt(input: {
     }
   }
 
-  const intent = input.intent ?? "general";
-  const responseMode = input.responseMode ?? "fast";
   const msgs: Msg[] = [];
-  if (input.system) msgs.push({ role: "system", content: input.system });
+  if (mergedSystem) msgs.push({ role: "system", content: mergedSystem });
 
   if (input.history?.length) {
     const historyLimit = historyLimitForIntent(intent, responseMode);
@@ -842,11 +845,6 @@ export async function completeClawCloudPrompt(input: {
   }
 
   msgs.push({ role: "user", content: input.user });
-
-  const extraGuardrails = QUALITY_GUARDRAILS[intent];
-  if (extraGuardrails) {
-    msgs.splice(input.system ? 1 : 0, 0, { role: "system", content: extraGuardrails });
-  }
   const tokens = input.maxTokens ?? tokenBudgetForIntent(intent, responseMode);
   const temperature =
     input.temperature ?? (intent === "coding" || intent === "math" ? 0.1 : 0.2);

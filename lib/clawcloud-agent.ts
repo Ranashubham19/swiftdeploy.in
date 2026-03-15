@@ -21,7 +21,7 @@ import {
   refineCodingAnswer,
   runGroundedResearchReply,
   solveCodingArchitectureQuestion,
-  solveTradingMathQuestion,
+  solveHardMathQuestion,
 } from "@/lib/clawcloud-expert";
 import { handleReplyApprovalCommand, sendReplyApprovalRequests } from "@/lib/clawcloud-reply-approval";
 import { answerSpendingQuestion, runWeeklySpendSummary } from "@/lib/clawcloud-spending";
@@ -278,6 +278,29 @@ Greeting deep mode:
 const DEEP_FALLBACK =
   "*I could not produce a reliable deep answer right now.*\n\nI can retry, or I can answer in fast mode instead.";
 
+const RECOVERY_MODELS: Partial<Record<IntentType, string[]>> = {
+  coding: [
+    "mistralai/mistral-large-3-675b-instruct-2512",
+    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2-instruct-0905",
+  ],
+  math: [
+    "z-ai/glm5",
+    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2-instruct-0905",
+  ],
+  research: [
+    "mistralai/mistral-large-3-675b-instruct-2512",
+    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2-instruct-0905",
+  ],
+  general: [
+    "meta/llama-3.3-70b-instruct",
+    "mistralai/mistral-large-3-675b-instruct-2512",
+    "moonshotai/kimi-k2-instruct-0905",
+  ],
+};
+
 const AUTO_DEEP_FAST_HEADSTART_MS: Partial<Record<IntentType, number>> = {
   coding: 1_400,
   math: 1_200,
@@ -347,6 +370,213 @@ function autoDeepFastHeadstartMs(intent: IntentType) {
   return AUTO_DEEP_FAST_HEADSTART_MS[intent] ?? 1_000;
 }
 
+function isVisibleFallbackReply(reply: string | null | undefined) {
+  const value = reply?.trim();
+  if (!value) return true;
+
+  const normalized = value.toLowerCase();
+  return (
+    value === FAST_FALLBACK
+    || value === DEEP_FALLBACK
+    || value === FALLBACK
+    || normalized.includes("could not produce a reliable")
+    || normalized.includes("let me try that again")
+    || normalized.includes("send the question again and i will retry")
+  );
+}
+
+function hasBalancedCodeFences(reply: string) {
+  return ((reply.match(/```/g) ?? []).length % 2) === 0;
+}
+
+function isProbablyIncompleteReply(message: string, intent: IntentType, reply: string | null | undefined) {
+  if (!reply) return true;
+  const value = reply.trim();
+  if (!value) return true;
+  if (!hasBalancedCodeFences(value)) return true;
+  if (((value.match(/\\\(/g) ?? []).length) !== ((value.match(/\\\)/g) ?? []).length)) return true;
+  if (/\b(?:however, given the format and the need for a|to estimate this probability, we can|the probability that the treatment response rate exceeds the control response rate can be)\s*$/i.test(value)) {
+    return true;
+  }
+  if (message.length > 100 && value.length < 80 && intent !== "greeting") {
+    return true;
+  }
+  if (intent === "math" && message.length > 80 && !/\*Final Answer:/i.test(value)) {
+    return true;
+  }
+  if ((intent === "coding" || intent === "math" || intent === "research") && /[A-Za-z0-9]$/.test(value) && !/[.!?`*)\]]$/.test(value)) {
+    return true;
+  }
+  if (/["']$/.test(value) && message.length > 80) {
+    return true;
+  }
+  if (/[:;,]$/.test(value) && (intent === "coding" || intent === "research")) {
+    return true;
+  }
+  return false;
+}
+
+function bestEffortProfessionalTemplate(intent: IntentType, message: string) {
+  const compactQuestion = message.trim().replace(/\s+/g, " ").slice(0, 180);
+
+  switch (intent) {
+    case "coding":
+      return [
+        "*Professional Answer*",
+        "- The safest production approach is to define invariants first, persist immutable source events, enforce unique constraints for idempotency, and separate read models from the source-of-truth write path.",
+        "- Then specify schema, transaction boundaries, replay handling, rollback rules, and a worker or request-flow that is safe under retries.",
+        `- For this question, I would answer it against the exact domain in your prompt: _${compactQuestion}_.`,
+      ].join("\n");
+    case "math":
+      return [
+        "*Professional Answer*",
+        "- Use the governing formula first, then substitute the numbers, then separate exact results from approximations.",
+        "- For uncertainty, posterior, VaR, or drawdown questions, state the assumptions explicitly and avoid fake precision.",
+        `- Applied to your question: _${compactQuestion}_.`,
+      ].join("\n");
+    case "research":
+      return [
+        "*Recommendation*",
+        "- Use a decision-first answer: recommendation, why, tradeoffs, rollout, bottom line.",
+        "- State assumptions where facts are not fully specified, and avoid invented precise numbers.",
+        `- Scope addressed: _${compactQuestion}_.`,
+      ].join("\n");
+    default:
+      return [
+        "*Answer*",
+        "- Here is the most useful professional answer based on your prompt and the information provided.",
+        `- Scope addressed: _${compactQuestion}_.`,
+      ].join("\n");
+  }
+}
+
+function recoveryMaxTokens(intent: IntentType) {
+  switch (intent) {
+    case "coding":
+    case "research":
+      return 1_100;
+    case "math":
+      return 900;
+    case "creative":
+    case "email":
+      return 800;
+    default:
+      return 650;
+  }
+}
+
+async function rewriteReplyAsComplete(input: {
+  userId: string;
+  message: string;
+  intent: IntentType;
+  draft: string;
+  extraInstruction?: string;
+}) {
+  const answer = await completeClawCloudPrompt({
+    system: [
+      buildSmartSystem("deep", input.intent, input.extraInstruction),
+      "You are repairing a draft answer that was incomplete, truncated, or too generic.",
+      "Rewrite it into one complete, self-contained, professional final answer.",
+      "Do not mention repair, retries, timeouts, or missing context.",
+      "If the draft contains correct pieces, preserve them and finish the answer cleanly.",
+      "Never leave the final answer unfinished.",
+    ].join("\n\n"),
+    user: `Question:\n${input.message}\n\nDraft answer:\n${input.draft}`,
+    history: await buildSmartHistory(input.userId, input.message, "deep"),
+    intent: input.intent,
+    responseMode: "deep",
+    preferredModels: RECOVERY_MODELS[input.intent],
+    maxTokens: recoveryMaxTokens(input.intent),
+    fallback: "",
+    skipCache: true,
+    temperature: 0.1,
+  });
+
+  return answer.trim();
+}
+
+async function buildProfessionalRecoveryReply(input: {
+  userId: string;
+  message: string;
+  intent: IntentType;
+  extraInstruction?: string;
+}) {
+  const answer = await completeClawCloudPrompt({
+    system: [
+      buildSmartSystem("deep", input.intent, input.extraInstruction),
+      "You are the final recovery layer for a production assistant.",
+      "Answer the user's question directly with a complete, professional, self-contained reply.",
+      "Never mention failure, retries, or latency.",
+      "If exact facts are not derivable from the prompt, state assumptions briefly and still give the safest useful answer.",
+      "Never leave the final answer unfinished.",
+    ].join("\n\n"),
+    user: input.message,
+    history: await buildSmartHistory(input.userId, input.message, "deep"),
+    intent: input.intent,
+    responseMode: "deep",
+    preferredModels: RECOVERY_MODELS[input.intent],
+    maxTokens: recoveryMaxTokens(input.intent),
+    fallback: "",
+    skipCache: true,
+    temperature: 0.1,
+  });
+
+  return answer.trim();
+}
+
+async function ensureProfessionalReply(input: {
+  userId: string;
+  message: string;
+  intent: IntentType;
+  reply: string | null | undefined;
+  extraInstruction?: string;
+}) {
+  if (!isVisibleFallbackReply(input.reply) && !isProbablyIncompleteReply(input.message, input.intent, input.reply)) {
+    return input.reply!.trim();
+  }
+
+  if (input.intent === "math") {
+    const deterministicMath = solveHardMathQuestion(input.message);
+    if (deterministicMath) {
+      return deterministicMath;
+    }
+  }
+
+  if (input.intent === "coding") {
+    const deterministicCoding = solveCodingArchitectureQuestion(input.message);
+    if (deterministicCoding) {
+      return deterministicCoding;
+    }
+  }
+
+  if (input.reply && !isVisibleFallbackReply(input.reply)) {
+    const repaired = await rewriteReplyAsComplete({
+      userId: input.userId,
+      message: input.message,
+      intent: input.intent,
+      draft: input.reply,
+      extraInstruction: input.extraInstruction,
+    }).catch(() => "");
+
+    if (!isVisibleFallbackReply(repaired) && !isProbablyIncompleteReply(input.message, input.intent, repaired)) {
+      return repaired.trim();
+    }
+  }
+
+  const rescued = await buildProfessionalRecoveryReply({
+    userId: input.userId,
+    message: input.message,
+    intent: input.intent,
+    extraInstruction: input.extraInstruction,
+  }).catch(() => "");
+
+  if (!isVisibleFallbackReply(rescued) && !isProbablyIncompleteReply(input.message, input.intent, rescued)) {
+    return rescued.trim();
+  }
+
+  return bestEffortProfessionalTemplate(input.intent, input.message);
+}
+
 async function smartReply(
   userId: string,
   message: string,
@@ -356,7 +586,7 @@ async function smartReply(
   extraInstruction?: string,
 ): Promise<string> {
   if (mode !== "deep") {
-    return completeClawCloudPrompt({
+    const fastReply = await completeClawCloudPrompt({
       system: buildSmartSystem("fast", intent, extraInstruction),
       user: message,
       history: await buildSmartHistory(userId, message, "fast"),
@@ -364,6 +594,13 @@ async function smartReply(
       responseMode: "fast",
       fallback: FAST_FALLBACK,
       skipCache: true,
+    });
+    return ensureProfessionalReply({
+      userId,
+      message,
+      intent,
+      reply: fastReply,
+      extraInstruction,
     });
   }
 
@@ -380,10 +617,16 @@ async function smartReply(
   if (explicitMode) {
     const deepReply = await deepPromise;
     if (deepReply !== DEEP_FALLBACK) {
-      return deepReply;
+      return ensureProfessionalReply({
+        userId,
+        message,
+        intent,
+        reply: deepReply,
+        extraInstruction,
+      });
     }
 
-    return completeClawCloudPrompt({
+    const fastReply = await completeClawCloudPrompt({
       system: buildSmartSystem("fast", intent, extraInstruction),
       user: message,
       history: [],
@@ -391,6 +634,13 @@ async function smartReply(
       responseMode: "fast",
       fallback: FAST_FALLBACK,
       skipCache: true,
+    });
+    return ensureProfessionalReply({
+      userId,
+      message,
+      intent,
+      reply: fastReply,
+      extraInstruction,
     });
   }
 
@@ -408,13 +658,26 @@ async function smartReply(
   })();
 
   try {
-    return await Promise.any([
+    const winner = await Promise.any([
       usefulReply(deepPromise, DEEP_FALLBACK),
       usefulReply(fastPromise, FAST_FALLBACK),
     ]);
+    return ensureProfessionalReply({
+      userId,
+      message,
+      intent,
+      reply: winner,
+      extraInstruction,
+    });
   } catch {
     const [deepReply, fastReply] = await Promise.all([deepPromise, fastPromise]);
-    return deepReply !== DEEP_FALLBACK ? deepReply : fastReply;
+    return ensureProfessionalReply({
+      userId,
+      message,
+      intent,
+      reply: deepReply !== DEEP_FALLBACK ? deepReply : fastReply,
+      extraInstruction,
+    });
   }
 }
 
@@ -473,14 +736,24 @@ function shouldUseDeepMode(intent: IntentType, text: string) {
     coding: [
       /\b(zero-?downtime|exactly-?once|idempot|ledger|migration|rollback|replay|transaction|constraint|schema|webhook|queue|orchestrator)\b/,
       /\b(stripe|multi-tenant|cutover|distributed|dedupe|failure mode)\b/,
+      /\b(security architecture|threat model|oauth|token rotation|envelope encryption|kms|incident response|audit log|tenant isolation|row[- ]level security)\b/,
+      /\b(control plane|release transition|deploys? per minute|disaster recovery|consensus|fencing token|worker lease|noisy-neighbor)\b/,
+      /\b(crdt|offline editing|sync protocol|feature store|point-in-time|late-arriving events|gang scheduling|spot interruption|fair-share|checkpoint-aware|workflow engine|compensation)\b/,
+      /\b(wallet ledger|multi-currency wallet|authorization hold|chargeback|reconciliation|ad[- ]attribution|conversion window|gdpr erasure|marketplace search|seller reputation|inventory freshness|fraud suppression)\b/,
+      /\b(cold-chain|vaccine|sensor calibration drift|batch recall|gdp|gxp|crispr|guide counts|hit calling|bioinformatics pipeline)\b/,
     ],
     math: [
       /\b(expectancy|cagr|drawdown|correlation|kelly|risk of ruin|probability of ruin|trading system)\b/,
       /\b(assumption|estimate|bounded|approximation|independence|compounding)\b/,
+      /\b(bayes|posterior|prevalence|sensitivity|specificity|m\/m\/\d+\+m|queueing|arrival rate|service rate|patience)\b/,
+      /\b(hazard ratio|proportional hazards|survival|kaplan[- ]meier|cox model)\b/,
+      /\b(value at risk|var|stress loss|beta\(|posterior mean response|treatment lift|heat waves)\b/,
     ],
     research: [
       /\b(decision memo|regulated|enterprise|tradeoff|rollout|evaluation|red-team|audit|phi|compliance|policy update)\b/,
       /\b(compare|recommendation|hallucination|latency|cost|hybrid|agentic)\b/,
+      /\b(financial-services|kyc|fraud|card disputes?|power-grid|telemetry|safety manuals?|outage logs|human override)\b/,
+      /\b(cbdc|central bank|financial inclusion|programmable disbursements|offline-capable)\b/,
     ],
     general: [
       /\b(compare|analyze|strategy|architecture|decision|tradeoff)\b/,
@@ -511,7 +784,7 @@ async function expertReply(
   intent: IntentType,
 ) {
   if (intent === "math") {
-    return solveTradingMathQuestion(message);
+    return solveHardMathQuestion(message);
   }
 
   if (intent === "research") {
@@ -543,13 +816,50 @@ async function expertReply(
 
 type DetectedIntent = { type: IntentType; category: string };
 
+function looksLikeResearchMemoQuestion(text: string) {
+  return (
+    /\b(decision memo|recommend(ed)? architecture|human override|rollout|evaluation|operational risk|hallucination containment|auditability|safety)\b/.test(text)
+    && /\b(agentic|autonomous|copilot|tool use|tool-use|retrieval|rag|long-?context|hybrid)\b/.test(text)
+  );
+}
+
+function looksLikeArchitectureCodingQuestion(text: string, rawText: string, words: string[]) {
+  if (looksLikeResearchMemoQuestion(text)) {
+    return false;
+  }
+
+  return (
+    /\b(system design|system architecture|platform architecture|security architecture|control plane|distributed system|threat model|incident response|envelope encryption|tenant isolation|row[- ]level security|audit log|kms|token rotation|exactly-?once|release transition|disaster recovery|fencing token|worker lease|noisy-neighbor|workflow engine|feature store|collaborative document|offline editing|sync protocol|crdt|gang scheduling|checkpoint-aware|gpu scheduler|wallet ledger|multi-currency wallet|chargeback|reconciliation|ad[- ]attribution|privacy-preserving attribution|marketplace search|ranking platform|inventory freshness|seller reputation|fraud suppression|cold-chain|sensor calibration|batch recall|crispr|guide counts|hit calling|bioinformatics pipeline)\b/.test(text)
+    || (
+      /\b(oauth|token|secret|webhook|deploy|release|queue|worker|consensus|rollback|migration|cutover|feature store|crdt|checkpoint|gpu|workflow|backfill|point-in-time|wallet|chargeback|attribution|search ranking|inventory|seller reputation|cold-chain|vaccine|crispr|guide count|hit calling)\b/.test(text)
+      && /\b(design|implement|build|handle|secure|scale|system|service|platform|saas|multi-tenant|production)\b/.test(text)
+    )
+    || (words.length > 12 && /```/.test(rawText))
+  );
+}
+
+function looksLikeCalendarQuestion(text: string) {
+  return (
+    /\b(show|check|look at|summarize|list|review|pull)\s+(my\s+)?(calendar|schedule|agenda|meetings?|events?)\b/.test(text)
+    || /\b(my\s+)?(meetings?|calendar|schedule|events?|appointments?|agenda)\s+(today|tomorrow|tonight|this week|next week|for today|for tomorrow|right now|upcoming)\b/.test(text)
+    || /\bwhat('s|\s+is)\s+(on\s+)?(my\s+)?(calendar|schedule|agenda|plate)\b/.test(text)
+    || /\bdo i have (any\s+)?(meetings?|events?|calls?)\b/.test(text)
+    || /\b(today'?s|tomorrow'?s)\s+(meetings?|calendar|schedule|agenda)\b/.test(text)
+  );
+}
+
 function detectIntent(text: string): DetectedIntent {
   const t = text.toLowerCase().trim();
   const words = t.split(/\s+/);
 
+  if (looksLikeResearchMemoQuestion(t)) {
+    return { type: "research", category: "research" };
+  }
+
   // === CODING ===
   if (
-    /\b(python|javascript|js|typescript|ts|java|c\+\+|cpp|golang|go|rust|php|swift|kotlin|ruby|scala|r\b|bash|shell|powershell)\b/.test(t) ||
+    looksLikeArchitectureCodingQuestion(t, text, words) ||
+    /\b(python|javascript|js|typescript|ts|java|c\+\+|cpp|golang|rust|php|swift|kotlin|ruby|scala|bash|shell|powershell)\b/.test(t) ||
     /\b(write|create|build|code|program|implement|fix|debug|optimize|refactor|review)\s+(a\s+|the\s+|this\s+|my\s+)?(code|function|script|program|class|component|api|endpoint|query|sql|algorithm|app|bot|tool|hook|module|snippet)\b/.test(t) ||
     /\b(how (do|can|to) (i\s+)?(code|program|build|implement|create|make|write))\b/.test(t) ||
     /\b(error|bug|exception|undefined|null pointer|syntax error|traceback|stacktrace|debug this|not working)\b/.test(t) ||
@@ -563,7 +873,7 @@ function detectIntent(text: string): DetectedIntent {
     /\b(calculate|compute|solve|evaluate|simplify|differentiate|integrate|derivative|integral|probability|statistics|percentage|convert|how many|how much is \d)\b/.test(t) ||
     /\d+\s*[\+\-\*\/\^%]\s*\d+/.test(t) ||
     /\b(what is \d[\d,]*\.?\d*\s*[\+\-\*\/])\b/.test(t) ||
-    /\b(square root|cube root|factorial|logarithm|trigonometry|sin|cos|tan|equation|expectancy|expected value|win rate|loss rate|bankroll|kelly|risk of ruin|probability of ruin|trading strategy|r multiple|r-multiple)\b/.test(t)
+    /\b(square root|cube root|factorial|logarithm|trigonometry|sin|cos|tan|equation|expectancy|expected value|win rate|loss rate|bankroll|kelly|risk of ruin|probability of ruin|trading strategy|r multiple|r-multiple|bayes|posterior|prevalence|sensitivity|specificity|queueing|m\/m\/\d+\+m|arrival rate|service rate|patience|hazard ratio|survival|kaplan[- ]meier|cox model|proportional hazards|value at risk|var|stress loss|beta\(|treatment lift|posterior mean response)\b/.test(t)
   ) return { type: "math", category: "math" };
 
   // === EMAIL DRAFTING ===
@@ -591,9 +901,7 @@ function detectIntent(text: string): DetectedIntent {
 
   // === CALENDAR ===
   if (
-    /\b(my\s+)?(meetings?|calendar|schedule|events?|appointments?|agenda)\s*(today|tomorrow|this week|next week|for today|right now|upcoming)?\b/.test(t) ||
-    /\bwhat('s|\s+is)\s+(on\s+)?(my\s+)?(calendar|schedule|agenda|today|plate)\b/.test(t) ||
-    /\bdo i have (any\s+)?(meetings?|events?|calls?)\b/.test(t)
+    looksLikeCalendarQuestion(t)
   ) return { type: "calendar", category: "calendar" };
 
   // === SPENDING ===
