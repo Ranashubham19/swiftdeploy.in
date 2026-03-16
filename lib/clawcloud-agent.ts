@@ -11,6 +11,7 @@
 
 import { getClawCloudCalendarEvents, getClawCloudGmailMessages } from "@/lib/clawcloud-google";
 import { upsertAnalyticsDaily } from "@/lib/clawcloud-analytics";
+import { answerNewsQuestion, detectNewsQuestion, hasNewsProviders } from "@/lib/clawcloud-news";
 import {
   completeClawCloudPrompt,
   completeClawCloudFast,
@@ -18,15 +19,23 @@ import {
   type ResponseMode,
 } from "@/lib/clawcloud-ai";
 import {
+  looksLikeRealtimeResearch,
   refineCodingAnswer,
   runGroundedResearchReply,
+  semanticDomainClassify,
   solveCodingArchitectureQuestion,
   solveHardMathQuestion,
+  solveWithUniversalExpert,
 } from "@/lib/clawcloud-expert";
 import { handleReplyApprovalCommand, sendReplyApprovalRequests } from "@/lib/clawcloud-reply-approval";
 import { answerSpendingQuestion, runWeeklySpendSummary } from "@/lib/clawcloud-spending";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
-import { buildMultilingualBriefingSystem, getUserLocale, translateMessage } from "@/lib/clawcloud-i18n";
+import {
+  buildMultilingualBriefingSystem,
+  getUserLocale,
+  translateMessage,
+  type SupportedLocale,
+} from "@/lib/clawcloud-i18n";
 import { sendClawCloudTelegramMessage } from "@/lib/clawcloud-telegram";
 import {
   clawCloudActiveTaskLimits,
@@ -228,8 +237,7 @@ Greeting mode:
 - Mention capabilities only when it helps.`,
 };
 
-const FAST_FALLBACK =
-  "*I could not produce a reliable answer fast enough.*\n\nSend the question again and I will retry with a tighter response.";
+const FAST_FALLBACK = "__FAST_FALLBACK_INTERNAL__";
 
 const DEEP_BRAIN = `You are ClawCloud AI on WhatsApp.
 
@@ -275,8 +283,7 @@ Greeting deep mode:
 - Be warm, brief, and polished.`,
 };
 
-const DEEP_FALLBACK =
-  "*I could not produce a reliable deep answer right now.*\n\nI can retry, or I can answer in fast mode instead.";
+const DEEP_FALLBACK = "__DEEP_FALLBACK_INTERNAL__";
 
 const RECOVERY_MODELS: Partial<Record<IntentType, string[]>> = {
   coding: [
@@ -376,12 +383,22 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
 
   const normalized = value.toLowerCase();
   return (
-    value === FAST_FALLBACK
-    || value === DEEP_FALLBACK
+    normalized.includes("__fast_fallback_internal__")
+    || normalized.includes("__deep_fallback_internal__")
     || value === FALLBACK
-    || normalized.includes("could not produce a reliable")
-    || normalized.includes("let me try that again")
-    || normalized.includes("send the question again and i will retry")
+    || normalized.startsWith("*i could not")
+    || normalized.startsWith("i could not")
+    || normalized.startsWith("i'm sorry")
+    || normalized.startsWith("i am sorry")
+    || normalized.includes("reliable answer")
+    || normalized.includes("send the question again")
+    || normalized.includes("something went wrong")
+    || normalized.includes("temporarily unavailable")
+    || normalized.includes("try again later")
+    || normalized.includes("i don't have enough information")
+    || normalized.includes("i cannot answer")
+    || normalized.includes("outside my expertise")
+    || normalized.includes("as an ai")
   );
 }
 
@@ -416,8 +433,54 @@ function isProbablyIncompleteReply(message: string, intent: IntentType, reply: s
   return false;
 }
 
+function buildDeterministicChatFallback(message: string, intent: IntentType) {
+  const text = message.toLowerCase().trim();
+
+  if (
+    intent === "greeting" ||
+    /^(hi+|hello+|hey+|good\s+(morning|afternoon|evening|night)|namaste|hola|bonjour|ciao|sup|yo|what'?s up|howdy|greetings)\b/.test(text)
+  ) {
+    return [
+      "👋 *Hey! I'm doing great.*",
+      "",
+      "I'm ready to help with *coding, math, writing, research, email, reminders,* and *WhatsApp workflow tasks* right here.",
+      "",
+      "What do you want to work on?",
+    ].join("\n");
+  }
+
+  if (/\b(what can you do|what do you do|your capabilities|help me with|features|who are you)\b/.test(text)) {
+    return [
+      "🦞 *Here’s what I can do for you:*",
+      "",
+      "• *Code* - write, debug, review, and explain code in any major language",
+      "• *Math* - solve questions step by step with clear final answers",
+      "• *Writing* - emails, reports, posts, resumes, and polished drafts",
+      "• *Research* - explain topics, compare options, and summarize clearly",
+      "• *Productivity* - reminders, calendar help, and WhatsApp task support",
+      "",
+      "Send me a real task and I’ll jump straight into it.",
+    ].join("\n");
+  }
+
+  if (/\b(test|working|alive|are you there|respond)\b/.test(text)) {
+    return [
+      "✅ *Yes, I'm here and working.*",
+      "",
+      "Send me any real question - technical, academic, writing, planning, or general - and I’ll handle it.",
+    ].join("\n");
+  }
+
+  return null;
+}
+
 function bestEffortProfessionalTemplate(intent: IntentType, message: string) {
   const compactQuestion = message.trim().replace(/\s+/g, " ").slice(0, 180);
+  const deterministic = buildDeterministicChatFallback(message, intent);
+
+  if (deterministic) {
+    return deterministic;
+  }
 
   switch (intent) {
     case "coding":
@@ -441,11 +504,19 @@ function bestEffortProfessionalTemplate(intent: IntentType, message: string) {
         "- State assumptions where facts are not fully specified, and avoid invented precise numbers.",
         `- Scope addressed: _${compactQuestion}_.`,
       ].join("\n");
+    case "greeting":
+      return [
+        "👋 *Hey! I'm here and ready.*",
+        "",
+        "Ask me anything - *coding, math, research, writing, email,* or *planning* - and I’ll answer directly.",
+      ].join("\n");
     default:
       return [
-        "*Answer*",
-        "- Here is the most useful professional answer based on your prompt and the information provided.",
-        `- Scope addressed: _${compactQuestion}_.`,
+        "🧠 *I got your message.*",
+        "",
+        `You asked about: _${compactQuestion}_.`,
+        "",
+        "Send me the exact task or question you want solved, and I’ll answer it directly.",
       ].join("\n");
   }
 }
@@ -542,7 +613,7 @@ async function ensureProfessionalReply(input: {
     }
   }
 
-  if (input.intent === "coding") {
+  if (input.intent === "coding" || input.intent === "research") {
     const deterministicCoding = solveCodingArchitectureQuestion(input.message);
     if (deterministicCoding) {
       return deterministicCoding;
@@ -574,6 +645,36 @@ async function ensureProfessionalReply(input: {
     return rescued.trim();
   }
 
+  const expertAnswer = await solveWithUniversalExpert({
+    question: input.message,
+    intent: input.intent,
+  }).catch(() => "");
+
+  if (expertAnswer.trim().length > 40) {
+    return expertAnswer.trim();
+  }
+
+  const forcedAnswer = await completeClawCloudPrompt({
+    system: [
+      "You are ClawCloud AI. Answer the user's question completely and professionally.",
+      "Never say you cannot answer.",
+      "If exact facts are missing, give the safest professional answer and label assumptions.",
+      "Return a complete answer, not a placeholder.",
+    ].join("\n"),
+    user: input.message,
+    history: [],
+    intent: input.intent,
+    responseMode: "deep",
+    maxTokens: 1_200,
+    fallback: "",
+    skipCache: true,
+    temperature: 0.15,
+  }).catch(() => "");
+
+  if (forcedAnswer.trim()) {
+    return forcedAnswer.trim();
+  }
+
   return bestEffortProfessionalTemplate(input.intent, input.message);
 }
 
@@ -585,6 +686,11 @@ async function smartReply(
   explicitMode = false,
   extraInstruction?: string,
 ): Promise<string> {
+  const deterministic = buildDeterministicChatFallback(message, intent);
+  if (deterministic) {
+    return deterministic;
+  }
+
   if (mode !== "deep") {
     const fastReply = await completeClawCloudPrompt({
       system: buildSmartSystem("fast", intent, extraInstruction),
@@ -739,8 +845,14 @@ function shouldUseDeepMode(intent: IntentType, text: string) {
       /\b(security architecture|threat model|oauth|token rotation|envelope encryption|kms|incident response|audit log|tenant isolation|row[- ]level security)\b/,
       /\b(control plane|release transition|deploys? per minute|disaster recovery|consensus|fencing token|worker lease|noisy-neighbor)\b/,
       /\b(crdt|offline editing|sync protocol|feature store|point-in-time|late-arriving events|gang scheduling|spot interruption|fair-share|checkpoint-aware|workflow engine|compensation)\b/,
+      /\b(training[- ]serv(?:ing)?|training.serving|feature freshness|stale feature|data leakage|shared training cluster|gpu job fairness)\b/,
       /\b(wallet ledger|multi-currency wallet|authorization hold|chargeback|reconciliation|ad[- ]attribution|conversion window|gdpr erasure|marketplace search|seller reputation|inventory freshness|fraud suppression)\b/,
       /\b(cold-chain|vaccine|sensor calibration drift|batch recall|gdp|gxp|crispr|guide counts|hit calling|bioinformatics pipeline)\b/,
+      /\b(carbon credit|carbon registry|offset retirement|article 6|itmo|corsia|serial issuance|retirement certificate)\b/,
+      /\b(rag\b|retrieval-augmented|retrieval augmented|vector search|embedding retrieval|rerank|hybrid retrieval|chunking strategy)\b/,
+      /\b(mlops|model registry|data drift|concept drift|feature drift|shadow deploy(?:ment)?|canary model)\b/,
+      /\b(satellite|conjunction|collision avoidance|maneuver planning|probability of collision|encounter frame|cdm)\b/,
+      /\b(hospital.*(?:ai|assistant|copilot)|medical.*ai|clinical.*ai|regulated.*ai|human-in-the-loop)\b/,
     ],
     math: [
       /\b(expectancy|cagr|drawdown|correlation|kelly|risk of ruin|probability of ruin|trading system)\b/,
@@ -748,12 +860,22 @@ function shouldUseDeepMode(intent: IntentType, text: string) {
       /\b(bayes|posterior|prevalence|sensitivity|specificity|m\/m\/\d+\+m|queueing|arrival rate|service rate|patience)\b/,
       /\b(hazard ratio|proportional hazards|survival|kaplan[- ]meier|cox model)\b/,
       /\b(value at risk|var|stress loss|beta\(|posterior mean response|treatment lift|heat waves)\b/,
+      /\b(beta|coefficient|standard error|t-?stat|confidence interval|policy study|program evaluation)\b/,
+      /\b(insurance reserv|chain ladder|bornhuetter|ibnr|loss development|actuarial|reserve estimate)\b/,
+      /\b(difference-?in-?differences?|did estimate|parallel trends|event study|staggered did|callaway|sant.?anna|sun.*abraham)\b/,
+      /\b(instrumental variable|iv estimation|2sls|two-stage least squares|weak instrument|exclusion restriction|first stage)\b/,
+      /\b(regression discontinuity|rdd|rd design|running variable|sharp rd|fuzzy rd|bandwidth|mccrary|local linear)\b/,
+      /\b(black-?scholes|option pricing|implied vol|delta hedge|vega|gamma|theta|rho|greeks)\b/,
+      /\b(bond pricing|ytm|yield to maturity|coupon bond|duration|convexity|fixed income|par value)\b/,
+      /\b(cvar|expected shortfall|tail risk|portfolio risk|market risk)\b/,
     ],
     research: [
       /\b(decision memo|regulated|enterprise|tradeoff|rollout|evaluation|red-team|audit|phi|compliance|policy update)\b/,
       /\b(compare|recommendation|hallucination|latency|cost|hybrid|agentic)\b/,
       /\b(financial-services|kyc|fraud|card disputes?|power-grid|telemetry|safety manuals?|outage logs|human override)\b/,
       /\b(cbdc|central bank|financial inclusion|programmable disbursements|offline-capable)\b/,
+      /\b(carbon registry|offset retirement|article 6|itmo|corsia|retirement certificate)\b/,
+      /\b(satellite|conjunction|collision avoidance|maneuver planning|probability of collision)\b/,
     ],
     general: [
       /\b(compare|analyze|strategy|architecture|decision|tradeoff)\b/,
@@ -788,6 +910,48 @@ async function expertReply(
   }
 
   if (intent === "research") {
+    const deterministicCoding = solveCodingArchitectureQuestion(message);
+    if (deterministicCoding) {
+      return deterministicCoding;
+    }
+
+    const deterministicMath = solveHardMathQuestion(message);
+    if (deterministicMath) {
+      return deterministicMath;
+    }
+
+    if (isArchitectureOrDesignQuestion(message)) {
+      return solveWithUniversalExpert({
+        question: message,
+        intent: "coding",
+      }).catch(() => null);
+    }
+
+    if (isMathOrStatisticsQuestion(message)) {
+      return solveWithUniversalExpert({
+        question: message,
+        intent: "math",
+      }).catch(() => null);
+    }
+
+    if (!looksLikeRealtimeResearch(message) && message.length > 70) {
+      const domain = await semanticDomainClassify(message).catch(() => "GENERAL");
+
+      if (domain === "ML_SYSTEMS" || domain === "SYS_ARCH" || domain === "REGULATED_AI") {
+        return solveWithUniversalExpert({
+          question: message,
+          intent: "coding",
+        }).catch(() => null);
+      }
+
+      if (domain === "FINANCE_MATH" || domain === "CAUSAL_STATS" || domain === "CLINICAL_BIO") {
+        return solveWithUniversalExpert({
+          question: message,
+          intent: "math",
+        }).catch(() => null);
+      }
+    }
+
     const history = await buildSmartHistory(userId, message, "deep");
     return runGroundedResearchReply({
       userId,
@@ -814,6 +978,28 @@ async function expertReply(
   return null;
 }
 
+function isArchitectureOrDesignQuestion(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return (
+    /\b(how (do|should|would|can) (i|we|you) (design|build|implement|architect|structure|handle|store|model|process))\b/.test(normalized)
+    || /\b(best (way|approach|practice|pattern|design) (to|for) (build|implement|design|store|handle|process))\b/.test(normalized)
+    || /\b(design (a|an|the) (system|platform|service|api|database|pipeline|architecture|ledger|registry|copilot))\b/.test(normalized)
+    || /\b(system design|distributed system|architecture (for|of)|data model (for|of)|schema (for|of))\b/.test(normalized)
+    || /\b(what('s| is) the (best|right|correct|proper) (way|approach|pattern|design) (to|for))\b/.test(normalized)
+  );
+}
+
+function isMathOrStatisticsQuestion(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return (
+    /\b(calculate|compute|derive|estimate|solve|formula (for|to)|what is the (formula|equation)|how (do i|do you|to) calculate)\b/.test(normalized)
+    || /\b(probability (of|that)|expected value|confidence interval|p-?value|standard deviation|variance of|mean of|standard error|t-?stat)\b/.test(normalized)
+    || /\b(statistical(ly)?|regression|correlation|significance|hypothesis|distribution of|normal distribution|beta|coefficient|policy study|program evaluation)\b/.test(normalized)
+    || /\b(if .{0,40}what (is|are|would|will)|given .{0,40}(find|calculate|compute|estimate|what))\b/.test(normalized)
+    || /\b(\d+%.*\d+%|\d+\s*(out of|of)\s*\d+)\b/.test(normalized)
+  );
+}
+
 type DetectedIntent = { type: IntentType; category: string };
 
 function looksLikeResearchMemoQuestion(text: string) {
@@ -829,9 +1015,9 @@ function looksLikeArchitectureCodingQuestion(text: string, rawText: string, word
   }
 
   return (
-    /\b(system design|system architecture|platform architecture|security architecture|control plane|distributed system|threat model|incident response|envelope encryption|tenant isolation|row[- ]level security|audit log|kms|token rotation|exactly-?once|release transition|disaster recovery|fencing token|worker lease|noisy-neighbor|workflow engine|feature store|collaborative document|offline editing|sync protocol|crdt|gang scheduling|checkpoint-aware|gpu scheduler|wallet ledger|multi-currency wallet|chargeback|reconciliation|ad[- ]attribution|privacy-preserving attribution|marketplace search|ranking platform|inventory freshness|seller reputation|fraud suppression|cold-chain|sensor calibration|batch recall|crispr|guide counts|hit calling|bioinformatics pipeline)\b/.test(text)
+    /\b(system design|system architecture|platform architecture|security architecture|control plane|distributed system|threat model|incident response|envelope encryption|tenant isolation|row[- ]level security|audit log|kms|token rotation|exactly-?once|release transition|disaster recovery|fencing token|worker lease|noisy-neighbor|workflow engine|feature store|collaborative document|offline editing|sync protocol|crdt|gang scheduling|checkpoint-aware|gpu scheduler|wallet ledger|multi-currency wallet|chargeback|reconciliation|ad[- ]attribution|privacy-preserving attribution|marketplace search|ranking platform|inventory freshness|seller reputation|fraud suppression|cold-chain|sensor calibration|batch recall|crispr|guide counts|hit calling|bioinformatics pipeline|training[- ]serv(?:ing)?|training.serving|feature freshness|stale feature|data leakage|shared training cluster|gpu job fairness|hospital.*(?:ai|assistant|copilot)|medical.*ai|clinical.*ai|regulated.*ai|human-in-the-loop|carbon registry|offset retirement|article 6|itmo|corsia|serial issuance|retirement certificate|rag\b|retrieval-augmented|retrieval augmented|vector search|embedding retrieval|rerank|hybrid retrieval|chunking strategy|mlops|model registry|data drift|concept drift|feature drift|shadow deploy(?:ment)?|canary model|satellite|conjunction|collision avoidance|maneuver planning|probability of collision|encounter frame|cdm)\b/.test(text)
     || (
-      /\b(oauth|token|secret|webhook|deploy|release|queue|worker|consensus|rollback|migration|cutover|feature store|crdt|checkpoint|gpu|workflow|backfill|point-in-time|wallet|chargeback|attribution|search ranking|inventory|seller reputation|cold-chain|vaccine|crispr|guide count|hit calling)\b/.test(text)
+      /\b(oauth|token|secret|webhook|deploy|release|queue|worker|consensus|rollback|migration|cutover|feature store|crdt|checkpoint|gpu|workflow|backfill|point-in-time|wallet|chargeback|attribution|search ranking|inventory|seller reputation|cold-chain|vaccine|crispr|guide count|hit calling|training[- ]serv(?:ing)?|feature freshness|stale feature|data leakage|hospital.*ai|medical.*ai|clinical.*ai|regulated.*ai|registry|retirement|serial issuance|rag|retrieval|vector search|rerank|chunking|embedding|model registry|drift|shadow deploy|canary|satellite|conjunction|maneuver|collision)\b/.test(text)
       && /\b(design|implement|build|handle|secure|scale|system|service|platform|saas|multi-tenant|production)\b/.test(text)
     )
     || (words.length > 12 && /```/.test(rawText))
@@ -856,6 +1042,11 @@ function detectIntent(text: string): DetectedIntent {
     return { type: "research", category: "research" };
   }
 
+  // === NEWS ===
+  if (detectNewsQuestion(t)) {
+    return { type: "research", category: "news" };
+  }
+
   // === CODING ===
   if (
     looksLikeArchitectureCodingQuestion(t, text, words) ||
@@ -873,7 +1064,7 @@ function detectIntent(text: string): DetectedIntent {
     /\b(calculate|compute|solve|evaluate|simplify|differentiate|integrate|derivative|integral|probability|statistics|percentage|convert|how many|how much is \d)\b/.test(t) ||
     /\d+\s*[\+\-\*\/\^%]\s*\d+/.test(t) ||
     /\b(what is \d[\d,]*\.?\d*\s*[\+\-\*\/])\b/.test(t) ||
-    /\b(square root|cube root|factorial|logarithm|trigonometry|sin|cos|tan|equation|expectancy|expected value|win rate|loss rate|bankroll|kelly|risk of ruin|probability of ruin|trading strategy|r multiple|r-multiple|bayes|posterior|prevalence|sensitivity|specificity|queueing|m\/m\/\d+\+m|arrival rate|service rate|patience|hazard ratio|survival|kaplan[- ]meier|cox model|proportional hazards|value at risk|var|stress loss|beta\(|treatment lift|posterior mean response)\b/.test(t)
+    /\b(square root|cube root|factorial|logarithm|trigonometry|sin|cos|tan|equation|expectancy|expected value|win rate|loss rate|bankroll|kelly|risk of ruin|probability of ruin|trading strategy|r multiple|r-multiple|bayes|posterior|prevalence|sensitivity|specificity|queueing|m\/m\/\d+\+m|arrival rate|service rate|patience|hazard ratio|survival|kaplan[- ]meier|cox model|proportional hazards|value at risk|var|stress loss|beta\(|beta|coefficient|standard error|t-?stat|confidence interval|policy study|program evaluation|treatment lift|posterior mean response|difference-?in-?differences?|parallel trends|event study|instrumental variable|2sls|weak instrument|regression discontinuity|rdd|running variable|mccrary|black-?scholes|option pricing|implied vol|greeks|bond pricing|ytm|yield to maturity|duration|convexity|cvar|expected shortfall|tail risk|portfolio risk|insurance reserv|chain ladder|bornhuetter|ibnr|loss development|actuarial)\b/.test(t)
   ) return { type: "math", category: "math" };
 
   // === EMAIL DRAFTING ===
@@ -934,6 +1125,60 @@ function detectIntent(text: string): DetectedIntent {
 
 // ─── Main router ──────────────────────────────────────────────────────────────
 
+async function notifyBackgroundTaskFailure(
+  userId: string,
+  locale: SupportedLocale,
+  taskLabel: string,
+  error: unknown,
+) {
+  const messageText = error instanceof Error ? error.message : String(error);
+  console.error(`[agent] ${taskLabel} failed for ${userId}:`, messageText);
+
+  const userError = messageText.includes("Daily limit")
+    ? "⚠️ *Daily limit reached.*\n\nYou have used all your runs today. Upgrade at swift-deploy.in/pricing"
+    : /(gmail|token|oauth|google)/i.test(messageText)
+    ? `⚠️ *${taskLabel} could not access Gmail.*\n\nYour Google connection may need to be reconnected at swift-deploy.in.`
+    : /(calendar)/i.test(messageText)
+    ? `⚠️ *${taskLabel} could not access your calendar.*\n\nPlease reconnect Google Calendar at swift-deploy.in and try again.`
+    : /(whatsapp|session|deliver)/i.test(messageText)
+    ? `⚠️ *${taskLabel} finished but delivery failed.*\n\nPlease try again in a moment.`
+    : `⚠️ *${taskLabel} ran into a problem.*\n\nPlease try again in a few minutes.`;
+
+  await sendClawCloudWhatsAppMessage(userId, await translateMessage(userError, locale)).catch(
+    () => null,
+  );
+}
+
+function runTaskFireAndForget(
+  userId: string,
+  taskType: ClawCloudTaskType,
+  userMessage: string | null | undefined,
+  locale: SupportedLocale,
+  taskLabel: string,
+) {
+  void (async () => {
+    try {
+      await runClawCloudTask({ userId, taskType, userMessage });
+    } catch (error) {
+      await notifyBackgroundTaskFailure(userId, locale, taskLabel, error);
+    }
+  })();
+}
+
+function runReplyApprovalsFireAndForget(
+  userId: string,
+  count: number,
+  locale: SupportedLocale,
+) {
+  void (async () => {
+    try {
+      await sendReplyApprovalRequests(userId, count);
+    } catch (error) {
+      await notifyBackgroundTaskFailure(userId, locale, "Email drafting", error);
+    }
+  })();
+}
+
 export async function routeInboundAgentMessage(
   userId: string,
   message: string,
@@ -947,11 +1192,36 @@ export async function routeInboundAgentMessage(
   if (approval.handled) return approval.response;
 
   const locale = await getUserLocale(userId);
-  const { type, category } = detectIntent(trimmed);
-  const responseMode = resolveResponseMode(type, trimmed, requested.mode);
+  const detected = detectIntent(trimmed);
+  let resolvedType = detected.type;
+  let resolvedCategory = detected.category;
+
+  if (resolvedCategory !== "math" && isMathOrStatisticsQuestion(trimmed)) {
+    resolvedType = "math";
+    resolvedCategory = "math";
+  } else if (resolvedCategory !== "coding" && isArchitectureOrDesignQuestion(trimmed)) {
+    resolvedType = "coding";
+    resolvedCategory = "coding";
+  } else if (
+    resolvedCategory === "research"
+    && !looksLikeRealtimeResearch(trimmed)
+    && trimmed.length > 70
+  ) {
+    const domain = await semanticDomainClassify(trimmed).catch(() => "GENERAL");
+
+    if (domain === "FINANCE_MATH" || domain === "CAUSAL_STATS" || domain === "CLINICAL_BIO") {
+      resolvedType = "math";
+      resolvedCategory = "math";
+    } else if (domain === "ML_SYSTEMS" || domain === "SYS_ARCH" || domain === "REGULATED_AI") {
+      resolvedType = "coding";
+      resolvedCategory = "coding";
+    }
+  }
+
+  const responseMode = resolveResponseMode(resolvedType, trimmed, requested.mode);
   const explicitMode = requested.explicit;
 
-  switch (category) {
+  switch (resolvedCategory) {
 
     case "spending": {
       const ans = await answerSpendingQuestion(userId, trimmed);
@@ -960,10 +1230,11 @@ export async function routeInboundAgentMessage(
     }
 
     case "draft_email": {
+      const count = /all|every|each/i.test(trimmed) ? 3 : 1;
       const ack = await fastAckQuick(
-        `User message: "${trimmed}". They want email help. Acknowledge you're checking their inbox and drafting. 1-2 lines max.`
+        `User message: "${trimmed}". They want email help. Acknowledge you're checking their inbox and drafting ${count} reply${count === 1 ? "" : "s"}. 1-2 lines max.`
       );
-      sendReplyApprovalRequests(userId, /all|every|each/i.test(trimmed) ? 3 : 1).catch(() => null);
+      runReplyApprovalsFireAndForget(userId, count, locale);
       return translateMessage(ack, locale);
     }
 
@@ -971,7 +1242,7 @@ export async function routeInboundAgentMessage(
       const ack = await fastAckQuick(
         `User message: "${trimmed}". They want to search email. Acknowledge you're searching their inbox. 1 line max.`
       );
-      runClawCloudTask({ userId, taskType: "email_search", userMessage: trimmed }).catch(() => null);
+      runTaskFireAndForget(userId, "email_search", trimmed, locale, "Email search");
       return translateMessage(ack, locale);
     }
 
@@ -979,17 +1250,46 @@ export async function routeInboundAgentMessage(
       const ack = await fastAckQuick(
         `User message: "${trimmed}". They want a reminder set. Confirm you're setting it with the task and time in *bold*. 1-2 lines.`
       );
-      runClawCloudTask({ userId, taskType: "custom_reminder", userMessage: trimmed }).catch(() => null);
+      runTaskFireAndForget(userId, "custom_reminder", trimmed, locale, "Reminder");
       return translateMessage(ack, locale);
     }
 
     case "calendar": {
       const ack = await fastAckQuick("User wants calendar info. 1 line: checking schedule.");
-      runClawCloudTask({ userId, taskType: "meeting_reminders" }).catch(() => null);
+      runTaskFireAndForget(userId, "meeting_reminders", null, locale, "Calendar check");
       return translateMessage(ack, locale);
     }
 
+    case "news": {
+      if (hasNewsProviders()) {
+        const answer = await answerNewsQuestion(trimmed).catch(() => "");
+        if (answer.trim()) {
+          return translateMessage(answer, locale);
+        }
+      }
+
+      const history = await buildSmartHistory(userId, trimmed, "deep");
+      const fallback = await runGroundedResearchReply({
+        userId,
+        question: trimmed,
+        history,
+      }).catch(() => "");
+
+      const normalizedFallback = fallback?.trim() ?? "";
+      if (normalizedFallback) {
+        return translateMessage(normalizedFallback, locale);
+      }
+
+      const reply = await smartReply(userId, trimmed, "research", responseMode, explicitMode);
+      return translateMessage(reply, locale);
+    }
+
     case "coding": {
+      const deterministic = solveCodingArchitectureQuestion(trimmed);
+      if (deterministic) {
+        return translateMessage(deterministic, locale);
+      }
+
       const reply =
         responseMode === "deep"
           ? (await expertReply(userId, trimmed, "coding"))
@@ -999,11 +1299,24 @@ export async function routeInboundAgentMessage(
     }
 
     case "math": {
-      const reply =
-        responseMode === "deep"
-          ? (await expertReply(userId, trimmed, "math"))
-            ?? await smartReply(userId, trimmed, "math", responseMode, explicitMode)
-          : await smartReply(userId, trimmed, "math", responseMode, explicitMode);
+      const mathExpert = await expertReply(userId, trimmed, "math");
+      if (mathExpert) {
+        return translateMessage(mathExpert, locale);
+      }
+
+      const mathDomain = await semanticDomainClassify(trimmed).catch(() => "GENERAL");
+      if (mathDomain === "FINANCE_MATH" || mathDomain === "CAUSAL_STATS" || mathDomain === "CLINICAL_BIO") {
+        const semanticAnswer = await solveWithUniversalExpert({
+          question: trimmed,
+          intent: "math",
+        }).catch(() => "");
+
+        if (semanticAnswer.trim()) {
+          return translateMessage(semanticAnswer, locale);
+        }
+      }
+
+      const reply = await smartReply(userId, trimmed, "math", responseMode, explicitMode);
       return translateMessage(reply, locale);
     }
 
@@ -1013,11 +1326,12 @@ export async function routeInboundAgentMessage(
     }
 
     case "research": {
-      const reply =
-        responseMode === "deep"
-          ? (await expertReply(userId, trimmed, "research"))
-            ?? await smartReply(userId, trimmed, "research", responseMode, explicitMode)
-          : await smartReply(userId, trimmed, "research", responseMode, explicitMode);
+      const expertAnswer = await expertReply(userId, trimmed, "research");
+      if (expertAnswer) {
+        return translateMessage(expertAnswer, locale);
+      }
+
+      const reply = await smartReply(userId, trimmed, "research", responseMode, explicitMode);
       return translateMessage(reply, locale);
     }
 
@@ -1027,7 +1341,7 @@ export async function routeInboundAgentMessage(
     }
 
     default: {
-      const reply = await smartReply(userId, trimmed, type, responseMode, explicitMode);
+      const reply = await smartReply(userId, trimmed, resolvedType, responseMode, explicitMode);
       return translateMessage(reply, locale);
     }
   }
