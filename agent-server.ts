@@ -100,17 +100,39 @@ const NVIDIA_ENV_KEYS = [
   "NVIDIA_API_KEY",
   "NVDIA_API_KEY",
   "NVDA_API_KEY",
+  "NVIDIA_APIKEY",
   "NVIDIA_KEY",
   "NVIDIA_TOKEN",
 ] as const;
 
+function looksLikeNvidiaApiKey(value: string) {
+  return /^nvapi-[A-Za-z0-9._-]{20,}$/.test(value.trim());
+}
+
 function resolveNvidiaApiKey() {
   for (const key of NVIDIA_ENV_KEYS) {
     const value = process.env[key]?.trim();
-    if (value) {
+    if (value && looksLikeNvidiaApiKey(value)) {
       return { key, value };
     }
   }
+
+  for (const [key, raw] of Object.entries(process.env)) {
+    const value = String(raw ?? "").trim();
+    if (!value) continue;
+    if (!/nvidia|nvda|nvdia|nvapi/i.test(key)) continue;
+    if (looksLikeNvidiaApiKey(value)) {
+      return { key, value };
+    }
+  }
+
+  for (const [key, raw] of Object.entries(process.env)) {
+    const value = String(raw ?? "").trim();
+    if (looksLikeNvidiaApiKey(value)) {
+      return { key: `(value_scan:${key})`, value };
+    }
+  }
+
   return { key: null as string | null, value: "" };
 }
 

@@ -20,8 +20,58 @@ function readNumber(name: string, fallback: number) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function readBoolean(name: string, fallback = false) {
+  const value = process.env[name]?.trim().toLowerCase();
+  if (!value) {
+    return fallback;
+  }
+
+  return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
+function looksLikeNvidiaApiKey(value: string) {
+  return /^nvapi-[A-Za-z0-9._-]{20,}$/.test(value.trim());
+}
+
+function readNvidiaApiKey() {
+  const explicit = readFirstString([
+    "NVIDIA_API_KEY",
+    "NVDIA_API_KEY",
+    "NVDA_API_KEY",
+    "NVIDIA_APIKEY",
+    "NVIDIA_KEY",
+    "NVIDIA_TOKEN",
+  ]);
+
+  if (looksLikeNvidiaApiKey(explicit)) {
+    return explicit;
+  }
+
+  for (const [key, raw] of Object.entries(process.env)) {
+    const value = String(raw ?? "").trim();
+    if (!value) continue;
+    if (!/nvidia|nvda|nvdia|nvapi/i.test(key)) continue;
+    if (looksLikeNvidiaApiKey(value)) {
+      return value;
+    }
+  }
+
+  for (const raw of Object.values(process.env)) {
+    const value = String(raw ?? "").trim();
+    if (looksLikeNvidiaApiKey(value)) {
+      return value;
+    }
+  }
+
+  return "";
+}
+
+const defaultPublicGoogleEnabled = /localhost|127\.0\.0\.1/i.test(
+  readFirstString(["NEXT_PUBLIC_APP_URL", "NEXTJS_URL"]),
+);
+
 export const env = {
-  NVIDIA_API_KEY: readString("NVIDIA_API_KEY"),
+  NVIDIA_API_KEY: readNvidiaApiKey(),
   NVIDIA_BASE_URL: readString(
     "NVIDIA_BASE_URL",
     "https://integrate.api.nvidia.com/v1",
@@ -101,6 +151,7 @@ export const env = {
   RAZORPAY_PLAN_PRO_MONTHLY: readString("RAZORPAY_PLAN_PRO_MONTHLY"),
   RAZORPAY_PLAN_PRO_ANNUAL: readString("RAZORPAY_PLAN_PRO_ANNUAL"),
   AGENT_SERVER_URL: readString("AGENT_SERVER_URL"),
+  BACKEND_API_URL: readString("BACKEND_API_URL"),
   AGENT_SECRET: readString("AGENT_SECRET"),
   NEXT_PUBLIC_APP_URL: readFirstString(["NEXT_PUBLIC_APP_URL", "NEXTJS_URL"]),
   NEXTJS_URL: readString("NEXTJS_URL"),
@@ -110,6 +161,16 @@ export const env = {
     "GOOGLE_OAUTH_CLIENT_SECRET",
   ]),
   GOOGLE_REDIRECT_URI: readString("GOOGLE_REDIRECT_URI"),
+  GOOGLE_SIGNIN_PUBLIC_ENABLED: readBoolean(
+    "GOOGLE_SIGNIN_PUBLIC_ENABLED",
+    defaultPublicGoogleEnabled,
+  ),
+  GOOGLE_WORKSPACE_PUBLIC_ENABLED: readBoolean(
+    "GOOGLE_WORKSPACE_PUBLIC_ENABLED",
+    defaultPublicGoogleEnabled,
+  ),
+  // Temporary global hold for Gmail/Calendar connect while verification is pending.
+  GOOGLE_WORKSPACE_TEMPORARY_HOLD: readBoolean("GOOGLE_WORKSPACE_TEMPORARY_HOLD", true),
   TELEGRAM_BOT_TOKEN: readString("TELEGRAM_BOT_TOKEN"),
   TELEGRAM_BOT_USERNAME: readString("TELEGRAM_BOT_USERNAME"),
   TELEGRAM_WEBHOOK_SECRET: readString("TELEGRAM_WEBHOOK_SECRET"),
@@ -169,6 +230,11 @@ export function getPublicAppConfig(): PublicAppConfig {
     supabaseUrl: env.SUPABASE_URL,
     supabaseAnonKey: env.SUPABASE_ANON_KEY,
     appUrl: env.NEXT_PUBLIC_APP_URL,
+    googleRollout: {
+      publicSignInEnabled: env.GOOGLE_SIGNIN_PUBLIC_ENABLED,
+      publicWorkspaceEnabled:
+        env.GOOGLE_WORKSPACE_PUBLIC_ENABLED && !env.GOOGLE_WORKSPACE_TEMPORARY_HOLD,
+    },
     firebase: {
       apiKey: env.FIREBASE_API_KEY,
       authDomain: env.FIREBASE_AUTH_DOMAIN,
