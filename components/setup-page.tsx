@@ -9,6 +9,7 @@ import { markOnboardingComplete } from "@/lib/onboarding";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 import type { PublicAppConfig } from "@/lib/types";
 
+import { SetupStepOnePanel } from "./setup-step1-panel";
 import styles from "./setup-page.module.css";
 
 type SetupPageProps = {
@@ -100,6 +101,9 @@ const taskChipLabels: Record<TaskId, string> = {
   remind: "⏰ Custom reminders",
 };
 
+const googleWorkspaceRolloutMessage =
+  "Google Workspace is temporarily paused while ClawCloud finishes verification. Continue setup now and connect Google later from the dashboard.";
+
 const timeOptions = ["6:00 AM", "7:00 AM", "8:00 AM", "9:00 AM"] as const;
 
 const qrAnchorCells = new Set<number>([
@@ -135,29 +139,6 @@ function getStepState(step: StepNumber, currentStep: StepNumber, setupComplete: 
   }
 
   return "idle";
-}
-
-function GoogleIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        fill="#4285F4"
-        d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09Z"
-      />
-      <path
-        fill="#34A853"
-        d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77a6.61 6.61 0 0 1-3.71 1.06c-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84A11.01 11.01 0 0 0 12 23Z"
-      />
-      <path
-        fill="#FBBC05"
-        d="M5.84 14.09A6.77 6.77 0 0 1 5.49 12c0-.73.13-1.43.35-2.09V7.07H2.18A11.1 11.1 0 0 0 1 12c0 1.78.43 3.45 1.18 4.93l3.66-2.84Z"
-      />
-      <path
-        fill="#EA4335"
-        d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1A11.01 11.01 0 0 0 2.18 7.07l3.66 2.84C6.71 7.31 9.14 5.38 12 5.38Z"
-      />
-    </svg>
-  );
 }
 
 function buildWhatsAppChatLink(phone: string | null) {
@@ -196,6 +177,7 @@ export function SetupPage({ config }: SetupPageProps) {
   const [waQrImage, setWaQrImage] = useState<string | null>(null);
   const [waQrError, setWaQrError] = useState("");
   const [waLoading, setWaLoading] = useState(false);
+  const [waForceRefreshRequested, setWaForceRefreshRequested] = useState(false);
   const [stepTwoComplete, setStepTwoComplete] = useState(false);
   const [qrSeed, setQrSeed] = useState(1);
   const [qrSeconds, setQrSeconds] = useState(299);
@@ -329,6 +311,7 @@ export function SetupPage({ config }: SetupPageProps) {
     setQrSeed((seed) => seed + 1);
     setScanPhase("waiting");
     setWaQrError("");
+    setWaForceRefreshRequested(false);
   }, [currentStep, stepTwoComplete, waConnected]);
 
   useEffect(() => {
@@ -349,7 +332,8 @@ export function SetupPage({ config }: SetupPageProps) {
         if (current <= 1) {
           setQrSeed((seed) => seed + 1);
           setScanPhase("waiting");
-          showToastRef.current("QR code refreshed");
+          setWaForceRefreshRequested(true);
+          showToastRef.current("Refreshing live QR...");
           return 299;
         }
 
@@ -377,7 +361,12 @@ export function SetupPage({ config }: SetupPageProps) {
       setWaLoading(true);
 
       try {
-        const response = await fetch("/api/whatsapp/connect", {
+        const refreshNow = waForceRefreshRequested;
+        const endpoint = refreshNow
+          ? "/api/whatsapp/connect?refresh=1"
+          : "/api/whatsapp/connect";
+
+        const response = await fetch(endpoint, {
           headers: {
             Authorization: `Bearer ${authAccessToken}`,
           },
@@ -392,6 +381,9 @@ export function SetupPage({ config }: SetupPageProps) {
           const message = payload?.error || "Unable to start WhatsApp connection.";
           setWaQrError(message);
           setWaLoading(false);
+          if (refreshNow) {
+            setWaForceRefreshRequested(false);
+          }
           if (showErrors) {
             showToastRef.current(message);
           }
@@ -416,6 +408,9 @@ export function SetupPage({ config }: SetupPageProps) {
         setScanPhase(nextScanPhase);
         setWaQrImage(payload?.qr ?? null);
         setWaLoading(false);
+        if (refreshNow) {
+          setWaForceRefreshRequested(false);
+        }
       } catch (error) {
         if (cancelled) {
           return;
@@ -425,6 +420,9 @@ export function SetupPage({ config }: SetupPageProps) {
           error instanceof Error ? error.message : "Unable to reach the WhatsApp agent server.";
         setWaQrError(message);
         setWaLoading(false);
+        if (waForceRefreshRequested) {
+          setWaForceRefreshRequested(false);
+        }
         if (showErrors) {
           showToastRef.current(message);
         }
@@ -440,7 +438,7 @@ export function SetupPage({ config }: SetupPageProps) {
       cancelled = true;
       window.clearInterval(pollId);
     };
-  }, [authAccessToken, currentStep, isConfigured, stepTwoComplete, waConnected]);
+  }, [authAccessToken, currentStep, isConfigured, stepTwoComplete, waConnected, waForceRefreshRequested]);
 
   useEffect(() => {
     const gmailConnectedFromSearch = searchParams.get("gmail") === "connected";
@@ -457,15 +455,32 @@ export function SetupPage({ config }: SetupPageProps) {
     }
 
     if (setupError) {
-      showToast(setupError);
+      if (setupError === googleWorkspaceRolloutMessage) {
+        setStepOneComplete(true);
+      } else {
+        showToast(setupError);
+      }
     }
   }, [searchParams]);
+
+  useEffect(() => {
+    if (!config.googleRollout.publicWorkspaceEnabled) {
+      clearGoogleTimeouts();
+      setGoogleConnecting(false);
+      setStepOneComplete(true);
+    }
+  }, [config.googleRollout.publicWorkspaceEnabled]);
 
   function handleGoToStep(step: StepNumber) {
     setCurrentStep(step);
   }
 
   function handleStartGmailConnect() {
+    if (!config.googleRollout.publicWorkspaceEnabled) {
+      showToast(googleWorkspaceRolloutMessage);
+      return;
+    }
+
     if (gmailConnected || googleConnecting) {
       return;
     }
@@ -474,6 +489,11 @@ export function SetupPage({ config }: SetupPageProps) {
   }
 
   function handleStartCalendarConnect() {
+    if (!config.googleRollout.publicWorkspaceEnabled) {
+      showToast(googleWorkspaceRolloutMessage);
+      return;
+    }
+
     if (calendarConnected || googleConnecting) {
       return;
     }
@@ -482,12 +502,18 @@ export function SetupPage({ config }: SetupPageProps) {
   }
 
   async function handleConnectGoogle() {
+    if (!config.googleRollout.publicWorkspaceEnabled) {
+      showToast(googleWorkspaceRolloutMessage);
+      return;
+    }
+
     if (googleConnecting || (gmailConnected && calendarConnected)) {
       return;
     }
 
     if (authUserId) {
-      window.location.assign(`/api/auth/google?userId=${encodeURIComponent(authUserId)}`);
+      const freshUrl = `/api/auth/google?userId=${encodeURIComponent(authUserId)}&ts=${Date.now()}`;
+      window.location.assign(freshUrl);
       return;
     }
 
@@ -771,7 +797,24 @@ export function SetupPage({ config }: SetupPageProps) {
           </div>
         ) : currentStep === 1 ? (
           <div className={styles.panel}>
-            <div className={styles.stepHead}>
+            <SetupStepOnePanel
+              gmailStatus={gmailStatus}
+              calendarStatus={calendarStatus}
+              gmailConnected={gmailConnected}
+              calendarConnected={calendarConnected}
+              googleWorkspacePublicEnabled={config.googleRollout.publicWorkspaceEnabled}
+              googleConnecting={googleConnecting}
+              stepOneComplete={stepOneComplete}
+              onStartGmailConnect={handleStartGmailConnect}
+              onStartCalendarConnect={handleStartCalendarConnect}
+              onConnectGoogle={handleConnectGoogle}
+              onSkip={handleSkipGmail}
+              onContinue={() => handleGoToStep(2)}
+              onShowHelp={() => showToast("Opening Gmail setup guide...")}
+            />
+            {/*
+            <div className={step1Styles.step1Panel}>
+              <div className={step1Styles.step1Head}>
               <div className={styles.stepNumTag}>Step 1 of 3</div>
               <h2>Connect your Gmail 📧</h2>
               <p>
@@ -904,6 +947,8 @@ export function SetupPage({ config }: SetupPageProps) {
                 </button>
               </div>
             </div>
+          </div>
+            */}
           </div>
         ) : currentStep === 2 ? (
           <div className={styles.panel}>
@@ -1074,6 +1119,23 @@ export function SetupPage({ config }: SetupPageProps) {
                       </div>
                     </div>
                   </div>
+
+                  {isConfigured ? (
+                    <button
+                      type="button"
+                      className={styles.demoButton}
+                      onClick={() => {
+                        setWaForceRefreshRequested(true);
+                        setWaQrError("");
+                        setWaQrImage(null);
+                        setWaLoading(true);
+                        setScanPhase("waiting");
+                        showToast("Refreshing live QR...");
+                      }}
+                    >
+                      Refresh live QR now
+                    </button>
+                  ) : null}
 
                   {!isConfigured ? (
                     <button

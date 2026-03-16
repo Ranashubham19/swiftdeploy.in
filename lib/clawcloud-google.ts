@@ -11,6 +11,12 @@ const googleScopes = [
   "profile",
 ] as const;
 
+const googleLoginScopes = [
+  "openid",
+  "email",
+  "profile",
+] as const;
+
 type ConnectedGoogleAccount = {
   access_token: string | null;
   refresh_token: string | null;
@@ -42,27 +48,80 @@ type CalendarEvent = {
   description: string | null;
 };
 
-function getGoogleRedirectUri() {
-  return (
-    env.GOOGLE_REDIRECT_URI ||
-    (env.NEXT_PUBLIC_APP_URL ? `${env.NEXT_PUBLIC_APP_URL}/api/auth/google/callback` : "")
-  );
+function normalizeOrigin(value: string | null | undefined) {
+  return String(value ?? "").trim().replace(/\/+$/, "");
 }
 
-function assertGoogleOAuthConfigured() {
-  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !getGoogleRedirectUri()) {
-    throw new Error(
-      "Google OAuth requires GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI or NEXT_PUBLIC_APP_URL.",
-    );
+function getGoogleRedirectUri(requestOrigin?: string) {
+  const configuredRedirectUri = normalizeOrigin(env.GOOGLE_REDIRECT_URI);
+  if (configuredRedirectUri) {
+    return configuredRedirectUri;
+  }
+
+  const configuredAppUrl = normalizeOrigin(env.NEXT_PUBLIC_APP_URL);
+  if (configuredAppUrl) {
+    return `${configuredAppUrl}/api/auth/google/callback`;
+  }
+
+  const liveOrigin = normalizeOrigin(requestOrigin);
+  if (liveOrigin) {
+    return `${liveOrigin}/api/auth/google/callback`;
+  }
+
+  return "";
+}
+
+function getGoogleLoginRedirectUri(requestOrigin?: string) {
+  return getGoogleRedirectUri(requestOrigin);
+}
+
+function assertGoogleOAuthConfigured(requestOrigin?: string) {
+  const missing: string[] = [];
+
+  if (!env.GOOGLE_CLIENT_ID) {
+    missing.push("GOOGLE_CLIENT_ID or GOOGLE_OAUTH_CLIENT_ID");
+  }
+
+  if (!env.GOOGLE_CLIENT_SECRET) {
+    missing.push("GOOGLE_CLIENT_SECRET or GOOGLE_OAUTH_CLIENT_SECRET");
+  }
+
+  if (!getGoogleRedirectUri(requestOrigin)) {
+    missing.push("GOOGLE_REDIRECT_URI, NEXT_PUBLIC_APP_URL, or request origin");
+  }
+
+  if (missing.length > 0) {
+    throw new Error(`Google OAuth is not fully configured. Missing: ${missing.join(", ")}.`);
   }
 }
 
-export function buildClawCloudGoogleAuthUrl(userId: string) {
-  assertGoogleOAuthConfigured();
+function assertGoogleLoginOAuthConfigured(requestOrigin?: string) {
+  const missing: string[] = [];
+
+  if (!env.GOOGLE_CLIENT_ID) {
+    missing.push("GOOGLE_CLIENT_ID or GOOGLE_OAUTH_CLIENT_ID");
+  }
+
+  if (!env.GOOGLE_CLIENT_SECRET) {
+    missing.push("GOOGLE_CLIENT_SECRET or GOOGLE_OAUTH_CLIENT_SECRET");
+  }
+
+  if (!getGoogleLoginRedirectUri(requestOrigin)) {
+    missing.push("NEXT_PUBLIC_APP_URL or request origin");
+  }
+
+  if (missing.length > 0) {
+    throw new Error(`Google login OAuth is not fully configured. Missing: ${missing.join(", ")}.`);
+  }
+}
+
+export function buildClawCloudGoogleAuthUrl(userId: string, requestOrigin?: string) {
+  assertGoogleOAuthConfigured(requestOrigin);
+  const redirectUri = getGoogleRedirectUri(requestOrigin);
 
   const params = new URLSearchParams({
     client_id: env.GOOGLE_CLIENT_ID,
-    redirect_uri: getGoogleRedirectUri(),
+    redirect_uri: redirectUri,
     response_type: "code",
     access_type: "offline",
     prompt: "consent",
@@ -73,8 +132,26 @@ export function buildClawCloudGoogleAuthUrl(userId: string) {
   return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
 }
 
-export async function exchangeClawCloudGoogleCode(code: string) {
-  assertGoogleOAuthConfigured();
+export function buildClawCloudGoogleLoginAuthUrl(state: string, requestOrigin?: string) {
+  assertGoogleLoginOAuthConfigured(requestOrigin);
+  const redirectUri = getGoogleLoginRedirectUri(requestOrigin);
+
+  const params = new URLSearchParams({
+    client_id: env.GOOGLE_CLIENT_ID,
+    redirect_uri: redirectUri,
+    response_type: "code",
+    access_type: "online",
+    prompt: "select_account",
+    scope: googleLoginScopes.join(" "),
+    state,
+  });
+
+  return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+}
+
+export async function exchangeClawCloudGoogleCode(code: string, requestOrigin?: string) {
+  assertGoogleOAuthConfigured(requestOrigin);
+  const redirectUri = getGoogleRedirectUri(requestOrigin);
 
   const response = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
@@ -85,7 +162,7 @@ export async function exchangeClawCloudGoogleCode(code: string) {
       code,
       client_id: env.GOOGLE_CLIENT_ID,
       client_secret: env.GOOGLE_CLIENT_SECRET,
-      redirect_uri: getGoogleRedirectUri(),
+      redirect_uri: redirectUri,
       grant_type: "authorization_code",
     }),
   });
@@ -105,6 +182,45 @@ export async function exchangeClawCloudGoogleCode(code: string) {
   return {
     accessToken: json.access_token,
     refreshToken: json.refresh_token ?? null,
+    expiresIn: json.expires_in ?? 3600,
+  };
+}
+
+export async function exchangeClawCloudGoogleLoginCode(code: string, requestOrigin?: string) {
+  assertGoogleLoginOAuthConfigured(requestOrigin);
+  const redirectUri = getGoogleLoginRedirectUri(requestOrigin);
+
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      code,
+      client_id: env.GOOGLE_CLIENT_ID,
+      client_secret: env.GOOGLE_CLIENT_SECRET,
+      redirect_uri: redirectUri,
+      grant_type: "authorization_code",
+    }),
+  });
+
+  const json = (await response.json()) as {
+    access_token?: string;
+    refresh_token?: string;
+    expires_in?: number;
+    id_token?: string;
+    error?: string;
+    error_description?: string;
+  };
+
+  if (!response.ok || json.error || !json.access_token || !json.id_token) {
+    throw new Error(json.error_description || json.error || "Google login token exchange failed.");
+  }
+
+  return {
+    accessToken: json.access_token,
+    refreshToken: json.refresh_token ?? null,
+    idToken: json.id_token,
     expiresIn: json.expires_in ?? 3600,
   };
 }

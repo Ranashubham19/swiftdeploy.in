@@ -18,7 +18,8 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const result = await requestClawCloudWhatsAppQr(auth.user.id);
+    const forceRefresh = request.nextUrl.searchParams.get("refresh") === "1";
+    const result = await requestClawCloudWhatsAppQr(auth.user.id, { forceRefresh });
     return NextResponse.json(result);
   } catch (error) {
     return NextResponse.json(

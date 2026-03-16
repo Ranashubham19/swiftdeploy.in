@@ -7,7 +7,6 @@ import { useRouter } from "next/navigation";
 import { getPostAuthRedirectPath } from "@/lib/onboarding";
 import { getPublicRedirectUrl } from "@/lib/public-app-url";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
-import { buildSupabaseHeaders } from "@/lib/supabase-headers";
 import type { PublicAppConfig } from "@/lib/types";
 
 import styles from "./auth-page.module.css";
@@ -41,25 +40,66 @@ type ResetForm = {
 };
 
 type FieldErrors = Partial<Record<string, string>>;
-type SupabaseAuthSettings = {
-  external?: {
-    google?: boolean;
-  };
-};
-
 type AuthExchangeResult = {
   errorMessage: string | null;
 };
+
+type GoogleBridgeSession = {
+  access_token?: string;
+  refresh_token?: string;
+  token_hash?: string;
+  type?: "magiclink";
+  error?: string;
+};
+
+const googleSignInRolloutMessage =
+  "Google sign-in is temporarily paused while ClawCloud finishes Google's public verification. Sign in with email for now. We'll reopen Google sign-in for everyone once approval lands.";
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const authCodeExchangeCache = new Map<string, Promise<AuthExchangeResult>>();
 
 function normalizeAuthErrorMessage(message: string) {
+  if (
+    /pkce code verifier not found in storage/i.test(message)
+    || /both auth code and code verifier should be non-empty/i.test(message)
+    || /code verifier/i.test(message)
+  ) {
+    return "Google sign-in expired before it could finish. Please tap Continue with Google again. If it still happens, refresh the page once and retry.";
+  }
+
   if (message === "Failed to fetch") {
     return "Could not reach Supabase to finish sign-in. Retry once, and if it still fails make sure the production auth redirect URL is allowed in Supabase Authentication settings.";
   }
 
   return message;
+}
+
+function normalizeProviderErrorMessage(message: string) {
+  if (/invalid_google_login_state/i.test(message)) {
+    return "Google sign-in expired before it could finish. Please tap Continue with Google again.";
+  }
+
+  if (/missing_supabase_env/i.test(message)) {
+    return "Google sign-in is configured on the app, but Supabase auth variables are still incomplete on the server. Add the missing production Supabase values and try again.";
+  }
+
+  if (/unacceptable audience in id_token/i.test(message)) {
+    return "Google sign-in was linked to an older Supabase Google audience. The sign-in bridge has been upgraded now, so please try Continue with Google again once.";
+  }
+
+  if (/deleted_client/i.test(message)) {
+    return "Google sign-in is still connected to an old deleted OAuth client in Supabase. Update Supabase Authentication > Providers > Google to use the active production client, then try again.";
+  }
+
+  if (/redirect_uri_mismatch/i.test(message)) {
+    return "Google sign-in is using a callback URL that is not allowed on the active OAuth client. Update the Google client used by Supabase and save the production callback URLs again.";
+  }
+
+  if (message === "access_denied") {
+    return "Sign-in was cancelled. Please try again.";
+  }
+
+  return normalizeAuthErrorMessage(message);
 }
 
 function exchangeAuthCodeOnce(
@@ -137,10 +177,12 @@ export function AuthPage({ config }: AuthPageProps) {
     [config.supabaseAnonKey, config.supabaseUrl],
   );
   const recoveryFlowRef = useRef(false);
+  const redirectingRef = useRef(false);
 
   const [panel, setPanel] = useState<AuthPanel>("login");
   const [globalError, setGlobalError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
+  const [authTransitionLabel, setAuthTransitionLabel] = useState<string | null>(null);
   const [loadingAction, setLoadingAction] = useState<
     "google-login" | "google-signup" | "login" | "signup" | "forgot" | "reset" | null
   >(null);
@@ -169,6 +211,16 @@ export function AuthPage({ config }: AuthPageProps) {
   function clearFeedback() {
     setGlobalError("");
     setSuccessMessage("");
+  }
+
+  function beginAuthTransition(label: string) {
+    clearFeedback();
+    setFieldErrors({});
+    setAuthTransitionLabel(label);
+  }
+
+  function endAuthTransition() {
+    setAuthTransitionLabel(null);
   }
 
   function activatePanel(nextPanel: AuthPanel) {
@@ -235,10 +287,78 @@ export function AuthPage({ config }: AuthPageProps) {
       const authCode = params.get("code");
       const authType = params.get("type");
       const mode = params.get("mode");
+      const googleBridge = params.get("google_bridge");
       const providerError = params.get("error_description") ?? params.get("error") ?? "";
 
       if (providerError) {
-        setGlobalError(providerError);
+        endAuthTransition();
+        window.history.replaceState({}, "", mode === "reset" ? "/auth?mode=reset" : "/auth");
+        setGlobalError(normalizeProviderErrorMessage(providerError));
+        return;
+      }
+
+      if (googleBridge === "1") {
+        window.history.replaceState({}, "", "/auth");
+        beginAuthTransition("Completing Google sign-in...");
+        setLoadingAction("google-login");
+
+        try {
+          const bridgeResponse = await fetch(`/api/auth/google-login/bridge?ts=${Date.now()}`, {
+            cache: "no-store",
+          });
+          const bridgeJson = (await bridgeResponse.json().catch(() => ({}))) as GoogleBridgeSession;
+
+          if (
+            !bridgeResponse.ok
+            || (
+              !bridgeJson.access_token
+              && !(bridgeJson.token_hash && bridgeJson.type === "magiclink")
+            )
+          ) {
+            throw new Error(
+              bridgeJson.error || "Unable to restore the Google sign-in session.",
+            );
+          }
+
+          const { error } = bridgeJson.token_hash && bridgeJson.type === "magiclink"
+            ? await authClient.auth.verifyOtp({
+                token_hash: bridgeJson.token_hash,
+                type: "magiclink",
+              })
+            : await authClient.auth.setSession({
+                access_token: bridgeJson.access_token!,
+                refresh_token: bridgeJson.refresh_token!,
+              });
+
+          if (cancelled) {
+            return;
+          }
+
+          setLoadingAction(null);
+
+          if (error) {
+            endAuthTransition();
+            setGlobalError(normalizeAuthErrorMessage(error.message));
+            return;
+          }
+
+          setAuthTransitionLabel("Opening your workspace...");
+          const { data: userData } = await authClient.auth.getUser();
+          redirectingRef.current = true;
+          router.replace(await resolvePostAuthRedirectPath(userData.user?.id));
+          return;
+        } catch (error) {
+          if (!cancelled) {
+            endAuthTransition();
+            setLoadingAction(null);
+            setGlobalError(
+              normalizeProviderErrorMessage(
+                error instanceof Error ? error.message : "Unable to finish Google sign-in.",
+              ),
+            );
+          }
+          return;
+        }
       }
 
       if (mode === "reset" || authType === "recovery") {
@@ -249,6 +369,9 @@ export function AuthPage({ config }: AuthPageProps) {
       if (authCode) {
         const isRecoveryFlow = authType === "recovery" || mode === "reset";
         window.history.replaceState({}, "", isRecoveryFlow ? "/auth?mode=reset" : "/auth");
+        beginAuthTransition(
+          isRecoveryFlow ? "Verifying your reset link..." : "Completing sign-in...",
+        );
         setLoadingAction("google-login");
         const { errorMessage } = await exchangeAuthCodeOnce(authClient, authCode);
 
@@ -259,14 +382,17 @@ export function AuthPage({ config }: AuthPageProps) {
         setLoadingAction(null);
 
         if (errorMessage) {
+          endAuthTransition();
           authCodeExchangeCache.delete(authCode);
           setGlobalError(errorMessage);
         } else if (isRecoveryFlow) {
+          endAuthTransition();
           recoveryFlowRef.current = true;
           setPanel("reset");
           setSuccessMessage("Choose a new password for your account.");
           return;
         } else {
+          setAuthTransitionLabel("Opening your workspace...");
           const { data: userData } = await authClient.auth.getUser();
           router.replace(await resolvePostAuthRedirectPath(userData.user?.id));
           return;
@@ -279,7 +405,11 @@ export function AuthPage({ config }: AuthPageProps) {
       }
 
       if (!error && data.session && !recoveryFlowRef.current) {
-        router.replace(await resolvePostAuthRedirectPath(data.session.user.id));
+        if (!redirectingRef.current) {
+          beginAuthTransition("Opening your workspace...");
+          redirectingRef.current = true;
+          router.replace(await resolvePostAuthRedirectPath(data.session.user.id));
+        }
       }
     }
 
@@ -294,6 +424,7 @@ export function AuthPage({ config }: AuthPageProps) {
     } = authClient.auth.onAuthStateChange((event, session) => {
       if (event === "PASSWORD_RECOVERY") {
         recoveryFlowRef.current = true;
+        endAuthTransition();
         setLoadingAction(null);
         setPanel("reset");
         setSuccessMessage("Choose a new password for your account.");
@@ -301,9 +432,19 @@ export function AuthPage({ config }: AuthPageProps) {
       }
 
       if (event === "SIGNED_IN" && session && !recoveryFlowRef.current) {
-        void resolvePostAuthRedirectPath(session.user.id).then((path) => {
-          router.replace(path);
-        });
+        if (!redirectingRef.current) {
+          beginAuthTransition("Opening your workspace...");
+          redirectingRef.current = true;
+          void resolvePostAuthRedirectPath(session.user.id).then((path) => {
+            router.replace(path);
+          });
+        }
+      }
+
+      if (event === "SIGNED_OUT") {
+        endAuthTransition();
+        redirectingRef.current = false;
+        recoveryFlowRef.current = false;
       }
     });
 
@@ -323,47 +464,19 @@ export function AuthPage({ config }: AuthPageProps) {
       return;
     }
 
-    const loadingKey = mode === "login" ? "google-login" : "google-signup";
-    setLoadingAction(loadingKey);
-
-    try {
-      const settingsResponse = await fetch(`${config.supabaseUrl}/auth/v1/settings`, {
-        headers: buildSupabaseHeaders(config.supabaseAnonKey),
-      });
-
-      if (settingsResponse.ok) {
-        const settings = (await settingsResponse.json()) as SupabaseAuthSettings;
-
-        if (!settings.external?.google) {
-          setLoadingAction(null);
-          setGlobalError(
-            "Google sign-in is not enabled in Supabase yet. In Supabase dashboard open Authentication > Sign In / Providers > Google, enable Google, paste the Google client ID and client secret there, and add your login email under Google OAuth consent screen > Test users if the app is still in testing.",
-          );
-          return;
-        }
-      }
-    } catch {
-      // If the settings check fails, fall back to Supabase's normal OAuth flow.
-    }
-
-    const redirectUrl = new URL("/auth", window.location.origin).toString();
-    const { data, error } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: {
-        redirectTo: redirectUrl,
-        skipBrowserRedirect: true,
-      },
-    });
-
-    if (error || !data?.url) {
-      setLoadingAction(null);
-      setGlobalError(
-        error?.message || "Unable to start Google sign-in. Please try again.",
-      );
+    if (!config.googleRollout.publicSignInEnabled) {
+      setGlobalError(googleSignInRolloutMessage);
       return;
     }
 
-    window.location.assign(data.url);
+    const loadingKey = mode === "login" ? "google-login" : "google-signup";
+    beginAuthTransition("Connecting to Google...");
+    setLoadingAction(loadingKey);
+
+    const googleLoginUrl = new URL("/api/auth/google-login", window.location.origin);
+    googleLoginUrl.searchParams.set("intent", mode);
+    googleLoginUrl.searchParams.set("ts", String(Date.now()));
+    window.location.assign(googleLoginUrl.toString());
   }
 
   async function handleLogin(event: React.FormEvent<HTMLFormElement>) {
@@ -399,11 +512,16 @@ export function AuthPage({ config }: AuthPageProps) {
     setLoadingAction(null);
 
     if (error) {
-      setGlobalError(error.message);
+      setGlobalError(
+        error.message.includes("Invalid login credentials")
+          ? "Incorrect email or password. Please try again."
+          : normalizeAuthErrorMessage(error.message),
+      );
       return;
     }
 
     setSuccessMessage("Signed in. Redirecting...");
+    beginAuthTransition("Opening your workspace...");
     const { data } = await supabase.auth.getUser();
     router.replace(await resolvePostAuthRedirectPath(data.user?.id));
   }
@@ -458,12 +576,18 @@ export function AuthPage({ config }: AuthPageProps) {
     setLoadingAction(null);
 
     if (error) {
-      setGlobalError(error.message);
+      setGlobalError(
+        error.message.includes("already registered")
+          || error.message.includes("already been registered")
+          ? "An account with this email already exists. Please sign in instead."
+          : normalizeAuthErrorMessage(error.message),
+      );
       return;
     }
 
     if (data.session) {
       setSuccessMessage("Account created. Redirecting...");
+      beginAuthTransition("Opening your workspace...");
       router.replace(await resolvePostAuthRedirectPath(data.session.user.id));
       return;
     }
@@ -495,11 +619,11 @@ export function AuthPage({ config }: AuthPageProps) {
     setLoadingAction(null);
 
     if (error) {
-      setGlobalError(error.message);
+      setGlobalError(normalizeAuthErrorMessage(error.message));
       return;
     }
 
-    setSuccessMessage("Reset link sent. Check your inbox to continue.");
+    setSuccessMessage("Password reset email sent. Check your inbox to continue.");
   }
 
   async function handleReset(event: React.FormEvent<HTMLFormElement>) {
@@ -535,14 +659,38 @@ export function AuthPage({ config }: AuthPageProps) {
     setLoadingAction(null);
 
     if (error) {
-      setGlobalError(error.message);
+      setGlobalError(normalizeAuthErrorMessage(error.message));
       return;
     }
 
     recoveryFlowRef.current = false;
     setSuccessMessage("Password updated. Redirecting...");
+    beginAuthTransition("Opening your workspace...");
     const { data } = await supabase.auth.getUser();
     router.replace(await resolvePostAuthRedirectPath(data.user?.id));
+  }
+
+  if (authTransitionLabel) {
+    return (
+      <main className={styles.page}>
+        <section className={styles.rightPanel}>
+          <div className={styles.authBox}>
+            <Link href="/" className={styles.mobileLogo}>
+              <span className={styles.logoMark}>CC</span>
+              <span>
+                Claw <span className={styles.brandAccent}>Cloud</span>
+              </span>
+            </Link>
+
+            <div className={styles.redirectStage}>
+              <span className={styles.redirectSpinner} aria-hidden="true" />
+              <h1 className={styles.title}>One second...</h1>
+              <p className={styles.subtitle}>{authTransitionLabel}</p>
+            </div>
+          </div>
+        </section>
+      </main>
+    );
   }
 
   return (
@@ -582,7 +730,27 @@ export function AuthPage({ config }: AuthPageProps) {
             </div>
           )}
 
-          {globalError ? <div className={styles.errorBanner}>{globalError}</div> : null}
+          {globalError ? (
+            <div className={styles.errorBanner}>
+              <span>{globalError}</span>
+              <button
+                type="button"
+                onClick={() => setGlobalError("")}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "inherit",
+                  cursor: "pointer",
+                  fontSize: "16px",
+                  lineHeight: 1,
+                  marginLeft: "8px",
+                }}
+                aria-label="Dismiss error"
+              >
+                ×
+              </button>
+            </div>
+          ) : null}
           {successMessage ? <div className={styles.successBox}>{successMessage}</div> : null}
 
           {panel === "login" ? (
@@ -590,14 +758,24 @@ export function AuthPage({ config }: AuthPageProps) {
               <h1 className={styles.title}>Welcome back 👋</h1>
               <p className={styles.subtitle}>Sign in to your ClawCloud account.</p>
 
+              {!config.googleRollout.publicSignInEnabled ? (
+                <div className={styles.configNote}>
+                  Google sign-in is in rollout hold while ClawCloud completes Google&apos;s public
+                  verification. Email sign-in is live today, and Google sign-in will be re-enabled
+                  automatically once approval is complete.
+                </div>
+              ) : null}
+
               <button
                 type="button"
                 className={styles.googleButton}
                 onClick={() => handleGoogle("login")}
-                disabled={loadingAction !== null}
+                disabled={loadingAction !== null || !config.googleRollout.publicSignInEnabled}
               >
                 {loadingAction === "google-login" ? <span className={styles.spinner} /> : <GoogleIcon />}
-                Continue with Google
+                {config.googleRollout.publicSignInEnabled
+                  ? "Continue with Google"
+                  : "Google sign-in opening soon"}
               </button>
 
               <div className={styles.divider}>or sign in with email</div>
@@ -696,18 +874,27 @@ export function AuthPage({ config }: AuthPageProps) {
                 Create your ClawCloud account. No credit card required.
               </p>
 
+              {!config.googleRollout.publicSignInEnabled ? (
+                <div className={styles.configNote}>
+                  Public Google sign-up is paused until Google finishes review. New users can still
+                  create an account with email now and connect Google later after approval.
+                </div>
+              ) : null}
+
               <button
                 type="button"
                 className={styles.googleButton}
                 onClick={() => handleGoogle("signup")}
-                disabled={loadingAction !== null}
+                disabled={loadingAction !== null || !config.googleRollout.publicSignInEnabled}
               >
                 {loadingAction === "google-signup" ? (
                   <span className={styles.spinner} />
                 ) : (
                   <GoogleIcon />
                 )}
-                Sign up with Google
+                {config.googleRollout.publicSignInEnabled
+                  ? "Sign up with Google"
+                  : "Google sign-up opening soon"}
               </button>
 
               <div className={styles.divider}>or sign up with email</div>

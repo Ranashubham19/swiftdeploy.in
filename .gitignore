@@ -47,3 +47,10 @@ backend/dist-bot/
 # Local scratch outputs
 tmp-*
 *.tsbuildinfo
+
+# Local deployment/env dumps (never commit)
+.deploy-clean/
+.vercel-env-check
+.vercel-env-prod-check
+env-check.production
+supabase/.temp/

@@ -17,6 +17,14 @@ type ResetPasswordPageProps = {
 type RecoveryStatus = "checking" | "ready" | "invalid" | "success";
 
 function normalizeAuthErrorMessage(message: string) {
+  if (
+    /pkce code verifier not found in storage/i.test(message)
+    || /both auth code and code verifier should be non-empty/i.test(message)
+    || /code verifier/i.test(message)
+  ) {
+    return "This recovery link expired before it could finish. Please request a fresh reset link and open it in the same browser.";
+  }
+
   if (message === "Failed to fetch") {
     return "Could not reach Supabase to verify the recovery link. Check your auth URL settings and try again.";
   }
