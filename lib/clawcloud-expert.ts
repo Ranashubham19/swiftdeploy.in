@@ -1,18 +1,77 @@
-import { completeClawCloudPrompt } from "@/lib/clawcloud-ai";
+import { completeClawCloudFast, completeClawCloudPrompt, type IntentType } from "@/lib/clawcloud-ai";
 import { runResearchAgent } from "@/lib/research-agent";
 
 type ChatHistory = Array<{ role: "user" | "assistant"; content: string }>;
+type ExpertDomain =
+  | "FINANCE_MATH"
+  | "CAUSAL_STATS"
+  | "ML_SYSTEMS"
+  | "SYS_ARCH"
+  | "REGULATED_AI"
+  | "CLINICAL_BIO"
+  | "PHYSICS_CHEM"
+  | "GENERAL";
+
+const CLASSIFIER_CACHE = new Map<string, ExpertDomain>();
+const VALID_EXPERT_DOMAINS: ExpertDomain[] = [
+  "FINANCE_MATH",
+  "CAUSAL_STATS",
+  "ML_SYSTEMS",
+  "SYS_ARCH",
+  "REGULATED_AI",
+  "CLINICAL_BIO",
+  "PHYSICS_CHEM",
+  "GENERAL",
+];
+
+export async function semanticDomainClassify(question: string): Promise<ExpertDomain> {
+  const key = question.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 160);
+  if (CLASSIFIER_CACHE.has(key)) {
+    return CLASSIFIER_CACHE.get(key)!;
+  }
+
+  const answer = await completeClawCloudFast({
+    system: [
+      "You are a domain classifier.",
+      "Map the user's question to exactly one domain code.",
+      "Reply with only the code and nothing else.",
+      "",
+      "Codes:",
+      "FINANCE_MATH - trading systems, options, bonds, portfolio risk, VaR, CVaR, Kelly, insurance reserving, actuarial math",
+      "CAUSAL_STATS - DiD, IV, RDD, causal inference, policy evaluation, beta or coefficient with standard error, t-statistic, confidence interval, survival analysis, Bayesian trials, diagnostics, econometrics",
+      "ML_SYSTEMS - feature stores, training-serving skew, stale features, feature freshness, MLOps, RAG, vector retrieval, GPU scheduling, model monitoring",
+      "SYS_ARCH - system design, ledgers, Stripe billing, carbon registry, CRDT, workflow engines, security architecture, CBDC, infra",
+      "REGULATED_AI - hospital copilots, medical AI, financial AI with oversight, human-in-the-loop AI, safety-critical AI",
+      "CLINICAL_BIO - clinical medicine, diagnostics, genomics, CRISPR, treatment protocols, biostatistics in clinical context",
+      "PHYSICS_CHEM - physics, chemistry, materials, quantum, thermodynamics, electromagnetism",
+      "GENERAL - everything else",
+    ].join("\n"),
+    user: question,
+    maxTokens: 10,
+    fallback: "GENERAL",
+  });
+
+  const cleaned = answer.trim().toUpperCase() as ExpertDomain;
+  const domain = VALID_EXPERT_DOMAINS.includes(cleaned) ? cleaned : "GENERAL";
+  CLASSIFIER_CACHE.set(key, domain);
+  return domain;
+}
 
 const CODING_REVIEW_MODELS = [
+  "moonshotai/kimi-k2.5",
+  "z-ai/glm5",
+  "qwen/qwen3-coder-480b-a35b-instruct",
   "mistralai/mistral-large-3-675b-instruct-2512",
   "meta/llama-3.3-70b-instruct",
-  "qwen/qwen3-coder-480b-a35b-instruct",
+  "meta/llama-3.1-405b-instruct",
 ];
 
 const RESEARCH_MEMO_MODELS = [
-  "mistralai/mistral-large-3-675b-instruct-2512",
-  "meta/llama-3.3-70b-instruct",
+  "moonshotai/kimi-k2.5",
   "z-ai/glm5",
+  "mistralai/mistral-large-3-675b-instruct-2512",
+  "meta/llama-3.1-405b-instruct",
+  "meta/llama-3.3-70b-instruct",
 ];
 
 type TradingSetup = {
@@ -312,6 +371,41 @@ function erf(x: number) {
 
 function normalCdf(x: number) {
   return 0.5 * (1 + erf(x / Math.sqrt(2)));
+}
+
+function normalPdf(x: number) {
+  return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+}
+
+function getZScore(p: number): number {
+  const a = [2.50662823884, -18.61500062529, 41.39119773534, -25.44106049637];
+  const b = [-8.4735109309, 23.08336743743, -21.06224101826, 3.13082909833];
+  const c = [
+    0.3374754822726147,
+    0.9761690190917186,
+    0.1607979714918209,
+    0.0276438810333863,
+    0.0038405729373609,
+    0.0003951896511349,
+    0.0000321767881768,
+    0.0000002888167364,
+    0.0000003960315187,
+  ];
+  const y = p - 0.5;
+
+  if (Math.abs(y) < 0.42) {
+    const r = y * y;
+    return y
+      * ((((a[3] * r + a[2]) * r + a[1]) * r + a[0]))
+      / (((((b[3] * r + b[2]) * r + b[1]) * r + b[0]) * r) + 1);
+  }
+
+  const r = p < 0.5 ? Math.log(-Math.log(p)) : Math.log(-Math.log(1 - p));
+  let x = c[0];
+  for (let i = 1; i < c.length; i += 1) {
+    x += c[i] * Math.pow(r, i);
+  }
+  return p < 0.5 ? -x : x;
 }
 
 export function solveTradingMathQuestion(question: string) {
@@ -880,6 +974,10 @@ function solveCbdcDecisionMemo(question: string) {
     return null;
   }
 
+  if (/\b(offline|without internet|merchant wallet|device wallet|double-spend|secure element)\b/.test(text)) {
+    return solveCbdcOfflineRetailQuestion(question);
+  }
+
   return [
     "*Recommendation*",
     "- Launch a *narrow pilot* for an offline-capable retail CBDC, but keep offline balances capped, restrict programmability to public-purpose disbursements, and preserve a human-governed policy layer instead of open-ended smart-contract behavior.",
@@ -901,6 +999,177 @@ function solveCbdcDecisionMemo(question: string) {
     "",
     "*Bottom Line*",
     "- The professional path is *pilot first, offline with strict caps, privacy by design, and narrow programmability*. Do not launch a fully general offline retail CBDC until fraud controls, reconciliation reliability, and governance are proven in production-like pilots.",
+  ].join("\n");
+}
+
+function solveCbdcOfflineRetailQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (
+    !containsAny(text, [/\b(cbdc|central bank digital|digital euro|digital rupee|offline payment|offline wallet|double-spend)\b/])
+  ) {
+    return null;
+  }
+
+  return [
+    "*Offline Retail CBDC Architecture*",
+    "",
+    "*Recommendation*",
+    "- Use a secure-element wallet or card design with monotonic nonces, offline value caps, and time-bounded redemption once connectivity returns.",
+    "",
+    "*Why This Is The Safe Path*",
+    "- Software-only offline wallets cannot prevent double-spend once a device is compromised.",
+    "- A secure element can enforce spend limits, nonce monotonicity, and local balance checks even when the network is unavailable.",
+    "",
+    "*Core Design*",
+    "- Store offline value inside tamper-resistant hardware on the phone or card.",
+    "- Every offline payment signs `(amount, payer key, payee key, nonce, timestamp, expiry)`.",
+    "- The merchant redeems that signed token online later; the issuer rejects duplicate nonces or expired tokens.",
+    "- Set offline balance caps and transaction-count caps so fraud exposure stays bounded.",
+    "",
+    "*Operational Controls*",
+    "- Require periodic online settlement windows, for example every 72 hours.",
+    "- Freeze remaining offline value on the next online sync if a device is reported lost or stolen.",
+    "- Keep an immutable redemption log so duplicates, replay attempts, and fraud patterns can be audited centrally.",
+    "",
+    "*Bottom Line*",
+    "- Offline CBDC can be production-safe only with hardware-backed wallets, strict caps, and delayed online redemption checks.",
+  ].join("\n");
+}
+
+function solveSatelliteCollisionAvoidanceQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (!containsAny(text, [/\b(satellite|conjunction|collision avoidance|space debris|maneuver planning|cdm|probability of collision|pc\b|tle|orbit)\b/])) {
+    return null;
+  }
+
+  return [
+    "*Satellite Collision-Avoidance Copilot*",
+    "",
+    "*Recommendation*",
+    "- Build a human-gated copilot that automates triage, conjunction ranking, and maneuver drafting, but never executes burns autonomously.",
+    "",
+    "*Ingestion And Risk Scoring*",
+    "- Ingest conjunction data messages, propagate the orbits to time of closest approach, and normalize state into a common encounter frame.",
+    "- Score each event using probability of collision, miss distance, covariance realism, object size, and mission constraints.",
+    "- Use a 2D encounter-plane collision-probability model with combined hard-body radius and projected covariance, rather than only a raw miss-distance threshold.",
+    "",
+    "*Maneuver Planning*",
+    "- Pull fuel budget, eclipse windows, attitude constraints, and previous maneuvers before proposing action.",
+    "- Draft 2-3 maneuver options with delta-v, burn timing, and predicted residual collision risk after the burn.",
+    "- Prefer solutions that drive risk below threshold with the least fuel and mission disruption.",
+    "",
+    "*Control Model*",
+    "- Read-only triage can run automatically.",
+    "- Recommendation drafting requires operator review.",
+    "- Any command uplink requires explicit approval plus a second safety check and immutable audit logging.",
+    "",
+    "*Rollout*",
+    "- Phase 1: shadow mode against historical conjunctions.",
+    "- Phase 2: live drafting with human approval on every maneuver.",
+    "- Phase 3: automated triage plus human-gated execution only.",
+    "",
+    "*Bottom Line*",
+    "- Let the model accelerate analysis, not authority. Collision avoidance is a copilot problem, not a full-autonomy problem.",
+  ].join("\n");
+}
+
+function solveSemiconductorWaferFabQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (!containsAny(text, [/\b(wafer fab|semiconductor scheduling|re-entrant flow|photolithography|lot dispatch|fab scheduling|wip)\b/])) {
+    return null;
+  }
+
+  return [
+    "*Semiconductor Wafer-Fab Scheduling*",
+    "",
+    "*Decision*",
+    "- Use dispatching rules plus predictive models, not a single static optimizer. Wafer fabs are re-entrant flow shops and need constant reprioritization.",
+    "",
+    "*Scheduling Design*",
+    "- Track lot state, equipment state, recipe compatibility, queue depth, due date, and hot-lot priority in real time.",
+    "- Use critical-ratio style dispatching as the baseline, then adjust with bottleneck-specific rules for lithography, furnaces, and batch tools.",
+    "- Reserve preventive-maintenance windows ahead of time and re-route lots before those windows open.",
+    "",
+    "*ML Layer*",
+    "- Predict cycle time and downtime risk from queue depth, tool health, shift, recipe, and recent failures.",
+    "- Feed those predictions back into dispatch priority instead of using FIFO everywhere.",
+    "",
+    "*Bottom Line*",
+    "- Practical fab scheduling is a real-time dispatch system with predictive assistance, maintenance awareness, and special handling for bottleneck tools.",
+  ].join("\n");
+}
+
+function solveWaterNetworkLossQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (!containsAny(text, [/\b(water network|non-revenue water|nrw|pipe burst|water loss|distribution network|pressure zone|leakage)\b/])) {
+    return null;
+  }
+
+  return [
+    "*Water Network Loss And Failure Risk*",
+    "",
+    "*Decision*",
+    "- Attack the problem in two layers: fast pressure-management wins for current leakage, plus risk-scored pipe renewal for structural loss reduction.",
+    "",
+    "*Operating Model*",
+    "- Measure district inflow, pressure, and minimum night flow continuously.",
+    "- Rank pipe segments by failure probability times consequence severity, using age, material, diameter, pressure, soil, traffic load, and burst history.",
+    "- Send the highest-risk segments into a proactive field queue for lining, replacement, or valve work.",
+    "",
+    "*Fastest Leakage Lever*",
+    "- Pressure-reducing valves usually cut real losses faster than broad network replacement.",
+    "- Night-flow analysis and step testing are the quickest way to isolate active leakage zones.",
+    "",
+    "*Bottom Line*",
+    "- Use pressure control for immediate NRW reduction and a risk model for long-horizon capital planning.",
+  ].join("\n");
+}
+
+function solveCarbonCreditRegistryQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (
+    !containsAny(text, [/\b(carbon credit|carbon registry|voluntary carbon|vcs|gold standard|offset retirement|article 6|itmo|corsia|emission credit)\b/])
+  ) {
+    return null;
+  }
+
+  return [
+    "*Carbon Credit Registry Architecture*",
+    "",
+    "*Core Invariants*",
+    "- Every credit serial has exactly one current owner at a time.",
+    "- Retirement is a terminal state: once retired, a credit cannot be transferred or re-issued.",
+    "- Issuance requires verifier-approved evidence before serials are minted.",
+    "- Public retirement records are append-only and externally auditable.",
+    "- Cross-border compliance attributes such as Article 6 adjustments must travel with the credit lifecycle.",
+    "",
+    "*Schema*",
+    "- `projects(id, methodology, validator_id, country, vintage_start, vintage_end, status)`",
+    "- `credit_serials(serial primary key, project_id, vintage_year, quantity_tonnes, owner_account_id, status, issued_at, retired_at)`",
+    "- `credit_events(id, event_type, serial_range_start, serial_range_end, from_account, to_account, quantity_tonnes, beneficiary_name, retirement_reason, verifier_id, tx_hash, created_at)` as an append-only event log",
+    "- `operator_approvals(id, event_id, approval_type, approver_id, approved_at, status)` for high-impact actions",
+    "- `settlement_webhook_inbox(provider, external_event_id, registry_account_id, payload, status, received_at, processed_at)` with `primary key (provider, external_event_id)` for exactly-once settlement ingestion",
+    "- `audit_batches(id, batch_root, batch_size, proof_scheme, anchored_at, anchor_ref)` so event batches can support Merkle-style or zk-friendly audit proofs without mutating business rows",
+    "",
+    "*Lifecycle Flow*",
+    "- Issuance: verifier sign-off -> registry review -> atomic serial minting -> issuance event written once.",
+    "- Transfer: check current ownership and state, move custody inside one transaction, append transfer event, reject partial updates.",
+    "- Retirement: mark serials retired, issue beneficiary-facing retirement record, expose public certificate lookup.",
+    "- Settlement webhooks: persist provider webhook in the inbox first, dedupe on external event id, then post one settlement event in the same transaction that updates custody or cash status.",
+    "",
+    "*Controls*",
+    "- Use globally unique serials per standard and hard database constraints to block double counting.",
+    "- Require dual approval for issuance, cancellation, buffer-pool changes, and any registry-admin override.",
+    "- Keep immutable audit history and optionally anchor event-batch hashes to a public chain for tamper evidence or later zero-knowledge proof generation.",
+    "- Model GDPR deletion as deletion of personal profile data while retaining non-personal registry events needed for financial and compliance audit.",
+    "",
+    "*Failure Modes And Rollback*",
+    "- If a settlement webhook retries, the inbox primary key prevents duplicate posting and the downstream event write should also enforce a unique provider-event constraint.",
+    "- If a migration goes wrong, roll back readers to the last verified projection while keeping the append-only event ledger intact; never delete or rewrite issued event history.",
+    "- For disputed transfers or registry-admin corrections, post compensating events plus operator approvals instead of mutating historical rows.",
+    "",
+    "*Bottom Line*",
+    "- A credible carbon registry is an append-only event ledger with unique serials, terminal retirement, verifier-gated issuance, and public retirement transparency.",
   ].join("\n");
 }
 
@@ -930,6 +1199,358 @@ function solveEnergyHedgeRiskQuestion(question: string) {
     "- It also smooths away structural scarcity pricing and underestimates joint extreme outcomes during heat waves, exactly where the hedge is most exposed.",
     "",
     "*Final Answer:* estimate weekly 95% VaR by simulating `L_week = Σ_h (Q_actual,h - Q_hedged,h) × (P_spot,h - P_forward,h)` under a heavy-tailed, regime-aware joint model for demand and spot prices, then take the 95th percentile of simulated losses. Estimate stress loss with a dedicated heat-wave scenario or historical replay. The key mistake to avoid is naive normality, which materially understates joint tail risk when demand and spot prices spike together.",
+  ].join("\n");
+}
+
+function solvePolicyEffectSignificanceQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (
+    !containsAny(text, [/\b(policy study|policy evaluation|program evaluation|treatment effect|policy effect|beta\b|coefficient\b|standard error)\b/])
+  ) {
+    return null;
+  }
+
+  const betaMatch = /(?:beta|coefficient|effect|estimate)[:\s=]+(-?\d+(?:\.\d+)?)/i.exec(question);
+  const seMatch = /(?:se|standard error)[:\s=]+(\d+(?:\.\d+)?)/i.exec(question);
+  const beta = betaMatch ? Number.parseFloat(betaMatch[1]) : null;
+  const se = seMatch ? Number.parseFloat(seMatch[1]) : null;
+
+  if (beta == null || se == null || se <= 0) {
+    return null;
+  }
+
+  const tStat = beta / se;
+  const ciLow = beta - 1.96 * se;
+  const ciHigh = beta + 1.96 * se;
+  const pApprox = 2 * (1 - normalCdf(Math.abs(tStat)));
+
+  return [
+    "*Policy-Effect Significance Check*",
+    "",
+    "*Computation*",
+    `- Reported coefficient: ${beta}`,
+    `- Standard error: ${se}`,
+    `- t-statistic: ${tStat.toFixed(3)}`,
+    `- 95% confidence interval: [${ciLow.toFixed(4)}, ${ciHigh.toFixed(4)}]`,
+    `- Approximate two-sided p-value: ${pApprox < 0.001 ? "< 0.001" : pApprox.toFixed(4)}`,
+    `- Significant at the 5% level: ${Math.abs(tStat) > 1.96 ? "yes" : "no"}`,
+    "",
+    "*Interpretation*",
+    `- If this coefficient is the policy effect from your preferred specification, the estimate implies a ${beta < 0 ? "negative" : "positive"} policy effect of ${Math.abs(beta).toFixed(2)} units on the outcome.`,
+    `- The interval ${Math.abs(tStat) > 1.96 ? "excludes" : "does not exclude"} zero, so the result is ${Math.abs(tStat) > 1.96 ? "statistically distinguishable from zero" : "not statistically distinguishable from zero"} at conventional levels.`,
+    "",
+    "*Checks That Matter*",
+    "- Make sure the identification strategy is credible: omitted variables, selection, or policy timing can still bias a significant coefficient.",
+    "- Use the right variance estimator: clustered or heteroskedasticity-robust standard errors are often required in policy settings.",
+    "- Check robustness across alternative specifications, sample restrictions, and placebo or falsification tests.",
+    "- If this is panel or quasi-experimental work, inspect pre-trends or event-study leads rather than relying on a single coefficient only.",
+    "",
+    "*Bottom Line*",
+    `- On the numbers alone, the coefficient is ${beta < 0 ? "negative" : "positive"} and ${Math.abs(tStat) > 1.96 ? "statistically significant" : "not statistically significant"}; the next question is whether the identification and standard-error choices are defensible.`,
+  ].join("\n");
+}
+
+function solveDifferenceInDifferencesQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (
+    !containsAny(text, [/\b(difference-?in-?differences?|did estimate|parallel trends|quasi-?experiment|event study|synthetic control|staggered did|callaway|sant.?anna|sun.*abraham)\b/])
+  ) {
+    return null;
+  }
+
+  const betaMatch = /(?:beta|coefficient|effect|estimate|tau)[:\s=]+(-?\d+(?:\.\d+)?)/i.exec(question);
+  const seMatch = /(?:se|standard error)[:\s=]+(\d+(?:\.\d+)?)/i.exec(question);
+  const beta = betaMatch ? Number.parseFloat(betaMatch[1]) : null;
+  const se = seMatch ? Number.parseFloat(seMatch[1]) : null;
+
+  const lines = [
+    "*Difference-in-Differences Causal Analysis*",
+    "",
+    "*Estimator*",
+    "- `tau_DiD = (Y_treat,post - Y_treat,pre) - (Y_control,post - Y_control,pre)`",
+    "- Regression form: `Y_it = alpha_i + lambda_t + beta*(Treated_i x Post_t) + X_it'gamma + error_it`",
+    "- `beta` is the ATT, the average treatment effect on the treated.",
+    "- Standard errors should be clustered at the treatment-unit level, not the individual row level.",
+  ];
+
+  if (beta !== null && se !== null && se > 0) {
+    const tStat = beta / se;
+    const ciLow = beta - 1.96 * se;
+    const ciHigh = beta + 1.96 * se;
+    const pApprox = 2 * (1 - normalCdf(Math.abs(tStat)));
+    lines.push(
+      "",
+      "*Numerical Readout*",
+      `- Effect estimate: ${beta}`,
+      `- Standard error: ${se}`,
+      `- t-statistic: ${tStat.toFixed(3)}`,
+      `- 95% CI: [${ciLow.toFixed(4)}, ${ciHigh.toFixed(4)}]`,
+      `- Approximate p-value: ${pApprox < 0.001 ? "< 0.001" : pApprox.toFixed(4)}`,
+      `- Significance at 5%: ${Math.abs(tStat) > 1.96 ? "yes" : "no"}`,
+    );
+  }
+
+  lines.push(
+    "",
+    "*Parallel Trends*",
+    "- The identifying assumption is that treatment and control would have followed the same trend without the intervention.",
+    "- Check this with raw pre-period trend plots first, then an event-study where lead coefficients stay near zero and are jointly insignificant.",
+    "- Report the pre-trend F-test or joint significance result explicitly if you have it.",
+    "",
+    "*Robustness*",
+    "- Run placebo treatment dates before the intervention period.",
+    "- Use synthetic control or alternative comparison groups as a cross-check.",
+    "- If treatment timing is staggered, avoid vanilla TWFE and use a staggered-treatment estimator such as Callaway-Sant'Anna or Sun-Abraham.",
+    "- Check for spillovers, composition changes, and serial correlation.",
+  );
+
+  return lines.join("\n");
+}
+
+function solveIVEstimationQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (
+    !containsAny(text, [/\b(instrumental variable|iv estimation|2sls|two-stage least squares|weak instrument|exclusion restriction|first stage|overidentified|hausman)\b/])
+  ) {
+    return null;
+  }
+
+  return [
+    "*Instrumental Variables Analysis*",
+    "",
+    "*Estimator*",
+    "- `beta_IV = Cov(Y, Z) / Cov(X, Z)`",
+    "- Two-stage least squares uses: Stage 1 `X_hat = pi0 + pi1*Z + W'alpha + error1`, then Stage 2 `Y = beta0 + beta1*X_hat + W'gamma + error2`.",
+    "- The IV estimate identifies a local average treatment effect when the instrument shifts treatment for compliers.",
+    "",
+    "*Validity Conditions*",
+    "- *Relevance:* the instrument must predict the endogenous regressor strongly enough. First-stage F-stat below about 10 is a warning sign.",
+    "- *Exclusion restriction:* the instrument affects the outcome only through the endogenous regressor.",
+    "- *Independence:* the instrument is uncorrelated with unobserved confounders.",
+    "",
+    "*Diagnostics*",
+    "- Check the first-stage F-statistic or Kleibergen-Paap statistic.",
+    "- Use robust or clustered standard errors in Stage 2.",
+    "- With multiple instruments, run a Sargan-Hansen overidentification test, but do not treat a pass as proof of validity.",
+    "- For weak instruments, Anderson-Rubin or LIML is more reliable than plain 2SLS inference.",
+  ].join("\n");
+}
+
+function solveRegressionDiscontinuityQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (
+    !containsAny(text, [/\b(regression discontinuity|rdd|rd design|running variable|sharp rd|fuzzy rd|bandwidth|mccrary|local linear)\b/])
+  ) {
+    return null;
+  }
+
+  return [
+    "*Regression Discontinuity Design*",
+    "",
+    "*Identification*",
+    "- Treatment is assigned by whether the running variable crosses a cutoff.",
+    "- Sharp RD means treatment jumps from 0 to 1 at the cutoff. Fuzzy RD means treatment probability jumps and the design is estimated like an IV near the threshold.",
+    "- The key assumption is continuity of potential outcomes at the cutoff in the absence of treatment.",
+    "",
+    "*Estimation*",
+    "- Estimate local linear regressions on both sides of the cutoff inside a chosen bandwidth.",
+    "- The treatment effect is the discontinuity in conditional expectations at the cutoff.",
+    "- Triangular kernels and CCT bandwidth selection are the standard practical default.",
+    "",
+    "*Validity Checks*",
+    "- Run a McCrary density test to detect manipulation of the running variable.",
+    "- Test predetermined covariates for discontinuities at the cutoff; they should be near zero.",
+    "- Use placebo cutoffs and donut RD as robustness checks.",
+    "- Report bandwidth sensitivity instead of relying on a single bandwidth only.",
+  ].join("\n");
+}
+
+function solveBlackScholesQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (
+    !containsAny(text, [/\b(black-?scholes|option pricing|call option|put option|implied vol|delta hedge|vega|gamma|theta|rho|greeks)\b/])
+  ) {
+    return null;
+  }
+
+  const spotMatch = /(?:stock|spot|s)[:\s=]+\$?(\d+(?:\.\d+)?)/i.exec(question);
+  const strikeMatch = /(?:strike|k)[:\s=]+\$?(\d+(?:\.\d+)?)/i.exec(question);
+  const maturityMatch = /(?:expiry|maturity|t)[:\s=]+(\d+(?:\.\d+)?)\s*(?:year|yr)?/i.exec(question);
+  const rateMatch = /(?:risk[- ]free|rate|r)[:\s=]+(\d+(?:\.\d+)?)\s*%?/i.exec(question);
+  const volMatch = /(?:volatility|vol|sigma)[:\s=]+(\d+(?:\.\d+)?)\s*%?/i.exec(question);
+  const spot = spotMatch ? Number.parseFloat(spotMatch[1]) : null;
+  const strike = strikeMatch ? Number.parseFloat(strikeMatch[1]) : null;
+  const maturity = maturityMatch ? Number.parseFloat(maturityMatch[1]) : null;
+  const rate = rateMatch ? Number.parseFloat(rateMatch[1]) / 100 : null;
+  const vol = volMatch ? Number.parseFloat(volMatch[1]) / 100 : null;
+
+  const lines = [
+    "*Black-Scholes Option Pricing*",
+    "",
+    "*Formulas*",
+    "- `C = S*N(d1) - K*e^(-rT)*N(d2)`",
+    "- `P = K*e^(-rT)*N(-d2) - S*N(-d1)`",
+    "- `d1 = [ln(S/K) + (r + sigma^2/2)T] / (sigma*sqrt(T))`",
+    "- `d2 = d1 - sigma*sqrt(T)`",
+  ];
+
+  if (spot !== null && strike !== null && maturity !== null && rate !== null && vol !== null) {
+    const d1 = (Math.log(spot / strike) + (rate + (vol * vol) / 2) * maturity) / (vol * Math.sqrt(maturity));
+    const d2 = d1 - vol * Math.sqrt(maturity);
+    const nd1 = normalCdf(d1);
+    const nd2 = normalCdf(d2);
+    const callPrice = spot * nd1 - strike * Math.exp(-rate * maturity) * nd2;
+    const putPrice = strike * Math.exp(-rate * maturity) * normalCdf(-d2) - spot * normalCdf(-d1);
+    const gamma = normalPdf(d1) / (spot * vol * Math.sqrt(maturity));
+    const vega = spot * normalPdf(d1) * Math.sqrt(maturity) / 100;
+    lines.push(
+      "",
+      "*Numerical Result*",
+      `- Inputs: S=${spot}, K=${strike}, T=${maturity}, r=${(rate * 100).toFixed(2)}%, sigma=${(vol * 100).toFixed(2)}%`,
+      `- d1 = ${d1.toFixed(4)}, d2 = ${d2.toFixed(4)}`,
+      `- Call price = $${callPrice.toFixed(4)}`,
+      `- Put price = $${putPrice.toFixed(4)}`,
+      `- Delta(call) = ${nd1.toFixed(4)}`,
+      `- Gamma = ${gamma.toFixed(6)}`,
+      `- Vega = $${vega.toFixed(4)} per 1% volatility move`,
+    );
+  } else {
+    lines.push("", "- Supply spot, strike, maturity, risk-free rate, and volatility for the full numerical result.");
+  }
+
+  return lines.join("\n");
+}
+
+function solveBondPricingQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (!containsAny(text, [/\b(bond pricing|ytm|yield to maturity|coupon bond|duration|convexity|fixed income|par value)\b/])) {
+    return null;
+  }
+
+  const faceMatch = /(?:face|par|principal)[:\s=]+\$?(\d+(?:\.\d+)?)/i.exec(question);
+  const couponMatch = /coupon[:\s=]+(\d+(?:\.\d+)?)\s*%?/i.exec(question);
+  const ytmMatch = /ytm[:\s=]+(\d+(?:\.\d+)?)\s*%?/i.exec(question);
+  const maturityMatch = /(\d+)\s*(?:year|yr)/i.exec(question);
+  const face = faceMatch ? Number.parseFloat(faceMatch[1]) : null;
+  const coupon = couponMatch ? Number.parseFloat(couponMatch[1]) / 100 : null;
+  const ytm = ytmMatch ? Number.parseFloat(ytmMatch[1]) / 100 : null;
+  const maturity = maturityMatch ? Number.parseFloat(maturityMatch[1]) : null;
+
+  const lines = [
+    "*Bond Pricing And Duration*",
+    "",
+    "*Formula*",
+    "- `P = sum_{t=1..N} C/(1+y)^t + F/(1+y)^N`",
+    "- `C` is the periodic coupon, `y` is the yield to maturity, and `F` is face value.",
+  ];
+
+  if (face !== null && coupon !== null && ytm !== null && maturity !== null) {
+    const couponCash = face * coupon;
+    const price = couponCash * (1 - Math.pow(1 + ytm, -maturity)) / ytm + face * Math.pow(1 + ytm, -maturity);
+    let weighted = 0;
+    for (let t = 1; t <= maturity; t += 1) {
+      weighted += t * (couponCash / Math.pow(1 + ytm, t));
+    }
+    weighted += maturity * (face / Math.pow(1 + ytm, maturity));
+    const macaulay = weighted / price;
+    const modified = macaulay / (1 + ytm);
+    lines.push(
+      "",
+      "*Numerical Result*",
+      `- Coupon cash flow = $${couponCash.toFixed(2)}`,
+      `- Bond price = $${price.toFixed(2)}`,
+      `- Macaulay duration = ${macaulay.toFixed(4)} years`,
+      `- Modified duration = ${modified.toFixed(4)}`,
+    );
+  } else {
+    lines.push("", "- Supply face value, coupon rate, YTM, and maturity for exact pricing.");
+  }
+
+  return lines.join("\n");
+}
+
+function solveVaRCVaRQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (
+    !containsAny(text, [/\b(value at risk|\bvar\b|cvar|expected shortfall|conditional value at risk|tail risk|portfolio risk|market risk)\b/])
+    || /energy.*var/.test(text)
+  ) {
+    return null;
+  }
+
+  const confidenceMatch = /(\d+(?:\.\d+)?)\s*%\s*(?:confidence|var)/i.exec(question);
+  const meanMatch = /(?:mean|return|mu)[:\s=]+(-?\d+(?:\.\d+)?)\s*%?/i.exec(question);
+  const volMatch = /(?:volatility|vol|sigma|std)[:\s=]+(\d+(?:\.\d+)?)\s*%?/i.exec(question);
+  const alpha = confidenceMatch ? Number.parseFloat(confidenceMatch[1]) / 100 : 0.99;
+  const mean = meanMatch ? Number.parseFloat(meanMatch[1]) / 100 : null;
+  const vol = volMatch ? Number.parseFloat(volMatch[1]) / 100 : null;
+
+  const lines = [
+    "*VaR And CVaR Framework*",
+    "",
+    "*Definitions*",
+    "- VaR(alpha) is the loss threshold exceeded with probability `1 - alpha`.",
+    "- CVaR or expected shortfall is the average loss in the tail beyond VaR.",
+    "- Expected shortfall is preferred to VaR for tail-sensitive risk because it is coherent.",
+  ];
+
+  if (mean !== null && vol !== null) {
+    const z = getZScore(alpha);
+    const varLoss = -(mean - z * vol);
+    const cvarLoss = -(mean - (vol * normalPdf(z)) / (1 - alpha));
+    lines.push(
+      "",
+      "*Parametric Result*",
+      `- Confidence level = ${(alpha * 100).toFixed(0)}%`,
+      `- z-score = ${z.toFixed(4)}`,
+      `- One-period VaR = ${(varLoss * 100).toFixed(3)}%`,
+      `- One-period CVaR = ${(cvarLoss * 100).toFixed(3)}%`,
+      `- If returns are iid, 10-period VaR scales approximately with sqrt(10), but that breaks under autocorrelation or fat tails.`,
+    );
+  }
+
+  lines.push(
+    "",
+    "*Method Choices*",
+    "- Parametric variance-covariance is fast but fragile under fat tails.",
+    "- Historical simulation captures real non-normal tails with fewer model assumptions.",
+    "- Monte Carlo is preferred for options and complex path-dependent books.",
+    "- Backtesting should track exceptions and cluster behavior, not just average calibration.",
+  );
+
+  return lines.join("\n");
+}
+
+function solveInsuranceReservingQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (
+    !containsAny(text, [/\b(insurance reserv|claims reserv|ibnr|bornhuetter|chain ladder|loss development|ultimate loss|run-off)\b/])
+  ) {
+    return null;
+  }
+
+  return [
+    "*Insurance Reserving Framework*",
+    "",
+    "*Decision*",
+    "- Use Chain Ladder as the baseline, Bornhuetter-Ferguson as the stabilizing cross-check, and bootstrap uncertainty for reserve ranges.",
+    "",
+    "*Core Methods*",
+    "- *Chain Ladder:* derive age-to-age development factors from the claims triangle, then project immature accident years to ultimate.",
+    "- *Bornhuetter-Ferguson:* combine emerged loss with an a priori expected loss ratio for immature cohorts.",
+    "- *Expected Loss Ratio:* use only when history is too sparse to trust development patterns.",
+    "",
+    "*IBNR Calculation*",
+    "- `IBNR = Ultimate Loss - Paid or Reported to Date`",
+    "- Example: if paid-to-date is 8.0M and the cumulative development factor is 1.25, ultimate loss is 10.0M and IBNR is 2.0M.",
+    "",
+    "*Platform Design*",
+    "- Keep an immutable claim-event log with accident date, report date, payment date, amount, line of business, and reserve updates.",
+    "- Build triangles from that event log, version every factor selection, and store every reserve run for audit.",
+    "- Add bootstrap or Mack-style uncertainty so finance can see reserve percentiles, not just point estimates.",
+    "",
+    "*Bottom Line*",
+    "- Professional reserving is triangle-based, versioned, and auditable. Do not rely on a single point estimate without uncertainty bands.",
   ].join("\n");
 }
 
@@ -1337,7 +1958,7 @@ function solveCollaborativeEditorQuestion(question: string) {
 function solveFeatureStoreQuestion(question: string) {
   const text = question.toLowerCase();
   if (
-    !containsAny(text, [/\b(feature store|point-in-time|training data|late-arriving events|backfills?|online serving|gdpr deletion)\b/])
+    !containsAny(text, [/\b(feature store|point-in-time|training data|late-arriving events|backfills?|online serving|gdpr deletion|training[- ]serv(?:ing)? skew|stale features?|feature freshness|real-?time models?)\b/])
   ) {
     return null;
   }
@@ -1547,8 +2168,222 @@ function solveCopilotArchitectureMemo(question: string) {
   ].join("\n");
 }
 
-function looksLikeRealtimeResearch(question: string) {
-  return /\b(latest|today|current|recent|news|this week|right now|as of|202[5-9])\b/i.test(question);
+function solveRAGArchitectureQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (
+    !containsAny(text, [/\b(rag\b|retrieval-augmented|retrieval augmented|vector search|embedding retrieval|rerank|hybrid retrieval|chunking strategy)\b/])
+  ) {
+    return null;
+  }
+
+  return [
+    "*RAG Architecture*",
+    "",
+    "*Recommendation*",
+    "- Use hierarchical chunking plus hybrid BM25+dense retrieval, then cross-encoder reranking before generation.",
+    "",
+    "*Why This Wins*",
+    "- Hybrid retrieval catches both exact identifiers and semantic paraphrases.",
+    "- Reranking improves precision more reliably than prompt tuning alone.",
+    "- Hierarchical chunking preserves section context without forcing huge prompts on every query.",
+    "",
+    "*Core Pipeline*",
+    "- Query normalization -> hybrid retrieval -> rerank top candidates -> deduplicate -> assemble grounded context -> generate with citation tags.",
+    "- Track source id, section, timestamp, and ACL metadata at chunk level.",
+    "- Refuse or down-rank responses when retrieval confidence is too low.",
+    "",
+    "*Evaluation*",
+    "- Measure Recall@K, MRR, NDCG for retrieval and groundedness or faithfulness for answers.",
+    "- Review citation accuracy and unsupported-claim rate with human spot checks each week.",
+    "",
+    "*Bottom Line*",
+    "- Retrieval quality drives answer quality. Invest in chunking, hybrid recall, reranking, and evaluation before touching fancy prompt tricks.",
+  ].join("\n");
+}
+
+function solveMLOpsQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (
+    !containsAny(text, [/\b(mlops|model deployment|model monitor|data drift|concept drift|model registry|shadow deploy|canary model|feature drift)\b/])
+  ) {
+    return null;
+  }
+
+  return [
+    "*MLOps Deployment And Monitoring*",
+    "",
+    "*Deployment Strategy*",
+    "- Use shadow deployment first, then canary rollout, then A/B or full promotion once metrics hold.",
+    "- Keep model artifacts, feature schema, training dataset fingerprint, and evaluation results together in the registry.",
+    "",
+    "*Monitoring*",
+    "- Track latency, error rate, prediction distribution, data drift, and business outcome metrics separately.",
+    "- Use PSI or KS for feature drift and compare ground-truth performance when labels arrive.",
+    "- Alert on both data shift and performance regression; neither one alone is enough.",
+    "",
+    "*Operational Controls*",
+    "- Require a rollback path to the previous model version with one config change.",
+    "- Version every feature contract so inference failures are obvious instead of silent.",
+    "- Tie production promotion to explicit approval plus benchmark evidence.",
+    "",
+    "*Bottom Line*",
+    "- Good MLOps is versioned deployment plus drift detection plus fast rollback, not just hosting a model behind an endpoint.",
+  ].join("\n");
+}
+
+function solveQuantumComputingQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (
+    !containsAny(text, [/\b(quantum computing|qubit|superposition|entanglement|quantum gate|quantum circuit|shor|grover|decoherence|bloch sphere)\b/])
+  ) {
+    return null;
+  }
+
+  return [
+    "*Quantum Computing Overview*",
+    "",
+    "*Core Concepts*",
+    "- A qubit can exist in a superposition `alpha|0> + beta|1>` until measurement collapses it.",
+    "- Entanglement creates joint states whose measurement outcomes are correlated beyond classical factorization.",
+    "- Useful gates include Hadamard for superposition, Pauli-X for bit flip, and CNOT for entanglement.",
+    "",
+    "*Why Quantum Is Different*",
+    "- Quantum algorithms exploit amplitude interference, not just parallel classical branching.",
+    "- Shor gives exponential speedup for integer factoring, while Grover gives quadratic speedup for unstructured search.",
+    "- Noise, decoherence, and error correction overhead are the practical bottlenecks today.",
+    "",
+    "*Bottom Line*",
+    "- Quantum computing is powerful for specific classes of problems, but practical advantage depends on error-corrected hardware and algorithms matched to the right task.",
+  ].join("\n");
+}
+
+async function solveAnyExpertQuestion(input: {
+  question: string;
+  intent: IntentType;
+  history?: ChatHistory;
+}) {
+  const text = input.question.toLowerCase();
+  const domainHints: string[] = [];
+
+  if (/\b(llm|rag|embedding|fine-?tun|neural network|transformer|machine learning|reinforcement)\b/.test(text)) {
+    domainHints.push("AI and machine-learning systems");
+  }
+  if (/\b(carbon credit|carbon registry|offset|article 6|itmo|retirement ledger)\b/.test(text)) {
+    domainHints.push("carbon market infrastructure and registry design");
+  }
+  if (/\b(database|postgres|mysql|schema|migration|query|index|redis|cassandra|shard)\b/.test(text)) {
+    domainHints.push("database engineering");
+  }
+  if (/\b(kubernetes|docker|terraform|aws|gcp|azure|devops|ci\/cd|platform engineering|infra)\b/.test(text)) {
+    domainHints.push("cloud and platform engineering");
+  }
+  if (/\b(finance|trading|portfolio|valuation|volatility|hedge|derivative|credit risk)\b/.test(text)) {
+    domainHints.push("quantitative finance");
+  }
+  if (/\b(medical|clinical|trial|diagnosis|treatment|patient|biostatistics|epidemiology)\b/.test(text)) {
+    domainHints.push("clinical and biomedical analysis");
+  }
+  if (/\b(legal|regulation|contract|compliance|gdpr|fda|sec|liability|jurisdiction)\b/.test(text)) {
+    domainHints.push("legal and regulatory analysis");
+  }
+  if (/\b(physics|thermodynamics|mechanics|electromagnetism|optics|materials science)\b/.test(text)) {
+    domainHints.push("physics and materials science");
+  }
+  if (/\b(quantum|qubit|entanglement|shor|grover|decoherence|bloch sphere)\b/.test(text)) {
+    domainHints.push("quantum computing and physics");
+  }
+  if (/\b(chemistry|reaction|catalyst|polymer|spectroscopy|molecular)\b/.test(text)) {
+    domainHints.push("chemistry and chemical engineering");
+  }
+  if (/\b(economics|inflation|monetary policy|fiscal|market structure|supply chain)\b/.test(text)) {
+    domainHints.push("economics and policy");
+  }
+  if (/\b(security|oauth|token|kms|threat|cve|exploit|incident response|tenant isolation)\b/.test(text)) {
+    domainHints.push("cybersecurity");
+  }
+  if (/\b(statistics|regression|bayesian|confidence interval|hypothesis|sampling|anova)\b/.test(text)) {
+    domainHints.push("statistics and quantitative inference");
+  }
+
+  const intentInstructions: Record<IntentType, string> = {
+    coding: [
+      "You are a principal software engineer and systems architect.",
+      "Respond in this order: invariants, schema or types, flow, failure modes, implementation outline, bottom line.",
+      "Use concrete identifiers and production-safe guidance.",
+      "Do not answer with vague tradeoff talk only.",
+      "If the system is regulated or financial, include auditability and approval controls.",
+    ].join("\n"),
+    math: [
+      "You are a quantitative analyst and applied mathematician.",
+      "Respond in this order: formulas, substitution, result, interpretation, assumptions, caveats.",
+      "Show the working and separate exact values from approximations.",
+    ].join("\n"),
+    research: [
+      "You are a senior analyst writing a decision memo.",
+      "Respond in this order: recommendation, rationale, tradeoffs, rollout, bottom line.",
+      "State assumptions instead of inventing facts.",
+    ].join("\n"),
+    general: [
+      "You are a world-class domain expert.",
+      "Lead with the direct answer, then explain clearly.",
+      "Use structure when the topic is multi-part.",
+      "Cover edge cases and common misconceptions when they materially change the answer.",
+    ].join("\n"),
+    email: [
+      "You are an expert business communicator.",
+      "Write a complete, ready-to-send response with a subject line when appropriate.",
+    ].join("\n"),
+    creative: [
+      "You are a creative writing expert.",
+      "Produce the complete piece without truncation and keep it specific.",
+    ].join("\n"),
+    greeting: "Respond warmly and briefly.",
+    reminder: "Confirm the reminder clearly with exact details.",
+    calendar: "Present the calendar answer clearly and concisely.",
+    spending: "Give a concrete spending analysis with numbers and actions.",
+  };
+
+  const domainContext = domainHints.length
+    ? `Detected domains: ${domainHints.join(", ")}.`
+    : "Detected domains: general professional reasoning.";
+
+  const preferredModels = input.intent === "coding"
+    ? CODING_REVIEW_MODELS
+    : input.intent === "research"
+      ? RESEARCH_MEMO_MODELS
+      : undefined;
+
+  const answer = await completeClawCloudPrompt({
+    system: [
+      "You are ClawCloud AI at expert level.",
+      domainContext,
+      intentInstructions[input.intent] ?? intentInstructions.general,
+      "Absolute rules:",
+      "- Never give a generic or incomplete answer.",
+      "- Never say the question is outside your expertise.",
+      "- State assumptions explicitly when data is missing.",
+      "- Finish the answer cleanly even if the topic is unusual or difficult.",
+      "- Never leave a structured answer half-complete.",
+    ].join("\n\n"),
+    user: input.question,
+    history: input.history ?? [],
+    intent: input.intent,
+    responseMode: "deep",
+    preferredModels,
+    maxTokens: 1_600,
+    fallback: "",
+    skipCache: true,
+    temperature: 0.1,
+  });
+
+  return answer.trim();
+}
+
+export function looksLikeRealtimeResearch(question: string) {
+  return containsAny(question.toLowerCase(), [
+    /\b(latest|current|today|this week|this month|news|recent|now|live|as of|202[4-9])\b/,
+    /\b(stock|price|rate|market|trend)\b/,
+  ]);
 }
 
 function codingReviewHints(question: string) {
@@ -1589,6 +2424,15 @@ function codingReviewHints(question: string) {
   if (/gpu|gang scheduling|spot interruption|fair-share|checkpoint/.test(text)) {
     hints.push("- Cover quota enforcement, gang reservations, checkpoint-aware preemption, and interruption recovery.");
   }
+  if (/carbon|credit|registry|retirement|article 6|itmo/.test(text)) {
+    hints.push("- Cover globally unique serials, terminal retirement state, operator approvals, and append-only auditability.");
+  }
+  if (/rag|retrieval|embedding|rerank|chunking/.test(text)) {
+    hints.push("- Cover chunking, hybrid retrieval, reranking, citation grounding, and evaluation metrics.");
+  }
+  if (/mlops|drift|model registry|canary|shadow deploy/.test(text)) {
+    hints.push("- Cover registry lineage, shadow and canary rollout, drift detection, and rollback.");
+  }
 
   return hints.join("\n");
 }
@@ -1616,7 +2460,7 @@ export async function refineCodingAnswer(input: {
     intent: "coding",
     responseMode: "deep",
     preferredModels: CODING_REVIEW_MODELS,
-    maxTokens: 1_000,
+    maxTokens: 1_600,
     fallback: input.draft,
     skipCache: true,
     temperature: 0.1,
@@ -1629,30 +2473,38 @@ export async function runGroundedResearchReply(input: {
   history?: ChatHistory;
 }) {
   const memo =
-    solveCbdcDecisionMemo(input.question)
+    solveCarbonCreditRegistryQuestion(input.question)
+    || solveSatelliteCollisionAvoidanceQuestion(input.question)
+    || solveRAGArchitectureQuestion(input.question)
+    || solveMLOpsQuestion(input.question)
+    || solveCbdcDecisionMemo(input.question)
     || solveRegulatedOpsMemo(input.question)
     || solveCopilotArchitectureMemo(input.question);
   if (memo) return memo;
 
   if (!looksLikeRealtimeResearch(input.question)) {
-    return completeClawCloudPrompt({
+    const answer = await completeClawCloudPrompt({
       system: [
         "You are writing a decision memo for an expert operator.",
         "Answer in this order: recommendation, why, tradeoffs, rollout, bottom line.",
         "Be concrete, decision-ready, and avoid invented precise numbers.",
-        "If the question is conceptual, do not pretend to cite the web.",
-        "Return only the memo.",
+        "If the question is conceptual, state assumptions explicitly.",
+        "Return only the memo. Never return an incomplete answer.",
       ].join("\n"),
       user: input.question,
       history: input.history ?? [],
       intent: "research",
       responseMode: "deep",
       preferredModels: RESEARCH_MEMO_MODELS,
-      maxTokens: 900,
+      maxTokens: 1_300,
       fallback: "",
       skipCache: true,
       temperature: 0.1,
-    }).then((answer) => answer || null);
+    });
+
+    if (answer.trim()) {
+      return answer;
+    }
   }
 
   const result = await runResearchAgent({
@@ -1671,7 +2523,15 @@ export function solveHardMathQuestion(question: string) {
     || solveBayesianDiagnosticQuestion(question)
     || solveQueueingMathQuestion(question)
     || solveSurvivalAnalysisQuestion(question)
+    || solveIVEstimationQuestion(question)
+    || solveRegressionDiscontinuityQuestion(question)
+    || solveBlackScholesQuestion(question)
+    || solveBondPricingQuestion(question)
     || solveEnergyHedgeRiskQuestion(question)
+    || solvePolicyEffectSignificanceQuestion(question)
+    || solveVaRCVaRQuestion(question)
+    || solveDifferenceInDifferencesQuestion(question)
+    || solveInsuranceReservingQuestion(question)
   );
 }
 
@@ -1681,6 +2541,7 @@ export function solveCodingArchitectureQuestion(question: string) {
     || solveCrisprPipelineQuestion(question)
     || solveFintechWalletLedgerQuestion(question)
     || solveStripeBillingMigrationQuestion(question)
+    || solveCarbonCreditRegistryQuestion(question)
     || solveSecurityArchitectureQuestion(question)
     || solveWorkflowEngineQuestion(question)
     || solveCollaborativeEditorQuestion(question)
@@ -1689,5 +2550,19 @@ export function solveCodingArchitectureQuestion(question: string) {
     || solveAdAttributionQuestion(question)
     || solveGpuSchedulerQuestion(question)
     || solveDistributedControlPlaneQuestion(question)
+    || solveSemiconductorWaferFabQuestion(question)
+    || solveWaterNetworkLossQuestion(question)
+    || solveSatelliteCollisionAvoidanceQuestion(question)
+    || solveCbdcOfflineRetailQuestion(question)
+    || solveRAGArchitectureQuestion(question)
+    || solveMLOpsQuestion(question)
   );
+}
+
+export async function solveWithUniversalExpert(input: {
+  question: string;
+  intent: IntentType;
+  history?: ChatHistory;
+}) {
+  return solveAnyExpertQuestion(input);
 }

@@ -1,33 +1,25 @@
-// agent-server.ts — ClawCloud WhatsApp Agent Server
-// ─────────────────────────────────────────────────────────────────────────────
-// KEY FEATURES:
-//  1. Typing indicator fires IMMEDIATELY when message arrives
-//  2. Streaming "typewriter" effect — sends text sentence-by-sentence
-//     so it appears to TYPE in WhatsApp like ChatGPT streams
-//  3. Professional message formatting preserved end-to-end
-//  4. Auto-reconnect on session drop
-//  5. Chunked delivery for long messages
-// ─────────────────────────────────────────────────────────────────────────────
-
 import express from "express";
 import * as cron from "node-cron";
 import QRCode from "qrcode";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  Browsers,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
   makeWASocket,
   useMultiFileAuthState,
-  DisconnectReason,
-  Browsers,
-  fetchLatestBaileysVersion,
   type WASocket,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import { createClient } from "@supabase/supabase-js";
 
-// ─── Config ───────────────────────────────────────────────────────────────────
-
 const STALE_MS = 60_000;
+const DIRECT_REPLY_TIMEOUT_MS = 50_000;
+const HTTP_REPLY_TIMEOUT_MS = 55_000;
+const STREAM_REPLY_MIN_LENGTH = 900;
+const SESSION_WATCHDOG_STALE_MS = 3 * 60_000;
+const SESSION_WATCHDOG_INTERVAL_MS = 5 * 60_000;
 
 type SessionRecord = {
   sock: WASocket;
@@ -38,16 +30,11 @@ type SessionRecord = {
   startedAt: number;
 };
 
+type RouteInboundAgentMessageFn = (userId: string, message: string) => Promise<string | null>;
+
 const sessions = new Map<string, SessionRecord>();
 const outboundIds = new Set<string>();
-const DIRECT_REPLY_TIMEOUT_MS = 15_000;
-const HTTP_REPLY_TIMEOUT_MS = 10_000;
-const STREAM_REPLY_MIN_LENGTH = 900;
-
-type RouteInboundAgentMessageFn = (userId: string, message: string) => Promise<string | null>;
 let cachedRouteInboundAgentMessage: RouteInboundAgentMessageFn | null = null;
-
-// ─── Supabase ─────────────────────────────────────────────────────────────────
 
 function db() {
   return createClient(
@@ -56,29 +43,71 @@ function db() {
   );
 }
 
-// ─── Env ──────────────────────────────────────────────────────────────────────
-
 function appUrl() {
   return process.env.NEXT_PUBLIC_APP_URL?.trim() || process.env.NEXTJS_URL?.trim() || "";
 }
 
 function missingEnv() {
   return ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "AGENT_SECRET"].filter(
-    (k) => !process.env[k]?.trim(),
+    (key) => !process.env[key]?.trim(),
   );
 }
 
 function configError() {
-  const m = missingEnv();
-  return m.length ? `Missing env vars: ${m.join(", ")}` : null;
+  const missing = missingEnv();
+  return missing.length ? `Missing env vars: ${missing.join(", ")}` : null;
 }
 
 function assertConfigured() {
-  const e = configError();
-  if (e) throw new Error(e);
+  const error = configError();
+  if (error) {
+    throw new Error(error);
+  }
 }
 
-// ─── WhatsApp version ─────────────────────────────────────────────────────────
+function logStartupDiagnostics() {
+  console.log("[agent] ======= STARTUP DIAGNOSTICS =======");
+
+  const checks = [
+    { key: "SUPABASE_URL", value: process.env.SUPABASE_URL ?? "MISSING" },
+    {
+      key: "SUPABASE_SERVICE_ROLE_KEY",
+      value: process.env.SUPABASE_SERVICE_ROLE_KEY ? "SET" : "MISSING",
+    },
+    { key: "AGENT_SECRET", value: process.env.AGENT_SECRET ? "SET" : "MISSING" },
+    { key: "CRON_SECRET", value: process.env.CRON_SECRET ? "SET" : "MISSING" },
+    {
+      key: "NVIDIA_API_KEY",
+      value: process.env.NVIDIA_API_KEY
+        ? `SET (${process.env.NVIDIA_API_KEY.slice(0, 8)}...)`
+        : "MISSING - AI answers may fall back",
+    },
+    {
+      key: "NEXT_PUBLIC_APP_URL",
+      value: process.env.NEXT_PUBLIC_APP_URL || "MISSING - HTTP fallback will fail",
+    },
+    { key: "NEXTJS_URL", value: process.env.NEXTJS_URL || "not set" },
+    { key: "WA_SESSION_DIR", value: process.env.WA_SESSION_DIR || "./wa-sessions" },
+  ];
+
+  for (const check of checks) {
+    console.log(`[agent] ${check.key}: ${check.value}`);
+  }
+
+  const url = appUrl();
+  if (!url) {
+    console.error("[agent] CRITICAL: NEXT_PUBLIC_APP_URL is not set.");
+    console.error("[agent] Set NEXT_PUBLIC_APP_URL=https://swift-deploy.in on Railway.");
+  } else if (url.includes("localhost") || url.includes("127.0.0.1")) {
+    console.error("[agent] CRITICAL: NEXT_PUBLIC_APP_URL points to localhost.");
+    console.error(`[agent] Current value: ${url}`);
+    console.error("[agent] Fix it to https://swift-deploy.in on Railway.");
+  } else {
+    console.log(`[agent] App URL: ${url}`);
+  }
+
+  console.log("[agent] =================================");
+}
 
 async function getWAVersion(): Promise<[number, number, number]> {
   const { version, isLatest } = await fetchLatestBaileysVersion();
@@ -86,148 +115,125 @@ async function getWAVersion(): Promise<[number, number, number]> {
   return version;
 }
 
-// ─── Session dir ──────────────────────────────────────────────────────────────
-
 function sessionDir(userId: string) {
   const base = process.env.WA_SESSION_DIR || "./wa-sessions";
   return path.join(base, userId.replace(/[^a-zA-Z0-9_-]/g, "_"));
 }
 
-// ─── Discard session ──────────────────────────────────────────────────────────
-
 async function discardSession(
   userId: string,
-  rec: SessionRecord | undefined,
-  opts: { deleteAuth?: boolean } = {},
+  record: SessionRecord | undefined,
+  options: { deleteAuth?: boolean } = {},
 ) {
-  if (rec) {
-    try { await rec.sock.logout(); } catch { /* ignore */ }
-    try { rec.sock.end(new Error("discarded")); } catch { /* ignore */ }
+  if (record) {
+    try {
+      await record.sock.logout();
+    } catch {
+      // Ignore logout failures during cleanup.
+    }
+
+    try {
+      record.sock.end(new Error("discarded"));
+    } catch {
+      // Ignore socket close failures during cleanup.
+    }
   }
+
   sessions.delete(userId);
-  if (opts.deleteAuth) {
-    const d = sessionDir(userId);
-    if (fs.existsSync(d)) fs.rmSync(d, { recursive: true, force: true });
+
+  if (options.deleteAuth) {
+    const dir = sessionDir(userId);
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   }
 }
 
-// ─── STREAMING TYPEWRITER EFFECT ─────────────────────────────────────────────
-// This is the magic that makes replies feel like ChatGPT typing.
-// Strategy: split the full reply into natural "chunks" (sentences / sections),
-// then send each chunk with a short delay, keeping "composing" indicator on
-// between chunks. The user sees text appearing progressively.
-
 function splitIntoStreamChunks(text: string): string[] {
-  // Split at sentence boundaries and section breaks for natural flow
   const chunks: string[] = [];
-  
-  // First split by double newlines (sections)
   const sections = text.split(/\n\n+/);
-  
+
   for (const section of sections) {
     const trimmed = section.trim();
-    if (!trimmed) continue;
-    
-    // For short sections (under 120 chars) — send as one chunk
+    if (!trimmed) {
+      continue;
+    }
+
     if (trimmed.length <= 120) {
       chunks.push(trimmed);
       continue;
     }
-    
-    // For longer sections — split by sentences
+
     const sentences = trimmed.split(/(?<=[.!?])\s+/);
     let current = "";
+
     for (const sentence of sentences) {
       if ((current + " " + sentence).length > 160 && current) {
         chunks.push(current.trim());
         current = sentence;
       } else {
-        current = current ? current + " " + sentence : sentence;
+        current = current ? `${current} ${sentence}` : sentence;
       }
     }
-    if (current.trim()) chunks.push(current.trim());
+
+    if (current.trim()) {
+      chunks.push(current.trim());
+    }
   }
-  
+
   return chunks.filter(Boolean);
 }
 
-// Delay between chunks in ms — simulates typing speed
-// Longer chunks get more time (realistic typing feel)
-function chunkDelay(chunk: string): number {
+function chunkDelay(chunk: string) {
   const words = chunk.split(/\s+/).length;
-  // ~200 words/min typing = ~300ms per word, but we go faster for UX
-  // Short chunk: 400-600ms, long chunk: 800-1200ms
-  return Math.min(400 + words * 60, 1200);
+  return Math.min(400 + words * 60, 1_200);
 }
 
-// ─── Send with streaming typewriter effect ────────────────────────────────────
-
-async function sendStreamingMessage(
-  sock: WASocket,
-  jid: string,
-  fullText: string,
-): Promise<void> {
+async function sendStreamingMessage(sock: WASocket, jid: string, fullText: string) {
   const chunks = splitIntoStreamChunks(fullText);
-  
+
   if (chunks.length <= 1) {
-    // Short reply — just send it directly, no need to split
     const sent = await sock.sendMessage(jid, { text: fullText.trim() });
-    if (sent?.key?.id) outboundIds.add(sent.key.id);
+    if (sent?.key?.id) {
+      outboundIds.add(sent.key.id);
+    }
     return;
   }
 
-  // Multi-chunk: stream sentence by sentence with typing indicator between each
-  for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i];
-    const isLast = i === chunks.length - 1;
-    
-    // Show typing indicator before each chunk (except before the very first
-    // since we already started composing in handleInboundMessage)
-    if (i > 0) {
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index] ?? "";
+    const isLast = index === chunks.length - 1;
+
+    if (index > 0) {
       await sock.sendPresenceUpdate("composing", jid).catch(() => null);
-      await new Promise((r) => setTimeout(r, chunkDelay(chunk)));
+      await new Promise((resolve) => setTimeout(resolve, chunkDelay(chunk)));
+      await new Promise((resolve) => setTimeout(resolve, 300));
     }
-    
-    // Build the cumulative message (all chunks so far)
-    // This makes it look like text is being appended progressively
-    const textSoFar = chunks.slice(0, i + 1).join("\n\n");
-    
-    if (i === 0) {
-      // First chunk — send as new message
-      const sent = await sock.sendMessage(jid, { text: textSoFar });
-      if (sent?.key?.id) outboundIds.add(sent.key.id);
-    } else {
-      // Subsequent chunks — send as new message (WhatsApp doesn't support
-      // editing sent messages, so we send the full accumulated text each time
-      // but delete previous non-final chunks... Actually simpler: just send
-      // each section as its own message with small delay)
-      await sock.sendPresenceUpdate("paused", jid).catch(() => null);
-      await new Promise((r) => setTimeout(r, 300));
-      
-      // Send ONLY the new chunk as a continuation
-      const sent = await sock.sendMessage(jid, { text: chunk });
-      if (sent?.key?.id) outboundIds.add(sent.key.id);
+
+    const sent = await sock.sendMessage(jid, { text: index === 0 ? chunk : chunk });
+    if (sent?.key?.id) {
+      outboundIds.add(sent.key.id);
     }
-    
+
     if (!isLast) {
       await sock.sendPresenceUpdate("composing", jid).catch(() => null);
     }
   }
-  
-  // Final: stop composing
+
   await sock.sendPresenceUpdate("paused", jid).catch(() => null);
 }
 
-// ─── Save to DB ───────────────────────────────────────────────────────────────
-
 async function logOutbound(userId: string, content: string) {
-  await db().from("whatsapp_messages").insert({
-    user_id: userId,
-    direction: "outbound",
-    content,
-    message_type: "text",
-    sent_at: new Date().toISOString(),
-  }).catch(() => null);
+  await db()
+    .from("whatsapp_messages")
+    .insert({
+      user_id: userId,
+      direction: "outbound",
+      content,
+      message_type: "text",
+      sent_at: new Date().toISOString(),
+    })
+    .catch(() => null);
 }
 
 async function shouldSendWelcome(userId: string, phone: string | null) {
@@ -239,7 +245,9 @@ async function shouldSendWelcome(userId: string, phone: string | null) {
     .maybeSingle()
     .catch(() => ({ data: null }));
 
-  if (!data) return true;
+  if (!data) {
+    return true;
+  }
 
   const existingPhone = String(data.phone_number ?? "").replace(/\D/g, "");
   const nextPhone = String(phone ?? "").replace(/\D/g, "");
@@ -301,72 +309,142 @@ async function persistPreferredChatTarget(
     .catch(() => null);
 }
 
-// ─── Welcome message ──────────────────────────────────────────────────────────
-
 async function sendWelcome(sock: WASocket, phone: string) {
   const jid = `${phone}@s.whatsapp.net`;
   const text = [
     "🦞 *ClawCloud AI is connected!*",
     "",
-    "I'm your personal AI assistant — more capable than ChatGPT, right here on WhatsApp.",
+    "I'm your personal AI assistant right here on WhatsApp.",
     "",
     "Here's what I can do for you:",
-    "💻 *Code* — write, debug, explain in any language",
-    "📧 *Email* — search, draft, reply to your inbox",
-    "📅 *Calendar* — check meetings & get briefings",
-    "⏰ *Reminders* — set smart alerts",
-    "🧠 *Knowledge* — answer any question on any topic",
-    "📊 *Math* — solve problems step by step",
-    "✍️ *Writing* — essays, reports, creative content",
-    "💡 *Ideas* — brainstorm, analyze, strategize",
+    "💻 *Code* - write, debug, explain in any language",
+    "📧 *Email* - search, draft, and reply from your inbox",
+    "📅 *Calendar* - check meetings and reminders",
+    "⏰ *Reminders* - set smart alerts",
+    "🧠 *Knowledge* - answer questions on any topic",
+    "📊 *Math* - solve problems step by step",
+    "✍️ *Writing* - essays, reports, and content",
+    "🗞️ *News* - latest news from anywhere",
     "",
-    "Just type naturally. I understand everything.",
+    "Just type naturally. I understand what you need.",
     "",
-    "Finish setup at swift-deploy.in to unlock all features 🚀",
+    "Finish setup at swift-deploy.in to unlock all features.",
   ].join("\n");
 
   const sent = await sock.sendMessage(jid, { text });
-  if (sent?.key?.id) outboundIds.add(sent.key.id);
+  if (sent?.key?.id) {
+    outboundIds.add(sent.key.id);
+  }
 }
 
-// ─── Send reply to user ───────────────────────────────────────────────────────
+function getBuiltinFallbackResponse(message: string) {
+  const text = message.toLowerCase().trim();
 
-async function sendReply(userId: string, message: string, targetJid?: string | null): Promise<boolean> {
+  if (
+    /^(hi|hello|hey|hii|helo|namaste|good\s*(morning|evening|afternoon|night))\b/.test(text) &&
+    text.length < 30
+  ) {
+    return "👋 *Hey! ClawCloud AI here.*\n\nAsk me anything - coding, math, email, news, reminders, or any question at all.";
+  }
+
+  if (/what can you do|what do you do|your capabilities|help me with|features/.test(text)) {
+    return [
+      "🦞 *I can help you with:*",
+      "",
+      "💻 *Code* - write, debug, explain any language",
+      "📧 *Email* - search and draft replies from your inbox",
+      "📅 *Calendar* - check meetings and briefings",
+      "⏰ *Reminders* - set smart alerts",
+      "🧠 *Knowledge* - answer any question",
+      "📊 *Math* - step-by-step solutions",
+      "✍️ *Writing* - essays, reports, and content",
+      "🗞️ *News* - latest news anywhere",
+      "",
+      "Just ask naturally and I will figure out what you need.",
+    ].join("\n");
+  }
+
+  if (/test|working|alive|are you there|respond/.test(text)) {
+    return "✅ *Yes, I'm here and working!*\n\nAsk me anything and I'll help.";
+  }
+
+  return [
+    "⚡ *ClawCloud AI*",
+    "",
+    `I received your message: _"${message.slice(0, 100)}${message.length > 100 ? "..." : ""}"_`,
+    "",
+    "I'm currently having trouble completing that request.",
+    "Please send it again in a moment. If it keeps happening, check swift-deploy.in.",
+  ].join("\n");
+}
+
+function isEmptyOrFallback(reply: string | null | undefined) {
+  if (!reply?.trim()) {
+    return true;
+  }
+
+  const lower = reply.trim().toLowerCase();
+  return (
+    lower.includes("__fast_fallback") ||
+    lower.includes("__deep_fallback") ||
+    lower.includes("could not produce a reliable answer") ||
+    lower.includes("send the question again and i will retry") ||
+    lower.includes("let me try that again") ||
+    (lower.startsWith("*i could not") && lower.length < 200)
+  );
+}
+
+async function sendReply(
+  userId: string,
+  message: string,
+  targetJid?: string | null,
+): Promise<boolean> {
   const session = sessions.get(userId);
-  if (!session?.phone) return false;
+  if (!session?.phone) {
+    return false;
+  }
 
   const jid = targetJid || session.lastChatJid || `${session.phone}@s.whatsapp.net`;
   const cleaned = message.replace(/\n{3,}/g, "\n\n").trim();
 
-  // Send normal replies as a single message for the fastest delivery.
-  // Keep streaming only for very long outputs where chunking helps readability.
   if (cleaned.length >= STREAM_REPLY_MIN_LENGTH) {
     await sendStreamingMessage(session.sock, jid, cleaned);
   } else {
     const sent = await session.sock.sendMessage(jid, { text: cleaned });
-    if (sent?.key?.id) outboundIds.add(sent.key.id);
+    if (sent?.key?.id) {
+      outboundIds.add(sent.key.id);
+    }
   }
 
   void logOutbound(userId, message);
   return true;
 }
 
-// ─── Internal Next.js call ────────────────────────────────────────────────────
+async function callNext(pathname: string, body: Record<string, unknown>): Promise<Response | null> {
+  if (!appUrl() || !process.env.AGENT_SECRET?.trim()) {
+    console.error("[agent] callNext skipped: app URL or AGENT_SECRET is missing");
+    return null;
+  }
 
-async function callNext(pathname: string, body: Record<string, unknown>) {
-  if (!appUrl() || !process.env.AGENT_SECRET?.trim()) return null;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), HTTP_REPLY_TIMEOUT_MS);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HTTP_REPLY_TIMEOUT_MS);
+
   try {
     return await fetch(`${appUrl()}${pathname}`, {
-    method: "POST",
-    signal: ctrl.signal,
-    headers: {
-      Authorization: `Bearer ${process.env.AGENT_SECRET}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${process.env.AGENT_SECRET}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    console.error(
+      "[agent] callNext failed:",
+      error instanceof Error ? error.message : error,
+    );
+    return null;
   } finally {
     clearTimeout(timer);
   }
@@ -377,18 +455,18 @@ async function getDirectRouteInboundAgentMessage() {
     return cachedRouteInboundAgentMessage;
   }
 
-  const mod = await import("./lib/clawcloud-agent");
-  cachedRouteInboundAgentMessage = mod.routeInboundAgentMessage;
+  const module = await import("./lib/clawcloud-agent");
+  cachedRouteInboundAgentMessage = module.routeInboundAgentMessage;
   return cachedRouteInboundAgentMessage;
 }
 
-async function runDirectAgentReply(userId: string, message: string) {
-  const routeInboundAgentMessage = await getDirectRouteInboundAgentMessage();
-  const timeout = new Promise<string | null>((resolve) => {
-    setTimeout(() => resolve(null), DIRECT_REPLY_TIMEOUT_MS);
-  });
-
+async function runDirectAgentReply(userId: string, message: string): Promise<string | null> {
   try {
+    const routeInboundAgentMessage = await getDirectRouteInboundAgentMessage();
+    const timeout = new Promise<string | null>((resolve) => {
+      setTimeout(() => resolve(null), DIRECT_REPLY_TIMEOUT_MS);
+    });
+
     return await Promise.race([routeInboundAgentMessage(userId, message), timeout]);
   } catch (error) {
     console.error(
@@ -399,24 +477,23 @@ async function runDirectAgentReply(userId: string, message: string) {
   }
 }
 
-// ─── Handle inbound message ───────────────────────────────────────────────────
-// FLOW: message arrives → typing starts INSTANTLY → AI call → stream reply
-
 async function handleInbound(
   userId: string,
   text: string,
   waId: string | null,
   remoteJid: string | null,
 ) {
-  // 1. Log inbound
-  void db().from("whatsapp_messages").insert({
-    user_id: userId,
-    direction: "inbound",
-    content: text,
-    message_type: "text",
-    wa_message_id: waId,
-    sent_at: new Date().toISOString(),
-  }).catch(() => null);
+  void db()
+    .from("whatsapp_messages")
+    .insert({
+      user_id: userId,
+      direction: "inbound",
+      content: text,
+      message_type: "text",
+      wa_message_id: waId,
+      sent_at: new Date().toISOString(),
+    })
+    .catch(() => null);
 
   const session = sessions.get(userId);
   if (session && remoteJid) {
@@ -424,95 +501,94 @@ async function handleInbound(
     sessions.set(userId, session);
     void persistPreferredChatTarget(userId, session.phone, remoteJid);
   }
-  const jid = remoteJid || session?.lastChatJid || (session?.phone ? `${session.phone}@s.whatsapp.net` : null);
 
-  // 2. Start typing indicator IMMEDIATELY — user sees this within milliseconds
+  const jid =
+    remoteJid ||
+    session?.lastChatJid ||
+    (session?.phone ? `${session.phone}@s.whatsapp.net` : null);
+
   if (jid && session) {
     void session.sock.sendPresenceUpdate("composing", jid).catch(() => null);
   }
 
-  // 3. Try direct in-process reply first for the fastest, most reliable path.
+  let finalReply: string | null = null;
+
+  console.log(`[agent] PATH A direct reply for ${userId}`);
   const directReply = await runDirectAgentReply(userId, text);
+  if (directReply?.trim() && !isEmptyOrFallback(directReply)) {
+    finalReply = directReply.trim();
+    console.log(`[agent] PATH A success for ${userId} (${finalReply.length} chars)`);
+  } else {
+    console.warn(`[agent] PATH A empty or fallback for ${userId} - trying PATH B`);
+
+    if (appUrl()) {
+      console.log(`[agent] PATH B HTTP call to ${appUrl()}/api/agent/message`);
+      const response = await callNext("/api/agent/message", {
+        userId,
+        message: text,
+        _internal: true,
+      });
+
+      if (response?.ok) {
+        const json = (await response.json().catch(() => ({}))) as { response?: string | null };
+        if (json.response?.trim() && !isEmptyOrFallback(json.response)) {
+          finalReply = json.response.trim();
+          console.log(`[agent] PATH B success for ${userId} (${finalReply.length} chars)`);
+        } else {
+          console.warn(`[agent] PATH B returned empty or fallback for ${userId}`);
+        }
+      } else if (response) {
+        const body = await response.text().catch(() => "");
+        console.error(
+          `[agent] PATH B failed for ${userId}: HTTP ${response.status}${body ? ` - ${body.slice(0, 200)}` : ""}`,
+        );
+      } else {
+        console.error(`[agent] PATH B failed for ${userId}: no response`);
+      }
+    } else {
+      console.error("[agent] PATH B skipped: NEXT_PUBLIC_APP_URL is not set");
+    }
+  }
+
+  if (!finalReply || isEmptyOrFallback(finalReply)) {
+    console.warn(`[agent] Using builtin fallback for ${userId}`);
+    finalReply = getBuiltinFallbackResponse(text);
+  }
+
   if (jid && session) {
     void session.sock.sendPresenceUpdate("paused", jid).catch(() => null);
   }
-  if (directReply?.trim()) {
-    await sendReply(userId, directReply, jid);
+
+  if (jid && session && finalReply) {
+    await sendReply(userId, finalReply, jid).catch((error) =>
+      console.error(
+        `[agent] Reply send failed for ${userId}:`,
+        error instanceof Error ? error.message : error,
+      ),
+    );
     return;
   }
 
-  // 4. Fall back to the Next.js internal API if needed.
-  let response: Response | null = null;
-  try {
-    response = await callNext("/api/agent/message", {
-      userId,
-      message: text,
-      _internal: true,
-    });
-  } catch (err) {
-    console.error(`[agent] Backend call failed for ${userId}:`, err instanceof Error ? err.message : err);
-    if (jid && session) void session.sock.sendPresenceUpdate("paused", jid).catch(() => null);
-    return;
-  }
-
-  if (!response) {
-    console.error(`[agent] No response for ${userId}: app URL or secret not configured`);
-    if (jid && session) {
-      void session.sock.sendPresenceUpdate("paused", jid).catch(() => null);
-      await sendReply(
-        userId,
-        "*ClawCloud is connected, but the reply service is temporarily unavailable.*\n\nPlease try again in a few seconds.",
-        jid,
-      ).catch(() => null);
-    }
-    return;
-  }
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    console.error(`[agent] Backend error for ${userId}: HTTP ${response.status}${body ? ` — ${body.slice(0, 200)}` : ""}`);
-    if (jid && session) {
-      void session.sock.sendPresenceUpdate("paused", jid).catch(() => null);
-      await sendReply(
-        userId,
-        "*ClawCloud hit a temporary error while generating the reply.*\n\nPlease send the message once more.",
-        jid,
-      ).catch(() => null);
-    }
-    return;
-  }
-
-  const json = (await response.json().catch(() => ({}))) as { response?: string | null };
-
-  // 4. Stop typing, stream the reply
-  if (jid && session) void session.sock.sendPresenceUpdate("paused", jid).catch(() => null);
-
-  if (json.response?.trim()) {
-    await sendReply(userId, json.response, jid);
-    return;
-  }
-
-  console.log(`[agent] No direct reply for ${userId} — task running async`);
-  if (jid && session) {
-    await sendReply(
-      userId,
-      "*Working on it.* I started the task and I’ll send the result here as soon as it’s ready.",
-      jid,
-    ).catch(() => null);
-  }
+  console.error(`[agent] Could not send reply for ${userId}: jid=${jid}, session=${Boolean(session)}`);
 }
 
-// ─── WhatsApp session ─────────────────────────────────────────────────────────
-
 async function markDisconnected(userId: string) {
-  await db().from("connected_accounts").update({ is_active: false })
-    .eq("user_id", userId).eq("provider", "whatsapp").catch(() => null);
+  await db()
+    .from("connected_accounts")
+    .update({ is_active: false })
+    .eq("user_id", userId)
+    .eq("provider", "whatsapp")
+    .catch(() => null);
 }
 
 async function getActiveUserIds(): Promise<string[]> {
-  const { data } = await db().from("connected_accounts").select("user_id")
-    .eq("provider", "whatsapp").eq("is_active", true);
-  return (data ?? []).map((r) => String(r.user_id ?? "").trim()).filter(Boolean);
+  const { data } = await db()
+    .from("connected_accounts")
+    .select("user_id")
+    .eq("provider", "whatsapp")
+    .eq("is_active", true);
+
+  return (data ?? []).map((row) => String(row.user_id ?? "").trim()).filter(Boolean);
 }
 
 async function connectSession(userId: string): Promise<SessionRecord> {
@@ -520,9 +596,15 @@ async function connectSession(userId: string): Promise<SessionRecord> {
   const preferredChatJid = await loadPreferredChatJid(userId);
 
   const existing = sessions.get(userId);
-  if (existing && (existing.status === "waiting" || existing.status === "connected")) return existing;
+  if (existing && (existing.status === "waiting" || existing.status === "connected")) {
+    return existing;
+  }
+
   if (existing && existing.status === "connecting") {
-    if (Date.now() - existing.startedAt < STALE_MS) return existing;
+    if (Date.now() - existing.startedAt < STALE_MS) {
+      return existing;
+    }
+
     console.warn(`[agent] Resetting stale session for ${userId}`);
     await discardSession(userId, existing, { deleteAuth: true });
   }
@@ -548,145 +630,234 @@ async function connectSession(userId: string): Promise<SessionRecord> {
     lastChatJid: preferredChatJid,
     startedAt: Date.now(),
   };
+
   sessions.set(userId, record);
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
-    const cur = sessions.get(userId);
-    if (cur !== record) return;
+    const current = sessions.get(userId);
+    if (current !== record) {
+      return;
+    }
 
     if (qr) {
-      console.log(`[agent] QR for ${userId}`);
-      cur.qr = await QRCode.toDataURL(qr, { width: 220, margin: 1 });
-      cur.status = "waiting";
-      sessions.set(userId, cur);
+      console.log(`[agent] QR generated for ${userId}`);
+      current.qr = await QRCode.toDataURL(qr, { width: 220, margin: 1 });
+      current.status = "waiting";
+      sessions.set(userId, current);
     }
 
     if (connection === "open") {
       const phone = sock.user?.id?.split(":")[0] ?? null;
-      console.log(`[agent] Connected for ${userId}${phone ? ` (${phone})` : ""}`);
-      cur.status = "connected";
-      cur.phone = phone;
-      cur.qr = null;
-      sessions.set(userId, cur);
+      console.log(`[agent] WhatsApp connected for ${userId}${phone ? ` (${phone})` : ""}`);
+      current.status = "connected";
+      current.phone = phone;
+      current.qr = null;
+      sessions.set(userId, current);
 
       const sendWelcomeNow = await shouldSendWelcome(userId, phone);
-      await db().from("connected_accounts").upsert({
-        user_id: userId, provider: "whatsapp", phone_number: phone,
-        display_name: sock.user?.name || phone, is_active: true,
-        connected_at: new Date().toISOString(),
-      }, { onConflict: "user_id,provider" }).catch(() => null);
+      await db()
+        .from("connected_accounts")
+        .upsert(
+          {
+            user_id: userId,
+            provider: "whatsapp",
+            phone_number: phone,
+            display_name: sock.user?.name || phone,
+            is_active: true,
+            connected_at: new Date().toISOString(),
+          },
+          { onConflict: "user_id,provider" },
+        )
+        .catch(() => null);
 
-      if (phone && sendWelcomeNow) await sendWelcome(sock, phone);
+      if (phone && sendWelcomeNow) {
+        await sendWelcome(sock, phone);
+      }
     }
 
     if (connection === "close") {
       const code = (lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
       const reconnect = code !== DisconnectReason.loggedOut;
       sessions.delete(userId);
-      if (!reconnect) await markDisconnected(userId);
-      console.warn(`[agent] Closed for ${userId} (code: ${code ?? "?"})`);
-      if (reconnect) setTimeout(() => void connectSession(userId), 3000);
+
+      if (!reconnect) {
+        await markDisconnected(userId);
+      }
+
+      console.warn(`[agent] Closed for ${userId} (code: ${code ?? "?"}) reconnect=${reconnect}`);
+      if (reconnect) {
+        setTimeout(() => {
+          void connectSession(userId);
+        }, 3_000);
+      }
     }
   });
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify" && type !== "append") return;
-    for (const msg of messages) {
-      const cur = sessions.get(userId);
-      if (cur !== record) return;
+    if (type !== "notify" && type !== "append") {
+      return;
+    }
 
-      const msgId = msg.key.id ?? "";
-      if (msgId && outboundIds.has(msgId)) { outboundIds.delete(msgId); continue; }
-      if (msg.key.fromMe && !isSelfChat(msg, cur)) continue;
+    for (const message of messages) {
+      const current = sessions.get(userId);
+      if (current !== record) {
+        return;
+      }
 
-      const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
-      if (!text) continue;
+      const messageId = message.key.id ?? "";
+      if (messageId && outboundIds.has(messageId)) {
+        outboundIds.delete(messageId);
+        continue;
+      }
 
-      console.log(`[agent] Msg from ${userId} (type=${type})`);
-      await handleInbound(
-        userId,
-        text,
-        msg.key.id ?? null,
-        msg.key.remoteJid ?? null,
-      );
+      if (message.key.fromMe && !isSelfChat(message, current)) {
+        continue;
+      }
+
+      const text =
+        message.message?.conversation ||
+        message.message?.extendedTextMessage?.text ||
+        message.message?.imageMessage?.caption ||
+        "";
+
+      if (!text) {
+        continue;
+      }
+
+      console.log(`[agent] Inbound from ${userId}: "${text.slice(0, 80)}"`);
+      await handleInbound(userId, text, message.key.id ?? null, message.key.remoteJid ?? null);
     }
   });
 
   return record;
 }
 
-function isSelfChat(msg: { key?: { remoteJid?: string | null } }, s: SessionRecord) {
-  const jid = String(msg.key?.remoteJid ?? "").split("@")[0]?.replace(/\D/g, "") ?? "";
-  const ph = s.phone?.replace(/\D/g, "") ?? "";
-  return Boolean(ph && jid && ph === jid);
+function isSelfChat(message: { key?: { remoteJid?: string | null } }, session: SessionRecord) {
+  const jid = String(message.key?.remoteJid ?? "").split("@")[0]?.replace(/\D/g, "") ?? "";
+  const phone = session.phone?.replace(/\D/g, "") ?? "";
+  return Boolean(phone && jid && phone === jid);
 }
 
 function findByPhone(phone: string) {
-  const d = phone.replace(/\D/g, "");
-  for (const s of sessions.values()) {
-    if (s.phone?.replace(/\D/g, "") === d) return s;
+  const digits = phone.replace(/\D/g, "");
+  for (const session of sessions.values()) {
+    if (session.phone?.replace(/\D/g, "") === digits) {
+      return session;
+    }
   }
   return null;
 }
 
-function readParam(v: string | string[] | undefined) {
-  return typeof v === "string" ? v : Array.isArray(v) ? (v[0] ?? "") : "";
+function readParam(value: string | string[] | undefined) {
+  return typeof value === "string" ? value : Array.isArray(value) ? (value[0] ?? "") : "";
 }
 
 async function restoreSessions() {
-  if (configError()) return;
+  if (configError()) {
+    return;
+  }
+
   try {
     const ids = await getActiveUserIds();
-    if (!ids.length) { console.log("[agent] No sessions to restore"); return; }
-    console.log(`[agent] Restoring ${ids.length} session(s)`);
+    if (!ids.length) {
+      console.log("[agent] No active sessions to restore");
+      return;
+    }
+
+    console.log(`[agent] Restoring ${ids.length} session(s)...`);
     for (const id of ids) {
-      void connectSession(id).catch((e) =>
-        console.error(`[agent] Restore failed for ${id}:`, e instanceof Error ? e.message : e),
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      void connectSession(id).catch((error) =>
+        console.error(
+          `[agent] Restore failed for ${id}:`,
+          error instanceof Error ? error.message : error,
+        ),
       );
     }
-  } catch (e) {
-    console.error("[agent] Restore error:", e);
+  } catch (error) {
+    console.error("[agent] Restore error:", error);
   }
 }
 
-// ─── Express ──────────────────────────────────────────────────────────────────
+async function sessionWatchdog() {
+  const now = Date.now();
+
+  for (const [userId, session] of sessions.entries()) {
+    if (session.status === "connected") {
+      continue;
+    }
+
+    if (now - session.startedAt < SESSION_WATCHDOG_STALE_MS) {
+      continue;
+    }
+
+    console.warn(`[agent] Watchdog restarting stuck session for ${userId} (${session.status})`);
+    const hasSavedAuth = fs.existsSync(sessionDir(userId));
+    await discardSession(userId, session, { deleteAuth: false });
+
+    if (!hasSavedAuth) {
+      await markDisconnected(userId);
+      continue;
+    }
+
+    void connectSession(userId).catch((error) =>
+      console.error(
+        `[agent] Watchdog reconnect failed for ${userId}:`,
+        error instanceof Error ? error.message : error,
+      ),
+    );
+  }
+}
 
 const app = express();
 app.use(express.json());
 
 function auth(req: express.Request, res: express.Response, next: express.NextFunction) {
-  const err = configError();
-  if (err) { res.status(503).json({ error: err, missingRequiredEnv: missingEnv() }); return; }
-  if (req.headers.authorization?.trim() !== `Bearer ${process.env.AGENT_SECRET}`) {
-    res.status(401).json({ error: "Unauthorized" }); return;
+  const error = configError();
+  if (error) {
+    res.status(503).json({ error, missingRequiredEnv: missingEnv() });
+    return;
   }
+
+  if (req.headers.authorization?.trim() !== `Bearer ${process.env.AGENT_SECRET}`) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
   next();
 }
 
 app.get("/wa/qr/:userId", auth, async (req, res) => {
   try {
-    const s = await connectSession(readParam(req.params.userId));
-    res.json({ status: s.status, qr: s.qr, phone: s.phone });
-  } catch (e) {
-    res.status(500).json({ error: e instanceof Error ? e.message : "Failed" });
+    const session = await connectSession(readParam(req.params.userId));
+    res.json({ status: session.status, qr: session.qr, phone: session.phone });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed" });
   }
 });
 
 app.delete("/wa/session/:userId", auth, async (req, res) => {
-  const id = readParam(req.params.userId);
-  await discardSession(id, sessions.get(id), { deleteAuth: true });
-  await markDisconnected(id);
+  const userId = readParam(req.params.userId);
+  await discardSession(userId, sessions.get(userId), { deleteAuth: true });
+  await markDisconnected(userId);
   res.json({ success: true });
 });
 
 app.post("/wa/send", auth, async (req, res) => {
   const phone = String(req.body.phone ?? "").trim();
   const message = String(req.body.message ?? "").trim();
-  if (!phone || !message) { res.status(400).json({ error: "phone and message required" }); return; }
+
+  if (!phone || !message) {
+    res.status(400).json({ error: "phone and message required" });
+    return;
+  }
 
   const session = findByPhone(phone) ?? [...sessions.values()][0] ?? null;
-  if (!session) { res.status(503).json({ error: "No active session" }); return; }
+  if (!session) {
+    res.status(503).json({ error: "No active session" });
+    return;
+  }
 
   const jid = `${phone.replace(/\D/g, "")}@s.whatsapp.net`;
   await sendStreamingMessage(session.sock, jid, message);
@@ -696,6 +867,7 @@ app.post("/wa/send", auth, async (req, res) => {
 app.post("/wa/send-user/:userId", auth, async (req, res) => {
   const userId = readParam(req.params.userId);
   const message = String(req.body.message ?? "").trim();
+
   if (!userId || !message) {
     res.status(400).json({ error: "userId and message required" });
     return;
@@ -714,29 +886,62 @@ app.post("/wa/send-user/:userId", auth, async (req, res) => {
 });
 
 app.get("/health", (_req, res) => {
-  const m = missingEnv();
-  res.json({ status: m.length ? "degraded" : "ok", configured: m.length === 0, missingRequiredEnv: m, connections: sessions.size });
-});
+  const error = configError();
+  const connected = [...sessions.values()].filter((session) => session.status === "connected");
 
-// ─── Cron ─────────────────────────────────────────────────────────────────────
+  res.json({
+    status: error ? "degraded" : "ok",
+    configured: !error,
+    connections: connected.length,
+    total_sessions: sessions.size,
+    nvidia_configured: Boolean(process.env.NVIDIA_API_KEY),
+    app_url: appUrl() || "NOT SET",
+    session_states: Object.fromEntries(
+      [...sessions.entries()].map(([userId, session]) => [
+        userId.slice(0, 8),
+        {
+          status: session.status,
+          phone: session.phone ? "set" : "none",
+        },
+      ]),
+    ),
+    missingRequiredEnv: error ? missingEnv() : [],
+    uptime_seconds: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
+});
 
 if (appUrl() && process.env.CRON_SECRET) {
   cron.schedule("* * * * *", async () => {
     try {
-      await fetch(`${appUrl()}/api/agent/cron`, {
+      const response = await fetch(`${appUrl()}/api/agent/cron`, {
         method: "POST",
         headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
       });
-    } catch (e) { console.error("[agent] Cron failed:", e); }
+
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        console.error(
+          `[agent] Cron HTTP ${response.status}${body ? ` - ${body.slice(0, 100)}` : ""}`,
+        );
+      }
+    } catch (error) {
+      console.error("[agent] Cron failed:", error);
+    }
   });
 }
 
-// ─── Start ────────────────────────────────────────────────────────────────────
-
 const port = Number(process.env.PORT || process.env.AGENT_PORT || 3001);
 app.listen(Number.isFinite(port) && port > 0 ? port : 3001, "0.0.0.0", () => {
-  const e = configError();
-  if (e) console.warn(e);
-  console.log(`ClawCloud agent running on port ${port}`);
+  const error = configError();
+  if (error) {
+    console.warn(error);
+  }
+
+  console.log(`[agent] Server listening on port ${port}`);
+  logStartupDiagnostics();
   void restoreSessions();
+  setInterval(() => {
+    void sessionWatchdog();
+  }, SESSION_WATCHDOG_INTERVAL_MS);
 });
