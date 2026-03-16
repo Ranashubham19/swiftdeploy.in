@@ -47,6 +47,49 @@ function appUrl() {
   return process.env.NEXT_PUBLIC_APP_URL?.trim() || process.env.NEXTJS_URL?.trim() || "";
 }
 
+function isRailwayRuntime() {
+  return Boolean(
+    process.env.RAILWAY_PROJECT_ID
+    || process.env.RAILWAY_ENVIRONMENT_ID
+    || process.env.RAILWAY_SERVICE_ID,
+  );
+}
+
+function sessionBaseDir() {
+  const configured = process.env.WA_SESSION_DIR?.trim();
+  if (configured) {
+    if (path.isAbsolute(configured) || !isRailwayRuntime()) {
+      return configured;
+    }
+
+    // Railway sessions need a mounted volume path; relative paths are ephemeral there.
+    return "/data/wa-sessions";
+  }
+
+  return isRailwayRuntime() ? "/data/wa-sessions" : "./wa-sessions";
+}
+
+function savedSessionUserIds() {
+  const base = sessionBaseDir();
+  if (!fs.existsSync(base)) {
+    return [];
+  }
+
+  try {
+    return fs
+      .readdirSync(base, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name.trim())
+      .filter(Boolean);
+  } catch (error) {
+    console.error(
+      "[agent] Could not inspect saved session dir:",
+      error instanceof Error ? error.message : error,
+    );
+    return [];
+  }
+}
+
 function missingEnv() {
   return ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "AGENT_SECRET"].filter(
     (key) => !process.env[key]?.trim(),
@@ -87,7 +130,12 @@ function logStartupDiagnostics() {
       value: process.env.NEXT_PUBLIC_APP_URL || "MISSING - HTTP fallback will fail",
     },
     { key: "NEXTJS_URL", value: process.env.NEXTJS_URL || "not set" },
-    { key: "WA_SESSION_DIR", value: process.env.WA_SESSION_DIR || "./wa-sessions" },
+    { key: "WA_SESSION_DIR", value: process.env.WA_SESSION_DIR || "not set" },
+    { key: "SESSION_BASE_DIR", value: sessionBaseDir() },
+    {
+      key: "SAVED_SESSION_DIRS",
+      value: String(savedSessionUserIds().length),
+    },
   ];
 
   for (const check of checks) {
@@ -116,7 +164,7 @@ async function getWAVersion(): Promise<[number, number, number]> {
 }
 
 function sessionDir(userId: string) {
-  const base = process.env.WA_SESSION_DIR || "./wa-sessions";
+  const base = sessionBaseDir();
   return path.join(base, userId.replace(/[^a-zA-Z0-9_-]/g, "_"));
 }
 
@@ -759,9 +807,15 @@ async function restoreSessions() {
   }
 
   try {
-    const ids = await getActiveUserIds();
+    const ids = Array.from(new Set([
+      ...(await getActiveUserIds()),
+      ...savedSessionUserIds(),
+    ]));
+
     if (!ids.length) {
-      console.log("[agent] No active sessions to restore");
+      console.log(
+        `[agent] No active sessions to restore (saved auth dirs: ${savedSessionUserIds().length})`,
+      );
       return;
     }
 
@@ -906,6 +960,8 @@ app.get("/health", (_req, res) => {
       ]),
     ),
     missingRequiredEnv: error ? missingEnv() : [],
+    session_base_dir: sessionBaseDir(),
+    saved_auth_dirs: savedSessionUserIds().length,
     uptime_seconds: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
   });
