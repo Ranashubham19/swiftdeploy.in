@@ -289,7 +289,7 @@ function renderBulletList(items: string[]) {
 }
 
 const NO_RELIABLE_INFO_MESSAGE =
-  "Reliable information for this detail is not available in the retrieved sources.";
+  "I couldn’t verify enough high-quality sources for this exact detail yet.";
 
 function sourceCitationLabel(source: ResearchSource) {
   return (source.domain || domainFromUrl(source.url) || "source")

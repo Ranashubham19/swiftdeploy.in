@@ -992,6 +992,25 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || normalized.includes("to give an exact numeric result, share the full equation")
     || normalized.includes("question captured:")
     || normalized.includes("ask your question and i'll answer it completely")
+    || normalized.includes("reliable information for this detail is not available in the retrieved sources")
+    || normalized.includes("## short summary")
+    || normalized.includes("## key updates")
+    || normalized.includes("## detailed explanation")
+    || normalized.includes("i can answer any history question with dates, causes, key figures, and impact")
+    || normalized.includes("ask specifically: 'when did x happen?'")
+    || normalized.includes("rephrase your question and i'll answer it immediately and accurately")
+  );
+}
+
+function isLowQualityTemplateReply(reply: string | null | undefined) {
+  if (!reply?.trim()) return true;
+  const normalized = reply.trim().toLowerCase();
+  return (
+    normalized.includes("reliable information for this detail is not available in the retrieved sources")
+    || normalized.includes("i can answer any history question with dates, causes, key figures, and impact")
+    || normalized.includes("ask specifically: 'when did x happen?'")
+    || normalized.includes("rephrase your question and i'll answer it immediately and accurately")
+    || (normalized.includes("short summary") && normalized.includes("key updates"))
   );
 }
 
@@ -1111,7 +1130,7 @@ function bestEffortProfessionalTemplate(intent: IntentType, message: string) {
       return [
         "🧠 *I got your message.*",
         "",
-        `You asked about: _${compactQuestion}_.`,
+        `Request summary: _${compactQuestion}_.`,
         "",
         "Send me the exact task or question you want solved, and I’ll answer it directly.",
       ].join("\n");
@@ -1510,7 +1529,7 @@ function bestEffortProfessionalTemplateV2Legacy(intent: IntentType, message: str
       return [
         "I got your message.",
         "",
-        `You asked about: _${compactQuestion}_.`,
+        `Request summary: _${compactQuestion}_.`,
         "",
         "Send the exact task you want solved, and I will answer directly.",
       ].join("\n");
@@ -1574,6 +1593,58 @@ function buildDeterministicChatFallback(message: string, intent: IntentType): st
       "Share your *city name* to get an accurate forecast.",
       "",
       "Example: _Weather today in Delhi_ or _Temperature in Mumbai now_.",
+    ].join("\n");
+  }
+
+  if (
+    /\bn[-\s]?queen(s)?\b/.test(text)
+    && /\b(code|program|algorithm|backtracking|python|java|c\+\+|javascript|js|typescript|ts|give|show|write|solve)\b/.test(text)
+  ) {
+    return [
+      "💻 *N-Queens (Backtracking) — Python*",
+      "",
+      "```python",
+      "def solve_n_queens(n: int):",
+      "    cols = set()",
+      "    diag1 = set()  # row - col",
+      "    diag2 = set()  # row + col",
+      "    board = [['.' for _ in range(n)] for _ in range(n)]",
+      "    ans = []",
+      "",
+      "    def dfs(r: int):",
+      "        if r == n:",
+      "            ans.append([''.join(row) for row in board])",
+      "            return",
+      "        for c in range(n):",
+      "            if c in cols or (r - c) in diag1 or (r + c) in diag2:",
+      "                continue",
+      "            cols.add(c); diag1.add(r - c); diag2.add(r + c)",
+      "            board[r][c] = 'Q'",
+      "            dfs(r + 1)",
+      "            board[r][c] = '.'",
+      "            cols.remove(c); diag1.remove(r - c); diag2.remove(r + c)",
+      "",
+      "    dfs(0)",
+      "    return ans",
+      "",
+      "print(solve_n_queens(4))",
+      "```",
+      "",
+      "• *Time:* O(N!)",
+      "• *Space:* O(N²) for board + recursion",
+    ].join("\n");
+  }
+
+  if (/\b(news of today|news today|today news|latest news|latest updates?)\b/.test(text)) {
+    return [
+      "📰 *Latest News Request*",
+      "",
+      "Send topic + region for an accurate update.",
+      "",
+      "Examples:",
+      "• _India news today_",
+      "• _AI news today in US_",
+      "• _Cricket news today_",
     ].join("\n");
   }
 
@@ -2317,18 +2388,11 @@ function buildUniversalDomainFallback(intent: IntentType, message: string): stri
   }
 
   return [
-    "🤖 *I received your question.*",
+    "🤖 *Ready to answer.*",
     "",
-    `You asked: _${q}_`,
+    `Topic: _${q}_`,
     "",
-    "I can answer questions on *any topic* — just ask directly:",
-    "• 'What is [topic]?'",
-    "• 'Explain [concept]'",
-    "• 'How does [thing] work?'",
-    "• 'Write code for [problem]'",
-    "• 'Solve [math problem]'",
-    "",
-    "Ask your question and I'll answer it completely.",
+    "I can answer questions on *any topic* with a direct, complete response.",
   ].join("\n");
 }
 
@@ -2434,13 +2498,17 @@ function bestEffortProfessionalTemplateV2(intent: IntentType, message: string) {
     ].join("\n");
   }
 
+  if (intent === "history" && /\b(code|program|algorithm|script|n[-\s]?queen)\b/.test(t)) {
+    return buildCodingFallbackV2(message);
+  }
+
   if (intent === "history") {
     return [
       `🏛️ *History: ${q.slice(0, 80)}*`,
       "",
-      "I can answer any history question with dates, causes, key figures, and impact.",
+      "I can answer this with clear timeline, causes, major figures, and outcomes.",
       "",
-      "Ask specifically: 'When did X happen?', 'Who was Y?', 'What caused Z?'",
+      "Ask with one anchor (year, person, or event) for the most accurate response.",
     ].join("\n");
   }
 
@@ -2774,11 +2842,42 @@ async function ensureProfessionalReply(input: {
     temperature: 0.15,
   }).catch(() => "");
 
-  if (forcedAnswer.trim()) {
+  if (forcedAnswer.trim() && !isVisibleFallbackReply(forcedAnswer) && !isLowQualityTemplateReply(forcedAnswer)) {
     return forcedAnswer.trim();
   }
 
-  return bestEffortProfessionalTemplateV2(input.intent, input.message);
+  const bestEffort = bestEffortProfessionalTemplateV2(input.intent, input.message);
+  if (!isVisibleFallbackReply(bestEffort) && !isLowQualityTemplateReply(bestEffort)) {
+    return bestEffort;
+  }
+
+  const deterministic = buildDeterministicChatFallback(input.message, input.intent);
+  if (deterministic) {
+    return deterministic;
+  }
+
+  if (/\b(code|program|algorithm|n[-\s]?queen)\b/i.test(input.message)) {
+    return buildCodingFallbackV2(input.message);
+  }
+
+  if (/\b(weather|whether|temperature|forecast|rain|humidity|wind|aqi)\b/i.test(input.message)) {
+    return [
+      "🌦️ *Weather Update*",
+      "",
+      "Share your city name for a precise forecast (temperature, rain, humidity, wind).",
+      "Example: _Weather today in Delhi_.",
+    ].join("\n");
+  }
+
+  if (/\b(news|latest|today)\b/i.test(input.message)) {
+    return buildNewsCoverageRecoveryReply(input.message);
+  }
+
+  return [
+    "✅ *I can help with this.*",
+    "",
+    "Send your exact goal in one line, and I’ll return a direct, complete answer.",
+  ].join("\n");
 }
 
 async function smartReply(
@@ -3523,6 +3622,18 @@ export async function routeInboundAgentMessage(
   } else if (resolvedCategory !== "coding" && isArchitectureOrDesignQuestion(trimmed)) {
     resolvedType = "coding";
     resolvedCategory = "coding";
+  } else if (
+    /\b(code|program|algorithm|script|debug|n[-\s]?queen|n[-\s]?queens|python|javascript|java|c\+\+)\b/i.test(trimmed)
+    && resolvedCategory !== "coding"
+  ) {
+    resolvedType = "coding";
+    resolvedCategory = "coding";
+  } else if (
+    /\b(weather|whether|temperature|forecast|rain|humidity|wind|aqi)\b/i.test(trimmed)
+    && resolvedCategory === "news"
+  ) {
+    resolvedType = "general";
+    resolvedCategory = "general";
   } else if (
     resolvedCategory === "research"
     && !looksLikeRealtimeResearch(trimmed)

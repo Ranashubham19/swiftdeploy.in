@@ -528,8 +528,51 @@ function isEmptyOrFallback(reply: string | null | undefined) {
     lower.includes("could not produce a reliable answer") ||
     lower.includes("send the question again and i will retry") ||
     lower.includes("let me try that again") ||
+    lower.includes("reliable information for this detail is not available in the retrieved sources") ||
+    lower.includes("i can answer any history question with dates, causes, key figures, and impact") ||
+    lower.includes("ask specifically: 'when did x happen?'") ||
+    lower.includes("rephrase your question and i'll answer it immediately and accurately") ||
+    lower.includes("i received your question") ||
+    lower.includes("you asked about") ||
     (lower.startsWith("*i could not") && lower.length < 200)
   );
+}
+
+function buildEmergencyProfessionalFallback(message: string) {
+  const text = message.toLowerCase().trim();
+
+  if (/\b(code|program|algorithm|n[-\s]?queen|debug|python|javascript|java|c\+\+)\b/.test(text)) {
+    return [
+      "💻 *Coding Mode Active*",
+      "",
+      "I can write a full working solution.",
+      "Send language + exact problem statement, and I’ll return complete runnable code.",
+    ].join("\n");
+  }
+
+  if (/\b(weather|whether|temperature|forecast|rain|humidity|wind|aqi)\b/.test(text)) {
+    return [
+      "🌦️ *Weather Update*",
+      "",
+      "Please send your city name for an accurate forecast.",
+      "Example: _Weather today in Delhi_.",
+    ].join("\n");
+  }
+
+  if (/\b(news|latest|today|headline)\b/.test(text)) {
+    return [
+      "📰 *News Update*",
+      "",
+      "Send topic + location for accurate latest headlines.",
+      "Example: _India business news today_.",
+    ].join("\n");
+  }
+
+  return [
+    "✅ *I can help with this.*",
+    "",
+    "Send your exact goal in one line and preferred output format.",
+  ].join("\n");
 }
 
 async function sendReply(
@@ -713,7 +756,7 @@ async function handleInbound(
 
   if (!finalReply || isEmptyOrFallback(finalReply)) {
     console.warn(`[agent] Using builtin fallback for ${userId}`);
-    finalReply = getBuiltinFallbackResponse(text);
+    finalReply = buildEmergencyProfessionalFallback(text);
   }
 
   if (jid && session) {

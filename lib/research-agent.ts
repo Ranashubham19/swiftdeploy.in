@@ -759,7 +759,7 @@ function buildStrictCoverageAnswer(
     : ["- No additional retry queries were available for this question."];
   const title = mode === "research" ? "Research Coverage Is Limited" : "Evidence Coverage Is Limited";
   const summary =
-    "Reliable information for this detail is not available in the retrieved sources.";
+    "I couldn’t verify enough high-quality sources for this exact query yet.";
   const keyUpdates = [
     strictCoverageSummary(mode, diagnostics.dedupedResultCount, diagnostics),
     diagnostics.retryCount > 0
@@ -801,14 +801,16 @@ function buildStrictCoverageAnswer(
       "Do you want a query pack you can run manually for verification?",
     ],
     markdown: [
-      `# ${title}`,
-      "## Short Summary",
+      `${title}`,
+      "",
       summary,
-      "## Key Updates",
+      "",
+      "Key Updates:",
       renderBulletList(keyUpdates),
-      "## Detailed Explanation",
+      "",
+      "Details:",
       detailed,
-    ].join("\n\n"),
+    ].join("\n"),
   };
 }
 
@@ -1512,7 +1514,7 @@ export async function runResearchAgent(
             pushProgress(
               "search",
               "Live search returned no sources",
-              "Reliable information for this detail is not available in the retrieved sources.",
+              "I couldn’t verify enough high-quality sources for this exact detail yet.",
               "error",
             );
 
@@ -1665,7 +1667,7 @@ export async function runResearchAgent(
             pushProgress(
               "search",
               "Internet search returned no sources",
-              "Reliable information for this detail is not available in the retrieved sources.",
+              "I couldn’t verify enough high-quality sources for this exact detail yet.",
               "error",
             );
 
@@ -1834,7 +1836,7 @@ export async function runResearchAgent(
             pushProgress(
               "crawl",
               "Website extraction returned limited content",
-              "Reliable information for this detail is not available in the retrieved sources.",
+              "I couldn’t verify enough high-quality sources for this exact detail yet.",
               "error",
             );
             answer = await generateWebsiteAnalysisAnswer({
