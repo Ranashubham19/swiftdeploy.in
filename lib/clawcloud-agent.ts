@@ -398,6 +398,7 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || normalized.includes("i don't have enough information")
     || normalized.includes("i cannot answer")
     || normalized.includes("outside my expertise")
+    || normalized.includes("nvidia generation unavailable")
     || normalized.includes("professional answer")
     || normalized.includes("scope addressed:")
     || normalized.includes("as an ai")
@@ -917,6 +918,11 @@ async function ensureProfessionalReply(input: {
   }
 
   if (input.intent === "math") {
+    const tradingFallback = tryBuildTradingRiskMathFallback(input.message);
+    if (tradingFallback) {
+      return tradingFallback;
+    }
+
     const deterministicMath = solveHardMathQuestion(input.message);
     if (deterministicMath) {
       return deterministicMath;
