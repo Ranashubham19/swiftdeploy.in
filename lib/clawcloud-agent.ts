@@ -1705,7 +1705,118 @@ function buildUniversalDomainFallback(intent: IntentType, message: string): stri
 }
 
 function bestEffortProfessionalTemplateV2(intent: IntentType, message: string) {
-  return buildUniversalDomainFallback(intent, message);
+  return buildUniversalDomainFallbackV2(intent, message);
+}
+
+function buildUniversalDomainFallbackV2(intent: IntentType, message: string): string {
+  const deterministic = buildDeterministicChatFallback(message, intent);
+  if (deterministic) {
+    return deterministic;
+  }
+
+  const t = message.toLowerCase().trim();
+  const q = message.trim().replace(/\s+/g, " ").slice(0, 200);
+  const asksCanYou = /\b(can|could|will|would|please)\s+you\b/.test(t);
+  const asksToWrite = /\b(write|draft|compose|create|generate)\b/.test(t);
+  const asksArticle = /\b(article|articles|blog|blog post|essay)\b/.test(t);
+  const asksEmail = /\b(email|mail)\b/.test(t);
+
+  if (asksCanYou && asksToWrite && asksArticle) {
+    return [
+      "Yes — I can write professional articles.",
+      "",
+      "To start now, send:",
+      "• Topic",
+      "• Audience",
+      "• Tone (formal/casual/expert)",
+      "• Length (for example, 800 words)",
+      "",
+      "If you want, I can start immediately with: Write a 900-word article on [topic] for [audience] in [tone].",
+    ].join("\n");
+  }
+
+  if (asksCanYou && asksToWrite && asksEmail) {
+    return [
+      "Yes — I can draft complete, ready-to-send emails.",
+      "",
+      "Send these details and I will write it now:",
+      "• Recipient",
+      "• Goal",
+      "• Tone",
+      "• Deadline or call-to-action",
+      "",
+      "Need anything else?",
+    ].join("\n");
+  }
+
+  const tableMatch = message.match(/table\s+of\s+(\d+)/i)
+    || message.match(/(\d+)\s*(?:times|multiplication)\s+table/i)
+    || message.match(/solve\s+table\s+of\s+(\d+)/i);
+  if (tableMatch) {
+    const n = Number.parseInt(tableMatch[1], 10);
+    if (n > 0 && n <= 1000) {
+      const rows = Array.from({ length: 10 }, (_, i) => (
+        `${n} × ${String(i + 1).padStart(2)} = ${String(n * (i + 1)).padStart(5)}`
+      ));
+      return [
+        `📐 *Table of ${n}*`,
+        "",
+        "```",
+        ...rows,
+        "```",
+        "",
+        `*Final Answer:* Table of ${n} complete above.`,
+      ].join("\n");
+    }
+  }
+
+  const domainFallbacks: Record<string, string> = {
+    creative: [
+      "Creative writing mode is active.",
+      "",
+      `Request: _${q}_`,
+      "",
+      "I can write full articles, blogs, essays, scripts, and stories.",
+      "Send topic + tone + length and I will produce the complete piece in one message.",
+      "",
+      "Need anything else?",
+    ].join("\n"),
+    email: [
+      "Email writing mode is active.",
+      "",
+      `Request: _${q}_`,
+      "",
+      "I can draft a complete email with subject, body, and clear call-to-action.",
+      "Share recipient + purpose + tone + deadline and I will write it now.",
+      "",
+      "Need anything else?",
+    ].join("\n"),
+    general: [
+      asksCanYou ? "Yes — I can help with that." : "I can help with this.",
+      "",
+      `Message understood: _${q}_`,
+      "",
+      asksToWrite
+        ? "If this is a writing request, send topic + tone + length and I will generate the full result now."
+        : "Ask your exact question in one line and I will give a direct, professional answer.",
+      "",
+      "Need anything else?",
+    ].join("\n"),
+  };
+
+  if (domainFallbacks[intent]) {
+    return domainFallbacks[intent];
+  }
+
+  return [
+    asksCanYou ? "Yes — I can help with that." : "I can help with this.",
+    "",
+    `Message understood: _${q}_`,
+    "",
+    "Ask your exact goal and preferred output format, and I will answer directly.",
+    "",
+    "Need anything else?",
+  ].join("\n");
 }
 
 function recoveryMaxTokens(intent: IntentType) {
@@ -2495,7 +2606,8 @@ function detectIntent(text: string): DetectedIntent {
   }
 
   if (
-    /\b(write a|write me|create a|compose a|generate a)\s+(story|poem|essay|letter|speech|article|blog|script|song|caption|tagline|slogan|joke|riddle|limerick)\b/.test(t)
+    /\b(write|create|compose|generate|draft)\s+(an?\s+|some\s+)?(story|poem|essay|letter|speech|article|articles|blog|blog post|script|song|caption|tagline|slogan|joke|riddle|limerick)\b/.test(t)
+    || /\b(can|could|will|please)\s+you\s+(write|create|compose|generate|draft)\s+(an?\s+|some\s+)?(story|poem|essay|letter|speech|article|articles|blog|blog post|script|song|caption|tagline|slogan|joke|riddle|limerick)\b/.test(t)
   ) {
     return { type: "creative", category: "creative" };
   }
