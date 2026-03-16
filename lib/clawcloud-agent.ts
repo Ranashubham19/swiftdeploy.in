@@ -12,6 +12,7 @@
 import { getClawCloudCalendarEvents, getClawCloudGmailMessages } from "@/lib/clawcloud-google";
 import { upsertAnalyticsDaily } from "@/lib/clawcloud-analytics";
 import { answerNewsQuestion, detectNewsQuestion, hasNewsProviders } from "@/lib/clawcloud-news";
+import { detectExpertMode, EXPERT_MODE_PROMPTS, WHATSAPP_BRAIN } from "@/lib/super-brain";
 import {
   completeClawCloudPrompt,
   completeClawCloudFast,
@@ -912,9 +913,13 @@ async function getHistory(userId: string, limit = 10) {
 function buildSmartSystem(
   mode: ResponseMode,
   intent: IntentType,
+  question?: string,
   extraInstruction?: string,
 ) {
-  const brain = mode === "deep" ? DEEP_BRAIN : FAST_BRAIN;
+  const expertMode = detectExpertMode(question ?? intent, intent);
+  const expertPrompt = EXPERT_MODE_PROMPTS[expertMode];
+  const modeBrain = mode === "deep" ? DEEP_BRAIN : FAST_BRAIN;
+  const brain = [WHATSAPP_BRAIN, modeBrain, expertPrompt].filter(Boolean).join("\n\n");
   const ext = (mode === "deep" ? DEEP_EXT : FAST_EXT)[intent]
     ?? (mode === "deep" ? DEEP_EXT : FAST_EXT).research;
   return brain + ext + (extraInstruction ? `\n\n${extraInstruction}` : "");
@@ -1547,6 +1552,28 @@ function buildDeterministicChatFallback(message: string, intent: IntentType): st
       "💡 *Any question* — I answer directly and completely",
       "",
       "Just ask your question and I'll answer it immediately.",
+    ].join("\n");
+  }
+
+  if (/\b(weather|whether|temperature|forecast|rain|humidity|wind|aqi)\b/.test(text)) {
+    const cityMatch = text.match(/\b(?:in|at|for)\s+([a-z][a-z\s]{1,30})\b/);
+    const city = cityMatch?.[1]?.trim();
+    if (city) {
+      return [
+        `🌦️ *Weather for ${toTitle(city)}*`,
+        "",
+        "I can provide a precise weather update with temperature, rain chance, humidity, and wind.",
+        "",
+        `Confirm this location: *${toTitle(city)}* and I’ll return the latest forecast in a clean format.`,
+      ].join("\n");
+    }
+
+    return [
+      "🌦️ *Weather Update*",
+      "",
+      "Share your *city name* to get an accurate forecast.",
+      "",
+      "Example: _Weather today in Delhi_ or _Temperature in Mumbai now_.",
     ].join("\n");
   }
 
@@ -2312,6 +2339,10 @@ function bestEffortProfessionalTemplateV2(intent: IntentType, message: string) {
   const deterministic = buildDeterministicChatFallback(message, intent);
   if (deterministic) return deterministic;
 
+  if (intent !== "coding" && /\b(code|algorithm|program|script|n[-\s]?queen|n[-\s]?queens)\b/.test(t)) {
+    return buildCodingFallbackV2(message);
+  }
+
   if (intent === "coding") return buildCodingFallbackV2(message);
 
   if (intent === "math") {
@@ -2603,7 +2634,7 @@ async function rewriteReplyAsComplete(input: {
 }) {
   const answer = await completeClawCloudPrompt({
     system: [
-      buildSmartSystem("deep", input.intent, input.extraInstruction),
+      buildSmartSystem("deep", input.intent, input.message, input.extraInstruction),
       "You are repairing a draft answer that was incomplete, truncated, or too generic.",
       "Rewrite it into one complete, self-contained, professional final answer.",
       "Do not mention repair, retries, timeouts, or missing context.",
@@ -2632,7 +2663,7 @@ async function buildProfessionalRecoveryReply(input: {
 }) {
   const answer = await completeClawCloudPrompt({
     system: [
-      buildSmartSystem("deep", input.intent, input.extraInstruction),
+      buildSmartSystem("deep", input.intent, input.message, input.extraInstruction),
       "You are the final recovery layer for a production assistant.",
       "Answer the user's question directly with a complete, professional, self-contained reply.",
       "Never mention failure, retries, or latency.",
@@ -2765,7 +2796,7 @@ async function smartReply(
 
   if (mode !== "deep") {
     const fastReply = await completeClawCloudPrompt({
-      system: buildSmartSystem("fast", intent, extraInstruction),
+      system: buildSmartSystem("fast", intent, message, extraInstruction),
       user: message,
       history: await buildSmartHistory(userId, message, "fast"),
       intent,
@@ -2783,7 +2814,7 @@ async function smartReply(
   }
 
   const deepPromise = completeClawCloudPrompt({
-    system: buildSmartSystem("deep", intent, extraInstruction),
+    system: buildSmartSystem("deep", intent, message, extraInstruction),
     user: message,
     history: await buildSmartHistory(userId, message, "deep"),
     intent,
@@ -2805,7 +2836,7 @@ async function smartReply(
     }
 
     const fastReply = await completeClawCloudPrompt({
-      system: buildSmartSystem("fast", intent, extraInstruction),
+      system: buildSmartSystem("fast", intent, message, extraInstruction),
       user: message,
       history: [],
       intent,
@@ -2825,7 +2856,7 @@ async function smartReply(
   const fastPromise = (async () => {
     await new Promise((resolve) => setTimeout(resolve, autoDeepFastHeadstartMs(intent)));
     return completeClawCloudPrompt({
-      system: buildSmartSystem("fast", intent, extraInstruction),
+      system: buildSmartSystem("fast", intent, message, extraInstruction),
       user: message,
       history: [],
       intent,
@@ -3267,8 +3298,9 @@ function detectIntent(text: string): DetectedIntent {
     looksLikeArchitectureCodingQuestion(t, text, words)
     || 
     /\b(python|javascript|js|typescript|ts|java\b|c\+\+|cpp|golang|go\b|rust|php|swift|kotlin|ruby|scala|bash|shell|sql|html|css|react|node|django|flask|spring|express)\b/.test(t)
+    || /\b(give|show|provide)\s+(me\s+)?(the\s+)?code\s+(for|to)\b/.test(t)
     || /\b(write|create|build|code|program|implement|fix|debug|optimize|refactor|review)\s+(a\s+|the\s+|my\s+)?(code|function|script|program|class|component|api|endpoint|query|algorithm|app|bot|tool|hook|module)\b/.test(t)
-    || /\b(rat in maze|fibonacci|binary search|bubble sort|merge sort|quicksort|linked list|binary tree|graph|dynamic programming|recursion|backtracking|two sum|palindrome|anagram|prime|factorial)\b/.test(t)
+    || /\b(rat in maze|fibonacci|binary search|bubble sort|merge sort|quicksort|linked list|binary tree|graph|dynamic programming|recursion|backtracking|two sum|palindrome|anagram|prime|factorial|n[-\s]?queen|n[-\s]?queens)\b/.test(t)
     || /\b(time complexity|space complexity|big o|algorithm|data structure|oop|object oriented|polymorphism|inheritance|interface|abstract class)\b/.test(t)
     || (words.length <= 4 && /\b(in\s+(python|js|java|typescript|golang|rust|c\+\+|php|ruby))\b/.test(t))
   ) {
@@ -3380,6 +3412,38 @@ function detectIntent(text: string): DetectedIntent {
   }
 
   return { type: "general", category: "general" };
+}
+
+function isLowCoverageResearchReply(reply: string): boolean {
+  const t = reply.toLowerCase();
+  return (
+    t.includes("reliable information for this detail is not available in the retrieved sources")
+    || t.includes("coverage remained below threshold")
+    || (t.includes("## short summary") && t.includes("## key updates"))
+  );
+}
+
+function normalizeResearchMarkdownForWhatsApp(reply: string): string {
+  return reply
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function buildNewsCoverageRecoveryReply(question: string): string {
+  const q = question.trim().slice(0, 120);
+  return [
+    `📰 *Latest Update Request: ${q}*`,
+    "",
+    "I couldn’t verify enough reliable live sources for this exact query yet.",
+    "",
+    "Send one specific topic + location for a precise update:",
+    "• _India stock market news today_",
+    "• _Delhi weather today_",
+    "• _Latest AI policy news in US today_",
+    "",
+    "I’ll return a clean, professional update.",
+  ].join("\n");
 }
 
 async function notifyBackgroundTaskFailure(
@@ -3521,7 +3585,7 @@ export async function routeInboundAgentMessage(
       if (hasNewsProviders()) {
         const answer = await answerNewsQuestion(trimmed).catch(() => "");
         if (answer.trim()) {
-          return translateMessage(answer, locale);
+          return translateMessage(normalizeResearchMarkdownForWhatsApp(answer), locale);
         }
       }
 
@@ -3534,7 +3598,10 @@ export async function routeInboundAgentMessage(
 
       const normalizedFallback = fallback?.trim() ?? "";
       if (normalizedFallback) {
-        return translateMessage(normalizedFallback, locale);
+        if (isLowCoverageResearchReply(normalizedFallback)) {
+          return translateMessage(buildNewsCoverageRecoveryReply(trimmed), locale);
+        }
+        return translateMessage(normalizeResearchMarkdownForWhatsApp(normalizedFallback), locale);
       }
 
       const reply = await smartReply(userId, trimmed, "research", responseMode, explicitMode);

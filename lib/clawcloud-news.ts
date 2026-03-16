@@ -67,6 +67,9 @@ const LOW_QUALITY_DOMAINS = [
 export function detectNewsQuestion(question: string): boolean {
   const text = question.trim();
   if (!text) return false;
+  if (/\b(weather|whether|temperature|forecast|rain|humidity|wind|aqi)\b/i.test(text)) {
+    return false;
+  }
   if (NOT_NEWS_PATTERNS.some((pattern) => pattern.test(text))) {
     return false;
   }
