@@ -29,26 +29,38 @@ function readBoolean(name: string, fallback = false) {
   return value === "1" || value === "true" || value === "yes" || value === "on";
 }
 
+function normalizeSecretCandidate(value: string) {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith("\"") && trimmed.endsWith("\"")) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
 function looksLikeNvidiaApiKey(value: string) {
-  return /^nvapi-[A-Za-z0-9._-]{20,}$/.test(value.trim());
+  const normalized = normalizeSecretCandidate(value).toLowerCase();
+  return normalized.includes("nvapi-") && normalized.length >= 16;
 }
 
 function readNvidiaApiKey() {
-  const explicit = readFirstString([
+  const explicit = normalizeSecretCandidate(readFirstString([
     "NVIDIA_API_KEY",
     "NVDIA_API_KEY",
     "NVDA_API_KEY",
     "NVIDIA_APIKEY",
     "NVIDIA_KEY",
     "NVIDIA_TOKEN",
-  ]);
+  ]));
 
   if (looksLikeNvidiaApiKey(explicit)) {
     return explicit;
   }
 
   for (const [key, raw] of Object.entries(process.env)) {
-    const value = String(raw ?? "").trim();
+    const value = normalizeSecretCandidate(String(raw ?? ""));
     if (!value) continue;
     if (!/nvidia|nvda|nvdia|nvapi/i.test(key)) continue;
     if (looksLikeNvidiaApiKey(value)) {
@@ -57,7 +69,7 @@ function readNvidiaApiKey() {
   }
 
   for (const raw of Object.values(process.env)) {
-    const value = String(raw ?? "").trim();
+    const value = normalizeSecretCandidate(String(raw ?? ""));
     if (looksLikeNvidiaApiKey(value)) {
       return value;
     }

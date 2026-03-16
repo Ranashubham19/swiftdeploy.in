@@ -105,20 +105,32 @@ const NVIDIA_ENV_KEYS = [
   "NVIDIA_TOKEN",
 ] as const;
 
+function normalizeSecretCandidate(value: string) {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith("\"") && trimmed.endsWith("\"")) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
 function looksLikeNvidiaApiKey(value: string) {
-  return /^nvapi-[A-Za-z0-9._-]{20,}$/.test(value.trim());
+  const normalized = normalizeSecretCandidate(value).toLowerCase();
+  return normalized.includes("nvapi-") && normalized.length >= 16;
 }
 
 function resolveNvidiaApiKey() {
   for (const key of NVIDIA_ENV_KEYS) {
-    const value = process.env[key]?.trim();
+    const value = normalizeSecretCandidate(process.env[key] ?? "");
     if (value && looksLikeNvidiaApiKey(value)) {
       return { key, value };
     }
   }
 
   for (const [key, raw] of Object.entries(process.env)) {
-    const value = String(raw ?? "").trim();
+    const value = normalizeSecretCandidate(String(raw ?? ""));
     if (!value) continue;
     if (!/nvidia|nvda|nvdia|nvapi/i.test(key)) continue;
     if (looksLikeNvidiaApiKey(value)) {
@@ -127,7 +139,7 @@ function resolveNvidiaApiKey() {
   }
 
   for (const [key, raw] of Object.entries(process.env)) {
-    const value = String(raw ?? "").trim();
+    const value = normalizeSecretCandidate(String(raw ?? ""));
     if (looksLikeNvidiaApiKey(value)) {
       return { key: `(value_scan:${key})`, value };
     }
@@ -142,6 +154,25 @@ function ensureCanonicalNvidiaEnv() {
     process.env.NVIDIA_API_KEY = resolved.value;
   }
   return resolveNvidiaApiKey();
+}
+
+function getNvidiaEnvHints() {
+  const hints: Array<{ key: string; hasValue: boolean; looksNvapi: boolean }> = [];
+  const seen = new Set<string>();
+
+  for (const key of Object.keys(process.env)) {
+    if (!/nvidia|nvda|nvdia|nvapi/i.test(key)) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const value = normalizeSecretCandidate(String(process.env[key] ?? ""));
+    hints.push({
+      key,
+      hasValue: Boolean(value),
+      looksNvapi: looksLikeNvidiaApiKey(value),
+    });
+  }
+
+  return hints.sort((a, b) => a.key.localeCompare(b.key));
 }
 
 function missingEnv() {
@@ -1063,6 +1094,7 @@ app.get("/health", (_req, res) => {
   const error = configError();
   const connected = [...sessions.values()].filter((session) => session.status === "connected");
   const nvidia = ensureCanonicalNvidiaEnv();
+  const nvidiaHints = getNvidiaEnvHints();
 
   res.json({
     status: error ? "degraded" : "ok",
@@ -1071,6 +1103,7 @@ app.get("/health", (_req, res) => {
     total_sessions: sessions.size,
     nvidia_configured: Boolean(nvidia.value),
     nvidia_env_source: nvidia.key,
+    nvidia_env_hints: nvidiaHints,
     app_url: appUrl() || "NOT SET",
     session_states: Object.fromEntries(
       [...sessions.entries()].map(([userId, session]) => [
