@@ -270,6 +270,10 @@ export interface PublicAppConfig {
   supabaseUrl: string;
   supabaseAnonKey: string;
   appUrl: string;
+  googleRollout: {
+    publicSignInEnabled: boolean;
+    publicWorkspaceEnabled: boolean;
+  };
   firebase: {
     apiKey: string;
     authDomain: string;
