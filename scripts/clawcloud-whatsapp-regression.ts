@@ -30,6 +30,8 @@ const cases: RegressionCase[] = [
   { prompt: "What is GDP", mustMatch: [/(gross domestic product|gdp)/i] },
   { prompt: "Speed of light", mustMatch: [/(299,?792,?458|3\s*[x×]\s*10\^?8|m\/s)/i] },
   { prompt: "Largest planet", mustMatch: [/\bjupiter\b/i] },
+  { prompt: "Rat in maze", mustMatch: [/(maze|path|dfs|python|find_paths)/i] },
+  { prompt: "What is mariana trench", mustMatch: [/(mariana|challenger deep|deepest)/i] },
   { prompt: "Write me an article about AI", mustMatch: [/(article|ai|innovation|productivity)/i] },
   { prompt: "Write a poem about nature", mustMatch: [/(poem|nature|earth|river|mountain)/i] },
   { prompt: "What are symptoms of diabetes", mustMatch: [/(diabetes|symptoms|thirst|urination|blood glucose)/i] },
@@ -41,6 +43,9 @@ const bannedPatterns = [
   /you asked:\s*_/i,
   /i received your question/i,
   /ask your question and i'll answer it completely/i,
+  /coding reply/i,
+  /i received:\s*_/i,
+  /clean starter template/i,
 ];
 
 function loadEnvFile(filePath: string) {

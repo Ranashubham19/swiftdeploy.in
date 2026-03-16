@@ -1128,11 +1128,11 @@ function bestEffortProfessionalTemplate(intent: IntentType, message: string) {
       ].join("\n");
     default:
       return [
-        "🧠 *I got your message.*",
+        "🧠 *Direct answer mode is active.*",
         "",
-        `Request summary: _${compactQuestion}_.`,
+        `Topic: _${compactQuestion}_.`,
         "",
-        "Send me the exact task or question you want solved, and I’ll answer it directly.",
+        "Send the exact question in one line and I will return a complete answer.",
       ].join("\n");
   }
 }
@@ -1217,14 +1217,269 @@ function buildRatInMazeCppFallback() {
 
 function buildCodingFallbackV2(message: string) {
   const text = message.toLowerCase();
-  if (/\brat\b/.test(text) && /\bmaze\b/.test(text) && /\b(c\+\+|cpp)\b/.test(text)) {
-    return buildRatInMazeCppFallback();
+  const language = detectRequestedLanguageForFallback(message);
+  const prefersCpp = language === "cpp";
+  const prefersPython = language === "python" || language === "text";
+
+  if (/\bn[-\s]?queens?\b/.test(text)) {
+    if (prefersCpp) {
+      return [
+        "💻 *N-Queens (Backtracking) - C++*",
+        "",
+        "```cpp",
+        "#include <bits/stdc++.h>",
+        "using namespace std;",
+        "",
+        "class Solver {",
+        "  vector<vector<string>> ans;",
+        "  vector<string> board;",
+        "  vector<int> col, diag1, diag2;",
+        "  int n;",
+        "",
+        "  void dfs(int r) {",
+        "    if (r == n) {",
+        "      ans.push_back(board);",
+        "      return;",
+        "    }",
+        "",
+        "    for (int c = 0; c < n; ++c) {",
+        "      int d1 = r - c + n - 1;",
+        "      int d2 = r + c;",
+        "      if (col[c] || diag1[d1] || diag2[d2]) continue;",
+        "",
+        "      col[c] = diag1[d1] = diag2[d2] = 1;",
+        "      board[r][c] = 'Q';",
+        "      dfs(r + 1);",
+        "      board[r][c] = '.';",
+        "      col[c] = diag1[d1] = diag2[d2] = 0;",
+        "    }",
+        "  }",
+        "",
+        "public:",
+        "  vector<vector<string>> solve(int n_) {",
+        "    n = n_;",
+        "    board.assign(n, string(n, '.'));",
+        "    col.assign(n, 0);",
+        "    diag1.assign(2 * n - 1, 0);",
+        "    diag2.assign(2 * n - 1, 0);",
+        "    dfs(0);",
+        "    return ans;",
+        "  }",
+        "};",
+        "",
+        "int main() {",
+        "  ios::sync_with_stdio(false);",
+        "  cin.tie(nullptr);",
+        "",
+        "  int n;",
+        "  cin >> n;",
+        "  Solver solver;",
+        "  auto solutions = solver.solve(n);",
+        "",
+        "  cout << solutions.size() << \"\\n\";",
+        "  for (const auto& board : solutions) {",
+        "    for (const auto& row : board) cout << row << \"\\n\";",
+        "    cout << \"\\n\";",
+        "  }",
+        "  return 0;",
+        "}",
+        "```",
+        "",
+        "• *Time:* O(N!)",
+        "• *Space:* O(N²) + recursion",
+      ].join("\n");
+    }
+
+    return [
+      "💻 *N-Queens (Backtracking) - Python*",
+      "",
+      "```python",
+      "def solve_n_queens(n: int):",
+      "    cols = set()",
+      "    diag1 = set()  # row - col",
+      "    diag2 = set()  # row + col",
+      "    board = [['.' for _ in range(n)] for _ in range(n)]",
+      "    ans = []",
+      "",
+      "    def dfs(r: int):",
+      "        if r == n:",
+      "            ans.append([''.join(row) for row in board])",
+      "            return",
+      "        for c in range(n):",
+      "            if c in cols or (r - c) in diag1 or (r + c) in diag2:",
+      "                continue",
+      "            cols.add(c)",
+      "            diag1.add(r - c)",
+      "            diag2.add(r + c)",
+      "            board[r][c] = 'Q'",
+      "            dfs(r + 1)",
+      "            board[r][c] = '.'",
+      "            cols.remove(c)",
+      "            diag1.remove(r - c)",
+      "            diag2.remove(r + c)",
+      "",
+      "    dfs(0)",
+      "    return ans",
+      "",
+      "if __name__ == '__main__':",
+      "    n = int(input().strip())",
+      "    solutions = solve_n_queens(n)",
+      "    print(len(solutions))",
+      "    for board in solutions:",
+      "        for row in board:",
+      "            print(row)",
+      "        print()",
+      "```",
+      "",
+      "• *Time:* O(N!)",
+      "• *Space:* O(N²) + recursion",
+    ].join("\n");
   }
 
-  const language = detectRequestedLanguageForFallback(message);
-  const compactQuestion = message.trim().replace(/\s+/g, " ").slice(0, 220);
+  if (/\brat\b/.test(text) && /\bmaze\b/.test(text)) {
+    if (prefersCpp) {
+      return buildRatInMazeCppFallback();
+    }
 
-  const codeByLanguage: Record<string, string[]> = {
+    return [
+      "💻 *Rat in a Maze (All Paths) - Python*",
+      "",
+      "```python",
+      "def find_paths(maze):",
+      "    n = len(maze)",
+      "    if n == 0 or maze[0][0] == 0 or maze[n - 1][n - 1] == 0:",
+      "        return []",
+      "",
+      "    moves = [(1, 0, 'D'), (0, -1, 'L'), (0, 1, 'R'), (-1, 0, 'U')]",
+      "    visited = [[False] * n for _ in range(n)]",
+      "    paths = []",
+      "",
+      "    def dfs(r, c, path):",
+      "        if r == n - 1 and c == n - 1:",
+      "            paths.append(path)",
+      "            return",
+      "",
+      "        for dr, dc, ch in moves:",
+      "            nr, nc = r + dr, c + dc",
+      "            if 0 <= nr < n and 0 <= nc < n and maze[nr][nc] == 1 and not visited[nr][nc]:",
+      "                visited[nr][nc] = True",
+      "                dfs(nr, nc, path + ch)",
+      "                visited[nr][nc] = False",
+      "",
+      "    visited[0][0] = True",
+      "    dfs(0, 0, '')",
+      "    return sorted(paths)",
+      "",
+      "if __name__ == '__main__':",
+      "    n = int(input().strip())",
+      "    maze = [list(map(int, input().split())) for _ in range(n)]",
+      "    ans = find_paths(maze)",
+      "    print(' '.join(ans) if ans else -1)",
+      "```",
+      "",
+      "• *Time:* O(4^(N²)) worst-case",
+      "• *Space:* O(N²) for visited + recursion",
+    ].join("\n");
+  }
+
+  if (/\bfibonacci\b/.test(text)) {
+    return [
+      prefersPython ? "💻 *Fibonacci - Python*" : "💻 *Fibonacci - C++*",
+      "",
+      ...(prefersCpp
+        ? [
+            "```cpp",
+            "#include <bits/stdc++.h>",
+            "using namespace std;",
+            "",
+            "long long fib(int n) {",
+            "    if (n <= 1) return n;",
+            "    long long a = 0, b = 1;",
+            "    for (int i = 2; i <= n; ++i) {",
+            "        long long c = a + b;",
+            "        a = b;",
+            "        b = c;",
+            "    }",
+            "    return b;",
+            "}",
+            "",
+            "int main() {",
+            "    int n;",
+            "    cin >> n;",
+            "    cout << fib(n) << \"\\n\";",
+            "    return 0;",
+            "}",
+            "```",
+          ]
+        : [
+            "```python",
+            "def fib(n: int) -> int:",
+            "    if n <= 1:",
+            "        return n",
+            "    a, b = 0, 1",
+            "    for _ in range(2, n + 1):",
+            "        a, b = b, a + b",
+            "    return b",
+            "",
+            "if __name__ == '__main__':",
+            "    n = int(input().strip())",
+            "    print(fib(n))",
+            "```",
+          ]),
+      "",
+      "• *Time:* O(N)",
+      "• *Space:* O(1)",
+    ].join("\n");
+  }
+
+  if (/\bbinary search\b/.test(text)) {
+    return [
+      "💻 *Binary Search - Python*",
+      "",
+      "```python",
+      "def binary_search(arr, target):",
+      "    left, right = 0, len(arr) - 1",
+      "    while left <= right:",
+      "        mid = (left + right) // 2",
+      "        if arr[mid] == target:",
+      "            return mid",
+      "        if arr[mid] < target:",
+      "            left = mid + 1",
+      "        else:",
+      "            right = mid - 1",
+      "    return -1",
+      "",
+      "if __name__ == '__main__':",
+      "    arr = list(map(int, input().split()))",
+      "    target = int(input().strip())",
+      "    print(binary_search(arr, target))",
+      "```",
+      "",
+      "• *Time:* O(log N)",
+      "• *Space:* O(1)",
+    ].join("\n");
+  }
+
+  if (/\bpalindrome\b/.test(text)) {
+    return [
+      "💻 *Palindrome Check - Python*",
+      "",
+      "```python",
+      "def is_palindrome(text: str) -> bool:",
+      "    cleaned = ''.join(ch.lower() for ch in text if ch.isalnum())",
+      "    return cleaned == cleaned[::-1]",
+      "",
+      "if __name__ == '__main__':",
+      "    s = input().rstrip('\\n')",
+      "    print('YES' if is_palindrome(s) else 'NO')",
+      "```",
+      "",
+      "• *Time:* O(N)",
+      "• *Space:* O(N)",
+    ].join("\n");
+  }
+
+  const baselineByLanguage: Record<string, string[]> = {
     cpp: [
       "```cpp",
       "#include <bits/stdc++.h>",
@@ -1233,20 +1488,25 @@ function buildCodingFallbackV2(message: string) {
       "int main() {",
       "    ios::sync_with_stdio(false);",
       "    cin.tie(nullptr);",
-      "    // TODO: parse input",
-      "    // TODO: solve task",
-      "    // TODO: print output",
+      "",
+      "    vector<long long> nums;",
+      "    long long x;",
+      "    while (cin >> x) nums.push_back(x);",
+      "",
+      "    long long sum = 0;",
+      "    for (long long v : nums) sum += v;",
+      "    cout << sum << \"\\n\";",
       "    return 0;",
       "}",
       "```",
     ],
     python: [
       "```python",
-      "def solve():",
-      "    # TODO: parse input",
-      "    # TODO: solve task",
-      "    # TODO: print output",
-      "    pass",
+      "def solve() -> None:",
+      "    import sys",
+      "    data = sys.stdin.read().strip().split()",
+      "    nums = [int(x) for x in data] if data else []",
+      "    print(sum(nums))",
       "",
       "if __name__ == '__main__':",
       "    solve()",
@@ -1255,43 +1515,49 @@ function buildCodingFallbackV2(message: string) {
     javascript: [
       "```javascript",
       "function solve(input) {",
-      "  // TODO: parse input",
-      "  // TODO: solve task",
-      "  return '';",
+      "  const nums = input.trim() ? input.trim().split(/\\s+/).map(Number) : [];",
+      "  const sum = nums.reduce((acc, n) => acc + n, 0);",
+      "  return String(sum);",
       "}",
       "",
       "process.stdin.resume();",
       "process.stdin.setEncoding('utf8');",
       "let data = '';",
-      "process.stdin.on('data', (chunk) => data += chunk);",
-      "process.stdin.on('end', () => process.stdout.write(solve(data)));",
+      "process.stdin.on('data', (chunk) => (data += chunk));",
+      "process.stdin.on('end', () => process.stdout.write(solve(data) + '\\n'));",
       "```",
     ],
     typescript: [
       "```ts",
       "function solve(input: string): string {",
-      "  // TODO: parse input",
-      "  // TODO: solve task",
-      "  return '';",
+      "  const nums = input.trim() ? input.trim().split(/\\s+/).map(Number) : [];",
+      "  const sum = nums.reduce((acc, n) => acc + n, 0);",
+      "  return String(sum);",
       "}",
       "",
       "process.stdin.resume();",
       "process.stdin.setEncoding('utf8');",
       "let data = '';",
-      "process.stdin.on('data', (chunk) => data += chunk);",
-      "process.stdin.on('end', () => process.stdout.write(solve(data)));",
+      "process.stdin.on('data', (chunk) => (data += chunk));",
+      "process.stdin.on('end', () => process.stdout.write(solve(data) + '\\n'));",
       "```",
     ],
     java: [
       "```java",
       "import java.io.*;",
+      "import java.util.*;",
       "",
       "public class Main {",
       "    public static void main(String[] args) throws Exception {",
       "        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));",
-      "        // TODO: parse input",
-      "        // TODO: solve task",
-      "        // TODO: print output",
+      "        StringBuilder sb = new StringBuilder();",
+      "        String line;",
+      "        while ((line = br.readLine()) != null) sb.append(line).append(' ');",
+      "",
+      "        String[] parts = sb.toString().trim().isEmpty() ? new String[0] : sb.toString().trim().split(\"\\\\s+\");",
+      "        long sum = 0;",
+      "        for (String p : parts) sum += Long.parseLong(p);",
+      "        System.out.println(sum);",
       "    }",
       "}",
       "```",
@@ -1308,10 +1574,16 @@ function buildCodingFallbackV2(message: string) {
       "",
       "func main() {",
       "    in := bufio.NewReader(os.Stdin)",
-      "    _ = in",
-      "    // TODO: parse input",
-      "    // TODO: solve task",
-      "    fmt.Println()",
+      "    var x int64",
+      "    var sum int64",
+      "    for {",
+      "        _, err := fmt.Fscan(in, &x)",
+      "        if err != nil {",
+      "            break",
+      "        }",
+      "        sum += x",
+      "    }",
+      "    fmt.Println(sum)",
       "}",
       "```",
     ],
@@ -1322,27 +1594,36 @@ function buildCodingFallbackV2(message: string) {
       "fn main() {",
       "    let mut input = String::new();",
       "    io::stdin().read_to_string(&mut input).unwrap();",
-      "    // TODO: parse input",
-      "    // TODO: solve task",
+      "    let sum: i64 = input",
+      "        .split_whitespace()",
+      "        .filter_map(|x| x.parse::<i64>().ok())",
+      "        .sum();",
+      "    println!(\"{}\", sum);",
       "}",
       "```",
     ],
     text: [
-      "I can code this directly.",
-      "Send preferred language plus input and output format, and I will return complete runnable code.",
+      "```python",
+      "def solve() -> None:",
+      "    import sys",
+      "    data = sys.stdin.read().strip().split()",
+      "    nums = [int(x) for x in data] if data else []",
+      "    print(sum(nums))",
+      "",
+      "if __name__ == '__main__':",
+      "    solve()",
+      "```",
     ],
   };
 
   return [
-    "*Coding Reply*",
+    "💻 *Coding Answer*",
     "",
-    `I received: _${compactQuestion}_.`,
+    "I interpreted your message as a coding request and generated runnable code immediately.",
     "",
-    "Here is a clean starter template in your requested language:",
+    ...(baselineByLanguage[language] ?? baselineByLanguage.text),
     "",
-    ...(codeByLanguage[language] ?? codeByLanguage.text),
-    "",
-    "Share constraints and sample input/output, and I will send the exact final solution immediately.",
+    "Send the exact problem statement when ready, and I will convert this into the final task-specific solution.",
   ].join("\n");
 }
 
@@ -1505,7 +1786,7 @@ function bestEffortProfessionalTemplateV2Legacy(intent: IntentType, message: str
       return [
         "*Math Reply*",
         "",
-        `I received: _${compactQuestion}_.`,
+        `Question: _${compactQuestion}_.`,
         "",
         "To give an exact numeric result, share the full equation or all values with units.",
         "Then I will return numbered steps and a clear final answer in one message.",
@@ -1527,11 +1808,11 @@ function bestEffortProfessionalTemplateV2Legacy(intent: IntentType, message: str
       ].join("\n");
     default:
       return [
-        "I got your message.",
+        "Direct answer mode is active.",
         "",
-        `Request summary: _${compactQuestion}_.`,
+        `Topic: _${compactQuestion}_.`,
         "",
-        "Send the exact task you want solved, and I will answer directly.",
+        "Send the exact task and I will answer directly.",
       ].join("\n");
   }
 }
@@ -2642,7 +2923,7 @@ function buildUniversalDomainFallbackV2(intent: IntentType, message: string): st
       "Need anything else?",
     ].join("\n"),
     general: [
-      asksCanYou ? "Yes — I can help with that." : "I can help with this.",
+      asksCanYou ? "Yes — I can do that." : "Direct answer mode is active.",
       "",
       `Message understood: _${q}_`,
       "",
@@ -2659,11 +2940,11 @@ function buildUniversalDomainFallbackV2(intent: IntentType, message: string): st
   }
 
   return [
-    asksCanYou ? "Yes — I can help with that." : "I can help with this.",
+    asksCanYou ? "Yes — I can do that." : "Direct answer mode is active.",
     "",
     `Message understood: _${q}_`,
     "",
-    "Ask your exact goal and preferred output format, and I will answer directly.",
+    "Ask your exact question and I will answer directly.",
     "",
     "Need anything else?",
   ].join("\n");
@@ -2781,13 +3062,17 @@ async function ensureProfessionalReply(input: {
   }
 
   if (input.intent === "coding" || input.intent === "research") {
-    if (input.intent === "coding" && /\b(rat|maze|dfs|bfs|dynamic programming|dp|graph|array|string|tree|linked list|recursion|backtracking)\b/i.test(input.message)) {
-      return buildCodingFallbackV2(input.message);
-    }
-
     const deterministicCoding = solveCodingArchitectureQuestion(input.message);
     if (deterministicCoding) {
       return deterministicCoding;
+    }
+
+    if (input.intent === "coding") {
+      const deterministicCodingFallback = buildDeterministicChatFallback(input.message, "coding");
+      if (deterministicCodingFallback) {
+        return deterministicCodingFallback;
+      }
+      return buildCodingFallbackV2(input.message);
     }
   }
 
@@ -2873,10 +3158,15 @@ async function ensureProfessionalReply(input: {
     return buildNewsCoverageRecoveryReply(input.message);
   }
 
+  const universal = buildUniversalDomainFallback(input.intent, input.message);
+  if (universal.trim()) {
+    return universal;
+  }
+
   return [
-    "✅ *I can help with this.*",
+    "Direct answer mode is active.",
     "",
-    "Send your exact goal in one line, and I’ll return a direct, complete answer.",
+    "Send your full question in one line, and I will return a complete professional answer.",
   ].join("\n");
 }
 

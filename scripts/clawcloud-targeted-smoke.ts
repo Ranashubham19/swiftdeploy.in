@@ -29,6 +29,8 @@ async function main() {
   const user = "targeted-smoke-user";
   const prompts = [
     "Ok give me code for n queen",
+    "Rat in maze",
+    "Ok what is mariana trench",
     "Ok what is the news of today",
     "What is the whether today",
   ];
