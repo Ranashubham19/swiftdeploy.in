@@ -1,8 +1,39 @@
 import { env } from "@/lib/env";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 
+const DEFAULT_PRODUCTION_AGENT_SERVER_URL = "https://swiftdeployin-production-d5fc.up.railway.app";
+const LEGACY_AGENT_SERVER_URLS = new Set([
+  "https://swiftdeployin-production.up.railway.app",
+]);
+
+function normalizeAgentServerUrl(url: string) {
+  const trimmed = url.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+
+  if (LEGACY_AGENT_SERVER_URLS.has(trimmed)) {
+    return DEFAULT_PRODUCTION_AGENT_SERVER_URL;
+  }
+
+  return trimmed;
+}
+
 function getAgentServerBaseUrl() {
-  return env.AGENT_SERVER_URL || "";
+  const explicit = normalizeAgentServerUrl(env.AGENT_SERVER_URL);
+  if (explicit) {
+    return explicit;
+  }
+
+  const backendApi = normalizeAgentServerUrl(env.BACKEND_API_URL);
+  if (backendApi) {
+    return backendApi;
+  }
+
+  // Keep the QR flow alive even if Vercel is missing the explicit agent URL.
+  if (env.NEXT_PUBLIC_APP_URL === "https://swift-deploy.in") {
+    return DEFAULT_PRODUCTION_AGENT_SERVER_URL;
+  }
+
+  return "";
 }
 
 function assertAgentServerConfigured() {
@@ -46,8 +77,12 @@ export async function getClawCloudWhatsAppAccount(userId: string) {
   };
 }
 
-export async function requestClawCloudWhatsAppQr(userId: string) {
-  const response = await agentServerFetch(`/wa/qr/${userId}`, {
+export async function requestClawCloudWhatsAppQr(
+  userId: string,
+  options?: { forceRefresh?: boolean },
+) {
+  const refreshQuery = options?.forceRefresh ? "?refresh=1" : "";
+  const response = await agentServerFetch(`/wa/qr/${userId}${refreshQuery}`, {
     method: "GET",
   });
 
