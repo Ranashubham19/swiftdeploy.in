@@ -697,7 +697,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
 
     if (qr) {
       console.log(`[agent] QR generated for ${userId}`);
-      current.qr = await QRCode.toDataURL(qr, { width: 220, margin: 1 });
+      current.qr = await QRCode.toDataURL(qr, { width: 360, margin: 2 });
       current.qrIssuedAt = Date.now();
       current.status = "waiting";
       sessions.set(userId, current);
