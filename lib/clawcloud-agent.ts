@@ -732,6 +732,53 @@ function buildCodingFallbackV2(message: string) {
   ].join("\n");
 }
 
+function tryBuildTradingRiskMathFallback(message: string) {
+  const text = message.toLowerCase();
+  const winRateMatch =
+    text.match(/(\d+(?:\.\d+)?)\s*%\s*(?:win rate|wins?)/)
+    ?? text.match(/win rate[^0-9]*(\d+(?:\.\d+)?)\s*%/);
+  const rrMatch =
+    text.match(/reward[-\s]*risk[^0-9]*(\d+(?:\.\d+)?)\s*[:/]\s*1/)
+    ?? text.match(/(\d+(?:\.\d+)?)\s*[:/]\s*1/);
+  const riskPctMatch =
+    text.match(/(\d+(?:\.\d+)?)\s*%\s*(?:risk per trade|risk)/)
+    ?? text.match(/risk per trade[^0-9]*(\d+(?:\.\d+)?)\s*%/);
+
+  if (!winRateMatch || !rrMatch) {
+    return null;
+  }
+
+  const p = Number.parseFloat(winRateMatch[1]) / 100;
+  const r = Number.parseFloat(rrMatch[1]);
+  const riskPct = riskPctMatch ? Number.parseFloat(riskPctMatch[1]) : null;
+
+  if (!Number.isFinite(p) || !Number.isFinite(r) || p <= 0 || p >= 1 || r <= 0) {
+    return null;
+  }
+
+  const q = 1 - p;
+  const expectancyR = (p * r) - q;
+  const kellyFraction = p - (q / r);
+  const expectedPctPerTrade = riskPct !== null ? expectancyR * riskPct : null;
+
+  const lines = [
+    "*Trading Risk Math*",
+    "",
+    `Inputs: win rate = ${(p * 100).toFixed(2)}%, reward:risk = ${r.toFixed(2)}:1${riskPct !== null ? `, risk/trade = ${riskPct.toFixed(2)}%` : ""}.`,
+    "",
+    `• Expectancy (R units): E = p*R - (1-p) = ${expectancyR.toFixed(4)}R per trade`,
+    expectedPctPerTrade !== null
+      ? `• Expected return per trade (approx): ${expectedPctPerTrade.toFixed(4)}%`
+      : "• Expected return per trade requires risk % per trade input.",
+    `• Full Kelly fraction: f* = p - (1-p)/R = ${(kellyFraction * 100).toFixed(2)}% of equity`,
+    `• Practical sizing: use ~0.25x to 0.50x Kelly => ${(Math.max(0, kellyFraction * 0.25) * 100).toFixed(2)}% to ${(Math.max(0, kellyFraction * 0.5) * 100).toFixed(2)}%`,
+    "",
+    "For 1,000 trades, sequence risk dominates. Keep max drawdown guardrails, cap correlated exposure, and reduce size during losing streak clusters.",
+  ];
+
+  return lines.join("\n");
+}
+
 function bestEffortProfessionalTemplateV2(intent: IntentType, message: string) {
   const compactQuestion = message.trim().replace(/\s+/g, " ").slice(0, 180);
   const deterministic = buildDeterministicChatFallback(message, intent);
@@ -744,6 +791,12 @@ function bestEffortProfessionalTemplateV2(intent: IntentType, message: string) {
     case "coding":
       return buildCodingFallbackV2(message);
     case "math":
+      {
+        const tradingFallback = tryBuildTradingRiskMathFallback(message);
+        if (tradingFallback) {
+          return tradingFallback;
+        }
+      }
       return [
         "*Math Reply*",
         "",
@@ -871,6 +924,10 @@ async function ensureProfessionalReply(input: {
   }
 
   if (input.intent === "coding" || input.intent === "research") {
+    if (input.intent === "coding" && /\b(rat|maze|dfs|bfs|dynamic programming|dp|graph|array|string|tree|linked list|recursion|backtracking)\b/i.test(input.message)) {
+      return buildCodingFallbackV2(input.message);
+    }
+
     const deterministicCoding = solveCodingArchitectureQuestion(input.message);
     if (deterministicCoding) {
       return deterministicCoding;
