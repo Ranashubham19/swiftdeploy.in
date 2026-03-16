@@ -96,6 +96,32 @@ function savedSessionUserIds() {
   }
 }
 
+const NVIDIA_ENV_KEYS = [
+  "NVIDIA_API_KEY",
+  "NVDIA_API_KEY",
+  "NVDA_API_KEY",
+  "NVIDIA_KEY",
+  "NVIDIA_TOKEN",
+] as const;
+
+function resolveNvidiaApiKey() {
+  for (const key of NVIDIA_ENV_KEYS) {
+    const value = process.env[key]?.trim();
+    if (value) {
+      return { key, value };
+    }
+  }
+  return { key: null as string | null, value: "" };
+}
+
+function ensureCanonicalNvidiaEnv() {
+  const resolved = resolveNvidiaApiKey();
+  if (!process.env.NVIDIA_API_KEY?.trim() && resolved.value) {
+    process.env.NVIDIA_API_KEY = resolved.value;
+  }
+  return resolveNvidiaApiKey();
+}
+
 function missingEnv() {
   return ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "AGENT_SECRET"].filter(
     (key) => !process.env[key]?.trim(),
@@ -116,6 +142,7 @@ function assertConfigured() {
 
 function logStartupDiagnostics() {
   console.log("[agent] ======= STARTUP DIAGNOSTICS =======");
+  const nvidia = ensureCanonicalNvidiaEnv();
 
   const checks = [
     { key: "SUPABASE_URL", value: process.env.SUPABASE_URL ?? "MISSING" },
@@ -126,9 +153,13 @@ function logStartupDiagnostics() {
     { key: "AGENT_SECRET", value: process.env.AGENT_SECRET ? "SET" : "MISSING" },
     { key: "CRON_SECRET", value: process.env.CRON_SECRET ? "SET" : "MISSING" },
     {
+      key: "NVIDIA_KEY_SOURCE",
+      value: nvidia.key ?? "none",
+    },
+    {
       key: "NVIDIA_API_KEY",
-      value: process.env.NVIDIA_API_KEY
-        ? `SET (${process.env.NVIDIA_API_KEY.slice(0, 8)}...)`
+      value: nvidia.value
+        ? `SET (${nvidia.value.slice(0, 8)}...)`
         : "MISSING - AI answers may fall back",
     },
     {
@@ -475,8 +506,18 @@ async function sendReply(
 }
 
 async function callNext(pathname: string, body: Record<string, unknown>): Promise<Response | null> {
-  if (!appUrl() || !process.env.AGENT_SECRET?.trim()) {
-    console.error("[agent] callNext skipped: app URL or AGENT_SECRET is missing");
+  if (!appUrl()) {
+    console.error("[agent] callNext skipped: app URL is missing");
+    return null;
+  }
+
+  const sharedSecrets = [
+    process.env.AGENT_SECRET?.trim(),
+    process.env.CRON_SECRET?.trim(),
+  ].filter((value): value is string => Boolean(value));
+
+  if (!sharedSecrets.length) {
+    console.error("[agent] callNext skipped: AGENT_SECRET/CRON_SECRET not configured");
     return null;
   }
 
@@ -484,15 +525,27 @@ async function callNext(pathname: string, body: Record<string, unknown>): Promis
   const timer = setTimeout(() => controller.abort(), HTTP_REPLY_TIMEOUT_MS);
 
   try {
-    return await fetch(`${appUrl()}${pathname}`, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${process.env.AGENT_SECRET}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
+    for (const secret of sharedSecrets) {
+      const response = await fetch(`${appUrl()}${pathname}`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${secret}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (response.ok) {
+        return response;
+      }
+
+      if (response.status !== 401 && response.status !== 403) {
+        return response;
+      }
+    }
+
+    return null;
   } catch (error) {
     console.error(
       "[agent] callNext failed:",
@@ -509,6 +562,7 @@ async function getDirectRouteInboundAgentMessage() {
     return cachedRouteInboundAgentMessage;
   }
 
+  ensureCanonicalNvidiaEnv();
   const module = await import("./lib/clawcloud-agent");
   cachedRouteInboundAgentMessage = module.routeInboundAgentMessage;
   return cachedRouteInboundAgentMessage;
@@ -986,13 +1040,15 @@ app.post("/wa/send-user/:userId", auth, async (req, res) => {
 app.get("/health", (_req, res) => {
   const error = configError();
   const connected = [...sessions.values()].filter((session) => session.status === "connected");
+  const nvidia = ensureCanonicalNvidiaEnv();
 
   res.json({
     status: error ? "degraded" : "ok",
     configured: !error,
     connections: connected.length,
     total_sessions: sessions.size,
-    nvidia_configured: Boolean(process.env.NVIDIA_API_KEY),
+    nvidia_configured: Boolean(nvidia.value),
+    nvidia_env_source: nvidia.key,
     app_url: appUrl() || "NOT SET",
     session_states: Object.fromEntries(
       [...sessions.entries()].map(([userId, session]) => [
