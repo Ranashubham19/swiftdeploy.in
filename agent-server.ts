@@ -69,6 +69,10 @@ function sessionBaseDir() {
   return isRailwayRuntime() ? "/data/wa-sessions" : "./wa-sessions";
 }
 
+function looksLikeUserId(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
 function savedSessionUserIds() {
   const base = sessionBaseDir();
   if (!fs.existsSync(base)) {
@@ -80,6 +84,7 @@ function savedSessionUserIds() {
       .readdirSync(base, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name.trim())
+      .filter((entry) => looksLikeUserId(entry))
       .filter(Boolean);
   } catch (error) {
     console.error(
