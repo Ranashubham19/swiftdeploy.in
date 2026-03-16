@@ -25,6 +25,7 @@ type SessionRecord = {
   sock: WASocket;
   status: "connecting" | "waiting" | "connected";
   qr: string | null;
+  qrIssuedAt: number | null;
   phone: string | null;
   lastChatJid: string | null;
   startedAt: number;
@@ -679,6 +680,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
     sock,
     status: "connecting",
     qr: null,
+    qrIssuedAt: null,
     phone: null,
     lastChatJid: preferredChatJid,
     startedAt: Date.now(),
@@ -696,6 +698,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
     if (qr) {
       console.log(`[agent] QR generated for ${userId}`);
       current.qr = await QRCode.toDataURL(qr, { width: 220, margin: 1 });
+      current.qrIssuedAt = Date.now();
       current.status = "waiting";
       sessions.set(userId, current);
     }
@@ -706,6 +709,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
       current.status = "connected";
       current.phone = phone;
       current.qr = null;
+      current.qrIssuedAt = null;
       sessions.set(userId, current);
 
       const sendWelcomeNow = await shouldSendWelcome(userId, phone);
@@ -784,6 +788,23 @@ async function connectSession(userId: string): Promise<SessionRecord> {
   });
 
   return record;
+}
+
+function shouldRegenerateQr(session: SessionRecord, forceRefresh: boolean) {
+  if (session.status !== "waiting") {
+    return false;
+  }
+
+  if (forceRefresh) {
+    return true;
+  }
+
+  if (!session.qr || !session.qrIssuedAt) {
+    return true;
+  }
+
+  // WhatsApp pairing QR turns stale quickly; rotate before users hit hard-expiry.
+  return Date.now() - session.qrIssuedAt > 75_000;
 }
 
 function isSelfChat(message: { key?: { remoteJid?: string | null } }, session: SessionRecord) {
@@ -889,8 +910,26 @@ function auth(req: express.Request, res: express.Response, next: express.NextFun
 
 app.get("/wa/qr/:userId", auth, async (req, res) => {
   try {
-    const session = await connectSession(readParam(req.params.userId));
-    res.json({ status: session.status, qr: session.qr, phone: session.phone });
+    const userId = readParam(req.params.userId);
+    const forceRefresh = String(req.query.refresh ?? "").trim() === "1";
+
+    let session = await connectSession(userId);
+    if (shouldRegenerateQr(session, forceRefresh)) {
+      console.log(
+        `[agent] Refreshing QR for ${userId} (forced=${forceRefresh}, ageMs=${
+          session.qrIssuedAt ? Date.now() - session.qrIssuedAt : -1
+        })`,
+      );
+      await discardSession(userId, sessions.get(userId), { deleteAuth: true });
+      session = await connectSession(userId);
+    }
+
+    res.json({
+      status: session.status,
+      qr: session.qr,
+      phone: session.phone,
+      qr_age_seconds: session.qrIssuedAt ? Math.floor((Date.now() - session.qrIssuedAt) / 1000) : null,
+    });
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : "Failed" });
   }
