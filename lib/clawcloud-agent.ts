@@ -992,6 +992,9 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || normalized.includes("to give an exact numeric result, share the full equation")
     || normalized.includes("question captured:")
     || normalized.includes("ask your question and i'll answer it completely")
+    || normalized.includes("ready to answer.")
+    || normalized.includes("i can explain any technology")
+    || normalized.includes("ask: 'what is [tech]?'")
     || normalized.includes("reliable information for this detail is not available in the retrieved sources")
     || normalized.includes("## short summary")
     || normalized.includes("## key updates")
@@ -3134,7 +3137,11 @@ async function ensureProfessionalReply(input: {
   reply: string | null | undefined;
   extraInstruction?: string;
 }) {
-  if (!isVisibleFallbackReply(input.reply) && !isProbablyIncompleteReply(input.message, input.intent, input.reply)) {
+  if (
+    !isVisibleFallbackReply(input.reply)
+    && !isLowQualityTemplateReply(input.reply)
+    && !isProbablyIncompleteReply(input.message, input.intent, input.reply)
+  ) {
     return input.reply!.trim();
   }
 
