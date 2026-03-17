@@ -2723,12 +2723,11 @@ function buildUniversalDomainFallback(intent: IntentType, message: string): stri
   }
 
   return [
-    "🧠 *Direct Answer*",
+    "I can help with this.",
     "",
-    `Question: _${q}_`,
+    `Topic: _${q}_`,
     "",
-    "Most likely interpretation has been selected.",
-    "I can continue with either a concise answer or a deeper explanation with examples.",
+    "Share one specific angle and I will give a complete direct answer.",
   ].join("\n");
 }
 
@@ -3031,16 +3030,12 @@ function buildUniversalDomainFallbackV2(intent: IntentType, message: string): st
       "Need anything else?",
     ].join("\n"),
     general: [
-      asksCanYou ? "Yes — I can do that." : "Direct answer mode is active.",
-      "",
-      `Message understood: _${q}_`,
+      asksCanYou ? "Yes - I can do that." : "",
       "",
       asksToWrite
-        ? "If this is a writing request, send topic + tone + length and I will generate the full result now."
-        : "Ask your exact question in one line and I will give a direct, professional answer.",
-      "",
-      "Need anything else?",
-    ].join("\n"),
+        ? "Share topic, tone, and length and I will write it now."
+        : "Tell me the exact question and I will give a complete direct answer.",
+    ].filter(Boolean).join("\n"),
   };
 
   if (domainFallbacks[intent]) {
@@ -3048,13 +3043,9 @@ function buildUniversalDomainFallbackV2(intent: IntentType, message: string): st
   }
 
   return [
-    asksCanYou ? "Yes — I can do that." : "Direct answer mode is active.",
+    "I did not fully catch that yet.",
     "",
-    `Message understood: _${q}_`,
-    "",
-    "Ask your exact question and I will answer directly.",
-    "",
-    "Need anything else?",
+    "Could you rephrase in one clear line? I will answer directly.",
   ].join("\n");
 }
 
@@ -3276,9 +3267,9 @@ async function ensureProfessionalReply(input: {
   }
 
   return [
-    "Direct answer mode is active.",
+    "I am ready to help.",
     "",
-    "Send your full question in one line, and I will return a complete professional answer.",
+    "Please rephrase the question once in a single clear line and I will answer directly.",
   ].join("\n");
 }
 
@@ -4217,29 +4208,39 @@ export async function routeInboundAgentMessage(
     }
 
     case "news": {
-      if (hasNewsProviders()) {
+      const useLiveProviders = hasNewsProviders();
+      if (useLiveProviders) {
         const answer = await answerNewsQuestion(trimmed).catch(() => "");
         if (answer.trim() && !isVisibleFallbackReply(answer) && !isLowCoverageResearchReply(answer)) {
           return translateMessage(normalizeResearchMarkdownForWhatsApp(answer), locale);
         }
-      }
 
-      const history = await buildSmartHistory(userId, trimmed, "deep");
-      const fallback = await runGroundedResearchReply({
-        userId,
-        question: trimmed,
-        history,
-      }).catch(() => "");
+        const history = await buildSmartHistory(userId, trimmed, "deep");
+        const fallback = await runGroundedResearchReply({
+          userId,
+          question: trimmed,
+          history,
+        }).catch(() => "");
 
-      const normalizedFallback = fallback?.trim() ?? "";
-      if (normalizedFallback) {
-        if (isLowCoverageResearchReply(normalizedFallback)) {
-          return translateMessage(buildNewsCoverageRecoveryReply(trimmed), locale);
+        const normalizedFallback = fallback?.trim() ?? "";
+        if (normalizedFallback && !isLowCoverageResearchReply(normalizedFallback)) {
+          return translateMessage(normalizeResearchMarkdownForWhatsApp(normalizedFallback), locale);
         }
-        return translateMessage(normalizeResearchMarkdownForWhatsApp(normalizedFallback), locale);
       }
 
-      const reply = await smartReply(userId, trimmed, "research", responseMode, explicitMode);
+      const knowledgeQuestion = trimmed
+        .replace(/\b(right now|currently|at the moment|as of now|today|live)\b/gi, "")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+
+      const reply = await smartReply(
+        userId,
+        knowledgeQuestion || trimmed,
+        "research",
+        responseMode,
+        explicitMode,
+        "Answer directly using best available knowledge. If this topic can change quickly, add one short note that live rankings/news may shift.",
+      );
       return translateMessage(reply, locale);
     }
 

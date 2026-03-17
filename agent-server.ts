@@ -38,7 +38,30 @@ type RouteInboundAgentMessageFn = (userId: string, message: string) => Promise<s
 
 const sessions = new Map<string, SessionRecord>();
 const outboundIds = new Set<string>();
+const inboundIds = new Map<string, number>();
 let cachedRouteInboundAgentMessage: RouteInboundAgentMessageFn | null = null;
+
+const INBOUND_ID_TTL_MS = 10 * 60_000;
+const INBOUND_ID_MAX = 5_000;
+
+function pruneInboundIdCache(now = Date.now()) {
+  if (inboundIds.size <= INBOUND_ID_MAX) {
+    for (const [id, seenAt] of inboundIds) {
+      if (now - seenAt > INBOUND_ID_TTL_MS) {
+        inboundIds.delete(id);
+      }
+    }
+    return;
+  }
+
+  const entries = [...inboundIds.entries()].sort((a, b) => a[1] - b[1]);
+  const keepFrom = Math.max(0, entries.length - INBOUND_ID_MAX);
+  inboundIds.clear();
+  for (let i = keepFrom; i < entries.length; i += 1) {
+    const [id, ts] = entries[i];
+    inboundIds.set(id, ts);
+  }
+}
 
 function db() {
   return createClient(
@@ -1065,6 +1088,16 @@ async function connectSession(userId: string): Promise<SessionRecord> {
 
       if (!text) {
         continue;
+      }
+
+      if (messageId) {
+        const now = Date.now();
+        pruneInboundIdCache(now);
+        const seenAt = inboundIds.get(messageId);
+        if (seenAt && now - seenAt <= INBOUND_ID_TTL_MS) {
+          continue;
+        }
+        inboundIds.set(messageId, now);
       }
 
       console.log(`[agent] Inbound from ${userId}: "${text.slice(0, 80)}"`);
