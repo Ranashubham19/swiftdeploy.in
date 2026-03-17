@@ -3966,9 +3966,16 @@ function isLowCoverageResearchReply(reply: string): boolean {
 
 function looksLikeReminderStatusQuestion(text: string): boolean {
   const t = text.toLowerCase();
+  if (/^\s*(remind me|set (a\s+)?reminder|alert me|notify me|don'?t (let me )?forget)\b/.test(t)) {
+    return false;
+  }
   return (
     /\b(reminder|remind|alert)\b/.test(t)
-    && /\b(status|set|scheduled|see|show|check|view|did you|have you|is it|when)\b/.test(t)
+    && (
+      /\b(status|scheduled|see|show|check|view|when)\b/.test(t)
+      || /\b(?:did|have)\s+(?:you\s+)?set\b/.test(t)
+      || /\b(is (?:my|the)?\s*reminder set)\b/.test(t)
+    )
   );
 }
 
@@ -4424,7 +4431,7 @@ async function runEveningSummary(userId: string) {
 
 function parseReminder(text: string): { fireAt: string; reminderText: string } | null {
   const now = new Date();
-  const timeM = text.match(/\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+  const timeM = text.match(/\b(?:at|of|for)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
   const inM = text.match(/\bin\s+(\d+)\s+(minute|hour|min|hr)s?\b/i);
   const tmrw = /\btomorrow\b/i.test(text);
   let fireAt: Date | null = null;
