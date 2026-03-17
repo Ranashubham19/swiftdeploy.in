@@ -3681,6 +3681,10 @@ function detectIntentLegacy(text: string): DetectedIntent {
     return { type: "save_contact", category: "save_contact" };
   }
 
+  if (looksLikeReminderStatusQuestion(t)) {
+    return { type: "reminder", category: "reminder" };
+  }
+
   // === CODING ===
   if (
     looksLikeArchitectureCodingQuestion(t, text, words) ||
@@ -3786,6 +3790,10 @@ function detectIntent(text: string): DetectedIntent {
     || t === "contacts"
   ) {
     return { type: "save_contact", category: "save_contact" };
+  }
+
+  if (looksLikeReminderStatusQuestion(t)) {
+    return { type: "reminder", category: "reminder" };
   }
 
   if (
