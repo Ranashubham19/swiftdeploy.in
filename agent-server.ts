@@ -3,6 +3,7 @@ import * as cron from "node-cron";
 import QRCode from "qrcode";
 import fs from "node:fs";
 import path from "node:path";
+import { loadEnvConfig } from "@next/env";
 import {
   Browsers,
   DisconnectReason,
@@ -13,6 +14,8 @@ import {
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import { createClient } from "@supabase/supabase-js";
+
+loadEnvConfig(process.cwd());
 
 const STALE_MS = 60_000;
 const DIRECT_REPLY_TIMEOUT_MS = 50_000;
@@ -45,7 +48,15 @@ function db() {
 }
 
 function appUrl() {
-  return process.env.NEXT_PUBLIC_APP_URL?.trim() || process.env.NEXTJS_URL?.trim() || "";
+  const configured = process.env.NEXT_PUBLIC_APP_URL?.trim() || process.env.NEXTJS_URL?.trim();
+  if (configured) return configured;
+
+  const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN?.trim();
+  if (railwayDomain) {
+    return `https://${railwayDomain}`;
+  }
+
+  return "";
 }
 
 function isRailwayRuntime() {
@@ -534,11 +545,18 @@ function isEmptyOrFallback(reply: string | null | undefined) {
     lower.includes("rephrase your question and i'll answer it immediately and accurately") ||
     lower.includes("i received your question") ||
     lower.includes("coding reply") ||
+    lower.includes("coding answer") ||
     lower.includes("i received: _") ||
     lower.includes("clean starter template") ||
     lower.includes("you asked about") ||
     lower.includes("send your exact goal in one line") ||
     lower.includes("preferred output format") ||
+    lower.includes("direct answer mode is active") ||
+    lower.includes("message understood: _") ||
+    lower.includes("ask your exact question in one line") ||
+    lower.includes("i can continue with either a concise answer or a deeper explanation") ||
+    lower.includes("send one topic + location so i can return a precise update") ||
+    lower.includes("latest update request") ||
     (lower.startsWith("*i could not") && lower.length < 200)
   );
 }
@@ -633,6 +651,36 @@ function buildEmergencyProfessionalFallback(message: string) {
     ].join("\n");
   }
 
+  const diffMatch = text.match(/\b(?:difference between|compare)\s+(.+?)\s+(?:and|vs\.?|versus)\s+(.+?)(?:\?|$)/);
+  if (diffMatch) {
+    const left = diffMatch[1].trim();
+    const right = diffMatch[2].trim();
+    if (
+      (left === "ai" && right === "ml")
+      || (left === "ml" && right === "ai")
+      || (left.includes("artificial intelligence") && right.includes("machine learning"))
+      || (left.includes("machine learning") && right.includes("artificial intelligence"))
+    ) {
+      return [
+        "*AI vs ML*",
+        "",
+        "*AI* is the broader field of building systems that perform tasks requiring human-like intelligence.",
+        "*ML* is a subset of AI where models learn patterns from data to make predictions or decisions.",
+        "",
+        "In short: *all ML is AI, but not all AI is ML.*",
+      ].join("\n");
+    }
+  }
+
+  if (/\bwhat is moist\b|\bdefine moist\b|\bmeaning of moist\b/.test(text)) {
+    return [
+      "*Moist means slightly wet.*",
+      "",
+      "It describes something that has a small amount of liquid but is not fully soaked.",
+      "Example: moist soil is damp enough for plants to grow well.",
+    ].join("\n");
+  }
+
   if (/\bmariana trench\b/.test(text)) {
     return [
       "Mariana Trench:",
@@ -643,9 +691,10 @@ function buildEmergencyProfessionalFallback(message: string) {
   }
 
   return [
-    "Direct answer mode is active.",
+    "I can help with this.",
     "",
-    "Send your full question in one line with key details, and I will return a complete answer.",
+    "Send your exact question in one line and include key detail (topic or location).",
+    "Example: *What is the Mariana Trench?* or *Weather in Mumbai today*.",
   ].join("\n");
 }
 

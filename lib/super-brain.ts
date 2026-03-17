@@ -15,7 +15,14 @@ export type ExpertMode =
   | "tutor"            // Teaching, explanation, learning
   | "researcher"       // Deep research, comprehensive analysis
   | "journalist"       // Current events, news, fact-checking
-  | "advisor";         // Recommendations, decisions, trade-offs
+  | "advisor"          // Recommendations, decisions, trade-offs
+  | "mathematician"    // Pure math, statistics, proofs
+  | "philosopher"      // Ethics, logic, abstract reasoning
+  | "linguist"         // Language, grammar, translation
+  | "historian"        // History, geopolitics, civilization
+  | "psychologist"     // Psychology and mental well-being
+  | "chef"             // Food, recipes, nutrition
+  | "coach";           // Sports, fitness, performance
 
 // ─── Master brain (base layer — always active) ───────────────────────────────
 
@@ -232,6 +239,62 @@ You are operating as a trusted personal advisor.
 - Give your honest opinion, even if it's not what they want to hear.
 - Structure: recommendation → why → caveats → alternatives.
 - End with one specific next action the person can take today.`,
+
+  mathematician: `
+━━━ MATHEMATICIAN MODE ACTIVATED ━━━
+You are operating as a professional mathematician and statistician.
+- Use: Given → Formula → Substitution → Working → Final Answer.
+- Show all key derivation steps and do not skip non-trivial arithmetic.
+- State assumptions and units clearly.
+- For statistics: include test statistic, confidence interval, and interpretation.`,
+
+  philosopher: `
+━━━ PHILOSOPHER MODE ACTIVATED ━━━
+You are operating as a philosopher focused on clarity and logic.
+- Define key terms before using them.
+- Present strongest arguments for each side fairly.
+- Distinguish facts (is) from values (ought).
+- Show the argument chain explicitly: premises → conclusion.`,
+
+  linguist: `
+━━━ LINGUIST MODE ACTIVATED ━━━
+You are operating as a linguist and translator.
+- Provide direct translation or rule first.
+- Explain register, nuance, and regional differences when relevant.
+- For grammar: rule + example + exception.
+- For Indian language terms, include practical usage examples.`,
+
+  historian: `
+━━━ HISTORIAN MODE ACTIVATED ━━━
+You are operating as a historian.
+- Lead with date/person/outcome first.
+- Structure: causes → timeline → consequences → long-term legacy.
+- Distinguish consensus facts from contested interpretations.
+- Use specific names, places, and dates.`,
+
+  psychologist: `
+━━━ PSYCHOLOGY MODE ACTIVATED ━━━
+You are operating as a psychology and behavior expert.
+- Lead with validation and evidence-based explanation.
+- Separate coping strategy from diagnosis.
+- Give practical, low-risk next steps.
+- For crisis signals, prioritize immediate professional help guidance.`,
+
+  chef: `
+━━━ CHEF MODE ACTIVATED ━━━
+You are operating as a professional chef and nutrition-aware cook.
+- Provide complete recipes with exact measurements.
+- Use: ingredients → prep → method → timing → tips.
+- Include substitutions and common failure points.
+- Mention veg/non-veg and allergen notes when relevant.`,
+
+  coach: `
+━━━ COACH MODE ACTIVATED ━━━
+You are operating as a sports and fitness coach.
+- Give actionable plans: sets, reps, duration, rest, intensity.
+- Tailor advice to goal (fat loss, strength, endurance, performance).
+- Include warm-up, progression, and recovery guidance.
+- For sports analytics, provide context with clear metrics.`,
 };
 
 // ─── Expert mode detector ─────────────────────────────────────────────────────
@@ -239,14 +302,32 @@ You are operating as a trusted personal advisor.
 export function detectExpertMode(question: string, intentType?: string): ExpertMode {
   const q = question.toLowerCase();
 
+  if (intentType === "science") return "scientist";
+  if (intentType === "history") return "historian";
+  if (intentType === "health") return "doctor";
+  if (intentType === "law") return "lawyer";
+  if (intentType === "economics") return "analyst";
+  if (intentType === "sports") return "coach";
+  if (intentType === "language") return "linguist";
+  if (intentType === "technology") return "engineer";
+
   if (intentType === "coding" || /\b(code|bug|function|api|algorithm|script|debug|error|class|method|syntax)\b/.test(q)) return "engineer";
-  if (intentType === "math" || /\b(calculate|solve|equation|formula|proof|theorem|integral|derivative|probability)\b/.test(q)) return "tutor";
-  if (intentType === "research" || /\b(research|comprehensive|analysis|in-depth|thorough|detailed report)\b/.test(q)) return "researcher";
+  if (intentType === "math" || /\b(calculate|solve|equation|formula|proof|theorem|integral|derivative|probability|statistics|matrix|algebra|calculus)\b/.test(q)) return "mathematician";
+  if (
+    (intentType === "research" && /\b(compare|analysis|evaluate|trade-?off|recommend|decision)\b/.test(q))
+    || /\b(research|comprehensive|analysis|in-depth|thorough|detailed report)\b/.test(q)
+  ) return "researcher";
   if (/\b(disease|symptom|medicine|drug|treatment|diagnosis|health|medical|doctor|pain|dose|prescription)\b/.test(q)) return "doctor";
   if (/\b(legal|law|court|section|act|ipc|rights|contract|patent|sue|judgment|bail|fir|advocate)\b/.test(q)) return "lawyer";
   if (/\b(stock|invest|nifty|sensex|ipo|mutual fund|crypto|portfolio|return|revenue|profit|gdp|inflation|rupee)\b/.test(q)) return "analyst";
   if (/\b(news|happened|event|announce|president|minister|policy|breaking|today|yesterday|election)\b/.test(q)) return "journalist";
   if (/\b(quantum|molecular|dna|physics|chemistry|evolution|experiment|peer.?reviewed|study|hypothesis)\b/.test(q)) return "scientist";
+  if (/\b(history|historical|empire|dynasty|war|civilization|independence|revolution)\b/.test(q)) return "historian";
+  if (/\b(translate|translation|grammar|vocabulary|pronunciation|meaning of|hindi|urdu|tamil|spanish|french)\b/.test(q)) return "linguist";
+  if (/\b(anxiety|depression|stress|mental health|behavior|motivation|confidence|relationship)\b/.test(q)) return "psychologist";
+  if (/\b(recipe|cook|ingredients|biryani|dal|curry|roti|paneer|masala|haldi|jeera|chai)\b/.test(q)) return "chef";
+  if (/\b(workout|exercise|gym|fitness|cricket|football|training|athlete|ipl)\b/.test(q)) return "coach";
+  if (/\b(philosophy|ethics|morality|logic|meaning of life|consciousness|free will)\b/.test(q)) return "philosopher";
   if (/\b(explain|teach|how does|what is|concept|understand|learn|tutorial|beginner)\b/.test(q)) return "tutor";
   if (/\b(should i|recommend|advice|best|decision|choose|which|help me decide|what do you think)\b/.test(q)) return "advisor";
 
