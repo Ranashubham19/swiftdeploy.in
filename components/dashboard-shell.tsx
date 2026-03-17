@@ -264,32 +264,6 @@ function createSeedMessages(firstName: string): ChatMessage[] {
   ];
 }
 
-function getAIResponse(command: string) {
-  const normalized = command.toLowerCase();
-
-  if (normalized.includes("draft") || normalized.includes("reply")) {
-    return "On it! I'll check your latest emails and create the draft now. It'll be in your Gmail drafts in about 30 seconds.";
-  }
-
-  if (normalized.includes("meeting") || normalized.includes("tomorrow")) {
-    return "\u{1F4C5} You have 2 meetings tomorrow:\n\u2022 10:00 AM - Team standup (Google Meet)\n\u2022 3:00 PM - Client review with Priya";
-  }
-
-  if (normalized.includes("remind")) {
-    return "Reminder set! I'll message you here at the specified time.";
-  }
-
-  if (normalized.includes("email") || normalized.includes("inbox")) {
-    return "You have 31 unread emails. 4 need replies from Priya, Vikram, Sarah, and Ankit. Want me to draft responses?";
-  }
-
-  if (normalized.includes("search")) {
-    return "Searching your inbox... Found 3 relevant emails. The most recent was from Priya on March 10 about the Q4 budget approval of Rs 2.4L.";
-  }
-
-  return "Got it! Working on that now. I'll update you here when it's done.";
-}
-
 function renderMessageText(text: string): ReactNode {
   const lines = text.split("\n");
 
@@ -342,6 +316,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
   const [hasInteractiveMessages, setHasInteractiveMessages] = useState(false);
   const [typingVisible, setTypingVisible] = useState(false);
   const [commandInput, setCommandInput] = useState("");
+  const [sendingCommand, setSendingCommand] = useState(false);
   const [toastMessage, setToastMessage] = useState("");
   const [toastVisible, setToastVisible] = useState(false);
   const [taskToggling, setTaskToggling] = useState<Record<string, boolean>>({});
@@ -690,7 +665,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
     commandInputRef.current?.focus();
   }
 
-  function handleCommandSubmit() {
+  async function handleCommandSubmit() {
     const value = commandInput.trim();
 
     if (!value) {
@@ -703,17 +678,68 @@ export function DashboardShell({ config }: DashboardShellProps) {
       return;
     }
 
+    if (!supabase) {
+      showToast("Auth not configured.");
+      return;
+    }
+
     setHasInteractiveMessages(true);
     appendMessage("user", value);
     setCommandInput("");
-    queueBotReply(getAIResponse(value), 400, 1500);
-    showToast("Command sent to your agent");
+    clearPendingResponses();
+    setTypingVisible(true);
+    setSendingCommand(true);
+
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+
+      if (!token) {
+        setTypingVisible(false);
+        router.replace("/auth");
+        return;
+      }
+
+      const response = await fetch("/api/agent/message", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ message: value }),
+      });
+
+      const payload = (await response.json().catch(() => ({}))) as {
+        response?: string | null;
+        error?: string;
+      };
+
+      setTypingVisible(false);
+
+      if (!response.ok) {
+        appendMessage("bot", payload.error || "Sorry, I could not complete that request.");
+        showToast(payload.error || "Command failed.");
+        return;
+      }
+
+      appendMessage(
+        "bot",
+        payload.response?.trim() || "Sorry, I could not generate a response for that yet.",
+      );
+      showToast("Command sent to your agent");
+    } catch {
+      setTypingVisible(false);
+      appendMessage("bot", "Network error. Please try again.");
+      showToast("Network error. Please try again.");
+    } finally {
+      setSendingCommand(false);
+    }
   }
 
   function handleCommandKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     if (event.key === "Enter") {
       event.preventDefault();
-      handleCommandSubmit();
+      void handleCommandSubmit();
     }
   }
 
@@ -1385,12 +1411,18 @@ export function DashboardShell({ config }: DashboardShellProps) {
                 type="text"
                 className={styles.commandInput}
                 value={commandInput}
+                disabled={sendingCommand}
                 onChange={(event) => setCommandInput(event.target.value)}
                 onKeyDown={handleCommandKeyDown}
                 placeholder='Try: "Summarise emails from last week" or "Remind me tomorrow at 9am about project review"'
               />
-              <button type="button" className={styles.commandButton} onClick={handleCommandSubmit}>
-                Send -&gt;
+              <button
+                type="button"
+                className={styles.commandButton}
+                onClick={() => void handleCommandSubmit()}
+                disabled={sendingCommand}
+              >
+                {sendingCommand ? "Sending..." : "Send -&gt;"}
               </button>
             </div>
             <div className={styles.commandSuggestions}>

@@ -1212,10 +1212,17 @@ app.get("/health", (_req, res) => {
   const connected = [...sessions.values()].filter((session) => session.status === "connected");
   const nvidia = ensureCanonicalNvidiaEnv();
   const nvidiaHints = getNvidiaEnvHints();
+  const buildSha =
+    process.env.RAILWAY_GIT_COMMIT_SHA
+    || process.env.VERCEL_GIT_COMMIT_SHA
+    || process.env.GIT_COMMIT_SHA
+    || null;
 
   res.json({
     status: error ? "degraded" : "ok",
     configured: !error,
+    build_sha: buildSha,
+    railway_service: process.env.RAILWAY_SERVICE_NAME || null,
     connections: connected.length,
     total_sessions: sessions.size,
     nvidia_configured: Boolean(nvidia.value),
