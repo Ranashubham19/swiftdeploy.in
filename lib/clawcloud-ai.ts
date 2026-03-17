@@ -22,6 +22,8 @@ export type IntentType =
   | "math"
   | "email"
   | "reminder"
+  | "send_message"
+  | "save_contact"
   | "calendar"
   | "spending"
   | "research"
@@ -76,6 +78,8 @@ const MODEL_FAILURE_MAX_COOLDOWN_MS = 8 * 60 * 1000;
 const INTENT_TIMEOUT_MS: Record<IntentType, number> = {
   greeting: 4_000,
   reminder: 4_000,
+  send_message: 4_000,
+  save_contact: 4_000,
   calendar: 5_000,
   general: 8_000,
   email: 8_000,
@@ -100,6 +104,8 @@ const INTENT_TIMEOUT_MS: Record<IntentType, number> = {
 const INTENT_PARALLELISM: Record<IntentType, number> = {
   greeting: 1,
   reminder: 1,
+  send_message: 1,
+  save_contact: 1,
   calendar: 1,
   general: 3,
   email: 2,
@@ -124,6 +130,8 @@ const INTENT_PARALLELISM: Record<IntentType, number> = {
 const INTENT_MAX_TOTAL_MS: Record<IntentType, number> = {
   greeting: 5_000,
   reminder: 5_000,
+  send_message: 6_000,
+  save_contact: 6_000,
   calendar: 7_000,
   general: 12_000,
   email: 12_000,
@@ -148,6 +156,8 @@ const INTENT_MAX_TOTAL_MS: Record<IntentType, number> = {
 const INTENT_CANDIDATE_LIMIT: Record<IntentType, number> = {
   greeting: 2,
   reminder: 2,
+  send_message: 2,
+  save_contact: 2,
   calendar: 2,
   general: 4,
   email: 4,
@@ -172,6 +182,8 @@ const INTENT_CANDIDATE_LIMIT: Record<IntentType, number> = {
 const INTENT_HISTORY_LIMIT: Record<IntentType, number> = {
   greeting: 2,
   reminder: 2,
+  send_message: 2,
+  save_contact: 2,
   calendar: 2,
   general: 3,
   email: 3,
@@ -196,6 +208,8 @@ const INTENT_HISTORY_LIMIT: Record<IntentType, number> = {
 const INTENT_HISTORY_CHAR_LIMIT: Record<IntentType, number> = {
   greeting: 180,
   reminder: 180,
+  send_message: 220,
+  save_contact: 220,
   calendar: 220,
   general: 260,
   email: 260,
@@ -225,6 +239,18 @@ const INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
     "moonshotai/kimi-k2-instruct",
   ],
   reminder: [
+    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2-instruct-0905",
+    "meta/llama-3.1-8b-instruct",
+    "moonshotai/kimi-k2-instruct",
+  ],
+  send_message: [
+    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2-instruct-0905",
+    "meta/llama-3.1-8b-instruct",
+    "moonshotai/kimi-k2-instruct",
+  ],
+  save_contact: [
     "meta/llama-3.3-70b-instruct",
     "moonshotai/kimi-k2-instruct-0905",
     "meta/llama-3.1-8b-instruct",
@@ -343,6 +369,8 @@ const INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
 const DEEP_INTENT_TIMEOUT_MS: Record<IntentType, number> = {
   greeting: 5_000,
   reminder: 5_000,
+  send_message: 6_000,
+  save_contact: 6_000,
   calendar: 7_000,
   general: 20_000,
   email: 18_000,
@@ -367,6 +395,8 @@ const DEEP_INTENT_TIMEOUT_MS: Record<IntentType, number> = {
 const DEEP_INTENT_PARALLELISM: Record<IntentType, number> = {
   greeting: 1,
   reminder: 1,
+  send_message: 1,
+  save_contact: 1,
   calendar: 1,
   general: 4,
   email: 4,
@@ -391,6 +421,8 @@ const DEEP_INTENT_PARALLELISM: Record<IntentType, number> = {
 const DEEP_INTENT_MAX_TOTAL_MS: Record<IntentType, number> = {
   greeting: 6_000,
   reminder: 6_000,
+  send_message: 8_000,
+  save_contact: 8_000,
   calendar: 8_000,
   general: 30_000,
   email: 26_000,
@@ -415,6 +447,8 @@ const DEEP_INTENT_MAX_TOTAL_MS: Record<IntentType, number> = {
 const DEEP_INTENT_CANDIDATE_LIMIT: Record<IntentType, number> = {
   greeting: 2,
   reminder: 2,
+  send_message: 2,
+  save_contact: 2,
   calendar: 2,
   general: 4,
   email: 4,
@@ -439,6 +473,8 @@ const DEEP_INTENT_CANDIDATE_LIMIT: Record<IntentType, number> = {
 const DEEP_INTENT_HISTORY_LIMIT: Record<IntentType, number> = {
   greeting: 2,
   reminder: 2,
+  send_message: 2,
+  save_contact: 2,
   calendar: 2,
   general: 4,
   email: 4,
@@ -463,6 +499,8 @@ const DEEP_INTENT_HISTORY_LIMIT: Record<IntentType, number> = {
 const DEEP_INTENT_HISTORY_CHAR_LIMIT: Record<IntentType, number> = {
   greeting: 180,
   reminder: 180,
+  send_message: 240,
+  save_contact: 240,
   calendar: 240,
   general: 360,
   email: 360,
@@ -490,6 +528,14 @@ const DEEP_INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
     "moonshotai/kimi-k2-instruct-0905",
   ],
   reminder: [
+    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2-instruct-0905",
+  ],
+  send_message: [
+    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2-instruct-0905",
+  ],
+  save_contact: [
     "meta/llama-3.3-70b-instruct",
     "moonshotai/kimi-k2-instruct-0905",
   ],
@@ -754,6 +800,8 @@ function baseModelsForIntent(intent: IntentType) {
   switch (intent) {
     case "greeting":
     case "reminder":
+    case "send_message":
+    case "save_contact":
     case "calendar":
       return uniqueModels([...fastModels(), ...chatModels()]);
     case "coding":
@@ -770,6 +818,8 @@ function tierForIntent(intent: IntentType): ModelTier {
   switch (intent) {
     case "greeting":
     case "reminder":
+    case "send_message":
+    case "save_contact":
     case "calendar":
       return "fast";
     case "coding":
@@ -839,6 +889,8 @@ function modelCandidatesForIntent(
 const TOKEN_BUDGETS: Record<IntentType, number> = {
   greeting: 200,
   reminder: 180,
+  send_message: 260,
+  save_contact: 260,
   calendar: 280,
   general: 400,
   email: 400,
@@ -863,6 +915,8 @@ const TOKEN_BUDGETS: Record<IntentType, number> = {
 const DEEP_TOKEN_BUDGETS: Record<IntentType, number> = {
   greeting: 220,
   reminder: 180,
+  send_message: 320,
+  save_contact: 320,
   calendar: 280,
   general: 700,
   email: 700,

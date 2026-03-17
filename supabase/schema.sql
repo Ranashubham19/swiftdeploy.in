@@ -129,7 +129,8 @@ create table if not exists public.agent_tasks (
     'meeting_reminders',
     'email_search',
     'evening_summary',
-    'custom_reminder'
+    'custom_reminder',
+    'user_contacts'
   )),
   is_enabled boolean not null default true,
   schedule_time time,

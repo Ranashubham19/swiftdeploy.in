@@ -47,7 +47,14 @@ import {
   type ClawCloudTaskConfig,
   type ClawCloudTaskType,
 } from "@/lib/clawcloud-types";
-import { sendClawCloudWhatsAppMessage } from "@/lib/clawcloud-whatsapp";
+import { sendClawCloudWhatsAppMessage, sendClawCloudWhatsAppToPhone } from "@/lib/clawcloud-whatsapp";
+import {
+  lookupContact,
+  parseSaveContactCommand,
+  parseSendMessageCommand,
+  listContactsFormatted,
+  saveContact,
+} from "@/lib/clawcloud-contacts";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -3650,6 +3657,23 @@ function detectIntentLegacy(text: string): DetectedIntent {
     return { type: "research", category: "news" };
   }
 
+  if (
+    /^(?:send\s+(?:a\s+)?(?:message|msg|whatsapp|wa)\s+to|message|whatsapp|wa)\s+[a-zA-Z\u0900-\u097F]/i.test(t)
+    || /^tell\s+[a-zA-Z\u0900-\u097F]{2,}\s+/i.test(t)
+    || /^send\s+.+\s+to\s+[a-zA-Z\u0900-\u097F]{2,}$/i.test(t)
+  ) {
+    return { type: "send_message", category: "send_message" };
+  }
+
+  if (
+    /^(?:save|add)\s+(?:contact|number|phone)/i.test(t)
+    || /^(?:save|add)\s+[a-zA-Z\u0900-\u097F\s]{1,25}\s+(?:as|=|:)\s*[\d+]/i.test(t)
+    || /\bmy contacts\b|\blist contacts\b|\bshow contacts\b/.test(t)
+    || t === "contacts"
+  ) {
+    return { type: "save_contact", category: "save_contact" };
+  }
+
   // === CODING ===
   if (
     looksLikeArchitectureCodingQuestion(t, text, words) ||
@@ -3738,6 +3762,23 @@ function detectIntent(text: string): DetectedIntent {
 
   if (detectNewsQuestion(t)) {
     return { type: "research", category: "news" };
+  }
+
+  if (
+    /^(?:send\s+(?:a\s+)?(?:message|msg|whatsapp|wa)\s+to|message|whatsapp|wa)\s+[a-zA-Z\u0900-\u097F]/i.test(t)
+    || /^tell\s+[a-zA-Z\u0900-\u097F]{2,}\s+/i.test(t)
+    || /^send\s+.+\s+to\s+[a-zA-Z\u0900-\u097F]{2,}$/i.test(t)
+  ) {
+    return { type: "send_message", category: "send_message" };
+  }
+
+  if (
+    /^(?:save|add)\s+(?:contact|number|phone)/i.test(t)
+    || /^(?:save|add)\s+[a-zA-Z\u0900-\u097F\s]{1,25}\s+(?:as|=|:)\s*[\d+]/i.test(t)
+    || /\bmy contacts\b|\blist contacts\b|\bshow contacts\b/.test(t)
+    || t === "contacts"
+  ) {
+    return { type: "save_contact", category: "save_contact" };
   }
 
   if (
@@ -4009,37 +4050,39 @@ export async function routeInboundAgentMessage(
   let resolvedType = detected.type;
   let resolvedCategory = detected.category;
 
-  if (resolvedCategory !== "math" && isMathOrStatisticsQuestion(trimmed)) {
-    resolvedType = "math";
-    resolvedCategory = "math";
-  } else if (resolvedCategory !== "coding" && isArchitectureOrDesignQuestion(trimmed)) {
-    resolvedType = "coding";
-    resolvedCategory = "coding";
-  } else if (
-    /\b(code|program|algorithm|script|debug|n[-\s]?queen|n[-\s]?queens|python|javascript|java|c\+\+)\b/i.test(trimmed)
-    && resolvedCategory !== "coding"
-  ) {
-    resolvedType = "coding";
-    resolvedCategory = "coding";
-  } else if (
-    /\b(weather|whether|temperature|forecast|rain|humidity|wind|aqi)\b/i.test(trimmed)
-    && resolvedCategory === "news"
-  ) {
-    resolvedType = "general";
-    resolvedCategory = "general";
-  } else if (
-    resolvedCategory === "research"
-    && !looksLikeRealtimeResearch(trimmed)
-    && trimmed.length > 70
-  ) {
-    const domain = await semanticDomainClassify(trimmed).catch(() => "GENERAL");
-
-    if (domain === "FINANCE_MATH" || domain === "CAUSAL_STATS" || domain === "CLINICAL_BIO") {
+  if (resolvedCategory !== "send_message" && resolvedCategory !== "save_contact") {
+    if (resolvedCategory !== "math" && isMathOrStatisticsQuestion(trimmed)) {
       resolvedType = "math";
       resolvedCategory = "math";
-    } else if (domain === "ML_SYSTEMS" || domain === "SYS_ARCH" || domain === "REGULATED_AI") {
+    } else if (resolvedCategory !== "coding" && isArchitectureOrDesignQuestion(trimmed)) {
       resolvedType = "coding";
       resolvedCategory = "coding";
+    } else if (
+      /\b(code|program|algorithm|script|debug|n[-\s]?queen|n[-\s]?queens|python|javascript|java|c\+\+)\b/i.test(trimmed)
+      && resolvedCategory !== "coding"
+    ) {
+      resolvedType = "coding";
+      resolvedCategory = "coding";
+    } else if (
+      /\b(weather|whether|temperature|forecast|rain|humidity|wind|aqi)\b/i.test(trimmed)
+      && resolvedCategory === "news"
+    ) {
+      resolvedType = "general";
+      resolvedCategory = "general";
+    } else if (
+      resolvedCategory === "research"
+      && !looksLikeRealtimeResearch(trimmed)
+      && trimmed.length > 70
+    ) {
+      const domain = await semanticDomainClassify(trimmed).catch(() => "GENERAL");
+
+      if (domain === "FINANCE_MATH" || domain === "CAUSAL_STATS" || domain === "CLINICAL_BIO") {
+        resolvedType = "math";
+        resolvedCategory = "math";
+      } else if (domain === "ML_SYSTEMS" || domain === "SYS_ARCH" || domain === "REGULATED_AI") {
+        resolvedType = "coding";
+        resolvedCategory = "coding";
+      }
     }
   }
 
@@ -4047,6 +4090,14 @@ export async function routeInboundAgentMessage(
   const explicitMode = requested.explicit;
 
   switch (resolvedCategory) {
+
+    case "send_message": {
+      return handleSendMessageToContact(userId, trimmed, locale);
+    }
+
+    case "save_contact": {
+      return handleSaveContactCommand(userId, trimmed, locale);
+    }
 
     case "spending": {
       const ans = await answerSpendingQuestion(userId, trimmed);
@@ -4376,6 +4427,121 @@ async function runCustomReminder(userId: string, userMessage: string | null | un
 }
 
 // ─── runClawCloudTask ─────────────────────────────────────────────────────────
+
+async function handleSendMessageToContact(
+  userId: string,
+  text: string,
+  locale: SupportedLocale,
+): Promise<string> {
+  const parsed = parseSendMessageCommand(text);
+  if (!parsed) {
+    return translateMessage(
+      [
+        "📤 *Send a message to a contact*",
+        "",
+        "Use this format:",
+        "_Send message to Maa: Good morning!_",
+        "_Message Papa: Call me when free_",
+        "_Tell Priya: Meeting shifted to 6pm_",
+        "",
+        "First save a contact: _Save contact: Maa = +919876543210_",
+      ].join("\n"),
+      locale,
+    );
+  }
+
+  const { contactName, message } = parsed;
+  const phone = await lookupContact(userId, contactName);
+  if (!phone) {
+    return translateMessage(
+      [
+        `📵 *I do not have ${contactName}'s number saved yet.*`,
+        "",
+        `Save it first: _Save contact: ${contactName} = +91XXXXXXXXXX_`,
+        "",
+        "Then I can send messages instantly.",
+      ].join("\n"),
+      locale,
+    );
+  }
+
+  try {
+    await sendClawCloudWhatsAppToPhone(phone, message);
+    await upsertAnalyticsDaily(userId, { wa_messages_sent: 1, tasks_run: 1 });
+    return translateMessage(
+      [
+        `✅ *Message sent to ${contactName}!*`,
+        "",
+        `📩 *Message:* ${message}`,
+        `📱 *To:* +${phone}`,
+      ].join("\n"),
+      locale,
+    );
+  } catch (error) {
+    console.error("[agent] sendClawCloudWhatsAppToPhone failed:", error);
+    return translateMessage(
+      [
+        `❌ *Could not send the message to ${contactName}.*`,
+        "",
+        "This usually happens when the number is not on WhatsApp or the session is disconnected.",
+        "Reconnect WhatsApp in the dashboard and try again.",
+      ].join("\n"),
+      locale,
+    );
+  }
+}
+
+async function handleSaveContactCommand(
+  userId: string,
+  text: string,
+  locale: SupportedLocale,
+): Promise<string> {
+  const normalized = text.toLowerCase().trim();
+  if (/\b(list|show|my)\s+contacts\b/.test(normalized) || normalized === "contacts") {
+    const list = await listContactsFormatted(userId);
+    return translateMessage(list, locale);
+  }
+
+  const parsed = parseSaveContactCommand(text);
+  if (!parsed) {
+    return translateMessage(
+      [
+        "📋 *Save a contact*",
+        "",
+        "Use this format:",
+        "_Save contact: Maa = +919876543210_",
+        "_Save contact: Papa = 9876543210_",
+        "_Save Priya as 9876543210_",
+        "",
+        "After saving, say: _Send message to Maa: Good morning!_",
+      ].join("\n"),
+      locale,
+    );
+  }
+
+  const { name, phone } = parsed;
+  const digits = phone.replace(/\D/g, "");
+  if (digits.length < 7) {
+    return translateMessage(
+      `❌ *Invalid phone number.* Use full number, for example: _Save contact: ${name} = +919876543210_`,
+      locale,
+    );
+  }
+
+  await saveContact(userId, name, phone);
+  const normalizedPhone = digits.startsWith("91") ? digits : `91${digits.replace(/^0+/, "")}`;
+
+  return translateMessage(
+    [
+      `✅ *${name} saved!*`,
+      "",
+      `📱 Number: +${normalizedPhone}`,
+      "",
+      `Now say: _Send message to ${name}: [your message]_`,
+    ].join("\n"),
+    locale,
+  );
+}
 
 export async function runClawCloudTask(input: RunTaskInput) {
   const db = getClawCloudSupabaseAdmin();

@@ -68,5 +68,6 @@ alter table public.agent_tasks add constraint agent_tasks_task_type_check
     'email_search',
     'evening_summary',
     'custom_reminder',
-    'weekly_spend'
+    'weekly_spend',
+    'user_contacts'
   ));

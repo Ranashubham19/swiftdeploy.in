@@ -2339,6 +2339,8 @@ async function solveAnyExpertQuestion(input: {
     ].join("\n"),
     greeting: "Respond warmly and briefly.",
     reminder: "Confirm the reminder clearly with exact details.",
+    send_message: "Confirm the message send action clearly and keep it concise.",
+    save_contact: "Confirm the contact-save action clearly with the normalized phone number.",
     calendar: "Present the calendar answer clearly and concisely.",
     spending: "Give a concrete spending analysis with numbers and actions.",
     science: [

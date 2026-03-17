@@ -7,6 +7,7 @@ export type ClawCloudTaskType =
   | "email_search"
   | "evening_summary"
   | "custom_reminder"
+  | "user_contacts"
   | "weekly_spend"
   | "weekly_spend_summary";
 
@@ -63,6 +64,7 @@ export const clawCloudDefaultTaskSeeds: Readonly<Record<ClawCloudTaskType, ClawC
     email_search: {},
     evening_summary: {},
     custom_reminder: {},
+    user_contacts: {},
     weekly_spend: {},
     weekly_spend_summary: {},
   } as const;
