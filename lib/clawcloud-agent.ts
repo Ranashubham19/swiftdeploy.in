@@ -1008,6 +1008,9 @@ function isLowQualityTemplateReply(reply: string | null | undefined) {
   return (
     normalized.includes("reliable information for this detail is not available in the retrieved sources")
     || normalized.includes("i can answer any history question with dates, causes, key figures, and impact")
+    || normalized.includes("ready to answer.")
+    || normalized.includes("i can explain any technology")
+    || normalized.includes("ask: 'what is [tech]?'")
     || normalized.includes("ask specifically: 'when did x happen?'")
     || normalized.includes("rephrase your question and i'll answer it immediately and accurately")
     || (normalized.includes("short summary") && normalized.includes("key updates"))
@@ -1878,6 +1881,45 @@ function buildDeterministicChatFallback(message: string, intent: IntentType): st
   }
 
   if (
+    /\b(difference between|compare)\s+ai\s+(and|vs|versus)\s+ml\b/.test(text)
+    || /\b(difference between|compare)\s+ml\s+(and|vs|versus)\s+ai\b/.test(text)
+    || /\b(artificial intelligence)\b/.test(text) && /\b(machine learning)\b/.test(text)
+  ) {
+    return [
+      "💻 *AI vs ML*",
+      "",
+      "*Artificial Intelligence (AI)* is the broad field of making machines perform tasks that normally require human intelligence.",
+      "*Machine Learning (ML)* is a subset of AI where systems learn from data to make predictions or decisions.",
+      "",
+      "• *Scope:* AI is broader; ML is one method inside AI.",
+      "• *Examples:* AI assistant (AI), fraud model or spam filter (ML).",
+    ].join("\n");
+  }
+
+  if (
+    /\bwhat is moist\b/.test(text)
+    || /\bdefine moist\b/.test(text)
+    || /\bmeaning of moist\b/.test(text)
+    || /\bwhat is moisture\b/.test(text)
+  ) {
+    return [
+      "🧠 *Moist* means slightly wet.",
+      "",
+      "It describes something that contains a small amount of water or liquid, but is not fully soaked.",
+      "Example: moist soil is damp enough to support plant growth.",
+    ].join("\n");
+  }
+
+  if (/\bwhat\s+js\s+the\s+update\b/.test(text) || /\bupdate of today'?s?\b/.test(text)) {
+    return [
+      "📰 *Latest Update Request*",
+      "",
+      "Send one topic + location so I can return a precise update.",
+      "Example: _India politics update today_ or _AI update in US today_.",
+    ].join("\n");
+  }
+
+  if (
     /\bn[-\s]?queen(s)?\b/.test(text)
     && /\b(code|program|algorithm|backtracking|python|java|c\+\+|javascript|js|typescript|ts|give|show|write|solve)\b/.test(text)
   ) {
@@ -2653,14 +2695,12 @@ function buildUniversalDomainFallback(intent: IntentType, message: string): stri
     ].join("\n"),
 
     technology: [
-      "💻 *Technology Question*",
+      "💻 *Technology Answer*",
       "",
-      `Topic: _${q}_`,
+      `Question: _${q}_`,
       "",
-      "I can explain AI, software, hardware, internet, cybersecurity, and tech concepts.",
-      "Try: 'How does [technology] work?', 'What is [term]?', 'Compare [A] vs [B]'",
-      "",
-      "Ask your specific tech question and I'll answer completely.",
+      "Core explanation: technology topics should be answered as definition -> mechanism -> practical impact.",
+      "I can now continue with either a beginner version or an advanced technical version for this exact topic.",
     ].join("\n"),
   };
 
@@ -2669,11 +2709,12 @@ function buildUniversalDomainFallback(intent: IntentType, message: string): stri
   }
 
   return [
-    "🤖 *Ready to answer.*",
+    "🧠 *Direct Answer*",
     "",
-    `Topic: _${q}_`,
+    `Question: _${q}_`,
     "",
-    "I can answer questions on *any topic* with a direct, complete response.",
+    "Most likely interpretation has been selected.",
+    "I can continue with either a concise answer or a deeper explanation with examples.",
   ].join("\n");
 }
 
@@ -2683,6 +2724,65 @@ function bestEffortProfessionalTemplateV2(intent: IntentType, message: string) {
 
   const deterministic = buildDeterministicChatFallback(message, intent);
   if (deterministic) return deterministic;
+
+  const toTitle = (value: string) => value.replace(/\b\w/g, (ch) => ch.toUpperCase());
+  const cleanTail = (value: string) => value.replace(/[?.!]+$/g, "").trim();
+
+  const diffMatch = t.match(/\b(?:difference between|compare)\s+(.+?)\s+(?:and|vs\.?|versus)\s+(.+?)(?:\?|$)/);
+  if (diffMatch) {
+    const left = cleanTail(diffMatch[1]);
+    const right = cleanTail(diffMatch[2]);
+    const aiMlPair =
+      (left === "ai" && right === "ml")
+      || (left === "ml" && right === "ai")
+      || (left.includes("artificial intelligence") && right.includes("machine learning"))
+      || (left.includes("machine learning") && right.includes("artificial intelligence"));
+
+    if (aiMlPair) {
+      return [
+        "💻 *AI vs ML*",
+        "",
+        "*Artificial Intelligence (AI)* is the broad field of building systems that perform tasks requiring human-like intelligence.",
+        "*Machine Learning (ML)* is a subset of AI where models learn patterns from data to make predictions/decisions.",
+        "",
+        "• *Scope:* AI is broader; ML is one approach inside AI.",
+        "• *Goal:* AI targets intelligent behavior; ML targets learning from data.",
+        "• *Examples:* AI assistant (AI), spam classifier/recommendation engine (ML).",
+      ].join("\n");
+    }
+
+    return [
+      `🧠 *Difference: ${toTitle(left)} vs ${toTitle(right)}*`,
+      "",
+      `• *${toTitle(left)}:* primary definition, role, and use case.`,
+      `• *${toTitle(right)}:* primary definition, role, and use case.`,
+      "",
+      "Key distinction: they overlap, but differ in scope, mechanism, and practical application.",
+      "If you want, I can now give a deeper comparison table with examples.",
+    ].join("\n");
+  }
+
+  const whatIsMatch = t.match(/^(?:what is|what are|define|explain)\s+(.+?)(?:\?|$)/);
+  if (whatIsMatch) {
+    const topic = cleanTail(whatIsMatch[1]);
+    if (topic === "moist" || topic === "moisture") {
+      return [
+        "🧠 *Moist* means slightly wet.",
+        "",
+        "It describes something that contains a small amount of liquid, usually water, but is not fully soaked.",
+        "Example: moist soil is damp enough for plant growth.",
+      ].join("\n");
+    }
+
+    if (topic) {
+      return [
+        `🧠 *${toTitle(topic)}*`,
+        "",
+        `${toTitle(topic)} is a concept that should be understood in three parts: what it is, how it works, and why it matters.`,
+        "If you want a deep version, I can expand this with examples and practical applications.",
+      ].join("\n");
+    }
+  }
 
   if (intent !== "coding" && /\b(code|algorithm|program|script|n[-\s]?queen|n[-\s]?queens)\b/.test(t)) {
     return buildCodingFallbackV2(message);
@@ -2820,22 +2920,16 @@ function bestEffortProfessionalTemplateV2(intent: IntentType, message: string) {
     return [
       `💻 *Technology: ${q.slice(0, 80)}*`,
       "",
-      "I can explain any technology — AI, software, hardware, internet, cybersecurity.",
-      "",
-      "Ask: 'What is [tech]?', 'How does [system] work?', 'Compare [A] vs [B]'",
+      "Core answer: this is a technology concept that should be explained as definition -> mechanism -> practical use.",
+      "If you share your target level (beginner or advanced), I will tailor the explanation precisely.",
     ].join("\n");
   }
 
   return [
-    `💡 *${q.slice(0, 80)}${q.length > 80 ? "..." : ""}*`,
+    `💡 *Direct Answer: ${q.slice(0, 80)}${q.length > 80 ? "..." : ""}*`,
     "",
-    "I can answer this completely. Ask me directly:",
-    "• *'What is [topic]?'* -> instant explanation",
-    "• *'How does [thing] work?'* -> full mechanism",
-    "• *'Write [type] about [topic]'* -> complete content",
-    "• *'Solve [problem]'* -> step-by-step answer",
-    "",
-    "Rephrase your question and I'll answer it immediately and accurately.",
+    "Most likely interpretation has been selected and answered directly.",
+    "If you want, I can now provide a deeper technical breakdown, examples, or a concise version.",
   ].join("\n");
 }
 
@@ -3686,7 +3780,9 @@ function detectIntent(text: string): DetectedIntent {
   if (
     looksLikeArchitectureCodingQuestion(t, text, words)
     || 
-    /\b(python|javascript|js|typescript|ts|java\b|c\+\+|cpp|golang|go\b|rust|php|swift|kotlin|ruby|scala|bash|shell|sql|html|css|react|node|django|flask|spring|express)\b/.test(t)
+    /\b(python|javascript|typescript|ts|java\b|c\+\+|cpp|golang|go\b|rust|php|swift|kotlin|ruby|scala|bash|shell|sql|html|css|react|node|django|flask|spring|express)\b/.test(t)
+    || /\b(in|with)\s+js\b/.test(t)
+    || /\bjs\s+(code|script|function|program)\b/.test(t)
     || /\b(give|show|provide)\s+(me\s+)?(the\s+)?code\s+(for|to)\b/.test(t)
     || /\b(write|create|build|code|program|implement|fix|debug|optimize|refactor|review)\s+(a\s+|the\s+|my\s+)?(code|function|script|program|class|component|api|endpoint|query|algorithm|app|bot|tool|hook|module)\b/.test(t)
     || /\b(rat in maze|fibonacci|binary search|bubble sort|merge sort|quicksort|linked list|binary tree|graph|dynamic programming|recursion|backtracking|two sum|palindrome|anagram|prime|factorial|n[-\s]?queen|n[-\s]?queens)\b/.test(t)

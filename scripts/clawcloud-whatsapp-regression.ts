@@ -20,6 +20,9 @@ const cases: RegressionCase[] = [
   { prompt: "Can you code", mustMatch: [/(code|program|script)/i] },
   { prompt: "Can you translate", mustMatch: [/(translate|languages)/i] },
   { prompt: "Can you explain quantum computing", mustMatch: [/(quantum|qubit|superposition)/i] },
+  { prompt: "What is moist", mustMatch: [/(moist|slightly wet|water)/i] },
+  { prompt: "What is difference between ai and ml", mustMatch: [/(ai|ml|machine learning|artificial intelligence|subset)/i] },
+  { prompt: "What js the update of todays", mustMatch: [/(update|latest|news|topic)/i] },
   { prompt: "What is photosynthesis", mustMatch: [/(photosynthesis|chlorophyll|co2|oxygen)/i] },
   { prompt: "Capital of Japan", mustMatch: [/\btokyo\b/i] },
   { prompt: "Table of 12", mustMatch: [/(12\s*[x×]\s*10|120)/i] },
@@ -46,6 +49,8 @@ const bannedPatterns = [
   /coding reply/i,
   /i received:\s*_/i,
   /clean starter template/i,
+  /ready to answer\./i,
+  /i can explain any technology/i,
 ];
 
 function loadEnvFile(filePath: string) {
