@@ -552,6 +552,8 @@ function isEmptyOrFallback(reply: string | null | undefined) {
     lower.includes("send your exact goal in one line") ||
     lower.includes("preferred output format") ||
     lower.includes("direct answer mode is active") ||
+    lower.includes("reminder set for [task] at [time]") ||
+    (lower.includes("[task]") && lower.includes("[time]")) ||
     lower.includes("message understood: _") ||
     lower.includes("ask your exact question in one line") ||
     lower.includes("i can continue with either a concise answer or a deeper explanation") ||

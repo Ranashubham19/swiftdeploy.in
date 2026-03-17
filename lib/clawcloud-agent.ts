@@ -1001,6 +1001,8 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || normalized.includes("ask your question and i'll answer it completely")
     || normalized.includes("ready to answer.")
     || normalized.includes("i can explain any technology")
+    || normalized.includes("reminder set for [task] at [time]")
+    || (normalized.includes("[task]") && normalized.includes("[time]"))
     || normalized.includes("ask: 'what is [tech]?'")
     || normalized.includes("reliable information for this detail is not available in the retrieved sources")
     || normalized.includes("## short summary")
@@ -1020,6 +1022,8 @@ function isLowQualityTemplateReply(reply: string | null | undefined) {
     || normalized.includes("i can answer any history question with dates, causes, key figures, and impact")
     || normalized.includes("ready to answer.")
     || normalized.includes("i can explain any technology")
+    || normalized.includes("reminder set for [task] at [time]")
+    || (normalized.includes("[task]") && normalized.includes("[time]"))
     || normalized.includes("ask: 'what is [tech]?'")
     || normalized.includes("ask specifically: 'when did x happen?'")
     || normalized.includes("rephrase your question and i'll answer it immediately and accurately")
@@ -3960,6 +3964,14 @@ function isLowCoverageResearchReply(reply: string): boolean {
   );
 }
 
+function looksLikeReminderStatusQuestion(text: string): boolean {
+  const t = text.toLowerCase();
+  return (
+    /\b(reminder|remind|alert)\b/.test(t)
+    && /\b(status|set|scheduled|see|show|check|view|did you|have you|is it|when)\b/.test(t)
+  );
+}
+
 function normalizeResearchMarkdownForWhatsApp(reply: string): string {
   return reply
     .replace(/^#{1,6}\s+/gm, "")
@@ -4127,11 +4139,49 @@ export async function routeInboundAgentMessage(
     }
 
     case "reminder": {
-      const ack = await fastAckQuick(
-        `User message: "${trimmed}". They want a reminder set. Confirm you're setting it with the task and time in *bold*. 1-2 lines.`
-      );
+      if (looksLikeReminderStatusQuestion(trimmed)) {
+        const status = await getLatestReminderStatus(userId);
+        if (!status) {
+          return translateMessage(
+            "⏰ *I don't see an active reminder yet.*\n\nTry: _Remind me at 6pm tomorrow to call Raj_",
+            locale,
+          );
+        }
+
+        const when = new Date(status.fireAt).toLocaleString("en-IN", {
+          weekday: "short",
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+
+        return translateMessage(
+          `✅ *Yes — your reminder is saved.*\n\n📌 *Task:* ${status.reminderText}\n⏰ *When:* ${when}\n\nI'll ping you here when it's due.`,
+          locale,
+        );
+      }
+
+      const parsed = parseReminder(trimmed);
+      if (!parsed) {
+        return translateMessage(
+          "⏰ *I can set that — share time + task.*\n\nTry:\n• _Remind me at 6pm tomorrow to call Raj_\n• _Remind me in 30 minutes to drink water_",
+          locale,
+        );
+      }
+
+      const when = new Date(parsed.fireAt).toLocaleString("en-IN", {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
       runTaskFireAndForget(userId, "custom_reminder", trimmed, locale, "Reminder");
-      return translateMessage(ack, locale);
+      return translateMessage(
+        `✅ *Reminder noted.*\n\n📌 *Task:* ${parsed.reminderText}\n⏰ *When:* ${when}`,
+        locale,
+      );
     }
 
     case "calendar": {
@@ -4402,6 +4452,56 @@ function parseReminder(text: string): { fireAt: string; reminderText: string } |
   if (!fireAt) return null;
   const rt = text.match(/\b(?:to|about|that|for)\s+(.+)/i)?.[1]?.trim() || text;
   return { fireAt: fireAt.toISOString(), reminderText: rt };
+}
+
+async function getLatestReminderStatus(userId: string): Promise<{ fireAt: string; reminderText: string } | null> {
+  const { data } = await getClawCloudSupabaseAdmin()
+    .from("agent_tasks")
+    .select("config,is_enabled")
+    .eq("user_id", userId)
+    .eq("task_type", "custom_reminder")
+    .eq("is_enabled", true)
+    .limit(20)
+    .catch(() => ({ data: null }));
+
+  const tasks = (data ?? []) as Array<{ config?: unknown; is_enabled?: boolean }>;
+  if (!tasks.length) {
+    return null;
+  }
+
+  const now = Date.now();
+  const parsed = tasks
+    .map((row) => {
+      const cfg = (row.config ?? {}) as Record<string, unknown>;
+      const fireAtRaw = typeof cfg.fire_at === "string" ? cfg.fire_at : "";
+      const reminderTextRaw =
+        typeof cfg.reminder_text === "string" && cfg.reminder_text.trim()
+          ? cfg.reminder_text.trim()
+          : "Your reminder";
+      const fireAtMs = fireAtRaw ? Date.parse(fireAtRaw) : Number.NaN;
+      if (!Number.isFinite(fireAtMs)) return null;
+      return {
+        fireAt: new Date(fireAtMs).toISOString(),
+        fireAtMs,
+        reminderText: reminderTextRaw,
+      };
+    })
+    .filter((value): value is { fireAt: string; fireAtMs: number; reminderText: string } => Boolean(value));
+
+  if (!parsed.length) {
+    return null;
+  }
+
+  const future = parsed
+    .filter((row) => row.fireAtMs >= now)
+    .sort((a, b) => a.fireAtMs - b.fireAtMs);
+
+  if (future.length > 0) {
+    return { fireAt: future[0].fireAt, reminderText: future[0].reminderText };
+  }
+
+  parsed.sort((a, b) => b.fireAtMs - a.fireAtMs);
+  return { fireAt: parsed[0].fireAt, reminderText: parsed[0].reminderText };
 }
 
 async function runCustomReminder(userId: string, userMessage: string | null | undefined) {
