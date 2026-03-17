@@ -557,6 +557,9 @@ function isEmptyOrFallback(reply: string | null | undefined) {
     lower.includes("i can continue with either a concise answer or a deeper explanation") ||
     lower.includes("send one topic + location so i can return a precise update") ||
     lower.includes("latest update request") ||
+    lower.includes("is a concept that should be understood in three parts") ||
+    lower.includes("can be understood in three parts: what it is, how it works, and why it matters") ||
+    lower.includes("if you want a deep version, i can expand this with examples and practical applications") ||
     (lower.startsWith("*i could not") && lower.length < 200)
   );
 }
@@ -788,6 +791,13 @@ async function getDirectRouteInboundAgentMessage() {
 }
 
 async function runDirectAgentReply(userId: string, message: string): Promise<string | null> {
+  // If local NVIDIA key is missing, PATH A often degrades to generic templates.
+  // Prefer PATH B (/api/agent/message on app_url) for stronger answers.
+  const nvidia = ensureCanonicalNvidiaEnv();
+  if (!nvidia.value && appUrl()) {
+    return null;
+  }
+
   try {
     const routeInboundAgentMessage = await getDirectRouteInboundAgentMessage();
     const timeout = new Promise<string | null>((resolve) => {

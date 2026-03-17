@@ -3603,10 +3603,13 @@ function isMathOrStatisticsQuestion(text: string): boolean {
   const normalized = text.toLowerCase();
   return (
     /\b(calculate|compute|derive|estimate|solve|formula (for|to)|what is the (formula|equation)|how (do i|do you|to) calculate)\b/.test(normalized)
+    || /\b(what is|how much is|find|evaluate)\s+\d[\d,]*(?:\.\d+)?\s*(?:%|percent)\s+of\s+\d[\d,]*(?:\.\d+)?\b/.test(normalized)
+    || /\b\d[\d,]*(?:\.\d+)?\s*(?:%|percent)\s+of\s+\d[\d,]*(?:\.\d+)?\b/.test(normalized)
+    || /\b\d[\d,]*(?:\.\d+)?\s*[\+\-\*\/\^]\s*\d[\d,]*(?:\.\d+)?\b/.test(normalized)
     || /\b(probability (of|that)|expected value|confidence interval|p-?value|standard deviation|variance of|mean of|standard error|t-?stat)\b/.test(normalized)
     || /\b(statistical(ly)?|regression|correlation|significance|hypothesis|distribution of|normal distribution|beta|coefficient|policy study|program evaluation)\b/.test(normalized)
     || /\b(if .{0,40}what (is|are|would|will)|given .{0,40}(find|calculate|compute|estimate|what))\b/.test(normalized)
-    || /\b(\d+%.*\d+%|\d+\s*(out of|of)\s*\d+)\b/.test(normalized)
+    || /\b(\d+%.*\d+%|\d+\s*(?:out of|of)\s*\d+)\b/.test(normalized)
   );
 }
 
@@ -3841,11 +3844,12 @@ function detectIntent(text: string): DetectedIntent {
   }
 
   if (
-    /\b(table of|multiplication table|times table|solve|calculate|compute|find the value|what is \d|how much is \d)\b/.test(t)
+    /\b(table of|multiplication table|times table|solve|calculate|compute|find the value|what is \d[\d,]*(?:\.\d+)?|how much is \d[\d,]*(?:\.\d+)?)\b/.test(t)
     || /\b(equation|formula|derivative|integral|matrix|vector|probability|statistics|mean|median|mode|standard deviation|variance|hypothesis|algebra|calculus|geometry|trigonometry)\b/.test(t)
     || /\b(sqrt|square root|cube root|log|logarithm|exponent|factorial|permutation|combination|binomial)\b/.test(t)
     || /^\s*[\d\s\+\-\*\/\(\)\^\%\.=]+\s*$/.test(t)
     || /\b\d+\s*[\+\-\*\/\^]\s*\d+\b/.test(t)
+    || /\b\d[\d,]*(?:\.\d+)?\s*(?:%|percent)\s+of\s+\d[\d,]*(?:\.\d+)?\b/.test(t)
   ) {
     return { type: "math", category: "math" };
   }
@@ -4139,7 +4143,7 @@ export async function routeInboundAgentMessage(
     case "news": {
       if (hasNewsProviders()) {
         const answer = await answerNewsQuestion(trimmed).catch(() => "");
-        if (answer.trim()) {
+        if (answer.trim() && !isVisibleFallbackReply(answer) && !isLowCoverageResearchReply(answer)) {
           return translateMessage(normalizeResearchMarkdownForWhatsApp(answer), locale);
         }
       }
@@ -4206,7 +4210,7 @@ export async function routeInboundAgentMessage(
 
     case "research": {
       const expertAnswer = await expertReply(userId, trimmed, "research");
-      if (expertAnswer) {
+      if (expertAnswer && !isVisibleFallbackReply(expertAnswer) && !isLowCoverageResearchReply(expertAnswer)) {
         return translateMessage(expertAnswer, locale);
       }
 
