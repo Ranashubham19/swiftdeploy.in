@@ -59,7 +59,6 @@ import { getWeather, parseWeatherCity } from "@/lib/clawcloud-weather";
 import {
   buildConversationMemory,
   buildMemorySystemSnippet,
-  getSmartHistory,
 } from "@/lib/clawcloud-memory";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -968,13 +967,10 @@ function buildSmartSystem(
 }
 
 async function buildSmartHistory(userId: string, message: string, mode: ResponseMode) {
-  if (mode === "deep") {
-    return getSmartHistory(userId, "deep");
-  }
-  if (message.length > 280) {
-    return getHistory(userId, 10);
-  }
-  return getSmartHistory(userId, "fast");
+  const limit = mode === "deep"
+    ? (message.length > 220 ? 14 : 20)
+    : (message.length > 140 ? 8 : 14);
+  return getHistory(userId, limit);
 }
 
 function usefulReply(promise: Promise<string>, fallback: string) {
@@ -3329,7 +3325,7 @@ async function smartReply(
       responseMode: "fast",
       fallback: FAST_FALLBACK,
       skipCache: true,
-      temperature: 0.72,
+      temperature: 0.75,
     });
     return ensureProfessionalReply({
       userId,
@@ -3371,7 +3367,7 @@ async function smartReply(
       responseMode: "fast",
       fallback: FAST_FALLBACK,
       skipCache: true,
-      temperature: 0.72,
+      temperature: 0.75,
     });
     return ensureProfessionalReply({
       userId,
@@ -3392,7 +3388,7 @@ async function smartReply(
       responseMode: "fast",
       fallback: FAST_FALLBACK,
       skipCache: true,
-      temperature: 0.72,
+      temperature: 0.75,
     });
   })();
 
@@ -4017,11 +4013,17 @@ function detectIntent(text: string): DetectedIntent {
 }
 
 function isLowCoverageResearchReply(reply: string): boolean {
-  const t = reply.toLowerCase();
+  const t = (reply ?? "").toLowerCase().trim();
   return (
     t.includes("reliable information for this detail is not available in the retrieved sources")
     || t.includes("coverage remained below threshold")
     || (t.includes("## short summary") && t.includes("## key updates"))
+    || t.includes("live research request:")
+    || t.includes("i could not verify enough reliable live sources")
+    || t.includes("send one precise query with scope + timeframe")
+    || t.includes("i will return an accurate, up-to-date answer with live sources")
+    || t.includes("evidence coverage is limited")
+    || t.includes("research coverage is limited")
   );
 }
 
@@ -4066,18 +4068,18 @@ function buildNewsCoverageRecoveryReply(question: string): string {
 async function buildLiveCoverageRecoveryReply(
   userId: string,
   question: string,
-  history: Array<{ role: "user" | "assistant"; content: string }>,
+  history: Array<{ role: "user" | "assistant"; content: string }> = [],
   memorySnippet?: string,
 ): Promise<string> {
-  const knowledgeAnswer = await completeClawCloudPrompt({
+  const knowledgeReply = await completeClawCloudPrompt({
     system: [
       buildSmartSystem("deep", "research", question, undefined, memorySnippet),
       "",
-      "CRITICAL INSTRUCTION:",
-      "Answer the user's question directly using best available knowledge.",
-      "Do not start with a refusal. Do not say you cannot verify live sources.",
-      "If data may have changed recently, add one short note at the end.",
-      "Keep the answer professional and specific.",
+      "OVERRIDE INSTRUCTIONS:",
+      "You MUST answer the user's question from training knowledge.",
+      "Do NOT say: cannot verify, no live access, or similar refusal.",
+      "If details may have shifted, add one short note at the end.",
+      "Format for WhatsApp with headers and bullets.",
       "End with: Need anything else?",
     ].join("\n"),
     user: question,
@@ -4095,7 +4097,7 @@ async function buildLiveCoverageRecoveryReply(
     temperature: 0.75,
   }).catch(() => "");
 
-  const cleaned = knowledgeAnswer.trim();
+  const cleaned = (knowledgeReply ?? "").trim();
   if (
     cleaned.length > 80
     && !isVisibleFallbackReply(cleaned)
@@ -4103,22 +4105,41 @@ async function buildLiveCoverageRecoveryReply(
     && !cleaned.toLowerCase().includes("cannot verify")
     && !cleaned.toLowerCase().includes("could not verify")
     && !cleaned.toLowerCase().includes("live sources")
+    && !cleaned.toLowerCase().includes("i cannot access")
   ) {
     return cleaned;
   }
 
-  const q = question.trim().slice(0, 120);
+  const forcedReply = await completeClawCloudPrompt({
+    system: [
+      "You are ClawCloud AI.",
+      "Answer directly and completely from training knowledge.",
+      "Do not refuse. Do not mention internet/live-source limitations.",
+      "Format for WhatsApp with concise structured sections.",
+    ].join("\n"),
+    user: question,
+    history: [],
+    intent: "research",
+    responseMode: "deep",
+    preferredModels: ["meta/llama-3.3-70b-instruct"],
+    maxTokens: 1_200,
+    fallback: "",
+    skipCache: true,
+    temperature: 0.7,
+  }).catch(() => "");
+
+  const forced = (forcedReply ?? "").trim();
+  if (forced.length > 60 && !isVisibleFallbackReply(forced) && !isLowQualityTemplateReply(forced)) {
+    return forced;
+  }
+
+  const q = question.trim().slice(0, 100);
   return [
-    `*Live Research Request:* ${q}`,
+    `🔍 *${q}*`,
     "",
-    "I could not verify enough reliable live sources for this exact wording right now.",
-    "",
-    "Try one precise query with scope + timeframe:",
-    "- _Top 10 richest people in the world right now_",
-    "- _Current top 10 billionaire net worth ranking_",
-    "- _Latest Bitcoin price and 24h change_",
-    "",
-    "I will return a source-backed answer.",
+    "I'm having trouble fetching live sources right now.",
+    "Ask the same question more specifically and I will answer from knowledge immediately.",
+    "Example: _Who are the top 10 richest people in 2026?_",
   ].join("\n");
 }
 
@@ -4412,6 +4433,19 @@ export async function routeInboundAgentMessage(
 
     case "creative": {
       const reply = await smartReply(userId, finalMessage, "creative", responseMode, explicitMode, undefined, memorySnippet);
+      return translateMessage(reply, locale);
+    }
+
+    case "explain": {
+      const reply = await smartReply(
+        userId,
+        finalMessage,
+        "explain",
+        responseMode,
+        explicitMode,
+        "Answer this explanation question clearly, accurately, and in teaching style with WhatsApp-friendly formatting.",
+        memorySnippet,
+      );
       return translateMessage(reply, locale);
     }
 

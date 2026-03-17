@@ -2436,10 +2436,54 @@ async function solveAnyExpertQuestion(input: {
   return answer.trim();
 }
 
-export function looksLikeRealtimeResearch(q: string): boolean {
-  const t = q.toLowerCase();
-  // ONLY flag questions that genuinely need live data
-  return /\b(price|stock price|bitcoin price|crypto price|weather|forecast|breaking news|news today|latest news|live score|match score|election result|just happened|right now|happening now)\b/.test(t);
+export function looksLikeRealtimeResearch(question: string): boolean {
+  const t = question.toLowerCase().trim();
+  if (!t) return false;
+
+  // Hard YES: queries that genuinely need live internet data.
+  const hardLive: RegExp[] = [
+    /\b(stock price|share price|bitcoin price|btc price|eth price|crypto price)\b/,
+    /\b(today'?s? price|current price|price right now|price today)\b/,
+    /\b(nifty|sensex|nasdaq|dow jones|s&p 500)\s+(today|now|live|current)\b/,
+    /\b(forex|exchange rate|usd to inr|inr to usd)\s*(today|now|live)?\b/,
+    /\b(lpg price|petrol price|diesel price)\s*(today|this month)?\b/,
+    /\b(live score|match score|today'?s? score|cricket score|ipl score|football score)\b/,
+    /\b(breaking news|news today|today'?s? news|latest news today|news right now)\b/,
+    /\bwhat (is|happened|are) (happening|going on) (right now|today|currently)\b/,
+    /\b(weather today|weather right now|temperature today|rain today|forecast today)\b/,
+    /\b(aqi|air quality) (today|right now|now)\b/,
+    /\b(election result|vote count|exit poll|who won the election)\b/,
+    /\b(just happened|just announced|just released|just launched)\b/,
+    /\b(died today|passed away today|arrested today|fired today|resigned today)\b/,
+    /\bright now\b/,
+    /\bas of today\b/,
+    /\bcurrently happening\b/,
+  ];
+  if (hardLive.some((re) => re.test(t))) return true;
+
+  // Hard NO: stable knowledge/explanation questions.
+  const hardKnowledge: RegExp[] = [
+    /^(what is|what are|what does|what was|what were|define|explain|describe|tell me about|meaning of|definition of)\b/,
+    /^(how does|how do|how is|how are|how did|how was)\b/,
+    /^(why does|why do|why is|why are|why did|why was)\b/,
+    /^(who (invented|discovered|created|founded|made|built|designed|wrote|composed))\b/,
+    /\b(chemical formula|molecular formula|element|compound|atom|molecule|reaction|enzyme|protein|dna|rna)\b/,
+    /\b(periodic table|boiling point|melting point|density of|speed of light)\b/,
+    /\b(history of|historical|ancient|medieval|world war|revolution|empire|dynasty|civilization)\b/,
+    /\b(capital of|located in|continent|geography)\b/,
+    /\b(calculate|compute|solve|prove|derive|algorithm|code|program|debug|function|syntax|sql|api)\b/,
+    /\b(factorial|fibonacci|prime number|sort|recursion|loop|array|string|integer)\b/,
+    /\b(difference between|formula for|how many (bones|planets|countries|continents|elements))\b/,
+    /\b(largest|smallest|tallest|deepest) (country|city|ocean|mountain|river|desert|building)\b/,
+  ];
+  if (hardKnowledge.some((re) => re.test(t))) return false;
+
+  // Soft live only with strong temporal cue.
+  const strongTemporal = /\b(right now|as of today|this moment|currently|live|real-?time|breaking)\b/.test(t);
+  const softLive = /\b(ceo of|president of|prime minister of|who is currently)\b/.test(t);
+  if (strongTemporal && softLive) return true;
+
+  return false;
 }
 
 function codingReviewHints(question: string) {
