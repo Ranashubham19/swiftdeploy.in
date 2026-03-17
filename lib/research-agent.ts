@@ -15,6 +15,7 @@ import type {
 } from "@/lib/types";
 
 import { rewriteQuestionWithMemory } from "@/lib/conversation-memory";
+import { completeClawCloudPrompt } from "@/lib/clawcloud-ai";
 import { extractWebsiteContent } from "@/lib/crawl";
 import { embedTexts } from "@/lib/embeddings";
 import { env, getProviderSnapshot } from "@/lib/env";
@@ -686,7 +687,7 @@ function mergeSearchDiagnostics(
 }
 
 function strictCoverageThreshold(mode: "search" | "research") {
-  return mode === "research" ? 4 : 3;
+  return mode === "research" ? 2 : 1;
 }
 
 function shouldEnterStrictCoverageMode(
@@ -720,7 +721,7 @@ function shouldEnterStrictCoverageMode(
   }
 
   // Allow high-confidence single-provider runs when coverage volume is strong.
-  const strongSingleProviderFloor = mode === "research" ? 10 : 8;
+  const strongSingleProviderFloor = mode === "research" ? 5 : 3;
   return effectiveCoverage < strongSingleProviderFloor;
 }
 
@@ -737,83 +738,87 @@ function strictCoverageSummary(
   return `Coverage remained below threshold after retry: ${sourceCount} sources (minimum ${minimum}) and ${successfulProviders} active providers.`;
 }
 
-function buildStrictCoverageAnswer(
+async function buildStrictCoverageAnswer(
   question: string,
   mode: "search" | "research",
   diagnostics: SearchDiagnostics,
-): AssistantAnswer {
-  const providerLines = diagnostics.providerSummary.map((summary) => {
-    if (!summary.attemptedQueries) {
-      return `${summary.provider}: not configured in this environment.`;
-    }
-
-    const base = `${summary.provider}: ${summary.successfulQueries}/${summary.attemptedQueries} successful queries, ${summary.totalResults} raw hits.`;
-    if (summary.failedQueries > 0 && summary.lastError) {
-      return `${base} Last error: ${summary.lastError}.`;
-    }
-
-    return base;
-  });
-  const retryLines = diagnostics.retryQueries?.length
-    ? diagnostics.retryQueries.map((query) => `- ${query}`)
-    : ["- No additional retry queries were available for this question."];
-  const title = mode === "research" ? "Research Coverage Is Limited" : "Evidence Coverage Is Limited";
+): Promise<AssistantAnswer> {
+  const title = mode === "research" ? "Research Answer" : "Search Answer";
   const summary =
-    "I couldn’t verify enough high-quality sources for this exact query yet.";
-  const keyUpdates = [
+    "Live sources were limited for this exact query, so this answer uses best available model knowledge.";
+
+  const fallbackMarkdown = [
+    `*${title}*`,
+    "",
+    `*Question:* ${question}`,
+    "",
+    "I could not verify enough reliable live sources for this exact wording right now.",
+    "Try adding scope and timeframe for source-backed verification.",
+    "",
+    "Need anything else?",
+  ].join("\n");
+
+  const knowledgeMarkdown = await completeClawCloudPrompt({
+    system: [
+      "You are ClawCloud AI, a high-accuracy assistant.",
+      "Live search coverage is limited for this query.",
+      "Answer directly using best available knowledge.",
+      "Do not output a refusal as the main answer.",
+      "If details may change over time, add one short uncertainty note.",
+      "Format for chat readability with short sections and bullets when useful.",
+      "End with: Need anything else?",
+    ].join("\n"),
+    user: question,
+    intent: "research",
+    responseMode: "deep",
+    preferredModels: [
+      "meta/llama-3.3-70b-instruct",
+      "mistralai/mistral-large-3-675b-instruct-2512",
+      "moonshotai/kimi-k2-instruct-0905",
+    ],
+    maxTokens: 1_200,
+    fallback: "",
+    skipCache: true,
+    temperature: 0.76,
+  }).catch(() => "");
+
+  const cleaned = knowledgeMarkdown.trim();
+  const lower = cleaned.toLowerCase();
+  const looksWeak =
+    cleaned.length < 80
+    || lower.includes("could not verify enough")
+    || lower.includes("reliable information for this detail is not available")
+    || lower.includes("i cannot verify")
+    || lower.includes("i don't have real-time access");
+
+  const markdown = looksWeak ? fallbackMarkdown : cleaned;
+  const keyInsights = [
     strictCoverageSummary(mode, diagnostics.dedupedResultCount, diagnostics),
     diagnostics.retryCount > 0
-      ? `Automatic retry was executed with ${diagnostics.retryQueries?.length ?? 0} extra query variants.`
+      ? `Automatic retry executed with ${diagnostics.retryQueries?.length ?? 0} extra query variants.`
       : "Automatic retry was not triggered because no safe retry variants were available.",
-    "The answer is intentionally conservative to avoid unsupported claims.",
   ];
-  const detailed = [
-    "### Coverage Diagnostics",
-    renderBulletList(providerLines),
-    "",
-    "### Retry Queries Used",
-    retryLines.join("\n"),
-    "",
-    "### What To Do Next",
-    renderBulletList([
-      "Narrow the scope to a specific geography, date range, or metric.",
-      "Ask for authoritative sources only (for example government, regulator, or primary publication domains).",
-      "If you have a target source URL, provide it directly for focused extraction.",
-    ]),
-  ].join("\n");
 
   return {
     format: mode === "research" ? "research" : "source",
     title,
     summary,
-    keyInsights: keyUpdates,
+    keyInsights,
     sections: [
       {
-        title: "Detailed Explanation",
-        content: detailed,
+        title: "Answer",
+        content: markdown,
         kind: "markdown",
       },
     ],
     followUps: [
-      "Should I retry with only government and primary-source domains?",
-      "Do you want this narrowed to a specific country or city?",
-      "Should I focus on a specific date window (for example last 7 or 30 days)?",
-      "Do you want a query pack you can run manually for verification?",
+      "Want me to narrow this to a country, city, or date window?",
+      "Should I retry with only primary or official sources?",
+      "Do you want a shorter executive summary?",
     ],
-    markdown: [
-      `${title}`,
-      "",
-      summary,
-      "",
-      "Key Updates:",
-      renderBulletList(keyUpdates),
-      "",
-      "Details:",
-      detailed,
-    ].join("\n"),
+    markdown,
   };
 }
-
 function buildPlan(
   question: string,
   classification: QueryClassification,
@@ -1509,27 +1514,30 @@ export async function runResearchAgent(
           const searchRun = await runSearchWithAutoRetry("search");
           const searchResults = searchRun.sources;
           searchDiagnostics = searchRun.diagnostics;
-
           if (!searchResults.length) {
             pushProgress(
               "search",
-              "Live search returned no sources",
-              "I couldn’t verify enough high-quality sources for this exact detail yet.",
+              "Live search returned no sources - answering from model knowledge",
+              "Falling back to best available knowledge for this query.",
               "error",
             );
 
-            answer = await generateSourceBackedAnswer({
-              question: rawQuestion,
-              classification,
-              plan,
-              sources: [],
-              documents: [],
-              retrievedContext: [],
-            });
+            answer = await buildStrictCoverageAnswer(
+              rawQuestion,
+              "search",
+              {
+                queries: plan.queries,
+                rawResultCount: 0,
+                dedupedResultCount: 0,
+                providerQueries: [],
+                providerSummary: [],
+                retryCount: 0,
+              },
+            );
             pushProgress(
               "reasoning",
-              "No-source fallback generated",
-              "Response returned without unsupported claims",
+              "Knowledge fallback generated",
+              "Response generated from model knowledge with explicit coverage diagnostics",
             );
             break;
           }
@@ -1549,7 +1557,7 @@ export async function runResearchAgent(
           );
 
           if (shouldEnterStrictCoverageMode("search", sources.length, searchDiagnostics)) {
-            answer = buildStrictCoverageAnswer(
+            answer = await buildStrictCoverageAnswer(
               rawQuestion,
               "search",
               searchDiagnostics ?? {
@@ -1662,30 +1670,31 @@ export async function runResearchAgent(
           const searchRun = await runSearchWithAutoRetry("research");
           const searchResults = searchRun.sources;
           searchDiagnostics = searchRun.diagnostics;
-
           if (!searchResults.length) {
             pushProgress(
               "search",
-              "Internet search returned no sources",
-              "I couldn’t verify enough high-quality sources for this exact detail yet.",
+              "Live search returned no sources - answering from model knowledge",
+              "Falling back to best available knowledge for this query.",
               "error",
             );
 
-            const reportBody = await generateStructuredReport({
-              question: rawQuestion,
-              plan,
-              retrievedContext: [],
-              sources: [],
-            });
-
-            report = {
-              ...reportBody,
-              sources: [],
-              plan,
-              retrievalContext: [],
-            };
-            answer = buildResearchAnswerFromReport(rawQuestion, reportBody, []);
-            pushProgress("report", "Structured report generated", clipText(report.title, 90));
+            answer = await buildStrictCoverageAnswer(
+              rawQuestion,
+              "research",
+              {
+                queries: plan.queries,
+                rawResultCount: 0,
+                dedupedResultCount: 0,
+                providerQueries: [],
+                providerSummary: [],
+                retryCount: 0,
+              },
+            );
+            pushProgress(
+              "reasoning",
+              "Knowledge fallback generated",
+              "Response generated from model knowledge with explicit coverage diagnostics",
+            );
             break;
           }
 
@@ -1704,7 +1713,7 @@ export async function runResearchAgent(
           );
 
           if (shouldEnterStrictCoverageMode("research", sources.length, searchDiagnostics)) {
-            answer = buildStrictCoverageAnswer(
+            answer = await buildStrictCoverageAnswer(
               rawQuestion,
               "research",
               searchDiagnostics ?? {
@@ -2001,3 +2010,4 @@ export async function runResearchAgent(
     throw error;
   }
 }
+

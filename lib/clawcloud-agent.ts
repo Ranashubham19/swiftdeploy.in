@@ -56,6 +56,11 @@ import {
   saveContact,
 } from "@/lib/clawcloud-contacts";
 import { getWeather, parseWeatherCity } from "@/lib/clawcloud-weather";
+import {
+  buildConversationMemory,
+  buildMemorySystemSnippet,
+  getSmartHistory,
+} from "@/lib/clawcloud-memory";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -895,7 +900,7 @@ const AUTO_DEEP_FAST_HEADSTART_MS: Partial<Record<IntentType, number>> = {
   creative: 1_000,
 };
 
-async function getHistory(userId: string, limit = 10) {
+async function getHistory(userId: string, limit = 30) {
   try {
     const { data } = await getClawCloudSupabaseAdmin()
       .from("whatsapp_messages")
@@ -905,10 +910,11 @@ async function getHistory(userId: string, limit = 10) {
       .limit(limit);
 
     if (!data?.length) return [];
-    return data.reverse()
+    return data
+      .reverse()
       .map((r) => ({
         role: (r.direction === "inbound" ? "user" : "assistant") as "user" | "assistant",
-        content: String(r.content ?? "").trim().slice(0, 500),
+        content: String(r.content ?? "").trim().slice(0, 800),
       }))
       .filter((m) => m.content.length > 0);
   } catch {
@@ -923,6 +929,7 @@ function buildSmartSystem(
   intent: IntentType,
   question?: string,
   extraInstruction?: string,
+  memorySnippet?: string,
 ) {
   const expertMode = detectExpertMode(question ?? intent, intent);
   const expertPrompt = EXPERT_MODE_PROMPTS[expertMode];
@@ -930,19 +937,44 @@ function buildSmartSystem(
   const brain = [WHATSAPP_BRAIN, modeBrain, expertPrompt].filter(Boolean).join("\n\n");
   const ext = (mode === "deep" ? DEEP_EXT : FAST_EXT)[intent]
     ?? (mode === "deep" ? DEEP_EXT : FAST_EXT).research;
-  return brain + ext + (extraInstruction ? `\n\n${extraInstruction}` : "");
+
+  const seed = Date.now() % 1000;
+  const styleVariants = [
+    "Lead with a concise direct answer, then add structured detail.",
+    "Open with the most important insight first.",
+    "Start with the core fact, then add context in clear steps.",
+    "Give the bottom line upfront, then support it with specifics.",
+    "Begin with a clear headline answer, then break it into sections.",
+  ];
+  const styleInstruction = styleVariants[seed % styleVariants.length];
+  const uniquenessInstruction = [
+    "",
+    "RESPONSE STYLE:",
+    styleInstruction,
+    "Do not start exactly like your previous reply.",
+    "Vary opening line and section order across repeated questions.",
+    `(Style seed: ${seed})`,
+  ].join("\n");
+
+  const memoryBlock = memorySnippet
+    ? `\n\nCONVERSATION MEMORY:\n${memorySnippet}\nUse this context for follow-up questions.`
+    : "";
+
+  return brain
+    + ext
+    + uniquenessInstruction
+    + memoryBlock
+    + (extraInstruction ? `\n\n${extraInstruction}` : "");
 }
 
 async function buildSmartHistory(userId: string, message: string, mode: ResponseMode) {
   if (mode === "deep") {
-    return getHistory(userId, message.length > 220 ? 4 : 6);
+    return getSmartHistory(userId, "deep");
   }
-
-  if (message.length > 140) {
-    return [];
+  if (message.length > 280) {
+    return getHistory(userId, 10);
   }
-
-  return getHistory(userId, message.length > 180 ? 3 : 5);
+  return getSmartHistory(userId, "fast");
 }
 
 function usefulReply(promise: Promise<string>, fallback: string) {
@@ -3281,6 +3313,7 @@ async function smartReply(
   mode: ResponseMode = "fast",
   explicitMode = false,
   extraInstruction?: string,
+  memorySnippet?: string,
 ): Promise<string> {
   const deterministic = buildDeterministicChatFallback(message, intent);
   if (deterministic) {
@@ -3289,13 +3322,14 @@ async function smartReply(
 
   if (mode !== "deep") {
     const fastReply = await completeClawCloudPrompt({
-      system: buildSmartSystem("fast", intent, message, extraInstruction),
+      system: buildSmartSystem("fast", intent, message, extraInstruction, memorySnippet),
       user: message,
       history: await buildSmartHistory(userId, message, "fast"),
       intent,
       responseMode: "fast",
       fallback: FAST_FALLBACK,
       skipCache: true,
+      temperature: 0.72,
     });
     return ensureProfessionalReply({
       userId,
@@ -3307,13 +3341,14 @@ async function smartReply(
   }
 
   const deepPromise = completeClawCloudPrompt({
-    system: buildSmartSystem("deep", intent, message, extraInstruction),
+    system: buildSmartSystem("deep", intent, message, extraInstruction, memorySnippet),
     user: message,
     history: await buildSmartHistory(userId, message, "deep"),
     intent,
     responseMode: "deep",
     fallback: DEEP_FALLBACK,
     skipCache: true,
+    temperature: 0.85,
   });
 
   if (explicitMode) {
@@ -3329,13 +3364,14 @@ async function smartReply(
     }
 
     const fastReply = await completeClawCloudPrompt({
-      system: buildSmartSystem("fast", intent, message, extraInstruction),
+      system: buildSmartSystem("fast", intent, message, extraInstruction, memorySnippet),
       user: message,
-      history: [],
+      history: await buildSmartHistory(userId, message, "fast"),
       intent,
       responseMode: "fast",
       fallback: FAST_FALLBACK,
       skipCache: true,
+      temperature: 0.72,
     });
     return ensureProfessionalReply({
       userId,
@@ -3349,13 +3385,14 @@ async function smartReply(
   const fastPromise = (async () => {
     await new Promise((resolve) => setTimeout(resolve, autoDeepFastHeadstartMs(intent)));
     return completeClawCloudPrompt({
-      system: buildSmartSystem("fast", intent, message, extraInstruction),
+      system: buildSmartSystem("fast", intent, message, extraInstruction, memorySnippet),
       user: message,
-      history: [],
+      history: await buildSmartHistory(userId, message, "fast"),
       intent,
       responseMode: "fast",
       fallback: FAST_FALLBACK,
       skipCache: true,
+      temperature: 0.72,
     });
   })();
 
@@ -4026,19 +4063,62 @@ function buildNewsCoverageRecoveryReply(question: string): string {
   ].join("\n");
 }
 
-function buildLiveCoverageRecoveryReply(question: string): string {
+async function buildLiveCoverageRecoveryReply(
+  userId: string,
+  question: string,
+  history: Array<{ role: "user" | "assistant"; content: string }>,
+  memorySnippet?: string,
+): Promise<string> {
+  const knowledgeAnswer = await completeClawCloudPrompt({
+    system: [
+      buildSmartSystem("deep", "research", question, undefined, memorySnippet),
+      "",
+      "CRITICAL INSTRUCTION:",
+      "Answer the user's question directly using best available knowledge.",
+      "Do not start with a refusal. Do not say you cannot verify live sources.",
+      "If data may have changed recently, add one short note at the end.",
+      "Keep the answer professional and specific.",
+      "End with: Need anything else?",
+    ].join("\n"),
+    user: question,
+    history,
+    intent: "research",
+    responseMode: "deep",
+    preferredModels: [
+      "meta/llama-3.3-70b-instruct",
+      "mistralai/mistral-large-3-675b-instruct-2512",
+      "moonshotai/kimi-k2-instruct-0905",
+    ],
+    maxTokens: 1_200,
+    fallback: "",
+    skipCache: true,
+    temperature: 0.75,
+  }).catch(() => "");
+
+  const cleaned = knowledgeAnswer.trim();
+  if (
+    cleaned.length > 80
+    && !isVisibleFallbackReply(cleaned)
+    && !isLowQualityTemplateReply(cleaned)
+    && !cleaned.toLowerCase().includes("cannot verify")
+    && !cleaned.toLowerCase().includes("could not verify")
+    && !cleaned.toLowerCase().includes("live sources")
+  ) {
+    return cleaned;
+  }
+
   const q = question.trim().slice(0, 120);
   return [
     `*Live Research Request:* ${q}`,
     "",
-    "I could not verify enough reliable live sources for this exact wording yet.",
+    "I could not verify enough reliable live sources for this exact wording right now.",
     "",
-    "Send one precise query with scope + timeframe for a source-backed answer:",
-    "- _Top 10 richest people in the world as of 2026_",
-    "- _Current top 10 billionaire net worth ranking today_",
+    "Try one precise query with scope + timeframe:",
+    "- _Top 10 richest people in the world right now_",
+    "- _Current top 10 billionaire net worth ranking_",
     "- _Latest Bitcoin price and 24h change_",
     "",
-    "I will return an accurate, up-to-date answer with live sources.",
+    "I will return a source-backed answer.",
   ].join("\n");
 }
 
@@ -4108,36 +4188,40 @@ export async function routeInboundAgentMessage(
   const approval = await handleReplyApprovalCommand(userId, trimmed);
   if (approval.handled) return approval.response;
 
+  const memory = await buildConversationMemory(userId, trimmed);
+  const memorySnippet = buildMemorySystemSnippet(memory);
+  const finalMessage = memory.resolvedQuestion.trim() || trimmed;
+
   const locale = await getUserLocale(userId);
-  const detected = detectIntent(trimmed);
+  const detected = detectIntent(finalMessage);
   let resolvedType = detected.type;
   let resolvedCategory = detected.category;
 
   if (resolvedCategory !== "send_message" && resolvedCategory !== "save_contact") {
-    if (resolvedCategory !== "math" && isMathOrStatisticsQuestion(trimmed)) {
+    if (resolvedCategory !== "math" && isMathOrStatisticsQuestion(finalMessage)) {
       resolvedType = "math";
       resolvedCategory = "math";
-    } else if (resolvedCategory !== "coding" && isArchitectureOrDesignQuestion(trimmed)) {
+    } else if (resolvedCategory !== "coding" && isArchitectureOrDesignQuestion(finalMessage)) {
       resolvedType = "coding";
       resolvedCategory = "coding";
     } else if (
-      /\b(code|program|algorithm|script|debug|n[-\s]?queen|n[-\s]?queens|python|javascript|java|c\+\+)\b/i.test(trimmed)
+      /\b(code|program|algorithm|script|debug|n[-\s]?queen|n[-\s]?queens|python|javascript|java|c\+\+)\b/i.test(finalMessage)
       && resolvedCategory !== "coding"
     ) {
       resolvedType = "coding";
       resolvedCategory = "coding";
     } else if (
-      /\b(weather|whether|temperature|forecast|rain|humidity|wind|aqi)\b/i.test(trimmed)
+      /\b(weather|whether|temperature|forecast|rain|humidity|wind|aqi)\b/i.test(finalMessage)
       && resolvedCategory === "news"
     ) {
       resolvedType = "general";
       resolvedCategory = "general";
     } else if (
       resolvedCategory === "research"
-      && !looksLikeRealtimeResearch(trimmed)
-      && trimmed.length > 70
+      && !looksLikeRealtimeResearch(finalMessage)
+      && finalMessage.length > 70
     ) {
-      const domain = await semanticDomainClassify(trimmed).catch(() => "GENERAL");
+      const domain = await semanticDomainClassify(finalMessage).catch(() => "GENERAL");
 
       if (domain === "FINANCE_MATH" || domain === "CAUSAL_STATS" || domain === "CLINICAL_BIO") {
         resolvedType = "math";
@@ -4149,7 +4233,7 @@ export async function routeInboundAgentMessage(
     }
   }
 
-  const responseMode = resolveResponseMode(resolvedType, trimmed, requested.mode);
+  const responseMode = resolveResponseMode(resolvedType, finalMessage, requested.mode);
   const explicitMode = requested.explicit;
 
   switch (resolvedCategory) {
@@ -4167,9 +4251,9 @@ export async function routeInboundAgentMessage(
     }
 
     case "spending": {
-      const ans = await answerSpendingQuestion(userId, trimmed);
+      const ans = await answerSpendingQuestion(userId, finalMessage);
       if (ans) return ans;
-      return smartReply(userId, trimmed, "spending", responseMode, explicitMode);
+      return smartReply(userId, finalMessage, "spending", responseMode, explicitMode, undefined, memorySnippet);
     }
 
     case "draft_email": {
@@ -4255,15 +4339,15 @@ export async function routeInboundAgentMessage(
     case "news": {
       const useLiveProviders = hasNewsProviders();
       if (useLiveProviders) {
-        const answer = await answerNewsQuestion(trimmed).catch(() => "");
+        const answer = await answerNewsQuestion(finalMessage).catch(() => "");
         if (answer.trim() && !isVisibleFallbackReply(answer) && !isLowCoverageResearchReply(answer)) {
           return translateMessage(normalizeResearchMarkdownForWhatsApp(answer), locale);
         }
 
-        const history = await buildSmartHistory(userId, trimmed, "deep");
+        const history = memory.recentTurns.length ? memory.recentTurns : await buildSmartHistory(userId, finalMessage, "deep");
         const fallback = await runGroundedResearchReply({
           userId,
-          question: trimmed,
+          question: finalMessage,
           history,
         }).catch(() => "");
 
@@ -4273,46 +4357,47 @@ export async function routeInboundAgentMessage(
         }
       }
 
-      const knowledgeQuestion = trimmed
+      const knowledgeQuestion = finalMessage
         .replace(/\b(right now|currently|at the moment|as of now|today|live)\b/gi, "")
         .replace(/\s{2,}/g, " ")
         .trim();
 
       const reply = await smartReply(
         userId,
-        knowledgeQuestion || trimmed,
+        knowledgeQuestion || finalMessage,
         "research",
         responseMode,
         explicitMode,
         "Answer directly using best available knowledge. If this topic can change quickly, add one short note that live rankings/news may shift.",
+        memorySnippet,
       );
       return translateMessage(reply, locale);
     }
 
     case "coding": {
-      const deterministic = solveCodingArchitectureQuestion(trimmed);
+      const deterministic = solveCodingArchitectureQuestion(finalMessage);
       if (deterministic) {
         return translateMessage(deterministic, locale);
       }
 
       const reply =
         responseMode === "deep"
-          ? (await expertReply(userId, trimmed, "coding"))
-            ?? await smartReply(userId, trimmed, "coding", responseMode, explicitMode)
-          : await smartReply(userId, trimmed, "coding", responseMode, explicitMode);
+          ? (await expertReply(userId, finalMessage, "coding"))
+            ?? await smartReply(userId, finalMessage, "coding", responseMode, explicitMode, undefined, memorySnippet)
+          : await smartReply(userId, finalMessage, "coding", responseMode, explicitMode, undefined, memorySnippet);
       return translateMessage(reply, locale);
     }
 
     case "math": {
-      const mathExpert = await expertReply(userId, trimmed, "math");
+      const mathExpert = await expertReply(userId, finalMessage, "math");
       if (mathExpert) {
         return translateMessage(mathExpert, locale);
       }
 
-      const mathDomain = await semanticDomainClassify(trimmed).catch(() => "GENERAL");
+      const mathDomain = await semanticDomainClassify(finalMessage).catch(() => "GENERAL");
       if (mathDomain === "FINANCE_MATH" || mathDomain === "CAUSAL_STATS" || mathDomain === "CLINICAL_BIO") {
         const semanticAnswer = await solveWithUniversalExpert({
-          question: trimmed,
+          question: finalMessage,
           intent: "math",
         }).catch(() => "");
 
@@ -4321,31 +4406,32 @@ export async function routeInboundAgentMessage(
         }
       }
 
-      const reply = await smartReply(userId, trimmed, "math", responseMode, explicitMode);
+      const reply = await smartReply(userId, finalMessage, "math", responseMode, explicitMode, undefined, memorySnippet);
       return translateMessage(reply, locale);
     }
 
     case "creative": {
-      const reply = await smartReply(userId, trimmed, "creative", responseMode, explicitMode);
+      const reply = await smartReply(userId, finalMessage, "creative", responseMode, explicitMode, undefined, memorySnippet);
       return translateMessage(reply, locale);
     }
 
     case "research": {
-      const realtimeResearch = looksLikeRealtimeResearch(trimmed);
-      const expertAnswer = await expertReply(userId, trimmed, "research");
+      const realtimeResearch = looksLikeRealtimeResearch(finalMessage);
+      const expertAnswer = await expertReply(userId, finalMessage, "research");
       if (expertAnswer && !isVisibleFallbackReply(expertAnswer) && !isLowCoverageResearchReply(expertAnswer)) {
         return translateMessage(expertAnswer, locale);
       }
 
       if (realtimeResearch) {
         if (expertAnswer && isLowCoverageResearchReply(expertAnswer)) {
-          return translateMessage(buildLiveCoverageRecoveryReply(trimmed), locale);
+          const recovery = await buildLiveCoverageRecoveryReply(userId, finalMessage, memory.recentTurns, memorySnippet);
+          return translateMessage(recovery, locale);
         }
 
-        const history = await buildSmartHistory(userId, trimmed, "deep");
+        const history = memory.recentTurns.length ? memory.recentTurns : await buildSmartHistory(userId, finalMessage, "deep");
         const grounded = await runGroundedResearchReply({
           userId,
-          question: trimmed,
+          question: finalMessage,
           history,
         }).catch(() => "");
 
@@ -4354,24 +4440,25 @@ export async function routeInboundAgentMessage(
           return translateMessage(normalizeResearchMarkdownForWhatsApp(normalizedGrounded), locale);
         }
 
-        return translateMessage(buildLiveCoverageRecoveryReply(trimmed), locale);
+        const recovery = await buildLiveCoverageRecoveryReply(userId, finalMessage, history, memorySnippet);
+        return translateMessage(recovery, locale);
       }
 
-      const reply = await smartReply(userId, trimmed, "research", responseMode, explicitMode);
+      const reply = await smartReply(userId, finalMessage, "research", responseMode, explicitMode, undefined, memorySnippet);
       return translateMessage(reply, locale);
     }
 
     case "greeting": {
-      const reply = await smartReply(userId, trimmed, "greeting", responseMode, explicitMode);
+      const reply = await smartReply(userId, finalMessage, "greeting", responseMode, explicitMode, undefined, memorySnippet);
       return translateMessage(reply, locale);
     }
 
     default: {
-      if (looksLikeRealtimeResearch(trimmed)) {
-        const history = await buildSmartHistory(userId, trimmed, "deep");
+      if (looksLikeRealtimeResearch(finalMessage)) {
+        const history = memory.recentTurns.length ? memory.recentTurns : await buildSmartHistory(userId, finalMessage, "deep");
         const grounded = await runGroundedResearchReply({
           userId,
-          question: trimmed,
+          question: finalMessage,
           history,
         }).catch(() => "");
 
@@ -4380,10 +4467,11 @@ export async function routeInboundAgentMessage(
           return translateMessage(normalizeResearchMarkdownForWhatsApp(normalizedGrounded), locale);
         }
 
-        return translateMessage(buildLiveCoverageRecoveryReply(trimmed), locale);
+        const recovery = await buildLiveCoverageRecoveryReply(userId, finalMessage, history, memorySnippet);
+        return translateMessage(recovery, locale);
       }
 
-      const reply = await smartReply(userId, trimmed, resolvedType, responseMode, explicitMode);
+      const reply = await smartReply(userId, finalMessage, resolvedType, responseMode, explicitMode, undefined, memorySnippet);
       return translateMessage(reply, locale);
     }
   }
