@@ -3705,6 +3705,10 @@ function detectIntentLegacy(text: string): DetectedIntent {
     /\b(square root|cube root|factorial|logarithm|trigonometry|sin|cos|tan|equation|expectancy|expected value|win rate|loss rate|bankroll|kelly|risk of ruin|probability of ruin|trading strategy|r multiple|r-multiple|bayes|posterior|prevalence|sensitivity|specificity|queueing|m\/m\/\d+\+m|arrival rate|service rate|patience|hazard ratio|survival|kaplan[- ]meier|cox model|proportional hazards|value at risk|var|stress loss|beta\(|beta|coefficient|standard error|t-?stat|confidence interval|policy study|program evaluation|treatment lift|posterior mean response|difference-?in-?differences?|parallel trends|event study|instrumental variable|2sls|weak instrument|regression discontinuity|rdd|running variable|mccrary|black-?scholes|option pricing|implied vol|greeks|bond pricing|ytm|yield to maturity|duration|convexity|cvar|expected shortfall|tail risk|portfolio risk|insurance reserv|chain ladder|bornhuetter|ibnr|loss development|actuarial)\b/.test(t)
   ) return { type: "math", category: "math" };
 
+  if (looksLikeRealtimeResearch(t)) {
+    return { type: "research", category: "research" };
+  }
+
   // === EMAIL DRAFTING ===
   if (
     /\b(draft|write|compose|create|send)\s+(an?\s+)?(email|mail|message|reply|response|follow.?up)\b/.test(t) ||
@@ -3874,6 +3878,10 @@ function detectIntent(text: string): DetectedIntent {
     return { type: "math", category: "math" };
   }
 
+  if (looksLikeRealtimeResearch(t)) {
+    return { type: "research", category: "research" };
+  }
+
   if (
     /\b(physics|chemistry|biology|genetics|astronomy|ecology|geology|neuroscience|quantum|atom|molecule|cell|dna|rna|evolution|photosynthesis|thermodynamics|electromagnetism|relativity|gravity|force|energy|wave|particle)\b/.test(t)
     || /\b(periodic table|element|compound|reaction|enzyme|protein|virus|bacteria|planet|star|galaxy|black hole|solar system|climate change|ecosystem)\b/.test(t)
@@ -4005,16 +4013,32 @@ function normalizeResearchMarkdownForWhatsApp(reply: string): string {
 function buildNewsCoverageRecoveryReply(question: string): string {
   const q = question.trim().slice(0, 120);
   return [
-    `📰 *Latest Update Request: ${q}*`,
+    `*Latest Update Request:* ${q}`,
     "",
-    "I couldn’t verify enough reliable live sources for this exact query yet.",
+    "I could not verify enough reliable live sources for this exact query yet.",
     "",
     "Send one specific topic + location for a precise update:",
-    "• _India stock market news today_",
-    "• _Delhi weather today_",
-    "• _Latest AI policy news in US today_",
+    "- _India stock market news today_",
+    "- _Delhi weather today_",
+    "- _Latest AI policy news in US today_",
     "",
-    "I’ll return a clean, professional update.",
+    "I will return a clean, professional update.",
+  ].join("\n");
+}
+
+function buildLiveCoverageRecoveryReply(question: string): string {
+  const q = question.trim().slice(0, 120);
+  return [
+    `*Live Research Request:* ${q}`,
+    "",
+    "I could not verify enough reliable live sources for this exact wording yet.",
+    "",
+    "Send one precise query with scope + timeframe for a source-backed answer:",
+    "- _Top 10 richest people in the world as of 2026_",
+    "- _Current top 10 billionaire net worth ranking today_",
+    "- _Latest Bitcoin price and 24h change_",
+    "",
+    "I will return an accurate, up-to-date answer with live sources.",
   ].join("\n");
 }
 
@@ -4307,9 +4331,30 @@ export async function routeInboundAgentMessage(
     }
 
     case "research": {
+      const realtimeResearch = looksLikeRealtimeResearch(trimmed);
       const expertAnswer = await expertReply(userId, trimmed, "research");
       if (expertAnswer && !isVisibleFallbackReply(expertAnswer) && !isLowCoverageResearchReply(expertAnswer)) {
         return translateMessage(expertAnswer, locale);
+      }
+
+      if (realtimeResearch) {
+        if (expertAnswer && isLowCoverageResearchReply(expertAnswer)) {
+          return translateMessage(buildLiveCoverageRecoveryReply(trimmed), locale);
+        }
+
+        const history = await buildSmartHistory(userId, trimmed, "deep");
+        const grounded = await runGroundedResearchReply({
+          userId,
+          question: trimmed,
+          history,
+        }).catch(() => "");
+
+        const normalizedGrounded = grounded?.trim() ?? "";
+        if (normalizedGrounded && !isVisibleFallbackReply(normalizedGrounded) && !isLowCoverageResearchReply(normalizedGrounded)) {
+          return translateMessage(normalizeResearchMarkdownForWhatsApp(normalizedGrounded), locale);
+        }
+
+        return translateMessage(buildLiveCoverageRecoveryReply(trimmed), locale);
       }
 
       const reply = await smartReply(userId, trimmed, "research", responseMode, explicitMode);
@@ -4322,6 +4367,22 @@ export async function routeInboundAgentMessage(
     }
 
     default: {
+      if (looksLikeRealtimeResearch(trimmed)) {
+        const history = await buildSmartHistory(userId, trimmed, "deep");
+        const grounded = await runGroundedResearchReply({
+          userId,
+          question: trimmed,
+          history,
+        }).catch(() => "");
+
+        const normalizedGrounded = grounded?.trim() ?? "";
+        if (normalizedGrounded && !isVisibleFallbackReply(normalizedGrounded) && !isLowCoverageResearchReply(normalizedGrounded)) {
+          return translateMessage(normalizeResearchMarkdownForWhatsApp(normalizedGrounded), locale);
+        }
+
+        return translateMessage(buildLiveCoverageRecoveryReply(trimmed), locale);
+      }
+
       const reply = await smartReply(userId, trimmed, resolvedType, responseMode, explicitMode);
       return translateMessage(reply, locale);
     }

@@ -2437,10 +2437,42 @@ async function solveAnyExpertQuestion(input: {
 }
 
 export function looksLikeRealtimeResearch(question: string) {
-  return containsAny(question.toLowerCase(), [
-    /\b(latest|current|today|this week|this month|news|recent|now|live|as of|202[4-9])\b/,
-    /\b(stock|price|rate|market|trend)\b/,
+  const text = question.toLowerCase().trim();
+  if (!text) return false;
+
+  const explicitRealtimeSignals = containsAny(text, [
+    /\b(latest|current|today|tonight|this week|this month|this year|news|recent|now|live|as of|updated|right now|ongoing|breaking|happening)\b/,
+    /\b(stock|price|rate|market|trend|forecast|score|standings)\b/,
+    /\b(202[4-9]|203\d)\b/,
   ]);
+
+  if (explicitRealtimeSignals) {
+    return true;
+  }
+
+  const rankingOrVolatileFacts = containsAny(text, [
+    /\b(top\s*\d+|ranking|rankings|rank\b|leaderboard|list of)\b/,
+    /\b(richest|wealthiest|net worth|billionaire|millionaire|most valuable|market cap|largest|smallest|highest|lowest|most expensive|cheapest)\b/,
+    /\b(ceo of|president of|prime minister of|election result|winner|incumbent)\b/,
+    /\b(population|gdp|inflation|unemployment|exchange rate)\b/,
+  ]);
+
+  if (rankingOrVolatileFacts) {
+    return true;
+  }
+
+  const factualEntityLookup = containsAny(text, [
+    /^(who is|who are|who was|what is|what are|which is|which are|where is|when is|when was|when did|how many)\b/,
+    /\b(who is the|what is the|which is the|how many)\b/,
+  ]);
+
+  const stableAcademicOrCodingPrompt = containsAny(text, [
+    /\b(prove|proof|derive|derivative|integral|equation|theorem|formula)\b/,
+    /\b(code|coding|program|algorithm|data structure|debug|compile|syntax)\b/,
+    /\b(system design|architecture|schema|database|api)\b/,
+  ]);
+
+  return factualEntityLookup && !stableAcademicOrCodingPrompt;
 }
 
 function codingReviewHints(question: string) {
