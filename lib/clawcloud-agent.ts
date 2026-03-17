@@ -4457,7 +4457,15 @@ function parseReminder(text: string): { fireAt: string; reminderText: string } |
   }
 
   if (!fireAt) return null;
-  const rt = text.match(/\b(?:to|about|that|for)\s+(.+)/i)?.[1]?.trim() || text;
+
+  const toMatch = text.match(/\bto\s+(.+)/i)?.[1]?.trim();
+  const fallbackMatch = text.match(/\b(?:about|that|for)\s+(.+)/i)?.[1]?.trim();
+  let rt = toMatch || fallbackMatch || text;
+  rt = rt.replace(/^(tomorrow|today|tonight)\s+/i, "").trim();
+  if (!rt) {
+    rt = "Reminder";
+  }
+
   return { fireAt: fireAt.toISOString(), reminderText: rt };
 }
 
@@ -4656,7 +4664,29 @@ async function handleSaveContactCommand(
 
 export async function runClawCloudTask(input: RunTaskInput) {
   const db = getClawCloudSupabaseAdmin();
-  const task = await getTaskRow(input.userId, input.taskType);
+  let task = await getTaskRow(input.userId, input.taskType);
+  if (!task && input.taskType === "custom_reminder") {
+    const { data, error } = await db
+      .from("agent_tasks")
+      .upsert(
+        {
+          user_id: input.userId,
+          task_type: "custom_reminder",
+          is_enabled: true,
+          config: {},
+        },
+        { onConflict: "user_id,task_type" },
+      )
+      .select("*")
+      .single();
+
+    if (error || !data) {
+      throw new Error(error?.message || "Task custom_reminder not configured.");
+    }
+
+    task = data as AgentTaskRow;
+  }
+
   if (!task) throw new Error(`Task ${input.taskType} not configured.`);
   if (!input.bypassEnabledCheck && !task.is_enabled) throw new Error(`Task ${input.taskType} disabled.`);
 
