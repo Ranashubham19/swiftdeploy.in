@@ -108,7 +108,7 @@ export function parseSaveContactCommand(text: string): { name: string; phone: st
 export function parseSendMessageCommand(
   text: string,
 ): { contactName: string; message: string } | null {
-  const t = text.trim();
+  const t = text.trim().replace(/^ok\s+/i, "").trim();
 
   const p1 = t.match(
     /^(?:send\s+(?:a\s+)?(?:message|msg|whatsapp|wa)\s+to|message|whatsapp|wa)\s+([a-zA-Z\u0900-\u097F\s]{1,30}?)[\s:,]+(.+)$/i,
@@ -116,14 +116,29 @@ export function parseSendMessageCommand(
   if (p1) return { contactName: p1[1].trim(), message: p1[2].trim() };
 
   const p2 = t.match(
-    /^tell\s+([a-zA-Z\u0900-\u097F\s]{1,25}?)\s+(?:that\s+)?(.+)$/i,
+    /^(?:write|send)\s+(?:a\s+)?(?:message|msg)\s+to\s+([a-zA-Z\u0900-\u097F][a-zA-Z\u0900-\u097F\s]{0,30}?)\s+(?:say(?:ing)?|that)\s+(.{2,})$/i,
   );
   if (p2) return { contactName: p2[1].trim(), message: p2[2].trim() };
 
   const p3 = t.match(
-    /^send\s+(.+?)\s+to\s+([a-zA-Z\u0900-\u097F\s]{1,25})$/i,
+    /^(?:message|msg|whatsapp|wa)\s+([a-zA-Z\u0900-\u097F][a-zA-Z\u0900-\u097F\s]{0,30}?)[\s:,]+(.{2,})$/i,
   );
-  if (p3) return { contactName: p3[2].trim(), message: p3[1].trim() };
+  if (p3) return { contactName: p3[1].trim(), message: p3[2].trim() };
+
+  const p4 = t.match(
+    /^tell\s+([a-zA-Z\u0900-\u097F\s]{1,25}?)\s+(?:that\s+)?(.+)$/i,
+  );
+  if (p4) return { contactName: p4[1].trim(), message: p4[2].trim() };
+
+  const p5 = t.match(
+    /^send\s+(good\s+(?:morning|night|evening|afternoon)|hello|hi|bye|take care)\s+(?:to\s+)?([a-zA-Z\u0900-\u097F][a-zA-Z\u0900-\u097F\s]{1,25})$/i,
+  );
+  if (p5) return { contactName: p5[2].trim(), message: p5[1].trim() };
+
+  const p6 = t.match(
+    /^send\s+(.{2,60}?)\s+to\s+([a-zA-Z\u0900-\u097F\s]{1,25})$/i,
+  );
+  if (p6) return { contactName: p6[2].trim(), message: p6[1].trim() };
 
   return null;
 }

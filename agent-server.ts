@@ -322,32 +322,47 @@ async function discardSession(
 }
 
 function splitIntoStreamChunks(text: string): string[] {
-  const chunks: string[] = [];
-  const sections = text.split(/\n\n+/);
+  const normalized = text.replace(/\n{3,}/g, "\n\n").trim();
+  if (!normalized) {
+    return [];
+  }
 
+  const codeBlocks: string[] = [];
+  const withPlaceholders = normalized.replace(/```[\s\S]*?```/g, (match) => {
+    codeBlocks.push(match.trim());
+    return `___CODE_BLOCK_${codeBlocks.length - 1}___`;
+  });
+
+  const chunks: string[] = [];
+  const sections = withPlaceholders.split(/\n\n+/);
   for (const section of sections) {
     const trimmed = section.trim();
-    if (!trimmed) {
+    if (!trimmed) continue;
+
+    if (/^___CODE_BLOCK_\d+___$/.test(trimmed)) {
+      const idx = Number.parseInt(trimmed.match(/\d+/)?.[0] ?? "-1", 10);
+      if (idx >= 0 && codeBlocks[idx]) {
+        chunks.push(codeBlocks[idx]);
+      }
       continue;
     }
 
-    if (trimmed.length <= 120) {
+    if (trimmed.length <= 220) {
       chunks.push(trimmed);
       continue;
     }
 
     const sentences = trimmed.split(/(?<=[.!?])\s+/);
     let current = "";
-
     for (const sentence of sentences) {
-      if ((current + " " + sentence).length > 160 && current) {
+      const candidate = current ? `${current} ${sentence}` : sentence;
+      if (candidate.length > 260 && current) {
         chunks.push(current.trim());
         current = sentence;
       } else {
-        current = current ? `${current} ${sentence}` : sentence;
+        current = candidate;
       }
     }
-
     if (current.trim()) {
       chunks.push(current.trim());
     }
@@ -357,18 +372,34 @@ function splitIntoStreamChunks(text: string): string[] {
 }
 
 function chunkDelay(chunk: string) {
+  if (chunk.startsWith("```")) {
+    return Math.min(600 + chunk.length * 2, 3_000);
+  }
   const words = chunk.split(/\s+/).length;
-  return Math.min(400 + words * 60, 1_200);
+  return Math.min(500 + words * 55, 1_800);
+}
+
+function initialTypingDelay(text: string) {
+  const len = text.length;
+  if (len < 80) return 700;
+  if (len < 300) return 1_100;
+  if (len < 800) return 1_600;
+  return 2_000;
 }
 
 async function sendStreamingMessage(sock: WASocket, jid: string, fullText: string) {
-  const chunks = splitIntoStreamChunks(fullText);
+  const trimmed = fullText.replace(/\n{3,}/g, "\n\n").trim();
+  const chunks = splitIntoStreamChunks(trimmed);
+
+  await sock.sendPresenceUpdate("composing", jid).catch(() => null);
+  await new Promise((resolve) => setTimeout(resolve, initialTypingDelay(trimmed)));
 
   if (chunks.length <= 1) {
-    const sent = await sock.sendMessage(jid, { text: fullText.trim() });
+    const sent = await sock.sendMessage(jid, { text: trimmed });
     if (sent?.key?.id) {
       outboundIds.add(sent.key.id);
     }
+    await sock.sendPresenceUpdate("paused", jid).catch(() => null);
     return;
   }
 
@@ -382,7 +413,7 @@ async function sendStreamingMessage(sock: WASocket, jid: string, fullText: strin
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
 
-    const sent = await sock.sendMessage(jid, { text: index === 0 ? chunk : chunk });
+    const sent = await sock.sendMessage(jid, { text: chunk });
     if (sent?.key?.id) {
       outboundIds.add(sent.key.id);
     }

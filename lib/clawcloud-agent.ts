@@ -55,6 +55,7 @@ import {
   listContactsFormatted,
   saveContact,
 } from "@/lib/clawcloud-contacts";
+import { getWeather, parseWeatherCity } from "@/lib/clawcloud-weather";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -3657,6 +3658,7 @@ function detectIntentLegacy(text: string): DetectedIntent {
 
   if (
     /^(?:send\s+(?:a\s+)?(?:message|msg|whatsapp|wa)\s+to|message|whatsapp|wa)\s+[a-zA-Z\u0900-\u097F]/i.test(t)
+    || /^(?:write|send)\s+(?:a\s+)?(?:message|msg)\s+to\s+[a-zA-Z\u0900-\u097F]/i.test(t)
     || /^tell\s+[a-zA-Z\u0900-\u097F]{2,}\s+/i.test(t)
     || /^send\s+.+\s+to\s+[a-zA-Z\u0900-\u097F]{2,}$/i.test(t)
   ) {
@@ -3670,6 +3672,13 @@ function detectIntentLegacy(text: string): DetectedIntent {
     || t === "contacts"
   ) {
     return { type: "save_contact", category: "save_contact" };
+  }
+
+  if (
+    parseWeatherCity(t)
+    || /\b(weather|temperature|temp|forecast|rain|humidity|wind|aqi|climate)\b/.test(t)
+  ) {
+    return { type: "research", category: "weather" };
   }
 
   if (looksLikeReminderStatusQuestion(t)) {
@@ -3768,6 +3777,7 @@ function detectIntent(text: string): DetectedIntent {
 
   if (
     /^(?:send\s+(?:a\s+)?(?:message|msg|whatsapp|wa)\s+to|message|whatsapp|wa)\s+[a-zA-Z\u0900-\u097F]/i.test(t)
+    || /^(?:write|send)\s+(?:a\s+)?(?:message|msg)\s+to\s+[a-zA-Z\u0900-\u097F]/i.test(t)
     || /^tell\s+[a-zA-Z\u0900-\u097F]{2,}\s+/i.test(t)
     || /^send\s+.+\s+to\s+[a-zA-Z\u0900-\u097F]{2,}$/i.test(t)
   ) {
@@ -3781,6 +3791,13 @@ function detectIntent(text: string): DetectedIntent {
     || t === "contacts"
   ) {
     return { type: "save_contact", category: "save_contact" };
+  }
+
+  if (
+    parseWeatherCity(t)
+    || /\b(weather|temperature|temp|forecast|rain|humidity|wind|aqi|climate)\b/.test(t)
+  ) {
+    return { type: "research", category: "weather" };
   }
 
   if (looksLikeReminderStatusQuestion(t)) {
@@ -4119,6 +4136,10 @@ export async function routeInboundAgentMessage(
 
     case "save_contact": {
       return handleSaveContactCommand(userId, trimmed, locale);
+    }
+
+    case "weather": {
+      return handleWeatherQuery(userId, trimmed, locale);
     }
 
     case "spending": {
@@ -4566,6 +4587,37 @@ async function runCustomReminder(userId: string, userMessage: string | null | un
 }
 
 // ─── runClawCloudTask ─────────────────────────────────────────────────────────
+
+async function handleWeatherQuery(
+  userId: string,
+  text: string,
+  locale: SupportedLocale,
+): Promise<string> {
+  const city = parseWeatherCity(text);
+  if (!city) {
+    return translateMessage(
+      [
+        "🌦️ *Weather Update*",
+        "",
+        "Tell me the city name, for example:",
+        "• _Weather in Delhi_",
+        "• _Temperature in Chandigarh now_",
+      ].join("\n"),
+      locale,
+    );
+  }
+
+  const weather = await getWeather(city);
+  if (weather) {
+    await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+    return translateMessage(weather, locale);
+  }
+
+  return translateMessage(
+    `🌦️ *Weather for ${city}*\n\nI could not fetch live weather right now. Please try again in a moment.`,
+    locale,
+  );
+}
 
 async function handleSendMessageToContact(
   userId: string,
