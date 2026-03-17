@@ -477,6 +477,45 @@ function jidFromPhone(phone: string | null | undefined) {
   return digits ? `${digits}@s.whatsapp.net` : null;
 }
 
+function isDirectChatJid(jid: string) {
+  return /@s\.whatsapp\.net$/i.test(jid);
+}
+
+function isIgnoredChatJid(jid: string) {
+  const value = jid.toLowerCase();
+  return (
+    value === "status@broadcast"
+    || value.endsWith("@broadcast")
+    || value.endsWith("@newsletter")
+    || value.endsWith("@g.us")
+  );
+}
+
+function toReplyableJid(jid: string | null | undefined) {
+  const value = String(jid ?? "").trim();
+  if (!value) return null;
+  if (isIgnoredChatJid(value)) return null;
+  if (!isDirectChatJid(value)) return null;
+  return value;
+}
+
+function resolveReplyJid(
+  session: SessionRecord,
+  targetJid?: string | null,
+) {
+  const candidate = toReplyableJid(targetJid);
+  if (candidate) {
+    return candidate;
+  }
+
+  const remembered = toReplyableJid(session.lastChatJid);
+  if (remembered) {
+    return remembered;
+  }
+
+  return jidFromPhone(session.phone);
+}
+
 async function loadPreferredChatJid(userId: string) {
   const { data } = await db()
     .from("connected_accounts")
@@ -494,7 +533,7 @@ async function persistPreferredChatTarget(
   sessionPhone: string | null,
   remoteJid: string | null,
 ) {
-  const remotePhone = phoneFromJid(remoteJid);
+  const remotePhone = phoneFromJid(toReplyableJid(remoteJid));
   const linkedPhone = normalizePhone(sessionPhone);
 
   if (!remotePhone || !linkedPhone || remotePhone === linkedPhone) {
@@ -767,7 +806,11 @@ async function sendReply(
     return false;
   }
 
-  const jid = targetJid || session.lastChatJid || `${session.phone}@s.whatsapp.net`;
+  const jid = resolveReplyJid(session, targetJid);
+  if (!jid) {
+    return false;
+  }
+
   const cleaned = message.replace(/\n{3,}/g, "\n\n").trim();
 
   if (cleaned.length >= STREAM_REPLY_MIN_LENGTH) {
@@ -889,16 +932,17 @@ async function handleInbound(
     .catch(() => null);
 
   const session = sessions.get(userId);
-  if (session && remoteJid) {
-    session.lastChatJid = remoteJid;
+  const safeRemoteJid = toReplyableJid(remoteJid);
+
+  if (session && safeRemoteJid) {
+    session.lastChatJid = safeRemoteJid;
     sessions.set(userId, session);
-    void persistPreferredChatTarget(userId, session.phone, remoteJid);
+    void persistPreferredChatTarget(userId, session.phone, safeRemoteJid);
   }
 
   const jid =
-    remoteJid ||
-    session?.lastChatJid ||
-    (session?.phone ? `${session.phone}@s.whatsapp.net` : null);
+    safeRemoteJid ||
+    (session ? resolveReplyJid(session) : null);
 
   if (jid && session) {
     void session.sock.sendPresenceUpdate("composing", jid).catch(() => null);
@@ -1101,6 +1145,9 @@ async function connectSession(userId: string): Promise<SessionRecord> {
         return;
       }
 
+      const remoteJid = message.key.remoteJid ?? null;
+      const safeRemoteJid = toReplyableJid(remoteJid);
+
       const messageId = message.key.id ?? "";
       if (messageId && outboundIds.has(messageId)) {
         outboundIds.delete(messageId);
@@ -1108,6 +1155,10 @@ async function connectSession(userId: string): Promise<SessionRecord> {
       }
 
       if (message.key.fromMe && !isSelfChat(message, current)) {
+        continue;
+      }
+
+      if (!message.key.fromMe && !safeRemoteJid) {
         continue;
       }
 
@@ -1132,7 +1183,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
       }
 
       console.log(`[agent] Inbound from ${userId}: "${text.slice(0, 80)}"`);
-      await handleInbound(userId, text, message.key.id ?? null, message.key.remoteJid ?? null);
+      await handleInbound(userId, text, message.key.id ?? null, safeRemoteJid);
     }
   });
 
@@ -1326,9 +1377,10 @@ app.post("/wa/send-user/:userId", auth, async (req, res) => {
     return;
   }
 
+  const session = sessions.get(userId) ?? null;
   res.json({
     success: true,
-    target: sessions.get(userId)?.lastChatJid || sessions.get(userId)?.phone || null,
+    target: session ? resolveReplyJid(session) : null,
   });
 });
 
