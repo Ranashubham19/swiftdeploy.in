@@ -4184,9 +4184,20 @@ export async function routeInboundAgentMessage(
         hour: "2-digit",
         minute: "2-digit",
       });
-      runTaskFireAndForget(userId, "custom_reminder", trimmed, locale, "Reminder");
+      await getClawCloudSupabaseAdmin().from("agent_tasks").upsert({
+        user_id: userId,
+        task_type: "custom_reminder",
+        is_enabled: true,
+        config: {
+          reminder_text: parsed.reminderText,
+          fire_at: parsed.fireAt,
+          one_time: true,
+          source_message: trimmed,
+        },
+      }, { onConflict: "user_id,task_type" });
+      await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
       return translateMessage(
-        `✅ *Reminder noted.*\n\n📌 *Task:* ${parsed.reminderText}\n⏰ *When:* ${when}`,
+        `✅ *Reminder set.*\n\n📌 *Task:* ${parsed.reminderText}\n⏰ *When:* ${when}\n\nI'll ping you here when it's due.`,
         locale,
       );
     }
