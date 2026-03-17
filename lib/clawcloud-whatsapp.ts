@@ -1,20 +1,8 @@
 import { env } from "@/lib/env";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 
-const DEFAULT_PRODUCTION_AGENT_SERVER_URL = "https://swiftdeployin-production-d5fc.up.railway.app";
-const LEGACY_AGENT_SERVER_URLS = new Set([
-  "https://swiftdeployin-production.up.railway.app",
-]);
-
 function normalizeAgentServerUrl(url: string) {
-  const trimmed = url.trim().replace(/\/+$/, "");
-  if (!trimmed) return "";
-
-  if (LEGACY_AGENT_SERVER_URLS.has(trimmed)) {
-    return DEFAULT_PRODUCTION_AGENT_SERVER_URL;
-  }
-
-  return trimmed;
+  return url.trim().replace(/\/+$/, "");
 }
 
 function getAgentServerBaseUrl() {
@@ -28,17 +16,14 @@ function getAgentServerBaseUrl() {
     return backendApi;
   }
 
-  // Keep the QR flow alive even if Vercel is missing the explicit agent URL.
-  if (env.NEXT_PUBLIC_APP_URL === "https://swift-deploy.in") {
-    return DEFAULT_PRODUCTION_AGENT_SERVER_URL;
-  }
-
   return "";
 }
 
 function assertAgentServerConfigured() {
   if (!getAgentServerBaseUrl() || !env.AGENT_SECRET) {
-    throw new Error("WhatsApp agent server requires AGENT_SERVER_URL and AGENT_SECRET.");
+    throw new Error(
+      "WhatsApp agent server requires AGENT_SERVER_URL (or BACKEND_API_URL) and AGENT_SECRET.",
+    );
   }
 }
 
