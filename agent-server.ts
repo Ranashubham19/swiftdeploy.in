@@ -519,11 +519,16 @@ function resolveReplyJid(
 async function loadPreferredChatJid(userId: string) {
   const { data } = await db()
     .from("connected_accounts")
-    .select("account_email")
+    .select("phone_number,account_email")
     .eq("user_id", userId)
     .eq("provider", "whatsapp")
     .maybeSingle()
     .catch(() => ({ data: null }));
+
+  const linkedPhoneJid = jidFromPhone(data?.phone_number);
+  if (linkedPhoneJid) {
+    return linkedPhoneJid;
+  }
 
   return jidFromPhone(data?.account_email);
 }
@@ -536,7 +541,12 @@ async function persistPreferredChatTarget(
   const remotePhone = phoneFromJid(toReplyableJid(remoteJid));
   const linkedPhone = normalizePhone(sessionPhone);
 
-  if (!remotePhone || !linkedPhone || remotePhone === linkedPhone) {
+  if (!linkedPhone) {
+    return;
+  }
+
+  // Keep WhatsApp assistant replies anchored to the owner's own chat.
+  if (!remotePhone || remotePhone !== linkedPhone) {
     return;
   }
 
@@ -1103,6 +1113,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
             user_id: userId,
             provider: "whatsapp",
             phone_number: phone,
+            account_email: phone,
             display_name: sock.user?.name || phone,
             is_active: true,
             connected_at: new Date().toISOString(),
@@ -1110,6 +1121,9 @@ async function connectSession(userId: string): Promise<SessionRecord> {
           { onConflict: "user_id,provider" },
         )
         .catch(() => null);
+
+      current.lastChatJid = jidFromPhone(phone);
+      sessions.set(userId, current);
 
       if (phone && sendWelcomeNow) {
         await sendWelcome(sock, phone);
