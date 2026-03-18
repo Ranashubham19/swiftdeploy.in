@@ -457,6 +457,19 @@ export function formatFinanceReply(result: FinanceResult): string {
     minute: "2-digit",
     hour12: true,
   });
+  const fetchedAt = new Date();
+  const fetchedTime = fetchedAt.toLocaleTimeString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
+  const fetchedDate = fetchedAt.toLocaleDateString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
   const currencySymbol = symbolForCurrency(result.currency);
 
   const lines: string[] = [
@@ -491,7 +504,8 @@ export function formatFinanceReply(result: FinanceResult): string {
   }
 
   lines.push(`\u{1F4E1} _Live data as of ${asOf} IST - ${result.source}_`);
-  lines.push("\u26A0\uFE0F _Not financial advice. Verify before trading._");
+  lines.push(`_Data fetched: ${fetchedTime} IST, ${fetchedDate}_`);
+  lines.push("\u26A0\uFE0F _Not financial advice. Verify on NSE/BSE or other official sources before any financial decision._");
   return lines.join("\n");
 }
 

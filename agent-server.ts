@@ -1488,7 +1488,14 @@ async function connectSession(userId: string): Promise<SessionRecord> {
         } else {
           await sendReply(
             userId,
-            "I received your image, but image understanding is not configured yet. Add a vision provider to enable image analysis.",
+            [
+              "🖼️ *Image received!*",
+              "",
+              "Image analysis isn't set up yet on this account.",
+              "To enable it, visit *swift-deploy.in/settings* and connect a vision provider.",
+              "",
+              "_Tip: You can also describe the image in text and I'll help you from there._",
+            ].join("\n"),
             replyTargetJid,
           );
           mediaHandled = true;
@@ -1571,7 +1578,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
             } else {
               await sendReply(
                 userId,
-                `I received *${fileName}* but couldn't extract text from it. Supported formats are PDF, DOCX, TXT, CSV, Markdown, and JSON.`,
+                `I received *${fileName}* but couldn't extract text from it. Supported formats are PDF, DOCX, XLSX, TXT, CSV, Markdown, and JSON.`,
                 replyTargetJid,
               );
               mediaHandled = true;
@@ -1587,11 +1594,99 @@ async function connectSession(userId: string): Promise<SessionRecord> {
         } else {
           await sendReply(
             userId,
-            `I received *${fileName}* but that file type is not supported yet.\n\nSupported formats: PDF, DOCX, TXT, CSV, Markdown, and JSON.`,
+            `I received *${fileName}* but that file type is not supported yet.\n\nSupported formats: *PDF, DOCX, XLSX, TXT, CSV, Markdown, and JSON.*`,
             replyTargetJid,
           );
           mediaHandled = true;
         }
+      }
+
+      if (!text && !mediaHandled && message.message?.videoMessage) {
+        const caption = message.message.videoMessage.caption?.trim() ?? "";
+        if (caption) {
+          text = caption;
+        } else {
+          await sendReply(
+            userId,
+            [
+              "🎥 *Video received!*",
+              "",
+              "I can't process video files yet, but I'm working on it.",
+              "",
+              "In the meantime, you can:",
+              "• Send me the *audio only* as a voice note - I'll transcribe it",
+              "• *Type your question* and I'll answer immediately",
+              "• Share a *YouTube link* and I'll summarise the video for you",
+            ].join("\n"),
+            replyTargetJid,
+          );
+          mediaHandled = true;
+        }
+      }
+
+      if (!text && !mediaHandled && message.message?.locationMessage) {
+        const loc = message.message.locationMessage;
+        const lat = loc.degreesLatitude ?? 0;
+        const lng = loc.degreesLongitude ?? 0;
+        const name = loc.name?.trim() ?? "";
+        const address = loc.address?.trim() ?? "";
+        const locationLabel = name || address || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+
+        text = `Tell me about this location and what's nearby: ${locationLabel}. Coordinates: ${lat}, ${lng}. Give me the weather, nearby landmarks, and any useful local information.`;
+      }
+
+      if (!text && !mediaHandled && message.message?.stickerMessage) {
+        await sendReply(
+          userId,
+          [
+            "😄 *Sticker received!*",
+            "",
+            "I can't view stickers, but I love the energy.",
+            "What can I help you with today?",
+          ].join("\n"),
+          replyTargetJid,
+        );
+        mediaHandled = true;
+      }
+
+      if (!text && !mediaHandled && message.message?.contactMessage) {
+        const contact = message.message.contactMessage;
+        const displayName = contact.displayName?.trim() || "Unknown";
+        const vcard = contact.vcard ?? "";
+        const phoneMatch = vcard.match(/TEL[^:]*:([+\d\s\-().]+)/);
+        const phone = phoneMatch?.[1]?.replace(/[^\d+]/g, "").trim() ?? "";
+
+        if (phone) {
+          text = `Save contact: ${displayName} = ${phone}`;
+        } else {
+          await sendReply(
+            userId,
+            [
+              `👤 *Contact received: ${displayName}*`,
+              "",
+              "I couldn't extract a phone number from this contact card.",
+              "You can save contacts manually by typing:",
+              `_Save ${displayName} as +91XXXXXXXXXX_`,
+            ].join("\n"),
+            replyTargetJid,
+          );
+          mediaHandled = true;
+        }
+      }
+
+      if (!text && !mediaHandled && message.message?.reactionMessage) {
+        const emoji = message.message.reactionMessage.text ?? "";
+        const positiveReactions = ["👍", "❤️", "🔥", "😍", "👏", "🙏", "💯", "✅", "😊", "🤩"];
+
+        if (positiveReactions.includes(emoji)) {
+          await sendReply(
+            userId,
+            "Glad that was helpful! 😊 What else can I help you with?",
+            replyTargetJid,
+          );
+        }
+
+        mediaHandled = true;
       }
 
       if (mediaHandled) {

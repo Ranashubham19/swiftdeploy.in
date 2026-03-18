@@ -1253,8 +1253,22 @@ function isProbablyIncompleteReply(message: string, intent: IntentType, reply: s
   if (message.length > 100 && value.length < 80 && intent !== "greeting") {
     return true;
   }
-  if (intent === "math" && message.length > 80 && !/\*Final Answer:/i.test(value)) {
-    return true;
+  if (intent === "math" && message.length > 80) {
+    const cleanValue = value.replace(/[*_`]/g, "").trim();
+    const hasMathConclusion =
+      /\*Final Answer:/i.test(value)
+      || /\bthe answer is\b/i.test(cleanValue)
+      || /\btherefore[,:]?\s/i.test(cleanValue)
+      || /\bhence[,:]?\s/i.test(cleanValue)
+      || /\bthus[,:]?\s/i.test(cleanValue)
+      || /∴/.test(cleanValue)
+      || /=\s*[-\d,.]+\s*(%|km|m|s|kg|n|j|w|v|a|°|₹|\$|€|£)?(?:\s|$)/i.test(cleanValue)
+      || /≈\s*[-\d,.]+/.test(cleanValue)
+      || /\b\d+(\.\d+)?\s*$/.test(cleanValue);
+
+    if (!hasMathConclusion) {
+      return true;
+    }
   }
   if ((intent === "coding" || intent === "math" || intent === "research") && /[A-Za-z0-9]$/.test(value) && !/[.!?`*)\]]$/.test(value)) {
     return true;
@@ -4500,10 +4514,31 @@ function buildHelpMessage(): string {
     "• Send a voice note and I'll transcribe and respond",
     "",
     "━━━ 📄 *Documents* ━━━",
-    "• Send a PDF or Word document and I'll summarize or answer questions",
+    "• Send a PDF, Word, or Excel file and I'll summarize or answer questions",
     "",
     "━━━ 🌐 *Translate* ━━━",
     "• _Translate this to Hindi: Good morning, how are you?_",
+    "",
+    "━━━ ⚡ *Power tips* ━━━",
+    "• Start with *deep:* for a detailed, expert-level answer",
+    "  _Example: deep: explain how transformers work in AI_",
+    "• Start with *quick:* for a fast, concise answer",
+    "  _Example: quick: what is GST?_",
+    "• Send a *PDF, DOCX, XLSX, or TXT* file - I'll read and answer questions about it",
+    "• Send a *voice note* - I'll transcribe and respond to it",
+    "• Send an *image* - I'll describe it or answer questions about it",
+    "",
+    "━━━ 🧠 *Memory commands* ━━━",
+    "• _My name is Rahul_ - I'll remember it forever",
+    "• _I work as a software engineer_ - saved to your profile",
+    "• _Show my profile_ - see everything I know about you",
+    "• _Forget my name_ - remove a specific fact",
+    "• _Clear my memory_ - start fresh",
+    "",
+    "━━━ 💳 *Account* ━━━",
+    "• _What plan am I on?_ - check your subscription",
+    "• _Upgrade to pro_ - unlock unlimited runs",
+    "• Manage everything at *swift-deploy.in*",
     "",
     "Need help with something specific? Just ask naturally.",
   ].join("\n");

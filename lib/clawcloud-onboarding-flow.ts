@@ -48,6 +48,9 @@ const LANGUAGE_MAP: Record<string, { locale: SupportedLocale; label: string }> =
   ko: { locale: "ko", label: "Korean" },
   chinese: { locale: "zh", label: "Chinese" },
   zh: { locale: "zh", label: "Chinese" },
+  punjabi: { locale: "pa", label: "Punjabi" },
+  pa: { locale: "pa", label: "Punjabi" },
+  "ਪੰਜਾਬੀ": { locale: "pa", label: "Punjabi" },
 };
 
 function capitalizeWords(value: string): string {
@@ -83,7 +86,7 @@ function step3Message(city: string): string {
     `Got it - *${city}* ✅`,
     "",
     "*What language do you prefer?*",
-    "Reply with something like: *English*, *Hindi*, or *other: Spanish*.",
+    "Reply with something like: *English*, *Hindi*, *Punjabi*, or *other: Spanish*.",
   ].join("\n");
 }
 

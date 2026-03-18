@@ -2,7 +2,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Document text extraction for WhatsApp file attachments.
 //
-// Supports: PDF, DOCX, DOC, TXT, CSV
+// Supports: PDF, DOCX, DOC, XLSX, XLS, TXT, CSV, JSON
 // Called from agent-server.ts when Baileys delivers a documentMessage.
 //
 // Uses pdfjs-dist for PDF and mammoth for DOCX — both are already in your
@@ -22,6 +22,71 @@ export type DocExtractResult = {
   fileName: string;
   truncated: boolean;
 };
+
+async function extractXlsx(
+  buffer: Buffer,
+  mimeType: string,
+  fileName: string,
+): Promise<DocExtractResult | null> {
+  try {
+    const xlsxModule = await import("xlsx") as typeof import("xlsx") & {
+      default?: typeof import("xlsx");
+    };
+    const XLSX = xlsxModule.default ?? xlsxModule;
+    const workbook = XLSX.read(buffer, { type: "buffer" });
+    const textParts: string[] = [];
+    let totalChars = 0;
+    let truncated = false;
+
+    for (const sheetName of workbook.SheetNames) {
+      const sheet = workbook.Sheets[sheetName];
+      if (!sheet) {
+        continue;
+      }
+
+      const csv = XLSX.utils.sheet_to_csv(sheet, { blankrows: false }).trim();
+      if (!csv) {
+        continue;
+      }
+
+      const sheetText = `[Sheet: ${sheetName}]\n${csv}`;
+      const separatorLength = textParts.length > 0 ? 2 : 0;
+      const remainingChars = MAX_EXTRACT_CHARS - totalChars - separatorLength;
+
+      if (remainingChars <= 0) {
+        truncated = true;
+        break;
+      }
+
+      if (sheetText.length > remainingChars) {
+        textParts.push(sheetText.slice(0, remainingChars));
+        truncated = true;
+        break;
+      }
+
+      textParts.push(sheetText);
+      totalChars += sheetText.length + separatorLength;
+    }
+
+    const finalText = textParts.join("\n\n").trim();
+
+    if (!finalText) {
+      console.warn("[docs] Excel file appears empty");
+      return null;
+    }
+
+    console.log(
+      `[docs] Excel extracted: ${workbook.SheetNames.length} sheets, ${finalText.length} chars`,
+    );
+    return { text: finalText, mimeType, fileName, truncated };
+  } catch (error) {
+    console.error(
+      "[docs] Excel extraction failed:",
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  }
+}
 
 /**
  * Extract readable text from a document buffer.
@@ -66,6 +131,15 @@ export async function extractDocumentText(
       return await extractDocx(buffer, mimeType, fileName);
     }
 
+    if (
+      lower.includes("xlsx") ||
+      lower.includes("xls") ||
+      lower.includes("spreadsheetml") ||
+      lower.includes("ms-excel")
+    ) {
+      return await extractXlsx(buffer, mimeType, fileName);
+    }
+
     // ── Plain text / CSV / Markdown ──────────────────────────────────────────
     if (
       lower.includes("text/") ||
@@ -98,10 +172,15 @@ export function isSupportedDocument(mimeType: string, fileName: string): boolean
     lower.includes("docx") ||
     lower.includes("msword") ||
     lower.includes("officedocument.wordprocessingml") ||
+    lower.includes("spreadsheetml") ||
+    lower.includes("ms-excel") ||
     lower.includes("text/plain") ||
     lower.includes(".txt") ||
     lower.includes(".csv") ||
-    lower.includes(".md")
+    lower.includes(".md") ||
+    lower.includes(".json") ||
+    lower.includes(".xlsx") ||
+    lower.includes(".xls")
   );
 }
 

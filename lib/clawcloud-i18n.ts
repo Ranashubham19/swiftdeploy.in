@@ -19,7 +19,8 @@ export type SupportedLocale =
   | "ru"
   | "ja"
   | "ko"
-  | "zh";
+  | "zh"
+  | "pa";
 
 const localeNames: Record<SupportedLocale, string> = {
   en: "English",
@@ -40,6 +41,7 @@ const localeNames: Record<SupportedLocale, string> = {
   ja: "Japanese",
   ko: "Korean",
   zh: "Chinese (Simplified)",
+  pa: "Punjabi",
 };
 
 const tldLocaleMap: Record<string, SupportedLocale> = {
