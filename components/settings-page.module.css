@@ -593,6 +593,31 @@
   border-top: 1px solid var(--border);
 }
 
+.integrationBanner {
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--accentbr);
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, rgba(255, 77, 77, 0.12), rgba(255, 179, 71, 0.08));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.integrationBannerTitle {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.integrationBannerText {
+  margin-top: 4px;
+  color: var(--text2);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
 .integrationIcon {
   width: 36px;
   flex-shrink: 0;
@@ -866,6 +891,7 @@
 
   .notificationRow,
   .integrationRow,
+  .integrationBanner,
   .toggleField,
   .dangerRow,
   .planHeader,

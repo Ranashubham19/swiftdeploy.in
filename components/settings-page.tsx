@@ -348,6 +348,23 @@ export function SettingsPage({ config }: SettingsPageProps) {
                     Manage the services your agent has access to
                   </div>
                 </div>
+                <div className={styles.integrationBanner}>
+                  <div>
+                    <div className={styles.integrationBannerTitle}>
+                      Reconnect Google to enable Drive & Sheets
+                    </div>
+                    <div className={styles.integrationBannerText}>
+                      Existing Google connections need the new Drive and Sheets scopes before file read/write works.
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className={styles.secondaryButton}
+                    onClick={() => showToast("Reconnect Google to grant Drive & Sheets access")}
+                  >
+                    Reconnect Google
+                  </button>
+                </div>
                 <div className={styles.card}>
                   {integrations.map((item) => (
                     <div key={item.name} className={styles.integrationRow}>

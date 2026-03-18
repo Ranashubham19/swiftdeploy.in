@@ -31,6 +31,7 @@ import {
   isSupportedDocument,
 } from "./lib/clawcloud-docs";
 import { handleUrlMessage, hasUrlIntent } from "./lib/clawcloud-url-reader";
+import { detectCodeRunIntent, runUserCode } from "./lib/clawcloud-code-runner";
 import {
   getActiveOnboardingState,
   handleOnboardingReply,
@@ -1850,6 +1851,20 @@ async function connectSession(userId: string): Promise<SessionRecord> {
         const urlReply = await handleUrlMessage(text).catch(() => null);
         if (urlReply) {
           await sendReply(userId, urlReply, replyTargetJid);
+          continue;
+        }
+      }
+
+      if (text && detectCodeRunIntent(text)) {
+        const session = sessions.get(userId);
+        const jid = session ? resolveReplyJid(session, replyTargetJid) : null;
+        if (jid && session) {
+          await session.sock.sendPresenceUpdate("composing", jid).catch(() => null);
+        }
+
+        const codeReply = await runUserCode(text).catch(() => null);
+        if (codeReply) {
+          await sendReply(userId, codeReply, replyTargetJid);
           continue;
         }
       }

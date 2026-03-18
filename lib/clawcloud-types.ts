@@ -14,6 +14,7 @@ export type ClawCloudTaskType =
 export type ClawCloudProvider =
   | "gmail"
   | "google_calendar"
+  | "google_drive"
   | "whatsapp"
   | "telegram"
   | "slack";

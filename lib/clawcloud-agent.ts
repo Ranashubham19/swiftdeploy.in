@@ -38,6 +38,7 @@ import {
   detectIndianStockQuery,
   detectTrainIntent,
 } from "@/lib/clawcloud-india-live";
+import { detectDriveIntent, handleDriveQuery } from "@/lib/clawcloud-drive";
 import {
   buildHinglishSystemSnippet,
   detectHinglish,
@@ -45,6 +46,8 @@ import {
 } from "@/lib/clawcloud-hinglish";
 import { answerTaxQuery, detectTaxQuery } from "@/lib/clawcloud-tax";
 import { answerHolidayQuery, detectHolidayQuery } from "@/lib/clawcloud-holidays";
+import { detectBillingIntent, handleBillingCommand } from "@/lib/clawcloud-billing-wa";
+import { detectCommandIntent, handleCustomCommand } from "@/lib/clawcloud-custom-commands";
 import { detectExpertMode, EXPERT_MODE_PROMPTS, WHATSAPP_BRAIN } from "@/lib/super-brain";
 import {
   completeClawCloudPrompt,
@@ -4827,7 +4830,7 @@ export async function routeInboundAgentMessage(
   message: string,
 ): Promise<string | null> {
   const routeStartedAt = Date.now();
-  const requested = extractModeOverride(message);
+  let requested = extractModeOverride(message);
   let trimmed = requested.cleaned;
   if (!trimmed) return null;
 
@@ -4861,6 +4864,22 @@ export async function routeInboundAgentMessage(
       alreadyTranslated: true,
     });
 
+  const commandIntent = detectCommandIntent(trimmed);
+  if (commandIntent.type !== "none") {
+    const commandResult = await handleCustomCommand(userId, trimmed);
+    if (commandResult.handled) {
+      if (commandResult.expandedPrompt) {
+        requested = extractModeOverride(commandResult.expandedPrompt);
+        trimmed = requested.cleaned;
+        if (!trimmed) {
+          return null;
+        }
+      } else if (commandResult.response) {
+        return finalizeEarlyRaw(commandResult.response, "help", "help");
+      }
+    }
+  }
+
   // 1. Approval commands (SEND/EDIT/SKIP)
   const approval = await handleReplyApprovalCommand(userId, trimmed);
   if (approval.handled) return finalizeEarlyTranslated(approval.response, "help", "help");
@@ -4887,6 +4906,14 @@ export async function routeInboundAgentMessage(
       ? formatMemorySavedReply(memoryCommand.key, memoryCommand.value)
       : "⚠️ *I couldn't save that right now.* Please try again in a moment.";
     return finalizeEarlyRaw(reply, "memory", "memory");
+  }
+
+  if (detectBillingIntent(trimmed)) {
+    const billingReply = await handleBillingCommand(userId, trimmed).catch(() => null);
+    if (billingReply) {
+      await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+      return finalizeEarlyRaw(billingReply, "general", "general");
+    }
   }
 
   void autoExtractAndSaveFacts(userId, trimmed).catch(() => null);
@@ -5041,6 +5068,14 @@ export async function routeInboundAgentMessage(
     const holidayReply = answerHolidayQuery(finalMessage);
     if (holidayReply) {
       return finalizeRaw(holidayReply, "general", "general");
+    }
+  }
+
+  if (detectDriveIntent(finalMessage)) {
+    const driveReply = await handleDriveQuery(userId, finalMessage).catch(() => null);
+    if (driveReply) {
+      await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+      return finalizeRaw(driveReply, "research", "research");
     }
   }
 
@@ -5528,21 +5563,110 @@ export async function createClawCloudTask(input: {
 
 // ─── Task runners ─────────────────────────────────────────────────────────────
 
+function buildMorningWeatherSummary(weatherReply: string | null, fallbackCity: string) {
+  if (!weatherReply) {
+    return null;
+  }
+
+  const location = weatherReply.match(/\*Weather in ([^*]+)\*/)?.[1]?.trim() || fallbackCity;
+  const temperature = weatherReply.match(/\*Temperature:\*\s*([^\n]+)/)?.[1]?.trim() || "";
+  const condition = weatherReply.match(/\*Condition:\*\s*([^\n]+)/)?.[1]?.trim() || "";
+  const parts = [location && `Weather in ${location}`, temperature, condition].filter(Boolean);
+  return parts.join(" - ").trim() || null;
+}
+
 async function runMorningBriefing(userId: string, config: ClawCloudTaskConfig) {
-  const [emails, events, locale] = await Promise.all([
-    getClawCloudGmailMessages(userId, { query: "is:unread", maxResults: Number(config.max_emails ?? 50) }),
-    getClawCloudCalendarEvents(userId, { timeMin: new Date().toISOString(), timeMax: new Date(Date.now() + 86400000).toISOString() }),
+  const [emails, events, locale, memoryFacts] = await Promise.all([
+    getClawCloudGmailMessages(userId, {
+      query: "is:unread",
+      maxResults: Number(config.max_emails ?? 50),
+    }),
+    getClawCloudCalendarEvents(userId, {
+      timeMin: new Date().toISOString(),
+      timeMax: new Date(Date.now() + 86_400_000).toISOString(),
+    }),
     getUserLocale(userId),
+    getAllMemoryFacts(userId).catch(() => []),
   ]);
 
-  const emailCtx = emails.slice(0, 15).map((e) => `From: ${e.from}\nSubject: ${e.subject}\nSnippet: ${e.snippet}`).join("\n---\n");
-  const eventCtx = events.map((e) => `${e.start} — ${e.summary}${e.hangoutLink ? ` (${e.hangoutLink})` : ""}`).join("\n");
+  const userName =
+    memoryFacts.find((fact) => fact.key === "preferred_name")?.value
+    || memoryFacts.find((fact) => fact.key === "name")?.value
+    || "";
+  const userCity = memoryFacts.find((fact) => fact.key === "city")?.value ?? "";
+  const userProfession = memoryFacts.find((fact) => fact.key === "profession")?.value ?? "";
+  const userTimezone = memoryFacts.find((fact) => fact.key === "timezone")?.value ?? "Asia/Kolkata";
+  const weatherReply = userCity ? await getWeather(userCity).catch(() => null) : null;
+  const weatherSummary = buildMorningWeatherSummary(weatherReply, userCity);
+  const greeting = userName ? `â˜€ï¸ *Good morning, ${userName}!*` : "â˜€ï¸ *Good morning!*";
+
+  const emailCtx = emails
+    .slice(0, 15)
+    .map((email) => `From: ${email.from}\nSubject: ${email.subject}\nSnippet: ${email.snippet}`)
+    .join("\n---\n");
+  const eventCtx = events
+    .map((event) => {
+      const time = new Date(event.start).toLocaleTimeString("en-IN", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: true,
+        timeZone: userTimezone,
+      });
+      return `${time} - ${event.summary}${event.hangoutLink ? " (video call)" : ""}`;
+    })
+    .join("\n");
+
+  const systemPrompt = [
+    buildMultilingualBriefingSystem(locale),
+    "Format for WhatsApp with bold headers, short bullets, and clear priorities.",
+    "Structure the reply as: greeting, weather, top priority emails, today's meetings, and one motivational closing line.",
+    "Highlight urgent emails and anything time-sensitive.",
+    "Keep it under 300 words and mobile friendly.",
+    userProfession ? `User profession: ${userProfession}` : "",
+  ].filter(Boolean).join("\n");
+
+  const userPrompt = [
+    greeting,
+    weatherSummary ? `Weather: ${weatherSummary}` : "Weather: unavailable",
+    userCity ? `City: ${userCity}` : "",
+    userProfession ? `Profession: ${userProfession}` : "",
+    "",
+    `Unread emails: ${emails.length}`,
+    emailCtx || "No unread emails.",
+    "",
+    `Today's meetings (${events.length}):`,
+    eventCtx || "No meetings scheduled.",
+  ].filter(Boolean).join("\n");
+
+  const fallback = [
+    greeting,
+    weatherSummary ? `ðŸŒ¤ï¸ *Weather:* ${weatherSummary}` : "",
+    "",
+    `ðŸ“§ *Unread emails:* ${emails.length}`,
+    emails.slice(0, 3).map((email) => `â€¢ *${email.subject || "(No subject)"}* - ${email.from}`).join("\n") || "_No urgent emails right now._",
+    "",
+    `ðŸ“… *Today's meetings:* ${events.length}`,
+    events.slice(0, 3).map((event) => {
+      const time = new Date(event.start).toLocaleTimeString("en-IN", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: true,
+        timeZone: userTimezone,
+      });
+      return `â€¢ ${time} - ${event.summary}`;
+    }).join("\n") || "_No meetings today ðŸŽ‰_",
+    "",
+    "_You've got this. Let's make today count._",
+  ].filter(Boolean).join("\n");
 
   const msg = await completeClawCloudPrompt({
-    system: buildMultilingualBriefingSystem(locale) + "\n\nFormat for WhatsApp: ☀️ *Good Morning!* header, *bold* section titles, • bullets. Professional, actionable, under 280 words. Highlight urgent emails and upcoming meetings.",
-    user: `Morning briefing.\nUnread: ${emails.length} emails\n${emailCtx}\n\nCalendar:\n${eventCtx || "No events"}`,
-    intent: "research", maxTokens: 600, skipCache: true,
-    fallback: `☀️ *Good Morning!*\n\n📧 *Emails:* ${emails.length} unread\n📅 *Calendar:* ${events.length} event${events.length === 1 ? "" : "s"}\n\n${events.map((e) => `• ${e.summary}`).join("\n") || "No meetings today 🎉"}`,
+    system: systemPrompt,
+    user: userPrompt,
+    intent: "research",
+    responseMode: "fast",
+    maxTokens: 700,
+    skipCache: true,
+    fallback,
   });
 
   await sendClawCloudWhatsAppMessage(userId, msg);

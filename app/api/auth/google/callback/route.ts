@@ -176,6 +176,20 @@ export async function GET(request: NextRequest) {
       throw new Error(calendarError.message);
     }
 
+    const { error: driveError } = await supabaseAdmin
+      .from("connected_accounts")
+      .upsert(
+        {
+          ...sharedRow,
+          provider: "google_drive",
+        },
+        { onConflict: "user_id,provider" },
+      );
+
+    if (driveError) {
+      console.warn("[google/callback] Drive upsert failed:", driveError.message);
+    }
+
     redirectBase.searchParams.set("step", "2");
     redirectBase.searchParams.set("gmail", "connected");
     return withNoStoreHeaders(NextResponse.redirect(redirectBase));

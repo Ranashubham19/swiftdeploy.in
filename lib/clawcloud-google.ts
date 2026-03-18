@@ -7,6 +7,8 @@ const googleScopes = [
   "https://www.googleapis.com/auth/gmail.compose",
   "https://www.googleapis.com/auth/gmail.send",
   "https://www.googleapis.com/auth/calendar.readonly",
+  "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/spreadsheets",
   "email",
   "profile",
 ] as const;
@@ -250,7 +252,7 @@ export async function fetchClawCloudGoogleProfile(accessToken: string) {
 
 async function getConnectedGoogleAccount(
   userId: string,
-  provider: Extract<ClawCloudProvider, "gmail" | "google_calendar">,
+  provider: Extract<ClawCloudProvider, "gmail" | "google_calendar" | "google_drive">,
 ) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const { data, error } = await supabaseAdmin
@@ -301,9 +303,9 @@ async function refreshGoogleAccessToken(refreshToken: string) {
   };
 }
 
-async function getValidGoogleAccessToken(
+export async function getValidGoogleAccessToken(
   userId: string,
-  provider: Extract<ClawCloudProvider, "gmail" | "google_calendar">,
+  provider: Extract<ClawCloudProvider, "gmail" | "google_calendar" | "google_drive">,
 ) {
   const account = await getConnectedGoogleAccount(userId, provider);
 
