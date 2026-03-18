@@ -51,6 +51,25 @@ const LANGUAGE_MAP: Record<string, { locale: SupportedLocale; label: string }> =
   punjabi: { locale: "pa", label: "Punjabi" },
   pa: { locale: "pa", label: "Punjabi" },
   "ਪੰਜਾਬੀ": { locale: "pa", label: "Punjabi" },
+  tamil: { locale: "ta", label: "Tamil" },
+  ta: { locale: "ta", label: "Tamil" },
+  "தமிழ்": { locale: "ta", label: "Tamil" },
+  telugu: { locale: "te", label: "Telugu" },
+  te: { locale: "te", label: "Telugu" },
+  "తెలుగు": { locale: "te", label: "Telugu" },
+  kannada: { locale: "kn", label: "Kannada" },
+  kn: { locale: "kn", label: "Kannada" },
+  "ಕನ್ನಡ": { locale: "kn", label: "Kannada" },
+  bengali: { locale: "bn", label: "Bengali" },
+  bangla: { locale: "bn", label: "Bengali" },
+  bn: { locale: "bn", label: "Bengali" },
+  "বাংলা": { locale: "bn", label: "Bengali" },
+  marathi: { locale: "mr", label: "Marathi" },
+  mr: { locale: "mr", label: "Marathi" },
+  "मराठी": { locale: "mr", label: "Marathi" },
+  gujarati: { locale: "gu", label: "Gujarati" },
+  gu: { locale: "gu", label: "Gujarati" },
+  "ગુજરાતી": { locale: "gu", label: "Gujarati" },
 };
 
 function capitalizeWords(value: string): string {
@@ -86,7 +105,7 @@ function step3Message(city: string): string {
     `Got it - *${city}* ✅`,
     "",
     "*What language do you prefer?*",
-    "Reply with something like: *English*, *Hindi*, *Punjabi*, or *other: Spanish*.",
+    "Reply with: *English*, *Hindi*, *Punjabi*, *Tamil*, *Telugu*, *Kannada*, *Bengali*, *Marathi*, *Gujarati*, or *other: Spanish*.",
   ].join("\n");
 }
 

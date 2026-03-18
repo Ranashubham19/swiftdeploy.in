@@ -2,6 +2,7 @@ import { completeClawCloudPrompt } from "@/lib/clawcloud-ai";
 import { upsertAnalyticsDaily } from "@/lib/clawcloud-analytics";
 import { getClawCloudGmailMessages } from "@/lib/clawcloud-google";
 import { getUserLocale, translateMessage } from "@/lib/clawcloud-i18n";
+import { getUpiTransactions } from "@/lib/clawcloud-upi";
 import { sendClawCloudWhatsAppMessage } from "@/lib/clawcloud-whatsapp";
 
 type SpendEntry = {
@@ -172,10 +173,13 @@ export async function runWeeklySpendSummary(userId: string) {
 
 export async function answerSpendingQuestion(userId: string, question: string) {
   const locale = await getUserLocale(userId);
-  const emails = await getClawCloudGmailMessages(userId, {
-    query: receiptQuery,
-    maxResults: 30,
-  });
+  const [emails, upiTransactions] = await Promise.all([
+    getClawCloudGmailMessages(userId, {
+      query: receiptQuery,
+      maxResults: 30,
+    }),
+    getUpiTransactions(userId, 30).catch(() => []),
+  ]);
 
   const entries: SpendEntry[] = [];
   for (const email of emails.slice(0, 20)) {
@@ -185,7 +189,17 @@ export async function answerSpendingQuestion(userId: string, question: string) {
     }
   }
 
-  const context = entries
+  const upiEntries: SpendEntry[] = upiTransactions.map((txn) => ({
+    merchant: txn.merchant,
+    amount: txn.amount,
+    currency: txn.currency,
+    date: txn.transacted_at.split("T")[0] ?? txn.transacted_at,
+    category: txn.category,
+  }));
+
+  const allEntries = [...entries, ...upiEntries];
+
+  const context = allEntries
     .map((entry) => `${entry.date} | ${entry.merchant} | ${entry.amount} ${entry.currency} | ${entry.category}`)
     .join("\n");
 

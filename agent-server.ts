@@ -37,6 +37,12 @@ import {
   isNewUserNeedingOnboarding,
   startOnboarding,
 } from "./lib/clawcloud-onboarding-flow";
+import {
+  detectUpiSms,
+  formatUpiSaveReply,
+  parseUpiSms,
+  saveUpiTransaction,
+} from "./lib/clawcloud-upi";
 
 loadEnvConfig(process.cwd());
 
@@ -1845,6 +1851,17 @@ async function connectSession(userId: string): Promise<SessionRecord> {
         if (urlReply) {
           await sendReply(userId, urlReply, replyTargetJid);
           continue;
+        }
+      }
+
+      if (text && detectUpiSms(text)) {
+        const transaction = parseUpiSms(text, userId);
+        if (transaction) {
+          const saved = await saveUpiTransaction(transaction).catch(() => false);
+          if (saved) {
+            await sendReply(userId, formatUpiSaveReply(transaction), replyTargetJid);
+            continue;
+          }
         }
       }
 

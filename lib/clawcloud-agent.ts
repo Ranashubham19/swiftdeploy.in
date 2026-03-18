@@ -32,6 +32,19 @@ import {
   detectCricketIntent,
   isCricketAvailable,
 } from "@/lib/clawcloud-cricket";
+import {
+  answerIndianStockQuery,
+  answerTrainQuery,
+  detectIndianStockQuery,
+  detectTrainIntent,
+} from "@/lib/clawcloud-india-live";
+import {
+  buildHinglishSystemSnippet,
+  detectHinglish,
+  extractHinglishIntent,
+} from "@/lib/clawcloud-hinglish";
+import { answerTaxQuery, detectTaxQuery } from "@/lib/clawcloud-tax";
+import { answerHolidayQuery, detectHolidayQuery } from "@/lib/clawcloud-holidays";
 import { detectExpertMode, EXPERT_MODE_PROMPTS, WHATSAPP_BRAIN } from "@/lib/super-brain";
 import {
   completeClawCloudPrompt,
@@ -4887,10 +4900,26 @@ export async function routeInboundAgentMessage(
   const memorySnippet = buildMemorySystemSnippet(memory, userProfileSnippet);
   const finalMessage = memory.resolvedQuestion.trim() || trimmed;
   const hasDocumentContext = looksLikeDocumentContext(finalMessage);
+  const isHinglish = detectHinglish(trimmed);
+  const hinglishIntentOverride = isHinglish ? extractHinglishIntent(trimmed) : null;
+  const hinglishSnippet = isHinglish ? buildHinglishSystemSnippet() : undefined;
 
   const detected = detectIntent(finalMessage);
   let resolvedType = hasDocumentContext ? "research" : detected.type;
   let resolvedCategory = hasDocumentContext ? "research" : detected.category;
+
+  if (!hasDocumentContext) {
+    if (hinglishIntentOverride === "reminder") {
+      resolvedType = "reminder";
+      resolvedCategory = "reminder";
+    } else if (hinglishIntentOverride === "coding" && resolvedCategory === "general") {
+      resolvedType = "coding";
+      resolvedCategory = "coding";
+    } else if (hinglishIntentOverride === "explain" && resolvedCategory === "general") {
+      resolvedType = "explain";
+      resolvedCategory = "explain";
+    }
+  }
 
   if (
     !hasDocumentContext
@@ -4942,6 +4971,8 @@ export async function routeInboundAgentMessage(
 
   const responseMode = resolveResponseMode(resolvedType, finalMessage, requested.mode);
   const explicitMode = requested.explicit;
+  const combineExtraInstruction = (instruction?: string) =>
+    [instruction, hinglishSnippet].filter(Boolean).join("\n\n") || undefined;
   const finalizeRaw = (
     reply: string,
     intent: string = resolvedType,
@@ -4982,6 +5013,37 @@ export async function routeInboundAgentMessage(
     }
   }
 
+  if (detectIndianStockQuery(finalMessage)) {
+    const stockReply = await answerIndianStockQuery(finalMessage).catch(() => null);
+    if (stockReply) {
+      await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+      return finalizeRaw(stockReply, "finance", "finance");
+    }
+  }
+
+  if (detectTrainIntent(finalMessage).type !== null) {
+    const trainReply = await answerTrainQuery(finalMessage).catch(() => null);
+    if (trainReply) {
+      await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+      return finalizeRaw(trainReply, "general", "general");
+    }
+  }
+
+  if (detectTaxQuery(finalMessage)) {
+    const taxReply = answerTaxQuery(finalMessage);
+    if (taxReply) {
+      await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+      return finalizeRaw(taxReply, "economics", "economics");
+    }
+  }
+
+  if (detectHolidayQuery(finalMessage)) {
+    const holidayReply = answerHolidayQuery(finalMessage);
+    if (holidayReply) {
+      return finalizeRaw(holidayReply, "general", "general");
+    }
+  }
+
   switch (resolvedCategory) {
 
     case "send_message": {
@@ -5012,7 +5074,7 @@ export async function routeInboundAgentMessage(
       const ans = await answerSpendingQuestion(userId, finalMessage);
       if (ans) return finalizeTranslated(ans, "spending", "spending");
       return finalizeRaw(
-        await smartReply(userId, finalMessage, "spending", responseMode, explicitMode, undefined, memorySnippet),
+        await smartReply(userId, finalMessage, "spending", responseMode, explicitMode, combineExtraInstruction(), memorySnippet),
         "spending",
         "spending",
       );
@@ -5260,7 +5322,7 @@ export async function routeInboundAgentMessage(
         "research",
         responseMode,
         explicitMode,
-        "Answer directly using best available knowledge. If this topic changes frequently, add one short freshness note at the end.",
+        combineExtraInstruction("Answer directly using best available knowledge. If this topic changes frequently, add one short freshness note at the end."),
         memorySnippet,
       );
       return finalizeRaw(staleWarning + knowledgeReply, "news", "news");
@@ -5276,8 +5338,8 @@ export async function routeInboundAgentMessage(
       const reply =
         responseMode === "deep"
           ? (await expertReply(userId, finalMessage, "coding"))
-            ?? await smartReply(userId, finalMessage, "coding", responseMode, explicitMode, undefined, memorySnippet)
-          : await smartReply(userId, finalMessage, "coding", responseMode, explicitMode, undefined, memorySnippet);
+            ?? await smartReply(userId, finalMessage, "coding", responseMode, explicitMode, combineExtraInstruction(), memorySnippet)
+          : await smartReply(userId, finalMessage, "coding", responseMode, explicitMode, combineExtraInstruction(), memorySnippet);
       return finalizeRaw(reply, "coding", "coding");
     }
 
@@ -5299,12 +5361,12 @@ export async function routeInboundAgentMessage(
         }
       }
 
-      const reply = await smartReply(userId, finalMessage, "math", responseMode, explicitMode, undefined, memorySnippet);
+      const reply = await smartReply(userId, finalMessage, "math", responseMode, explicitMode, combineExtraInstruction(), memorySnippet);
       return finalizeRaw(reply, "math", "math");
     }
 
     case "creative": {
-      const reply = await smartReply(userId, finalMessage, "creative", responseMode, explicitMode, undefined, memorySnippet);
+      const reply = await smartReply(userId, finalMessage, "creative", responseMode, explicitMode, combineExtraInstruction(), memorySnippet);
       return finalizeRaw(reply, "creative", "creative");
     }
 
@@ -5315,7 +5377,7 @@ export async function routeInboundAgentMessage(
         "explain",
         responseMode,
         explicitMode,
-        "Answer this explanation question clearly, accurately, and in teaching style with WhatsApp-friendly formatting.",
+        combineExtraInstruction("Answer this explanation question clearly, accurately, and in teaching style with WhatsApp-friendly formatting."),
         memorySnippet,
       );
       return finalizeRaw(reply, "explain", "explain");
@@ -5329,7 +5391,7 @@ export async function routeInboundAgentMessage(
           "research",
           responseMode,
           explicitMode,
-          "Use only the document content already included in the message. Answer the user's question directly, check every stated constraint explicitly, and if choosing among options, name the winner, briefly explain why the others do not qualify, and mention one extra supporting operational differentiator from the winning row when the document provides it, such as support level, incident response, SLA, turnaround time, or another concrete field that was not already one of the hard constraints. Do not use Gmail, spending history, or outside knowledge.",
+          combineExtraInstruction("Use only the document content already included in the message. Answer the user's question directly, check every stated constraint explicitly, and if choosing among options, name the winner, briefly explain why the others do not qualify, and mention one extra supporting operational differentiator from the winning row when the document provides it, such as support level, incident response, SLA, turnaround time, or another concrete field that was not already one of the hard constraints. Do not use Gmail, spending history, or outside knowledge."),
           memorySnippet,
         );
         return finalizeRaw(reply, "research", "research");
@@ -5369,7 +5431,7 @@ export async function routeInboundAgentMessage(
         return finalizeRaw(recovery, "research", "research");
       }
 
-      const reply = await smartReply(userId, finalMessage, "research", responseMode, explicitMode, undefined, memorySnippet);
+      const reply = await smartReply(userId, finalMessage, "research", responseMode, explicitMode, combineExtraInstruction(), memorySnippet);
       return finalizeRaw(reply, "research", "research");
     }
 
@@ -5378,7 +5440,7 @@ export async function routeInboundAgentMessage(
     }
 
     case "greeting": {
-      const reply = await smartReply(userId, finalMessage, "greeting", responseMode, explicitMode, undefined, memorySnippet);
+      const reply = await smartReply(userId, finalMessage, "greeting", responseMode, explicitMode, combineExtraInstruction(), memorySnippet);
       return finalizeRaw(reply, "greeting", "greeting");
     }
 
@@ -5412,7 +5474,7 @@ export async function routeInboundAgentMessage(
         resolvedType,
         responseMode,
         explicitMode,
-        buildIntentSpecificInstruction(resolvedType, finalMessage),
+        combineExtraInstruction(buildIntentSpecificInstruction(resolvedType, finalMessage)),
         memorySnippet,
       );
       return finalizeRaw(

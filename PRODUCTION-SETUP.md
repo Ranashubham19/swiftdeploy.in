@@ -33,9 +33,10 @@ CRON_SECRET=the-same-cron-secret-as-your-app
 NEXT_PUBLIC_APP_URL=https://swift-deploy.in
 NEXTJS_URL=https://swift-deploy.in
 WA_SESSION_DIR=/data/wa-sessions
-TOGETHER_API_KEY=your-together-key
+HF_TOKEN=your-huggingface-token        # optional Pollinations fallback
+GOOGLE_GEMINI_API_KEY=your-gemini-key  # optional Pollinations fallback
 CRICAPI_KEY=your-cricapi-key
-STABILITY_API_KEY=your-stability-key   # optional
+RAPIDAPI_KEY=your-rapidapi-key         # optional IRCTC PNR/train status
 ```
 
 Important:
@@ -75,9 +76,10 @@ CRON_SECRET=the-same-cron-secret-as-your-railway-agent
 NEXT_PUBLIC_APP_URL=https://swift-deploy.in
 NEXTJS_URL=https://swift-deploy.in
 NVIDIA_API_KEY=your-nvidia-key
-TOGETHER_API_KEY=your-together-key
+HF_TOKEN=your-huggingface-token        # optional Pollinations fallback
+GOOGLE_GEMINI_API_KEY=your-gemini-key  # optional Pollinations fallback
 CRICAPI_KEY=your-cricapi-key
-STABILITY_API_KEY=your-stability-key   # optional
+RAPIDAPI_KEY=your-rapidapi-key         # optional IRCTC PNR/train status
 ```
 
 Notes:
