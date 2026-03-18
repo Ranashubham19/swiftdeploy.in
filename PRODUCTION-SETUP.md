@@ -33,6 +33,9 @@ CRON_SECRET=the-same-cron-secret-as-your-app
 NEXT_PUBLIC_APP_URL=https://swift-deploy.in
 NEXTJS_URL=https://swift-deploy.in
 WA_SESSION_DIR=/data/wa-sessions
+TOGETHER_API_KEY=your-together-key
+CRICAPI_KEY=your-cricapi-key
+STABILITY_API_KEY=your-stability-key   # optional
 ```
 
 Important:
@@ -72,6 +75,9 @@ CRON_SECRET=the-same-cron-secret-as-your-railway-agent
 NEXT_PUBLIC_APP_URL=https://swift-deploy.in
 NEXTJS_URL=https://swift-deploy.in
 NVIDIA_API_KEY=your-nvidia-key
+TOGETHER_API_KEY=your-together-key
+CRICAPI_KEY=your-cricapi-key
+STABILITY_API_KEY=your-stability-key   # optional
 ```
 
 Notes:

@@ -27,6 +27,11 @@ import {
   formatFinanceReply,
   getLiveFinanceData,
 } from "@/lib/clawcloud-finance";
+import {
+  answerCricketQuery,
+  detectCricketIntent,
+  isCricketAvailable,
+} from "@/lib/clawcloud-cricket";
 import { detectExpertMode, EXPERT_MODE_PROMPTS, WHATSAPP_BRAIN } from "@/lib/super-brain";
 import {
   completeClawCloudPrompt,
@@ -1196,17 +1201,23 @@ async function finalizeAgentReply(input: {
   alreadyTranslated?: boolean;
 }) {
   const cleanedReply = input.reply.replace(/\n{3,}/g, "\n\n").trim();
+  const proactiveSuggestion = input.alreadyTranslated
+    ? ""
+    : buildProactiveSuggestion(input.intent, input.question, cleanedReply);
+  const replyWithSuggestion = proactiveSuggestion
+    ? `${cleanedReply}${proactiveSuggestion}`
+    : cleanedReply;
   const replyWithDisclaimer = input.alreadyTranslated
-    ? cleanedReply
+    ? replyWithSuggestion
     : applyDisclaimer({
       intent: input.intent,
       category: input.category,
       question: input.question,
-      answer: cleanedReply,
+      answer: replyWithSuggestion,
     }).combined;
 
   const finalReply = input.alreadyTranslated
-    ? cleanedReply
+    ? replyWithSuggestion
     : await translateMessage(replyWithDisclaimer, input.locale);
 
   void logIntentAnalytics(
@@ -1218,6 +1229,52 @@ async function finalizeAgentReply(input: {
   ).catch(() => null);
 
   return finalReply;
+}
+
+function buildProactiveSuggestion(intent: string, question: string, reply: string): string {
+  const q = question.toLowerCase();
+  const r = reply.toLowerCase();
+
+  if (
+    reply.length < 150
+    || intent === "greeting"
+    || intent === "help"
+    || intent === "reminder"
+    || intent === "memory"
+  ) {
+    return "";
+  }
+
+  if (intent === "coding") {
+    if (/\b(function|class|component|api|endpoint)\b/.test(r) && !/test|spec/.test(q)) {
+      return "\n\n💡 _Want me to also write tests for this? Or explain the time complexity?_";
+    }
+    if (/\b(error|bug|fix|debug)\b/.test(q)) {
+      return "\n\n💡 _Want me to also review the rest of the file for similar issues?_";
+    }
+    return "\n\n💡 _Want me to optimise this, add error handling, or convert it to another language?_";
+  }
+
+  if (intent === "math") {
+    return "\n\n💡 _Want me to verify this with a different method, or apply it to a real example?_";
+  }
+
+  if (intent === "research" || intent === "explain" || intent === "technology" || intent === "science") {
+    if (/\b(vs|versus|compare|difference)\b/.test(q)) {
+      return "\n\n💡 _Want a recommendation on which one to choose for your use case?_";
+    }
+    return "\n\n💡 _Want to go deeper on any part of this, or see a practical example?_";
+  }
+
+  if (intent === "email" || intent === "creative") {
+    return "\n\n💡 _Want a different tone, shorter version, or alternative draft?_";
+  }
+
+  if (intent === "finance") {
+    return "\n\n💡 _Want a historical chart, analyst sentiment, or comparison with a competitor?_";
+  }
+
+  return "";
 }
 
 function isLowQualityTemplateReply(reply: string | null | undefined) {
@@ -4758,8 +4815,15 @@ export async function routeInboundAgentMessage(
 ): Promise<string | null> {
   const routeStartedAt = Date.now();
   const requested = extractModeOverride(message);
-  const trimmed = requested.cleaned;
+  let trimmed = requested.cleaned;
   if (!trimmed) return null;
+
+  if (trimmed.startsWith("[Group message")) {
+    trimmed = trimmed.replace(/^\[Group message[^\]]*\]\s*/i, "").trim();
+    if (!trimmed) {
+      return null;
+    }
+  }
 
   const localePromise = getUserLocale(userId);
   const finalizeEarlyRaw = async (reply: string, intent: string, category: string) =>
@@ -4907,6 +4971,16 @@ export async function routeInboundAgentMessage(
       reply,
       alreadyTranslated: true,
     });
+
+  if (detectCricketIntent(finalMessage)) {
+    if (isCricketAvailable()) {
+      const cricketReply = await answerCricketQuery(finalMessage).catch(() => null);
+      if (cricketReply) {
+        await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+        return finalizeRaw(cricketReply, "sports", "sports");
+      }
+    }
+  }
 
   switch (resolvedCategory) {
 

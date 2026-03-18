@@ -20,10 +20,17 @@ import { createClient } from "@supabase/supabase-js";
 import { transcribeAudioBuffer, isWhisperAvailable } from "./lib/clawcloud-whisper";
 import { analyseImage, isVisionAvailable, formatVisionReply } from "./lib/clawcloud-vision";
 import {
+  detectImageGenIntent,
+  extractImagePrompt,
+  generateImage,
+  isImageGenAvailable,
+} from "./lib/clawcloud-imagegen";
+import {
   buildDocumentPromptPrefix,
   extractDocumentText,
   isSupportedDocument,
 } from "./lib/clawcloud-docs";
+import { handleUrlMessage, hasUrlIntent } from "./lib/clawcloud-url-reader";
 import {
   getActiveOnboardingState,
   handleOnboardingReply,
@@ -41,6 +48,7 @@ const SESSION_WATCHDOG_STALE_MS = 3 * 60_000;
 const SESSION_WATCHDOG_INTERVAL_MS = 5 * 60_000;
 const MAX_SEND_RETRIES = 3;
 const RETRY_DELAYS_MS = [1_000, 3_000, 9_000] as const;
+const GROUP_RATE_LIMIT_MS = 8_000;
 
 type SessionRecord = {
   sock: WASocket;
@@ -57,6 +65,7 @@ type RouteInboundAgentMessageFn = (userId: string, message: string) => Promise<s
 const sessions = new Map<string, SessionRecord>();
 const outboundIds = new Set<string>();
 const inboundIds = new Map<string, number>();
+const groupLastReplyAt = new Map<string, number>();
 let cachedRouteInboundAgentMessage: RouteInboundAgentMessageFn | null = null;
 
 const INBOUND_ID_TTL_MS = 10 * 60_000;
@@ -79,6 +88,19 @@ function pruneInboundIdCache(now = Date.now()) {
     const [id, ts] = entries[i];
     inboundIds.set(id, ts);
   }
+}
+
+function isGroupRateLimited(groupJid: string): boolean {
+  const lastAt = groupLastReplyAt.get(groupJid);
+  if (!lastAt) {
+    return false;
+  }
+
+  return Date.now() - lastAt < GROUP_RATE_LIMIT_MS;
+}
+
+function markGroupReplied(groupJid: string): void {
+  groupLastReplyAt.set(groupJid, Date.now());
 }
 
 function db() {
@@ -1021,6 +1043,9 @@ async function sendReply(
       }
 
       void logOutbound(userId, message);
+      if (isGroupChatJid(jid)) {
+        markGroupReplied(jid);
+      }
       return true;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
@@ -1082,6 +1107,9 @@ async function sendReplyLegacy(
   }
 
   void logOutbound(userId, message);
+  if (isGroupChatJid(jid)) {
+    markGroupReplied(jid);
+  }
   return true;
 }
 
@@ -1177,6 +1205,7 @@ async function handleInbound(
   text: string,
   waId: string | null,
   remoteJid: string | null,
+  routedTextOverride?: string,
 ) {
   void db()
     .from("whatsapp_messages")
@@ -1209,9 +1238,10 @@ async function handleInbound(
   }
 
   let finalReply: string | null = null;
+  const routedText = routedTextOverride?.trim() || text;
 
   console.log(`[agent] PATH A direct reply for ${userId}`);
-  const directReply = await runDirectAgentReply(userId, text);
+  const directReply = await runDirectAgentReply(userId, routedText);
   if (directReply?.trim() && !isEmptyOrFallback(directReply)) {
     finalReply = directReply.trim();
     console.log(`[agent] PATH A success for ${userId} (${finalReply.length} chars)`);
@@ -1222,7 +1252,7 @@ async function handleInbound(
       console.log(`[agent] PATH B HTTP call to ${appUrl()}/api/agent/message`);
       const response = await callNext("/api/agent/message", {
         userId,
-        message: text,
+        message: routedText,
         _internal: true,
       });
 
@@ -1413,11 +1443,22 @@ async function connectSession(userId: string): Promise<SessionRecord> {
       const safeRemoteJid = toReplyableJid(remoteJid);
       const isGroupMessage = Boolean(remoteJid && isGroupChatJid(remoteJid));
       const mentionedJids = isGroupMessage ? getMentionedJids(message) : [];
-      const groupReplyJid =
-        isGroupMessage && isBotMentioned(message, current)
-          ? remoteJid
-          : null;
-      const replyTargetJid = groupReplyJid ?? safeRemoteJid;
+      let replyTargetJid = safeRemoteJid;
+
+      if (isGroupMessage) {
+        const isMentioned = isBotMentioned(message, current);
+
+        if (!isMentioned) {
+          continue;
+        }
+
+        if (remoteJid && isGroupRateLimited(remoteJid)) {
+          console.log(`[agent] Group rate limited: ${remoteJid}`);
+          continue;
+        }
+
+        replyTargetJid = remoteJid ?? safeRemoteJid;
+      }
 
       const messageId = message.key.id ?? "";
       if (messageId && outboundIds.has(messageId)) {
@@ -1734,8 +1775,84 @@ async function connectSession(userId: string): Promise<SessionRecord> {
         }
       }
 
+      if (text && detectImageGenIntent(text)) {
+        if (!isImageGenAvailable()) {
+          await sendReply(
+            userId,
+            [
+              "🎨 *Image generation isn't set up yet.*",
+              "",
+              "Add `TOGETHER_API_KEY` to your environment to enable AI image generation.",
+              "Get a free key at *api.together.xyz*",
+            ].join("\n"),
+            replyTargetJid,
+          );
+          continue;
+        }
+
+        const session = sessions.get(userId);
+        const jid = session ? resolveReplyJid(session, replyTargetJid) : null;
+        if (jid && session) {
+          await session.sock.sendPresenceUpdate("composing", jid).catch(() => null);
+        }
+
+        await sendReply(
+          userId,
+          "🎨 _Generating your image... this takes about 10 seconds_",
+          replyTargetJid,
+        );
+
+        const prompt = extractImagePrompt(text);
+        const result = await generateImage(prompt).catch(() => null);
+
+        if (result && jid && session) {
+          const sent = await session.sock.sendMessage(jid, {
+            image: result.imageBuffer,
+            mimetype: result.mimeType,
+            caption: `🎨 *Generated:* ${prompt.slice(0, 100)}${prompt.length > 100 ? "..." : ""}`,
+          }).catch(() => null);
+
+          if (sent?.key?.id) {
+            outboundIds.add(sent.key.id);
+          }
+          if (isGroupChatJid(jid)) {
+            markGroupReplied(jid);
+          }
+        } else {
+          await sendReply(
+            userId,
+            [
+              "❌ *Image generation failed.*",
+              "",
+              "The image provider returned an error. Please try:",
+              "• A simpler or more specific prompt",
+              "• Trying again in a moment",
+            ].join("\n"),
+            replyTargetJid,
+          );
+        }
+        continue;
+      }
+
+      if (text && hasUrlIntent(text)) {
+        const session = sessions.get(userId);
+        const jid = session ? resolveReplyJid(session, replyTargetJid) : null;
+        if (jid && session) {
+          await session.sock.sendPresenceUpdate("composing", jid).catch(() => null);
+        }
+
+        const urlReply = await handleUrlMessage(text).catch(() => null);
+        if (urlReply) {
+          await sendReply(userId, urlReply, replyTargetJid);
+          continue;
+        }
+      }
+
       console.log(`[agent] Inbound from ${userId}: "${text.slice(0, 80)}"`);
-      await handleInbound(userId, text, message.key.id ?? null, replyTargetJid);
+      const agentText = isGroupMessage
+        ? `[Group message — respond concisely for a group audience]\n${text}`
+        : text;
+      await handleInbound(userId, text, message.key.id ?? null, replyTargetJid, agentText);
     }
   });
 

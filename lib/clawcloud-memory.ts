@@ -13,7 +13,7 @@ export type ConversationMemory = {
   resolvedQuestion: string;
 };
 
-const RAW_RECENT_TURNS = 14;
+const RAW_RECENT_TURNS = 20;
 const SUMMARY_LOOK_BACK = 40;
 const MAX_CONTENT_CHARS = 800;
 
@@ -181,6 +181,6 @@ export async function getSmartHistory(
   userId: string,
   mode: "fast" | "deep" = "fast",
 ): Promise<MemoryTurn[]> {
-  const limit = mode === "deep" ? 20 : 12;
+  const limit = mode === "deep" ? 30 : 20;
   return loadRawHistory(userId, limit);
 }

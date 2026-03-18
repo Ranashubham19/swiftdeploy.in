@@ -23,6 +23,96 @@ export type DocExtractResult = {
   truncated: boolean;
 };
 
+async function extractPdfWithOcr(
+  buffer: Buffer,
+  mimeType: string,
+  fileName: string,
+  pageCount: number,
+): Promise<DocExtractResult | null> {
+  let worker: Awaited<ReturnType<typeof import("tesseract.js")["createWorker"]>> | null = null;
+
+  try {
+    const { createWorker } = await import("tesseract.js");
+    const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs").catch(
+      () => import("pdfjs-dist"),
+    );
+    const canvasModule = await import("canvas").catch(() => null);
+    const createCanvas = canvasModule?.createCanvas;
+
+    if (!createCanvas) {
+      console.warn("[docs] OCR skipped: canvas package not installed");
+      return null;
+    }
+
+    const uint8 = new Uint8Array(buffer);
+    const pdfDoc = await pdfjsLib.getDocument({ data: uint8, verbosity: 0 }).promise;
+    worker = await createWorker("eng+hin");
+
+    const textParts: string[] = [];
+    let totalChars = 0;
+    let truncated = false;
+    const maxPages = Math.min(pdfDoc.numPages, 5);
+
+    for (let pageNum = 1; pageNum <= maxPages; pageNum += 1) {
+      if (totalChars >= MAX_EXTRACT_CHARS) {
+        truncated = true;
+        break;
+      }
+
+      const page = await pdfDoc.getPage(pageNum);
+      const viewport = page.getViewport({ scale: 2.0 });
+      const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+      const context = canvas.getContext("2d");
+
+      if (!context) {
+        console.warn("[docs] OCR skipped: could not create canvas context");
+        return null;
+      }
+
+      await page.render({
+        canvas: canvas as unknown as HTMLCanvasElement,
+        canvasContext: context as unknown as CanvasRenderingContext2D,
+        viewport,
+      }).promise;
+
+      const imageBuffer = canvas.toBuffer("image/png");
+      const recognized = await worker.recognize(imageBuffer);
+      const pageText = recognized.data.text.trim().replace(/\s{2,}/g, " ");
+
+      if (pageText.length > 20) {
+        textParts.push(`[Page ${pageNum} — OCR]\n${pageText}`);
+        totalChars += pageText.length;
+      }
+    }
+
+    const fullText = textParts.join("\n\n");
+    if (!fullText.trim()) {
+      return null;
+    }
+
+    const finalText = truncated ? fullText.slice(0, MAX_EXTRACT_CHARS) : fullText;
+    console.log(`[docs] OCR success: ${Math.min(pageCount, 5)} pages, ${finalText.length} chars`);
+
+    return {
+      text: `⚠️ _This PDF was scanned — text extracted via OCR (may have minor errors)_\n\n${finalText}`,
+      pageCount,
+      mimeType,
+      fileName,
+      truncated: truncated || pageCount > 5,
+    };
+  } catch (error) {
+    console.error(
+      "[docs] OCR fallback failed:",
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  } finally {
+    if (worker) {
+      await worker.terminate().catch(() => null);
+    }
+  }
+}
+
 async function extractXlsx(
   buffer: Buffer,
   mimeType: string,
@@ -254,9 +344,13 @@ async function extractPdf(
       : fullText;
 
     if (!finalText.trim()) {
-      console.warn("[docs] PDF appears to be image-only (no extractable text)");
+      console.warn("[docs] PDF appears to be image-only — attempting OCR fallback");
+      const ocrResult = await extractPdfWithOcr(buffer, mimeType, fileName, numPages);
+      if (ocrResult) {
+        return ocrResult;
+      }
       return {
-        text: "This PDF appears to contain only images. Text extraction was not possible.",
+        text: "⚠️ This PDF appears to contain scanned images only. OCR extraction was attempted but could not read the text clearly. Please try sending a clearer scan or a text-based PDF.",
         pageCount: numPages,
         mimeType,
         fileName,
