@@ -37,6 +37,9 @@
   ],
   "exclude": [
     "node_modules",
+    "tmp-files-*",
+    "tmp_patch_*",
+    "tmp_runtime_logs",
     "tmp-clawcloud-bundle",
     "agent-server.ts"
   ]

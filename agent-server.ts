@@ -7,13 +7,29 @@ import { loadEnvConfig } from "@next/env";
 import {
   Browsers,
   DisconnectReason,
+  downloadContentFromMessage,
   fetchLatestBaileysVersion,
   makeWASocket,
   useMultiFileAuthState,
+  type MediaType,
+  type WAMessage,
   type WASocket,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import { createClient } from "@supabase/supabase-js";
+import { transcribeAudioBuffer, isWhisperAvailable } from "./lib/clawcloud-whisper";
+import { analyseImage, isVisionAvailable, formatVisionReply } from "./lib/clawcloud-vision";
+import {
+  buildDocumentPromptPrefix,
+  extractDocumentText,
+  isSupportedDocument,
+} from "./lib/clawcloud-docs";
+import {
+  getActiveOnboardingState,
+  handleOnboardingReply,
+  isNewUserNeedingOnboarding,
+  startOnboarding,
+} from "./lib/clawcloud-onboarding-flow";
 
 loadEnvConfig(process.cwd());
 
@@ -23,6 +39,8 @@ const HTTP_REPLY_TIMEOUT_MS = 55_000;
 const STREAM_REPLY_MIN_LENGTH = 900;
 const SESSION_WATCHDOG_STALE_MS = 3 * 60_000;
 const SESSION_WATCHDOG_INTERVAL_MS = 5 * 60_000;
+const MAX_SEND_RETRIES = 3;
+const RETRY_DELAYS_MS = [1_000, 3_000, 9_000] as const;
 
 type SessionRecord = {
   sock: WASocket;
@@ -481,13 +499,16 @@ function isDirectChatJid(jid: string) {
   return /@s\.whatsapp\.net$/i.test(jid);
 }
 
+function isGroupChatJid(jid: string) {
+  return /@g\.us$/i.test(jid);
+}
+
 function isIgnoredChatJid(jid: string) {
   const value = jid.toLowerCase();
   return (
     value === "status@broadcast"
     || value.endsWith("@broadcast")
     || value.endsWith("@newsletter")
-    || value.endsWith("@g.us")
   );
 }
 
@@ -503,6 +524,11 @@ function resolveReplyJid(
   session: SessionRecord,
   targetJid?: string | null,
 ) {
+  const rawTarget = String(targetJid ?? "").trim();
+  if (rawTarget && isGroupChatJid(rawTarget)) {
+    return rawTarget;
+  }
+
   const candidate = toReplyableJid(targetJid);
   if (candidate) {
     return candidate;
@@ -561,7 +587,91 @@ async function persistPreferredChatTarget(
     .catch(() => null);
 }
 
-async function sendWelcome(sock: WASocket, phone: string) {
+const STATIC_WELCOME_TEXT = [
+  "🦞 *ClawCloud AI reconnected!*",
+  "",
+  "Your AI assistant is back online.",
+  "",
+  "💻 Code  •  📧 Email  •  📅 Calendar  •  ⏰ Reminders",
+  "📊 Math  •  🗞️ News  •  💰 Finance  •  🌤️ Weather",
+  "🖼️ Images  •  🎤 Voice notes  •  📄 Documents",
+  "",
+  "Type *help* for the full feature list.",
+  "Finish setup at swift-deploy.in to unlock all features.",
+].join("\n");
+
+async function sendWelcome(sock: WASocket, phone: string, userId?: string) {
+  const jid = `${phone}@s.whatsapp.net`;
+  let text = STATIC_WELCOME_TEXT;
+
+  if (userId) {
+    const needsOnboarding = await isNewUserNeedingOnboarding(userId).catch(() => false);
+    if (needsOnboarding) {
+      text = await startOnboarding(userId).catch(() => STATIC_WELCOME_TEXT);
+    }
+  }
+
+  const sent = await sock.sendMessage(jid, { text });
+  if (sent?.key?.id) {
+    outboundIds.add(sent.key.id);
+  }
+}
+
+function getMentionedJids(message: WAMessage): string[] {
+  const candidates = [
+    message.message?.extendedTextMessage?.contextInfo?.mentionedJid,
+    message.message?.imageMessage?.contextInfo?.mentionedJid,
+    message.message?.videoMessage?.contextInfo?.mentionedJid,
+    message.message?.documentMessage?.contextInfo?.mentionedJid,
+  ];
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate) && candidate.length > 0) {
+      return candidate;
+    }
+  }
+
+  return [];
+}
+
+function isBotMentioned(message: WAMessage, session: SessionRecord): boolean {
+  const mentionedJids = getMentionedJids(message);
+  if (!mentionedJids.length) {
+    return false;
+  }
+
+  const botCandidates = [
+    phoneFromJid(session.sock.user?.id),
+    normalizePhone(session.phone),
+  ].filter((value): value is string => Boolean(value));
+
+  return mentionedJids.some((jid) => {
+    const mentionedPhone = phoneFromJid(jid);
+    return Boolean(mentionedPhone && botCandidates.includes(mentionedPhone));
+  });
+}
+
+function stripMentionTokens(text: string, mentionedJids: string[]): string {
+  let cleaned = text;
+
+  for (const jid of mentionedJids) {
+    const digits = phoneFromJid(jid);
+    if (!digits) continue;
+
+    cleaned = cleaned.replace(new RegExp(`@${digits}\\b`, "g"), "");
+    if (digits.length > 10) {
+      cleaned = cleaned.replace(new RegExp(`@${digits.slice(-10)}\\b`, "g"), "");
+    }
+  }
+
+  return cleaned.replace(/\s{2,}/g, " ").trim();
+}
+
+function stripQuotedReplyPrefix(text: string): string {
+  return text.replace(/^\[Replying to:[^\]]+\]\s*/i, "").trim();
+}
+
+async function sendWelcomeLegacy(sock: WASocket, phone: string) {
   const jid = `${phone}@s.whatsapp.net`;
   const text = [
     "🦞 *ClawCloud AI is connected!*",
@@ -587,6 +697,65 @@ async function sendWelcome(sock: WASocket, phone: string) {
   if (sent?.key?.id) {
     outboundIds.add(sent.key.id);
   }
+}
+
+async function downloadMediaBuffer(
+  message: WAMessage,
+  mediaType: MediaType,
+): Promise<Buffer | null> {
+  const contentNode =
+    mediaType === "image"
+      ? message.message?.imageMessage
+      : mediaType === "audio"
+        ? message.message?.audioMessage
+        : mediaType === "document"
+          ? message.message?.documentMessage
+          : null;
+
+  if (!contentNode) {
+    return null;
+  }
+
+  try {
+    const stream = await downloadContentFromMessage(contentNode, mediaType);
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+  } catch (error) {
+    console.error(
+      `[agent] downloadMediaBuffer(${mediaType}) failed:`,
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  }
+}
+
+function extractQuotedReplyText(message: WAMessage): string {
+  const quotedMessage = message.message?.extendedTextMessage?.contextInfo?.quotedMessage as
+    | {
+        conversation?: string | null;
+        extendedTextMessage?: { text?: string | null } | null;
+        imageMessage?: { caption?: string | null } | null;
+        videoMessage?: { caption?: string | null } | null;
+        documentMessage?: { caption?: string | null; fileName?: string | null } | null;
+      }
+    | undefined;
+
+  if (!quotedMessage) {
+    return "";
+  }
+
+  return (
+    quotedMessage.conversation?.trim()
+    || quotedMessage.extendedTextMessage?.text?.trim()
+    || quotedMessage.imageMessage?.caption?.trim()
+    || quotedMessage.videoMessage?.caption?.trim()
+    || quotedMessage.documentMessage?.caption?.trim()
+    || quotedMessage.documentMessage?.fileName?.trim()
+    || ""
+  );
 }
 
 function getBuiltinFallbackResponse(message: string) {
@@ -822,6 +991,86 @@ async function sendReply(
   }
 
   const cleaned = message.replace(/\n{3,}/g, "\n\n").trim();
+  const messageExcerpt = cleaned.slice(0, 200);
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < MAX_SEND_RETRIES; attempt += 1) {
+    try {
+      if (cleaned.length >= STREAM_REPLY_MIN_LENGTH) {
+        await sendStreamingMessage(session.sock, jid, cleaned);
+      } else {
+        const sent = await session.sock.sendMessage(jid, { text: cleaned });
+        if (sent?.key?.id) {
+          outboundIds.add(sent.key.id);
+        }
+      }
+
+      if (attempt > 0) {
+        await db()
+          .from("delivery_failures")
+          .update({
+            final_status: "delivered",
+            resolved_at: new Date().toISOString(),
+          })
+          .eq("user_id", userId)
+          .eq("jid", jid)
+          .eq("message_excerpt", messageExcerpt)
+          .eq("final_status", "retrying")
+          .is("resolved_at", null)
+          .catch(() => null);
+      }
+
+      void logOutbound(userId, message);
+      return true;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      const finalStatus = attempt === MAX_SEND_RETRIES - 1 ? "failed" : "retrying";
+
+      await db()
+        .from("delivery_failures")
+        .insert({
+          user_id: userId,
+          jid,
+          message_excerpt: messageExcerpt,
+          error_message: lastError.message,
+          retry_count: attempt + 1,
+          final_status: finalStatus,
+        })
+        .catch(() => null);
+
+      if (attempt < MAX_SEND_RETRIES - 1) {
+        const delay = RETRY_DELAYS_MS[attempt] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1];
+        console.warn(
+          `[agent] sendReply attempt ${attempt + 1} failed for ${userId}; retrying in ${delay}ms`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  console.error(
+    `[agent] sendReply failed after ${MAX_SEND_RETRIES} attempts for ${userId}:`,
+    lastError?.message ?? "Unknown error",
+  );
+  return false;
+}
+
+async function sendReplyLegacy(
+  userId: string,
+  message: string,
+  targetJid?: string | null,
+): Promise<boolean> {
+  const session = sessions.get(userId);
+  if (!session?.phone) {
+    return false;
+  }
+
+  const jid = resolveReplyJid(session, targetJid);
+  if (!jid) {
+    return false;
+  }
+
+  const cleaned = message.replace(/\n{3,}/g, "\n\n").trim();
 
   if (cleaned.length >= STREAM_REPLY_MIN_LENGTH) {
     await sendStreamingMessage(session.sock, jid, cleaned);
@@ -951,6 +1200,7 @@ async function handleInbound(
   }
 
   const jid =
+    (session ? resolveReplyJid(session, remoteJid) : null) ||
     safeRemoteJid ||
     (session ? resolveReplyJid(session) : null);
 
@@ -1126,7 +1376,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
       sessions.set(userId, current);
 
       if (phone && sendWelcomeNow) {
-        await sendWelcome(sock, phone);
+        await sendWelcome(sock, phone, userId);
       }
     }
 
@@ -1161,6 +1411,13 @@ async function connectSession(userId: string): Promise<SessionRecord> {
 
       const remoteJid = message.key.remoteJid ?? null;
       const safeRemoteJid = toReplyableJid(remoteJid);
+      const isGroupMessage = Boolean(remoteJid && isGroupChatJid(remoteJid));
+      const mentionedJids = isGroupMessage ? getMentionedJids(message) : [];
+      const groupReplyJid =
+        isGroupMessage && isBotMentioned(message, current)
+          ? remoteJid
+          : null;
+      const replyTargetJid = groupReplyJid ?? safeRemoteJid;
 
       const messageId = message.key.id ?? "";
       if (messageId && outboundIds.has(messageId)) {
@@ -1172,15 +1429,178 @@ async function connectSession(userId: string): Promise<SessionRecord> {
         continue;
       }
 
-      if (!message.key.fromMe && !safeRemoteJid) {
+      if (!message.key.fromMe && !replyTargetJid) {
         continue;
       }
 
-      const text =
+      let text =
         message.message?.conversation ||
         message.message?.extendedTextMessage?.text ||
-        message.message?.imageMessage?.caption ||
         "";
+      let mediaHandled = false;
+
+      if (isGroupMessage && text) {
+        text = stripMentionTokens(text, mentionedJids);
+      }
+
+      const quotedReplyText = extractQuotedReplyText(message);
+      if (text && quotedReplyText) {
+        const quotedSnippet = quotedReplyText.slice(0, 300);
+        const needsEllipsis = quotedReplyText.length > 300;
+
+        if (quotedSnippet !== text.trim()) {
+          text = [
+            `[Replying to: "${quotedSnippet}${needsEllipsis ? "..." : ""}"]`,
+            text,
+          ].join("\n");
+          console.log(`[agent] Quoted reply detected for ${userId}; context prepended`);
+        }
+      }
+
+      if (!text && message.message?.imageMessage) {
+        const caption = message.message.imageMessage.caption?.trim() ?? "";
+        const mimeType = message.message.imageMessage.mimetype ?? "image/jpeg";
+
+        if (isVisionAvailable()) {
+          const session = sessions.get(userId);
+          const jid = session ? resolveReplyJid(session, replyTargetJid) : null;
+          if (jid && session) {
+            await session.sock.sendPresenceUpdate("composing", jid).catch(() => null);
+          }
+
+          console.log(`[agent] Image received for ${userId}; downloading for vision`);
+          const imageBuffer = await downloadMediaBuffer(message, "image");
+
+          if (imageBuffer) {
+            const visionAnswer = await analyseImage(imageBuffer, mimeType, caption);
+            if (visionAnswer) {
+              const reply = formatVisionReply(visionAnswer, Boolean(caption));
+              await sendReply(userId, reply, replyTargetJid);
+              mediaHandled = true;
+            } else {
+              text = caption || "Can you describe what you see?";
+            }
+          } else {
+            text = caption || "I received your image but couldn't download it. Please try again.";
+          }
+        } else if (caption) {
+          text = caption;
+        } else {
+          await sendReply(
+            userId,
+            "I received your image, but image understanding is not configured yet. Add a vision provider to enable image analysis.",
+            replyTargetJid,
+          );
+          mediaHandled = true;
+        }
+      }
+
+      if (!text && !mediaHandled && message.message?.audioMessage) {
+        const mimeType = message.message.audioMessage.mimetype ?? "audio/ogg; codecs=opus";
+
+        if (isWhisperAvailable()) {
+          const session = sessions.get(userId);
+          const jid = session ? resolveReplyJid(session, replyTargetJid) : null;
+          if (jid && session) {
+            await session.sock.sendPresenceUpdate("composing", jid).catch(() => null);
+          }
+
+          console.log(`[agent] Voice note received for ${userId}; transcribing`);
+          const audioBuffer = await downloadMediaBuffer(message, "audio");
+
+          if (audioBuffer) {
+            const transcript = await transcribeAudioBuffer(audioBuffer, mimeType);
+            if (transcript) {
+              console.log(
+                `[agent] Transcript: "${transcript.slice(0, 80)}${transcript.length > 80 ? "..." : ""}"`,
+              );
+              text = `[Voice note transcribed]: ${transcript}`;
+            } else {
+              await sendReply(
+                userId,
+                "I received your voice note but couldn't transcribe it. Please try again or type your message.",
+                replyTargetJid,
+              );
+              mediaHandled = true;
+            }
+          } else {
+            await sendReply(
+              userId,
+              "I received your voice note but couldn't download it. Please try again.",
+              replyTargetJid,
+            );
+            mediaHandled = true;
+          }
+        } else {
+          await sendReply(
+            userId,
+            "I received your voice note, but voice transcription is not configured yet. Add `GROQ_API_KEY` to enable voice notes.",
+            replyTargetJid,
+          );
+          mediaHandled = true;
+        }
+      }
+
+      if (!text && !mediaHandled && message.message?.documentMessage) {
+        const mimeType =
+          message.message.documentMessage.mimetype ?? "application/octet-stream";
+        const fileName =
+          message.message.documentMessage.fileName ??
+          `document.${mimeType.split("/")[1] ?? "bin"}`;
+        const caption = message.message.documentMessage.caption?.trim() ?? "";
+
+        if (isSupportedDocument(mimeType, fileName)) {
+          const session = sessions.get(userId);
+          const jid = session ? resolveReplyJid(session, replyTargetJid) : null;
+          if (jid && session) {
+            await session.sock.sendPresenceUpdate("composing", jid).catch(() => null);
+          }
+
+          console.log(
+            `[agent] Document received for ${userId}: "${fileName}" (${mimeType})`,
+          );
+          const documentBuffer = await downloadMediaBuffer(message, "document");
+
+          if (documentBuffer) {
+            const extracted = await extractDocumentText(documentBuffer, mimeType, fileName);
+            if (extracted) {
+              const prefix = buildDocumentPromptPrefix(extracted);
+              text = caption
+                ? `${prefix}\n\nUser question about this document: ${caption}`
+                : `${prefix}\n\nPlease summarize this document and highlight the key points.`;
+            } else {
+              await sendReply(
+                userId,
+                `I received *${fileName}* but couldn't extract text from it. Supported formats are PDF, DOCX, TXT, CSV, Markdown, and JSON.`,
+                replyTargetJid,
+              );
+              mediaHandled = true;
+            }
+          } else {
+            await sendReply(
+              userId,
+              `I received *${fileName}* but couldn't download it. Please try again.`,
+              replyTargetJid,
+            );
+            mediaHandled = true;
+          }
+        } else {
+          await sendReply(
+            userId,
+            `I received *${fileName}* but that file type is not supported yet.\n\nSupported formats: PDF, DOCX, TXT, CSV, Markdown, and JSON.`,
+            replyTargetJid,
+          );
+          mediaHandled = true;
+        }
+      }
+
+      if (mediaHandled) {
+        continue;
+      }
+
+      if (isGroupMessage && text) {
+        text = stripMentionTokens(text, mentionedJids);
+      }
 
       if (!text) {
         continue;
@@ -1196,8 +1616,31 @@ async function connectSession(userId: string): Promise<SessionRecord> {
         inboundIds.set(messageId, now);
       }
 
+      if (!isGroupMessage) {
+        const onboardingState = await getActiveOnboardingState(userId).catch(() => null);
+        if (onboardingState) {
+          const onboardingReply = await handleOnboardingReply(
+            userId,
+            stripQuotedReplyPrefix(text),
+          ).catch(() => null);
+          if (onboardingReply) {
+            await sendReply(userId, onboardingReply, replyTargetJid);
+            continue;
+          }
+        } else {
+          const shouldStartOnboarding = await isNewUserNeedingOnboarding(userId).catch(() => false);
+          if (shouldStartOnboarding) {
+            const onboardingReply = await startOnboarding(userId).catch(() => null);
+            if (onboardingReply) {
+              await sendReply(userId, onboardingReply, replyTargetJid);
+              continue;
+            }
+          }
+        }
+      }
+
       console.log(`[agent] Inbound from ${userId}: "${text.slice(0, 80)}"`);
-      await handleInbound(userId, text, message.key.id ?? null, safeRemoteJid);
+      await handleInbound(userId, text, message.key.id ?? null, replyTargetJid);
     }
   });
 

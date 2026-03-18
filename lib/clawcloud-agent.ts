@@ -11,7 +11,22 @@
 
 import { getClawCloudCalendarEvents, getClawCloudGmailMessages } from "@/lib/clawcloud-google";
 import { upsertAnalyticsDaily } from "@/lib/clawcloud-analytics";
-import { answerNewsQuestion, detectNewsQuestion, hasNewsProviders } from "@/lib/clawcloud-news";
+import {
+  parseCalendarAttendees,
+  sendMeetingBriefing,
+} from "@/lib/clawcloud-meeting-briefing";
+import {
+  answerNewsQuestion,
+  answerWebSearch,
+  buildNoLiveDataReply,
+  detectNewsQuestion,
+  detectWebSearchIntent,
+} from "@/lib/clawcloud-news";
+import {
+  detectFinanceQuery,
+  formatFinanceReply,
+  getLiveFinanceData,
+} from "@/lib/clawcloud-finance";
 import { detectExpertMode, EXPERT_MODE_PROMPTS, WHATSAPP_BRAIN } from "@/lib/super-brain";
 import {
   completeClawCloudPrompt,
@@ -49,17 +64,55 @@ import {
 } from "@/lib/clawcloud-types";
 import { sendClawCloudWhatsAppMessage, sendClawCloudWhatsAppToPhone } from "@/lib/clawcloud-whatsapp";
 import {
-  lookupContact,
+  listContactsFormatted,
   parseSaveContactCommand,
   parseSendMessageCommand,
-  listContactsFormatted,
   saveContact,
 } from "@/lib/clawcloud-contacts";
+import {
+  formatAmbiguousReply,
+  formatNotFoundReply,
+  lookupContactFuzzy,
+} from "@/lib/clawcloud-contacts-v2";
+import { applyDisclaimer } from "@/lib/clawcloud-disclaimers";
+import { sendEveningSummary } from "@/lib/clawcloud-evening-summary-v2";
 import { getWeather, parseWeatherCity } from "@/lib/clawcloud-weather";
 import {
   buildConversationMemory,
   buildMemorySystemSnippet,
 } from "@/lib/clawcloud-memory";
+import {
+  autoDetectAndSaveTimezone,
+  autoExtractAndSaveFacts,
+  clearAllMemoryFacts,
+  deleteMemoryFact,
+  detectMemoryCommand,
+  formatMemoryClearedReply,
+  formatMemoryForgotReply,
+  formatMemorySavedReply,
+  formatProfileReply,
+  getAllMemoryFacts,
+  loadUserProfileSnippet,
+  saveMemoryFact,
+} from "@/lib/clawcloud-user-memory";
+import { shouldUseLiveSearch } from "@/lib/clawcloud-live-search";
+import {
+  cancelAllReminders,
+  cancelReminderByIndex,
+  detectReminderIntent,
+  formatCancelAllReply,
+  formatCancelReply,
+  formatDoneReply,
+  formatReminderListReply,
+  formatReminderSetReply,
+  formatSnoozeReply,
+  formatStatusReply,
+  listActiveReminders,
+  markLatestReminderDone,
+  parseReminderAI,
+  saveReminder,
+  snoozeLatestReminder,
+} from "@/lib/clawcloud-reminders";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -956,7 +1009,7 @@ function buildSmartSystem(
   ].join("\n");
 
   const memoryBlock = memorySnippet
-    ? `\n\nCONVERSATION MEMORY:\n${memorySnippet}\nUse this context for follow-up questions.`
+    ? `\n\nCONVERSATION MEMORY:\n${memorySnippet}\nUse this context for follow-up questions and relevant personalization.`
     : "";
 
   return brain
@@ -966,10 +1019,18 @@ function buildSmartSystem(
     + (extraInstruction ? `\n\n${extraInstruction}` : "");
 }
 
-async function buildSmartHistory(userId: string, message: string, mode: ResponseMode) {
+const EXTENDED_HISTORY_INTENTS = new Set<string>(["coding", "research", "math", "explain"]);
+
+async function buildSmartHistory(
+  userId: string,
+  message: string,
+  mode: ResponseMode,
+  intent?: string | null,
+) {
+  const extended = Boolean(intent && EXTENDED_HISTORY_INTENTS.has(intent));
   const limit = mode === "deep"
-    ? (message.length > 220 ? 14 : 20)
-    : (message.length > 140 ? 8 : 14);
+    ? (extended ? (message.length > 220 ? 20 : 30) : (message.length > 220 ? 14 : 20))
+    : (extended ? (message.length > 140 ? 12 : 20) : (message.length > 140 ? 8 : 14));
   return getHistory(userId, limit);
 }
 
@@ -1041,6 +1102,122 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || normalized.includes("ask specifically: 'when did x happen?'")
     || normalized.includes("rephrase your question and i'll answer it immediately and accurately")
   );
+}
+
+async function logIntentAnalytics(
+  userId: string,
+  intent: string,
+  latencyMs: number,
+  hadFallback: boolean,
+  charCount: number,
+) {
+  const db = getClawCloudSupabaseAdmin();
+  const nowIso = new Date().toISOString();
+  const dateKey = nowIso.slice(0, 10);
+  const normalizedIntent = intent.trim() || "general";
+  const normalizedLatencyMs = Math.max(0, Math.round(latencyMs));
+  const normalizedCharCount = Math.max(0, Math.round(charCount));
+
+  const { data: existing } = await db
+    .from("intent_analytics_daily")
+    .select("id, count, avg_latency_ms, fallback_count")
+    .eq("user_id", userId)
+    .eq("date", dateKey)
+    .eq("intent", normalizedIntent)
+    .maybeSingle()
+    .catch(() => ({ data: null }));
+
+  const row = (existing ?? null) as {
+    id: string;
+    count: number | null;
+    avg_latency_ms: number | null;
+    fallback_count: number | null;
+  } | null;
+
+  if (row?.id) {
+    const previousCount = Number(row.count ?? 0);
+    const nextCount = previousCount + 1;
+    const previousAvg = Number(row.avg_latency_ms ?? 0);
+    const nextAvg = Math.round(
+      ((previousAvg * previousCount) + normalizedLatencyMs) / Math.max(nextCount, 1),
+    );
+
+    await db
+      .from("intent_analytics_daily")
+      .update({
+        count: nextCount,
+        avg_latency_ms: nextAvg,
+        fallback_count: Number(row.fallback_count ?? 0) + (hadFallback ? 1 : 0),
+      })
+      .eq("id", row.id)
+      .catch(() => null);
+  } else {
+    await db
+      .from("intent_analytics_daily")
+      .insert({
+        user_id: userId,
+        date: dateKey,
+        intent: normalizedIntent,
+        count: 1,
+        avg_latency_ms: normalizedLatencyMs,
+        fallback_count: hadFallback ? 1 : 0,
+      })
+      .catch(() => null);
+  }
+
+  await db
+    .from("task_runs")
+    .insert({
+      user_id: userId,
+      task_id: null,
+      task_type: "chat_message",
+      status: hadFallback ? "failed" : "success",
+      input_data: { intent: normalizedIntent },
+      output_data: { char_count: normalizedCharCount },
+      duration_ms: normalizedLatencyMs,
+      intent_type: normalizedIntent,
+      latency_ms: normalizedLatencyMs,
+      had_fallback: hadFallback,
+      char_count: normalizedCharCount,
+      started_at: nowIso,
+      completed_at: nowIso,
+    })
+    .catch(() => null);
+}
+
+async function finalizeAgentReply(input: {
+  userId: string;
+  locale: SupportedLocale;
+  question: string;
+  intent: string;
+  category: string;
+  startedAt: number;
+  reply: string;
+  alreadyTranslated?: boolean;
+}) {
+  const cleanedReply = input.reply.replace(/\n{3,}/g, "\n\n").trim();
+  const replyWithDisclaimer = input.alreadyTranslated
+    ? cleanedReply
+    : applyDisclaimer({
+      intent: input.intent,
+      category: input.category,
+      question: input.question,
+      answer: cleanedReply,
+    }).combined;
+
+  const finalReply = input.alreadyTranslated
+    ? cleanedReply
+    : await translateMessage(replyWithDisclaimer, input.locale);
+
+  void logIntentAnalytics(
+    input.userId,
+    input.intent,
+    Date.now() - input.startedAt,
+    isVisibleFallbackReply(cleanedReply),
+    finalReply.length,
+  ).catch(() => null);
+
+  return finalReply;
 }
 
 function isLowQualityTemplateReply(reply: string | null | undefined) {
@@ -3119,7 +3296,7 @@ async function rewriteReplyAsComplete(input: {
       "Never leave the final answer unfinished.",
     ].join("\n\n"),
     user: `Question:\n${input.message}\n\nDraft answer:\n${input.draft}`,
-    history: await buildSmartHistory(input.userId, input.message, "deep"),
+    history: await buildSmartHistory(input.userId, input.message, "deep", input.intent),
     intent: input.intent,
     responseMode: "deep",
     preferredModels: RECOVERY_MODELS[input.intent],
@@ -3148,7 +3325,7 @@ async function buildProfessionalRecoveryReply(input: {
       "Never leave the final answer unfinished.",
     ].join("\n\n"),
     user: input.message,
-    history: await buildSmartHistory(input.userId, input.message, "deep"),
+    history: await buildSmartHistory(input.userId, input.message, "deep", input.intent),
     intent: input.intent,
     responseMode: "deep",
     preferredModels: RECOVERY_MODELS[input.intent],
@@ -3320,7 +3497,7 @@ async function smartReply(
     const fastReply = await completeClawCloudPrompt({
       system: buildSmartSystem("fast", intent, message, extraInstruction, memorySnippet),
       user: message,
-      history: await buildSmartHistory(userId, message, "fast"),
+      history: await buildSmartHistory(userId, message, "fast", intent),
       intent,
       responseMode: "fast",
       fallback: FAST_FALLBACK,
@@ -3339,7 +3516,7 @@ async function smartReply(
   const deepPromise = completeClawCloudPrompt({
     system: buildSmartSystem("deep", intent, message, extraInstruction, memorySnippet),
     user: message,
-    history: await buildSmartHistory(userId, message, "deep"),
+    history: await buildSmartHistory(userId, message, "deep", intent),
     intent,
     responseMode: "deep",
     fallback: DEEP_FALLBACK,
@@ -3362,7 +3539,7 @@ async function smartReply(
     const fastReply = await completeClawCloudPrompt({
       system: buildSmartSystem("fast", intent, message, extraInstruction, memorySnippet),
       user: message,
-      history: await buildSmartHistory(userId, message, "fast"),
+      history: await buildSmartHistory(userId, message, "fast", intent),
       intent,
       responseMode: "fast",
       fallback: FAST_FALLBACK,
@@ -3383,7 +3560,7 @@ async function smartReply(
     return completeClawCloudPrompt({
       system: buildSmartSystem("fast", intent, message, extraInstruction, memorySnippet),
       user: message,
-      history: await buildSmartHistory(userId, message, "fast"),
+      history: await buildSmartHistory(userId, message, "fast", intent),
       intent,
       responseMode: "fast",
       fallback: FAST_FALLBACK,
@@ -3591,7 +3768,7 @@ async function expertReply(
       }
     }
 
-    const history = await buildSmartHistory(userId, message, "deep");
+    const history = await buildSmartHistory(userId, message, "deep", intent);
     return runGroundedResearchReply({
       userId,
       question: message,
@@ -3605,7 +3782,7 @@ async function expertReply(
       return deterministic;
     }
 
-    const history = await buildSmartHistory(userId, message, "deep");
+    const history = await buildSmartHistory(userId, message, "deep", intent);
     const draft = await smartReply(userId, message, "coding", "deep", true);
     return refineCodingAnswer({
       question: message,
@@ -3673,7 +3850,232 @@ function looksLikeCalendarQuestion(text: string) {
     || /\bwhat('s|\s+is)\s+(on\s+)?(my\s+)?(calendar|schedule|agenda|plate)\b/.test(text)
     || /\bdo i have (any\s+)?(meetings?|events?|calls?)\b/.test(text)
     || /\b(today'?s|tomorrow'?s)\s+(meetings?|calendar|schedule|agenda)\b/.test(text)
+    || /\b(calendar|schedule|meetings?|events?)\b.*\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/.test(text)
+    || /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b.*\b(calendar|schedule|meetings?|events?|overlap|back-to-back)\b/.test(text)
+    || /\b(overlap|back-to-back|conflict|double-booked)\b.*\b(calendar|schedule|meetings?|events?)\b/.test(text)
+    || /\b(calendar|schedule|meetings?|events?)\b.*\b(morning|afternoon|evening|night|between \d|from \d)\b/.test(text)
   );
+}
+
+function looksLikeConceptualTechnologyQuestion(text: string) {
+  const normalized = text.toLowerCase();
+  return (
+    /\b(explain|compare|difference between|different between|versus|vs\.?|trade-?off|pros and cons|strengths?|weaknesses?|failure modes?|how does|what is|what are|why does|why do)\b/.test(normalized)
+    && /\b(vector database|vector databases|graph database|graph databases|knowledge graph|retrieval|embedding|embeddings|semantic search|rerank|transformer|attention|quic|tcp|tls|http\/3|consensus|raft|paxos|distributed systems?)\b/.test(normalized)
+    && !/\b(write|implement|build|debug|fix|code|program|script)\b/.test(normalized)
+  );
+}
+
+type CalendarQueryWindow = {
+  label: string;
+  timeMin: string;
+  timeMax: string;
+  checksSpacing: boolean;
+};
+
+function nextWeekdayDate(base: Date, weekday: number) {
+  const result = new Date(base);
+  const delta = (weekday - result.getDay() + 7) % 7;
+  result.setDate(result.getDate() + delta);
+  return result;
+}
+
+function parseClockTime(value: string) {
+  const match = value.trim().toLowerCase().match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
+  if (!match) return null;
+
+  let hour = Number(match[1]);
+  const minute = Number(match[2] ?? "0");
+  const meridiem = match[3];
+
+  if (meridiem === "pm" && hour < 12) hour += 12;
+  if (meridiem === "am" && hour === 12) hour = 0;
+  if (!meridiem && hour <= 7) hour += 12;
+  if (hour > 23 || minute > 59) return null;
+
+  return { hour, minute };
+}
+
+function buildCalendarQueryWindow(text: string): CalendarQueryWindow {
+  const normalized = text.toLowerCase();
+  const base = new Date();
+  let dayStart = new Date(base);
+  dayStart.setHours(0, 0, 0, 0);
+  let label = "today";
+
+  const weekdayMap: Record<string, number> = {
+    sunday: 0,
+    monday: 1,
+    tuesday: 2,
+    wednesday: 3,
+    thursday: 4,
+    friday: 5,
+    saturday: 6,
+  };
+
+  if (/\bnext week\b/.test(normalized)) {
+    dayStart.setDate(dayStart.getDate() + 7);
+    label = "next week";
+  } else if (/\btomorrow\b/.test(normalized)) {
+    dayStart.setDate(dayStart.getDate() + 1);
+    label = "tomorrow";
+  } else {
+    for (const [name, index] of Object.entries(weekdayMap)) {
+      if (normalized.includes(name)) {
+        dayStart = nextWeekdayDate(dayStart, index);
+        label = name;
+        if (new RegExp(`\\bnext\\s+${name}\\b`).test(normalized)) {
+          dayStart.setDate(dayStart.getDate() + 7);
+          label = `next ${name}`;
+        }
+        break;
+      }
+    }
+  }
+
+  const explicitRange =
+    normalized.match(/\bbetween\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s+(?:and|to)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b/)
+    ?? normalized.match(/\bfrom\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s+(?:to|-)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b/);
+
+  let startHour = 0;
+  let startMinute = 0;
+  let endHour = 23;
+  let endMinute = 59;
+
+  if (explicitRange) {
+    const start = parseClockTime(explicitRange[1]);
+    const end = parseClockTime(explicitRange[2]);
+    if (start && end) {
+      startHour = start.hour;
+      startMinute = start.minute;
+      endHour = end.hour;
+      endMinute = end.minute;
+      label = `${label} ${explicitRange[1].trim()}-${explicitRange[2].trim()}`;
+    }
+  } else if (/\bmorning\b/.test(normalized)) {
+    startHour = 6;
+    endHour = 11;
+    endMinute = 59;
+    label = `${label} morning`;
+  } else if (/\bafternoon\b/.test(normalized)) {
+    startHour = 12;
+    endHour = 17;
+    endMinute = 0;
+    label = `${label} afternoon`;
+  } else if (/\bevening\b/.test(normalized)) {
+    startHour = 17;
+    endHour = 21;
+    endMinute = 0;
+    label = `${label} evening`;
+  } else if (/\btonight\b|\bnight\b/.test(normalized)) {
+    startHour = 18;
+    endHour = 23;
+    endMinute = 59;
+    label = `${label} night`;
+  } else if (label === "next week") {
+    endHour = 23;
+    endMinute = 59;
+  }
+
+  const timeMin = new Date(dayStart);
+  timeMin.setHours(startHour, startMinute, 0, 0);
+
+  const timeMax = new Date(dayStart);
+  if (label === "next week") {
+    timeMax.setDate(timeMax.getDate() + 7);
+    timeMax.setHours(0, 0, 0, 0);
+  } else {
+    timeMax.setHours(endHour, endMinute, 59, 999);
+    if (timeMax <= timeMin) {
+      timeMax.setDate(timeMax.getDate() + 1);
+    }
+  }
+
+  return {
+    label,
+    timeMin: timeMin.toISOString(),
+    timeMax: timeMax.toISOString(),
+    checksSpacing: /\b(overlap|back-to-back|conflict|double-booked)\b/.test(normalized),
+  };
+}
+
+function formatCalendarEventTime(value: string, timezone: string) {
+  const parsed = new Date(value);
+  return parsed.toLocaleTimeString("en-IN", {
+    timeZone: timezone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
+function findCalendarOverlaps(events: Array<{ start: string; end: string; summary: string }>) {
+  const overlaps: string[] = [];
+  const sorted = [...events].sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+
+  for (let index = 1; index < sorted.length; index += 1) {
+    const previous = sorted[index - 1];
+    const current = sorted[index];
+    if (Date.parse(current.start) < Date.parse(previous.end)) {
+      overlaps.push(`${previous.summary} overlaps with ${current.summary}`);
+    }
+  }
+
+  return overlaps;
+}
+
+function findCalendarBackToBack(events: Array<{ start: string; end: string; summary: string }>) {
+  const pairs: string[] = [];
+  const sorted = [...events].sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+
+  for (let index = 1; index < sorted.length; index += 1) {
+    const previous = sorted[index - 1];
+    const current = sorted[index];
+    const gapMinutes = Math.round((Date.parse(current.start) - Date.parse(previous.end)) / 60000);
+    if (gapMinutes >= 0 && gapMinutes <= 10) {
+      pairs.push(`${previous.summary} -> ${current.summary} (${gapMinutes} min gap)`);
+    }
+  }
+
+  return pairs;
+}
+
+async function isGoogleCalendarConnected(userId: string) {
+  const { data } = await getClawCloudSupabaseAdmin()
+    .from("connected_accounts")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("provider", "google_calendar")
+    .eq("is_active", true)
+    .maybeSingle()
+    .catch(() => ({ data: null }));
+
+  return Boolean(data);
+}
+
+function looksLikeDocumentContext(text: string) {
+  return (
+    /📄\s*\*user sent a document:/i.test(text)
+    || /---\s*document content\s*---/i.test(text)
+    || /---\s*end of document\s*---/i.test(text)
+    || /\buser question about this document:/i.test(text)
+  );
+}
+
+function shouldRouteToWebSearch(text: string): boolean {
+  const t = text.toLowerCase().trim();
+  if (!detectWebSearchIntent(t)) return false;
+
+  // Keep first-party personal-tool queries on dedicated intents.
+  if (
+    /\b(search|find|look up|check|show|get)\s+(my\s+)?(email|inbox|mail|messages?|calendar|schedule|agenda|meetings?|events?|reminders?|spending|expenses?|contacts?|profile)\b/.test(t)
+    || /\b(my\s+)?(emails?|inbox|calendar|schedule|agenda|reminders?|spending|expenses?|contacts?|profile)\b/.test(t)
+    || /\b(remind me|set (a\s+)?reminder|show reminders?|list reminders?)\b/.test(t)
+  ) {
+    return false;
+  }
+
+  return true;
 }
 
 function detectIntentLegacy(text: string): DetectedIntent {
@@ -3682,6 +4084,33 @@ function detectIntentLegacy(text: string): DetectedIntent {
 
   if (looksLikeResearchMemoQuestion(t)) {
     return { type: "research", category: "research" };
+  }
+
+  if (looksLikeDocumentContext(text)) {
+    return { type: "research", category: "research" };
+  }
+
+  if (
+    /^(\/help|help|menu|\/menu)$/i.test(t) ||
+    /\b(what can you do|your (features|capabilities|commands)|how (to use|do i use)|kya kar sakte|mujhe kya|show me features)\b/.test(t)
+  ) {
+    return { type: "help", category: "help" };
+  }
+
+  if (detectMemoryCommand(t).type !== "none") {
+    return { type: "memory", category: "memory" };
+  }
+
+  if (detectFinanceQuery(t) !== null) {
+    return { type: "finance", category: "finance" };
+  }
+
+  if (shouldRouteToWebSearch(t)) {
+    return { type: "web_search", category: "web_search" };
+  }
+
+  if (looksLikeConceptualTechnologyQuestion(t)) {
+    return { type: "technology", category: "technology" };
   }
 
   // === NEWS ===
@@ -3714,7 +4143,7 @@ function detectIntentLegacy(text: string): DetectedIntent {
     return { type: "research", category: "weather" };
   }
 
-  if (looksLikeReminderStatusQuestion(t)) {
+  if (detectReminderIntent(t).intent !== "unknown") {
     return { type: "reminder", category: "reminder" };
   }
 
@@ -3759,12 +4188,6 @@ function detectIntentLegacy(text: string): DetectedIntent {
     /\bany (emails?|messages?) (from|about|regarding)\b/.test(t)
   ) return { type: "email", category: "email_search" };
 
-  // === REMINDER ===
-  if (
-    /\b(remind me|set (a\s+)?reminder|alert me|notify me|don'?t (let me )?forget)\b/.test(t) ||
-    /\bremind (me\s+)?(at|in|on|by|tomorrow|tonight|this evening|next)\b/.test(t)
-  ) return { type: "reminder", category: "reminder" };
-
   // === CALENDAR ===
   if (
     looksLikeCalendarQuestion(t)
@@ -3808,6 +4231,33 @@ function detectIntent(text: string): DetectedIntent {
     return { type: "research", category: "research" };
   }
 
+  if (looksLikeDocumentContext(text)) {
+    return { type: "research", category: "research" };
+  }
+
+  if (
+    /^(\/help|help|menu|\/menu)$/i.test(t) ||
+    /\b(what can you do|your (features|capabilities|commands)|how (to use|do i use)|kya kar sakte|mujhe kya|show me features)\b/.test(t)
+  ) {
+    return { type: "help", category: "help" };
+  }
+
+  if (detectMemoryCommand(t).type !== "none") {
+    return { type: "memory", category: "memory" };
+  }
+
+  if (detectFinanceQuery(t) !== null) {
+    return { type: "finance", category: "finance" };
+  }
+
+  if (shouldRouteToWebSearch(t)) {
+    return { type: "web_search", category: "web_search" };
+  }
+
+  if (looksLikeConceptualTechnologyQuestion(t)) {
+    return { type: "technology", category: "technology" };
+  }
+
   if (detectNewsQuestion(t)) {
     return { type: "research", category: "news" };
   }
@@ -3837,14 +4287,7 @@ function detectIntent(text: string): DetectedIntent {
     return { type: "research", category: "weather" };
   }
 
-  if (looksLikeReminderStatusQuestion(t)) {
-    return { type: "reminder", category: "reminder" };
-  }
-
-  if (
-    /\b(remind me|set (a\s+)?reminder|alert me|notify me|don'?t (let me )?forget)\b/.test(t)
-    || /\bremind (me\s+)?(at|in|on|by|tomorrow|tonight|this evening|next)\b/.test(t)
-  ) {
+  if (detectReminderIntent(t).intent !== "unknown") {
     return { type: "reminder", category: "reminder" };
   }
 
@@ -3971,7 +4414,7 @@ function detectIntent(text: string): DetectedIntent {
   }
 
   if (
-    /\b(artificial intelligence|ai|machine learning|neural network|chatgpt|gpt|llm|deep learning|computer vision|nlp|internet|wifi|5g|blockchain|cloud computing|cybersecurity|hacking|vpn|router|smartphone|laptop|processor|gpu|ram|ssd|operating system|windows|linux|macos|android|ios|app|software|saas)\b/.test(t)
+    /\b(artificial intelligence|ai|machine learning|neural network|chatgpt|gpt|llm|deep learning|computer vision|nlp|internet|wifi|5g|blockchain|cloud computing|cybersecurity|hacking|vpn|router|smartphone|laptop|processor|gpu|ram|ssd|operating system|windows|linux|macos|android|ios|app|software|saas|vector databases?|graph databases?|knowledge graph|semantic search|retrieval|transformer|attention|quic|tcp|tls|http\/3)\b/.test(t)
     && !/\b(write code|implement|debug|fix this|build a)\b/.test(t)
   ) {
     return { type: "technology", category: "technology" };
@@ -4012,6 +4455,60 @@ function detectIntent(text: string): DetectedIntent {
   return { type: "general", category: "general" };
 }
 
+function buildHelpMessage(): string {
+  return [
+    "🦞 *ClawCloud AI - What I can do*",
+    "",
+    "━━━ 💬 *Ask me anything* ━━━",
+    "• Any question on science, history, math, law, health",
+    "• Example: _What is quantum entanglement?_",
+    "",
+    "━━━ 💻 *Code* ━━━",
+    "• Write, debug, and explain code in any language",
+    "• Example: _Write a Python function to sort a dict by value_",
+    "",
+    "━━━ 📊 *Math* ━━━",
+    "• Step-by-step solutions with working shown",
+    "• Example: _Solve: 3x² + 5x - 2 = 0_",
+    "",
+    "━━━ ✍️ *Writing* ━━━",
+    "• Emails, essays, reports, cover letters, and captions",
+    "• Example: _Write a professional email asking for a refund_",
+    "",
+    "━━━ 📧 *Email* ━━━",
+    "• Search inbox: _What did Priya say about the invoice?_",
+    "• Draft replies: _Draft replies to my last 3 emails_",
+    "",
+    "━━━ 📅 *Calendar* ━━━",
+    "• Check meetings: _What meetings do I have today?_",
+    "",
+    "━━━ ⏰ *Reminders* ━━━",
+    "• _Remind me at 6pm to call Raj_",
+    "• _Remind me in 30 minutes to drink water_",
+    "• _Show my reminders_",
+    "",
+    "━━━ 🌤️ *Weather* ━━━",
+    "• _Weather in Delhi today_",
+    "",
+    "━━━ 🗞️ *News* ━━━",
+    "• _Latest news about AI_",
+    "",
+    "━━━ 🖼️ *Images* ━━━",
+    "• Send a photo and I'll describe it, read text, or answer questions",
+    "",
+    "━━━ 🎤 *Voice notes* ━━━",
+    "• Send a voice note and I'll transcribe and respond",
+    "",
+    "━━━ 📄 *Documents* ━━━",
+    "• Send a PDF or Word document and I'll summarize or answer questions",
+    "",
+    "━━━ 🌐 *Translate* ━━━",
+    "• _Translate this to Hindi: Good morning, how are you?_",
+    "",
+    "Need help with something specific? Just ask naturally.",
+  ].join("\n");
+}
+
 function isLowCoverageResearchReply(reply: string): boolean {
   const t = (reply ?? "").toLowerCase().trim();
   return (
@@ -4027,26 +4524,39 @@ function isLowCoverageResearchReply(reply: string): boolean {
   );
 }
 
-function looksLikeReminderStatusQuestion(text: string): boolean {
-  const t = text.toLowerCase();
-  if (/^\s*(remind me|set (a\s+)?reminder|alert me|notify me|don'?t (let me )?forget)\b/.test(t)) {
-    return false;
-  }
-  return (
-    /\b(reminder|remind|alert)\b/.test(t)
-    && (
-      /\b(status|scheduled|see|show|check|view|when)\b/.test(t)
-      || /\b(?:did|have)\s+(?:you\s+)?set\b/.test(t)
-      || /\b(is (?:my|the)?\s*reminder set)\b/.test(t)
-    )
-  );
-}
-
 function normalizeResearchMarkdownForWhatsApp(reply: string): string {
   return reply
     .replace(/^#{1,6}\s+/gm, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+function hasLiveEvidenceMarkers(answer: string): boolean {
+  const t = answer.toLowerCase();
+  return (
+    /\bsources?:/i.test(answer)
+    || t.includes("source domains:")
+    || t.includes("live data as of")
+    || t.includes("searched:")
+    || t.includes("live answer")
+    || t.includes("source note:")
+  );
+}
+
+function looksUnsafeUngroundedNumericalAnswer(answer: string): boolean {
+  const t = answer.toLowerCase();
+  const hasNumbers = /\d+(?:\.\d+)?/.test(answer);
+  const hasRiskLanguage = /unavailable|not found|could not|cannot|may shift|verify|subject to change/.test(t);
+  return hasNumbers && !hasLiveEvidenceMarkers(answer) && !hasRiskLanguage;
+}
+
+function isAcceptableLiveAnswer(answer: string | null | undefined): boolean {
+  const normalized = answer?.trim() ?? "";
+  if (!normalized) return false;
+  if (isVisibleFallbackReply(normalized) || isLowCoverageResearchReply(normalized)) return false;
+  if (!hasLiveEvidenceMarkers(normalized)) return false;
+  if (looksUnsafeUngroundedNumericalAnswer(normalized)) return false;
+  return true;
 }
 
 function buildNewsCoverageRecoveryReply(question: string): string {
@@ -4071,6 +4581,16 @@ async function buildLiveCoverageRecoveryReply(
   history: Array<{ role: "user" | "assistant"; content: string }> = [],
   memorySnippet?: string,
 ): Promise<string> {
+  if (shouldUseLiveSearch(question)) {
+    const q = question.trim().slice(0, 100);
+    return [
+      `🔍 *${q}*`,
+      "",
+      "I could not verify enough live sources right now for an accurate answer.",
+      "Please retry in a moment. I will return fresh, source-backed data.",
+    ].join("\n");
+  }
+
   const knowledgeReply = await completeClawCloudPrompt({
     system: [
       buildSmartSystem("deep", "research", question, undefined, memorySnippet),
@@ -4201,25 +4721,89 @@ export async function routeInboundAgentMessage(
   userId: string,
   message: string,
 ): Promise<string | null> {
+  const routeStartedAt = Date.now();
   const requested = extractModeOverride(message);
   const trimmed = requested.cleaned;
   if (!trimmed) return null;
 
+  const localePromise = getUserLocale(userId);
+  const finalizeEarlyRaw = async (reply: string, intent: string, category: string) =>
+    finalizeAgentReply({
+      userId,
+      locale: await localePromise,
+      question: trimmed,
+      intent,
+      category,
+      startedAt: routeStartedAt,
+      reply,
+    });
+  const finalizeEarlyTranslated = async (reply: string, intent: string, category: string) =>
+    finalizeAgentReply({
+      userId,
+      locale: await localePromise,
+      question: trimmed,
+      intent,
+      category,
+      startedAt: routeStartedAt,
+      reply,
+      alreadyTranslated: true,
+    });
+
   // 1. Approval commands (SEND/EDIT/SKIP)
   const approval = await handleReplyApprovalCommand(userId, trimmed);
-  if (approval.handled) return approval.response;
+  if (approval.handled) return finalizeEarlyTranslated(approval.response, "help", "help");
+  const memoryCommand = detectMemoryCommand(trimmed);
 
-  const memory = await buildConversationMemory(userId, trimmed);
-  const memorySnippet = buildMemorySystemSnippet(memory);
+  if (memoryCommand.type === "show_profile") {
+    const facts = await getAllMemoryFacts(userId);
+    return finalizeEarlyRaw(formatProfileReply(facts), "memory", "memory");
+  }
+
+  if (memoryCommand.type === "forget_all") {
+    const count = await clearAllMemoryFacts(userId);
+    return finalizeEarlyRaw(formatMemoryClearedReply(count), "memory", "memory");
+  }
+
+  if (memoryCommand.type === "forget_key") {
+    const found = await deleteMemoryFact(userId, memoryCommand.key);
+    return finalizeEarlyRaw(formatMemoryForgotReply(memoryCommand.key, found), "memory", "memory");
+  }
+
+  if (memoryCommand.type === "save_explicit") {
+    const saved = await saveMemoryFact(userId, memoryCommand.key, memoryCommand.value, "explicit", 1.0);
+    const reply = saved
+      ? formatMemorySavedReply(memoryCommand.key, memoryCommand.value)
+      : "⚠️ *I couldn't save that right now.* Please try again in a moment.";
+    return finalizeEarlyRaw(reply, "memory", "memory");
+  }
+
+  void autoExtractAndSaveFacts(userId, trimmed).catch(() => null);
+  void autoDetectAndSaveTimezone(userId, trimmed).catch(() => null);
+
+  const [memory, userProfileSnippet, locale] = await Promise.all([
+    buildConversationMemory(userId, trimmed),
+    loadUserProfileSnippet(userId),
+    localePromise,
+  ]);
+  const memorySnippet = buildMemorySystemSnippet(memory, userProfileSnippet);
   const finalMessage = memory.resolvedQuestion.trim() || trimmed;
+  const hasDocumentContext = looksLikeDocumentContext(finalMessage);
 
-  const locale = await getUserLocale(userId);
   const detected = detectIntent(finalMessage);
-  let resolvedType = detected.type;
-  let resolvedCategory = detected.category;
+  let resolvedType = hasDocumentContext ? "research" : detected.type;
+  let resolvedCategory = hasDocumentContext ? "research" : detected.category;
 
-  if (resolvedCategory !== "send_message" && resolvedCategory !== "save_contact") {
-    if (resolvedCategory !== "math" && isMathOrStatisticsQuestion(finalMessage)) {
+  if (
+    !hasDocumentContext
+    && resolvedCategory !== "send_message"
+    && resolvedCategory !== "save_contact"
+    && resolvedCategory !== "finance"
+    && resolvedCategory !== "web_search"
+  ) {
+    if (looksLikeConceptualTechnologyQuestion(finalMessage)) {
+      resolvedType = "technology";
+      resolvedCategory = "technology";
+    } else if (resolvedCategory !== "math" && isMathOrStatisticsQuestion(finalMessage)) {
       resolvedType = "math";
       resolvedCategory = "math";
     } else if (resolvedCategory !== "coding" && isArchitectureOrDesignQuestion(finalMessage)) {
@@ -4247,7 +4831,10 @@ export async function routeInboundAgentMessage(
       if (domain === "FINANCE_MATH" || domain === "CAUSAL_STATS" || domain === "CLINICAL_BIO") {
         resolvedType = "math";
         resolvedCategory = "math";
-      } else if (domain === "ML_SYSTEMS" || domain === "SYS_ARCH" || domain === "REGULATED_AI") {
+      } else if (
+        !looksLikeConceptualTechnologyQuestion(finalMessage)
+        && (domain === "ML_SYSTEMS" || domain === "SYS_ARCH" || domain === "REGULATED_AI")
+      ) {
         resolvedType = "coding";
         resolvedCategory = "coding";
       }
@@ -4256,25 +4843,70 @@ export async function routeInboundAgentMessage(
 
   const responseMode = resolveResponseMode(resolvedType, finalMessage, requested.mode);
   const explicitMode = requested.explicit;
+  const finalizeRaw = (
+    reply: string,
+    intent: string = resolvedType,
+    category: string = resolvedCategory,
+  ) =>
+    finalizeAgentReply({
+      userId,
+      locale,
+      question: finalMessage,
+      intent,
+      category,
+      startedAt: routeStartedAt,
+      reply,
+    });
+  const finalizeTranslated = (
+    reply: string,
+    intent: string = resolvedType,
+    category: string = resolvedCategory,
+  ) =>
+    finalizeAgentReply({
+      userId,
+      locale,
+      question: finalMessage,
+      intent,
+      category,
+      startedAt: routeStartedAt,
+      reply,
+      alreadyTranslated: true,
+    });
 
   switch (resolvedCategory) {
 
     case "send_message": {
-      return handleSendMessageToContact(userId, trimmed, locale);
+      return finalizeTranslated(
+        await handleSendMessageToContact(userId, trimmed, locale),
+        "send_message",
+        "send_message",
+      );
     }
 
     case "save_contact": {
-      return handleSaveContactCommand(userId, trimmed, locale);
+      return finalizeTranslated(
+        await handleSaveContactCommand(userId, trimmed, locale),
+        "save_contact",
+        "save_contact",
+      );
     }
 
     case "weather": {
-      return handleWeatherQuery(userId, trimmed, locale);
+      return finalizeTranslated(
+        await handleWeatherQuery(userId, trimmed, locale),
+        "weather",
+        "weather",
+      );
     }
 
     case "spending": {
       const ans = await answerSpendingQuestion(userId, finalMessage);
-      if (ans) return ans;
-      return smartReply(userId, finalMessage, "spending", responseMode, explicitMode, undefined, memorySnippet);
+      if (ans) return finalizeTranslated(ans, "spending", "spending");
+      return finalizeRaw(
+        await smartReply(userId, finalMessage, "spending", responseMode, explicitMode, undefined, memorySnippet),
+        "spending",
+        "spending",
+      );
     }
 
     case "draft_email": {
@@ -4283,7 +4915,7 @@ export async function routeInboundAgentMessage(
         `User message: "${trimmed}". They want email help. Acknowledge you're checking their inbox and drafting ${count} reply${count === 1 ? "" : "s"}. 1-2 lines max.`
       );
       runReplyApprovalsFireAndForget(userId, count, locale);
-      return translateMessage(ack, locale);
+      return finalizeRaw(ack, "email", "draft_email");
     }
 
     case "email_search": {
@@ -4291,114 +4923,245 @@ export async function routeInboundAgentMessage(
         `User message: "${trimmed}". They want to search email. Acknowledge you're searching their inbox. 1 line max.`
       );
       runTaskFireAndForget(userId, "email_search", trimmed, locale, "Email search");
-      return translateMessage(ack, locale);
+      return finalizeRaw(ack, "email", "email_search");
     }
 
     case "reminder": {
-      if (looksLikeReminderStatusQuestion(trimmed)) {
-        const status = await getLatestReminderStatus(userId);
-        if (!status) {
-          return translateMessage(
-            "⏰ *I don't see an active reminder yet.*\n\nTry: _Remind me at 6pm tomorrow to call Raj_",
-            locale,
+      const intentResult = detectReminderIntent(trimmed);
+      const userTimezone = await getUserReminderTimezone(userId);
+
+      if (intentResult.intent === "list") {
+        const reminders = await listActiveReminders(userId).catch(() => []);
+        return finalizeRaw(formatReminderListReply(reminders, userTimezone), "reminder", "reminder");
+      }
+
+      if (intentResult.intent === "status") {
+        const reminders = await listActiveReminders(userId).catch(() => []);
+        return finalizeRaw(formatStatusReply(reminders, userTimezone), "reminder", "reminder");
+      }
+
+      if (intentResult.intent === "cancel_all") {
+        const count = await cancelAllReminders(userId).catch(() => 0);
+        return finalizeRaw(formatCancelAllReply(count), "reminder", "reminder");
+      }
+
+      if (intentResult.intent === "cancel_index") {
+        const cancelled = await cancelReminderByIndex(userId, intentResult.index).catch(() => null);
+        if (!cancelled) {
+          const reminders = await listActiveReminders(userId).catch(() => []);
+          return finalizeRaw(
+            reminders.length
+              ? `❌ *No reminder #${intentResult.index} found.*\n\nReply _show reminders_ to see your active list.`
+              : "⏰ *You do not have any active reminders.*",
+            "reminder",
+            "reminder",
           );
         }
 
-        const when = new Date(status.fireAt).toLocaleString("en-IN", {
-          weekday: "short",
-          month: "short",
-          day: "numeric",
-          hour: "2-digit",
-          minute: "2-digit",
-        });
+        return finalizeRaw(formatCancelReply(cancelled, intentResult.index), "reminder", "reminder");
+      }
 
-        return translateMessage(
-          `✅ *Yes — your reminder is saved.*\n\n📌 *Task:* ${status.reminderText}\n⏰ *When:* ${when}\n\nI'll ping you here when it's due.`,
-          locale,
+      if (intentResult.intent === "done") {
+        const reminderText = await markLatestReminderDone(userId).catch(() => null);
+        return finalizeRaw(
+          reminderText ? formatDoneReply(reminderText) : "✅ *Got it.*",
+          "reminder",
+          "reminder",
         );
       }
 
-      const parsed = parseReminder(trimmed);
+      if (intentResult.intent === "snooze") {
+        const result = await snoozeLatestReminder(userId, intentResult.minutes).catch(() => null);
+        if (!result) {
+          return finalizeRaw("⏰ *There is no recent reminder to snooze.*", "reminder", "reminder");
+        }
+
+        return finalizeRaw(
+          formatSnoozeReply(
+            result.reminderText,
+            result.newFireAt,
+            intentResult.minutes,
+            userTimezone,
+          ),
+          "reminder",
+          "reminder",
+        );
+      }
+
+      const parsed = await parseReminderAI(trimmed, userTimezone);
       if (!parsed) {
-        return translateMessage(
-          "⏰ *I can set that — share time + task.*\n\nTry:\n• _Remind me at 6pm tomorrow to call Raj_\n• _Remind me in 30 minutes to drink water_",
-          locale,
+        return finalizeRaw(
+          [
+            "⏰ *I can set that. I just need a time and task.*",
+            "",
+            "Examples:",
+            "• _Remind me at 6pm to call Raj_",
+            "• _Remind me in 30 minutes to drink water_",
+            "• _Remind me every weekday at 9am for standup_",
+            "• _Mujhe kal subah 8 baje yaad dilao ki medicine leni hai_",
+          ].join("\n"),
+          "reminder",
+          "reminder",
         );
       }
 
-      const when = new Date(parsed.fireAt).toLocaleString("en-IN", {
-        weekday: "short",
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-      await getClawCloudSupabaseAdmin().from("agent_tasks").upsert({
-        user_id: userId,
-        task_type: "custom_reminder",
-        is_enabled: true,
-        config: {
-          reminder_text: parsed.reminderText,
-          fire_at: parsed.fireAt,
-          one_time: true,
-          source_message: trimmed,
-        },
-      }, { onConflict: "user_id,task_type" });
-      await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
-      return translateMessage(
-        `✅ *Reminder set.*\n\n📌 *Task:* ${parsed.reminderText}\n⏰ *When:* ${when}\n\nI'll ping you here when it's due.`,
-        locale,
-      );
+      try {
+        const saved = await saveReminder(
+          userId,
+          parsed.fireAt,
+          parsed.reminderText,
+          parsed.recurRule,
+          trimmed,
+        );
+        const reminders = await listActiveReminders(userId).catch(() => [saved]);
+        await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+        return finalizeRaw(
+          formatReminderSetReply(saved, reminders.length, userTimezone),
+          "reminder",
+          "reminder",
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to save reminder.";
+        if (/active reminders/i.test(message)) {
+          return finalizeRaw(
+            `⚠️ *${message}*\n\nReply _show reminders_ to manage them.`,
+            "reminder",
+            "reminder",
+          );
+        }
+
+        throw error;
+      }
     }
 
     case "calendar": {
-      const ack = await fastAckQuick("User wants calendar info. 1 line: checking schedule.");
-      runTaskFireAndForget(userId, "meeting_reminders", null, locale, "Calendar check");
-      return translateMessage(ack, locale);
+      return finalizeTranslated(
+        await answerCalendarQuestionSafe(userId, finalMessage, locale),
+        "calendar",
+        "calendar",
+      );
+    }
+
+    case "finance": {
+      const financeData = await getLiveFinanceData(finalMessage).catch(() => null);
+      if (financeData) {
+        await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+        return finalizeRaw(formatFinanceReply(financeData), "finance", "finance");
+      }
+
+      const searchAnswer = await answerWebSearch(finalMessage).catch(() => "");
+      const normalizedSearch = searchAnswer.trim();
+      if (isAcceptableLiveAnswer(normalizedSearch)) {
+        const withSafety = /not financial advice/i.test(normalizedSearch)
+          ? normalizedSearch
+          : `${normalizedSearch}\n\n\u26A0\uFE0F _Not financial advice. Verify before trading._`;
+        await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+        return finalizeRaw(
+          normalizeResearchMarkdownForWhatsApp(withSafety),
+          "finance",
+          "finance",
+        );
+      }
+
+      const safeFallback = [
+        "\u26A0\uFE0F _Live price data unavailable right now._",
+        "",
+        "I could not fetch reliable market quotes for this request.",
+        "Please retry shortly and share an exact ticker when possible (e.g., `RELIANCE.NS`, `BTC`, `USDINR`).",
+        "",
+        "\u26A0\uFE0F _Not financial advice. Verify before trading._",
+      ].join("\n");
+      return finalizeRaw(safeFallback, "finance", "finance");
+    }
+
+    case "web_search": {
+      const searchAnswer = await answerWebSearch(finalMessage).catch(() => "");
+      const normalizedSearch = searchAnswer.trim();
+      if (isAcceptableLiveAnswer(normalizedSearch)) {
+        await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+        return finalizeRaw(
+          normalizeResearchMarkdownForWhatsApp(normalizedSearch),
+          "web_search",
+          "web_search",
+        );
+      }
+
+      const history = memory.recentTurns.length
+        ? memory.recentTurns
+        : await buildSmartHistory(userId, finalMessage, "deep", "web_search");
+
+      const researchAnswer = await runGroundedResearchReply({
+        userId,
+        question: finalMessage,
+        history,
+      }).catch(() => "");
+
+      const normalizedResearch = researchAnswer?.trim() ?? "";
+      if (isAcceptableLiveAnswer(normalizedResearch)) {
+        return finalizeRaw(
+          normalizeResearchMarkdownForWhatsApp(normalizedResearch),
+          "web_search",
+          "web_search",
+        );
+      }
+
+      return finalizeRaw(buildNoLiveDataReply(finalMessage), "web_search", "web_search");
     }
 
     case "news": {
-      const useLiveProviders = hasNewsProviders();
-      if (useLiveProviders) {
-        const answer = await answerNewsQuestion(finalMessage).catch(() => "");
-        if (answer.trim() && !isVisibleFallbackReply(answer) && !isLowCoverageResearchReply(answer)) {
-          return translateMessage(normalizeResearchMarkdownForWhatsApp(answer), locale);
-        }
-
-        const history = memory.recentTurns.length ? memory.recentTurns : await buildSmartHistory(userId, finalMessage, "deep");
-        const fallback = await runGroundedResearchReply({
-          userId,
-          question: finalMessage,
-          history,
-        }).catch(() => "");
-
-        const normalizedFallback = fallback?.trim() ?? "";
-        if (normalizedFallback && !isLowCoverageResearchReply(normalizedFallback)) {
-          return translateMessage(normalizeResearchMarkdownForWhatsApp(normalizedFallback), locale);
-        }
+      const newsAnswer = await answerNewsQuestion(finalMessage).catch(() => "");
+      const normalizedNews = newsAnswer.trim();
+      if (isAcceptableLiveAnswer(normalizedNews)) {
+        await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+        return finalizeRaw(
+          normalizeResearchMarkdownForWhatsApp(normalizedNews),
+          "news",
+          "news",
+        );
       }
 
-      const knowledgeQuestion = finalMessage
+      const history = memory.recentTurns.length
+        ? memory.recentTurns
+        : await buildSmartHistory(userId, finalMessage, "deep", "news");
+
+      const groundedAnswer = await runGroundedResearchReply({
+        userId,
+        question: finalMessage,
+        history,
+      }).catch(() => "");
+
+      const normalizedGrounded = groundedAnswer?.trim() ?? "";
+      if (isAcceptableLiveAnswer(normalizedGrounded)) {
+        return finalizeRaw(
+          normalizeResearchMarkdownForWhatsApp(normalizedGrounded),
+          "news",
+          "news",
+        );
+      }
+
+      const staleWarning = `${buildNoLiveDataReply(finalMessage)}\n\n`;
+      const freshnessSafeQuestion = finalMessage
         .replace(/\b(right now|currently|at the moment|as of now|today|live)\b/gi, "")
         .replace(/\s{2,}/g, " ")
         .trim();
 
-      const reply = await smartReply(
+      const knowledgeReply = await smartReply(
         userId,
-        knowledgeQuestion || finalMessage,
+        freshnessSafeQuestion || finalMessage,
         "research",
         responseMode,
         explicitMode,
-        "Answer directly using best available knowledge. If this topic can change quickly, add one short note that live rankings/news may shift.",
+        "Answer directly using best available knowledge. If this topic changes frequently, add one short freshness note at the end.",
         memorySnippet,
       );
-      return translateMessage(reply, locale);
+      return finalizeRaw(staleWarning + knowledgeReply, "news", "news");
+
     }
 
     case "coding": {
       const deterministic = solveCodingArchitectureQuestion(finalMessage);
       if (deterministic) {
-        return translateMessage(deterministic, locale);
+        return finalizeRaw(deterministic, "coding", "coding");
       }
 
       const reply =
@@ -4406,13 +5169,13 @@ export async function routeInboundAgentMessage(
           ? (await expertReply(userId, finalMessage, "coding"))
             ?? await smartReply(userId, finalMessage, "coding", responseMode, explicitMode, undefined, memorySnippet)
           : await smartReply(userId, finalMessage, "coding", responseMode, explicitMode, undefined, memorySnippet);
-      return translateMessage(reply, locale);
+      return finalizeRaw(reply, "coding", "coding");
     }
 
     case "math": {
       const mathExpert = await expertReply(userId, finalMessage, "math");
       if (mathExpert) {
-        return translateMessage(mathExpert, locale);
+        return finalizeRaw(mathExpert, "math", "math");
       }
 
       const mathDomain = await semanticDomainClassify(finalMessage).catch(() => "GENERAL");
@@ -4423,17 +5186,17 @@ export async function routeInboundAgentMessage(
         }).catch(() => "");
 
         if (semanticAnswer.trim()) {
-          return translateMessage(semanticAnswer, locale);
+          return finalizeRaw(semanticAnswer, "math", "math");
         }
       }
 
       const reply = await smartReply(userId, finalMessage, "math", responseMode, explicitMode, undefined, memorySnippet);
-      return translateMessage(reply, locale);
+      return finalizeRaw(reply, "math", "math");
     }
 
     case "creative": {
       const reply = await smartReply(userId, finalMessage, "creative", responseMode, explicitMode, undefined, memorySnippet);
-      return translateMessage(reply, locale);
+      return finalizeRaw(reply, "creative", "creative");
     }
 
     case "explain": {
@@ -4446,23 +5209,38 @@ export async function routeInboundAgentMessage(
         "Answer this explanation question clearly, accurately, and in teaching style with WhatsApp-friendly formatting.",
         memorySnippet,
       );
-      return translateMessage(reply, locale);
+      return finalizeRaw(reply, "explain", "explain");
     }
 
     case "research": {
+      if (hasDocumentContext) {
+        const reply = await smartReply(
+          userId,
+          finalMessage,
+          "research",
+          responseMode,
+          explicitMode,
+          "Use only the document content already included in the message. Answer the user's question directly, check every stated constraint explicitly, and if choosing among options, name the winner, briefly explain why the others do not qualify, and mention one extra supporting operational differentiator from the winning row when the document provides it, such as support level, incident response, SLA, turnaround time, or another concrete field that was not already one of the hard constraints. Do not use Gmail, spending history, or outside knowledge.",
+          memorySnippet,
+        );
+        return finalizeRaw(reply, "research", "research");
+      }
+
       const realtimeResearch = looksLikeRealtimeResearch(finalMessage);
       const expertAnswer = await expertReply(userId, finalMessage, "research");
       if (expertAnswer && !isVisibleFallbackReply(expertAnswer) && !isLowCoverageResearchReply(expertAnswer)) {
-        return translateMessage(expertAnswer, locale);
+        return finalizeRaw(expertAnswer, "research", "research");
       }
 
       if (realtimeResearch) {
         if (expertAnswer && isLowCoverageResearchReply(expertAnswer)) {
           const recovery = await buildLiveCoverageRecoveryReply(userId, finalMessage, memory.recentTurns, memorySnippet);
-          return translateMessage(recovery, locale);
+          return finalizeRaw(recovery, "research", "research");
         }
 
-        const history = memory.recentTurns.length ? memory.recentTurns : await buildSmartHistory(userId, finalMessage, "deep");
+        const history = memory.recentTurns.length
+          ? memory.recentTurns
+          : await buildSmartHistory(userId, finalMessage, "deep", "research");
         const grounded = await runGroundedResearchReply({
           userId,
           question: finalMessage,
@@ -4471,25 +5249,35 @@ export async function routeInboundAgentMessage(
 
         const normalizedGrounded = grounded?.trim() ?? "";
         if (normalizedGrounded && !isVisibleFallbackReply(normalizedGrounded) && !isLowCoverageResearchReply(normalizedGrounded)) {
-          return translateMessage(normalizeResearchMarkdownForWhatsApp(normalizedGrounded), locale);
+          return finalizeRaw(
+            normalizeResearchMarkdownForWhatsApp(normalizedGrounded),
+            "research",
+            "research",
+          );
         }
 
         const recovery = await buildLiveCoverageRecoveryReply(userId, finalMessage, history, memorySnippet);
-        return translateMessage(recovery, locale);
+        return finalizeRaw(recovery, "research", "research");
       }
 
       const reply = await smartReply(userId, finalMessage, "research", responseMode, explicitMode, undefined, memorySnippet);
-      return translateMessage(reply, locale);
+      return finalizeRaw(reply, "research", "research");
+    }
+
+    case "help": {
+      return finalizeRaw(buildHelpMessage(), "help", "help");
     }
 
     case "greeting": {
       const reply = await smartReply(userId, finalMessage, "greeting", responseMode, explicitMode, undefined, memorySnippet);
-      return translateMessage(reply, locale);
+      return finalizeRaw(reply, "greeting", "greeting");
     }
 
     default: {
       if (looksLikeRealtimeResearch(finalMessage)) {
-        const history = memory.recentTurns.length ? memory.recentTurns : await buildSmartHistory(userId, finalMessage, "deep");
+        const history = memory.recentTurns.length
+          ? memory.recentTurns
+          : await buildSmartHistory(userId, finalMessage, "deep", resolvedType);
         const grounded = await runGroundedResearchReply({
           userId,
           question: finalMessage,
@@ -4498,15 +5286,31 @@ export async function routeInboundAgentMessage(
 
         const normalizedGrounded = grounded?.trim() ?? "";
         if (normalizedGrounded && !isVisibleFallbackReply(normalizedGrounded) && !isLowCoverageResearchReply(normalizedGrounded)) {
-          return translateMessage(normalizeResearchMarkdownForWhatsApp(normalizedGrounded), locale);
+          return finalizeRaw(
+            normalizeResearchMarkdownForWhatsApp(normalizedGrounded),
+            resolvedType,
+            resolvedCategory,
+          );
         }
 
         const recovery = await buildLiveCoverageRecoveryReply(userId, finalMessage, history, memorySnippet);
-        return translateMessage(recovery, locale);
+        return finalizeRaw(recovery, resolvedType, resolvedCategory);
       }
 
-      const reply = await smartReply(userId, finalMessage, resolvedType, responseMode, explicitMode, undefined, memorySnippet);
-      return translateMessage(reply, locale);
+      const reply = await smartReply(
+        userId,
+        finalMessage,
+        resolvedType,
+        responseMode,
+        explicitMode,
+        buildIntentSpecificInstruction(resolvedType, finalMessage),
+        memorySnippet,
+      );
+      return finalizeRaw(
+        postProcessIntentReply(resolvedType, finalMessage, reply),
+        resolvedType,
+        resolvedCategory,
+      );
     }
   }
 }
@@ -4582,31 +5386,36 @@ async function runDraftReplies(userId: string, config: ClawCloudTaskConfig, user
 }
 
 async function runMeetingReminders(userId: string, config: ClawCloudTaskConfig) {
-  const locale = await getUserLocale(userId);
+  const minutesBefore = Number(config.minutes_before ?? 30);
+  const windowStart = new Date(Date.now() + (minutesBefore - 2) * 60_000);
+  const windowEnd = new Date(Date.now() + (minutesBefore + 5) * 60_000);
   const events = await getClawCloudCalendarEvents(userId, {
-    timeMin: new Date().toISOString(),
-    timeMax: new Date(Date.now() + 86400000).toISOString(),
+    timeMin: windowStart.toISOString(),
+    timeMax: windowEnd.toISOString(),
   });
 
   if (!events.length) {
-    await sendClawCloudWhatsAppMessage(userId, await translateMessage("📅 *No meetings today!*\n\nYour calendar is clear for the next 24 hours. Enjoy the free time! 🎉", locale));
     return { eventCount: 0 };
   }
 
-  const list = events.map((e) => {
-    const t = new Date(e.start).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
-    return `• *${e.summary}* at ${t}${e.hangoutLink ? `\n  🔗 ${e.hangoutLink}` : ""}`;
-  }).join("\n\n");
+  let briefingsSent = 0;
+  for (const event of events) {
+    const sent = await sendMeetingBriefing({
+      userId,
+      eventId: String(event.id || event.summary || Math.random()),
+      eventTitle: event.summary,
+      eventStart: event.start,
+      hangoutLink: event.hangoutLink ?? null,
+      attendees: parseCalendarAttendees(event as unknown as Record<string, unknown>),
+      minutesBefore,
+    });
 
-  const msg = await completeClawCloudPrompt({
-    system: buildMultilingualBriefingSystem(locale) + "\n\nProfessional WhatsApp meeting summary. 📅 header, *bold* names/times.",
-    user: `Meetings:\n${list}`, intent: "calendar", maxTokens: 350, skipCache: true,
-    fallback: `📅 *Your Meetings Today*\n\n${list}`,
-  });
+    if (sent) {
+      briefingsSent += 1;
+    }
+  }
 
-  await sendClawCloudWhatsAppMessage(userId, msg);
-  await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
-  return { eventCount: events.length, message: msg };
+  return { eventCount: events.length, briefingsSent };
 }
 
 async function runEmailSearch(userId: string, userMessage: string | null | undefined) {
@@ -4633,138 +5442,67 @@ async function runEmailSearch(userId: string, userMessage: string | null | undef
 }
 
 async function runEveningSummary(userId: string) {
-  const start = new Date(); start.setHours(0, 0, 0, 0);
-  const [emails, events, runs] = await Promise.all([
-    getClawCloudGmailMessages(userId, { query: `after:${Math.floor(start.getTime() / 1000)}`, maxResults: 30 }),
-    getClawCloudCalendarEvents(userId, { timeMin: start.toISOString(), timeMax: new Date().toISOString() }),
-    getClawCloudSupabaseAdmin().from("task_runs").select("task_type,status").eq("user_id", userId).gte("started_at", start.toISOString()),
-  ]);
-
-  const unread = emails.filter((e) => !e.isRead);
-  const msg = await completeClawCloudPrompt({
-    system: BRAIN + "\n\nEvening summary for WhatsApp. 🌙 header, *bold* stats, • bullets for unread.",
-    user: `Summary:\nEmails: ${emails.length} (${unread.length} unread)\nMeetings: ${events.length}\nAI tasks: ${runs.data?.length ?? 0}\nUnread:\n${unread.slice(0, 5).map((e) => `- ${e.from}: ${e.subject}`).join("\n") || "None"}`,
-    intent: "research", maxTokens: 300, skipCache: true,
-    fallback: `🌙 *Evening Summary*\n\n📧 ${emails.length} emails, ${unread.length} unread\n📅 ${events.length} meetings\n🤖 ${runs.data?.length ?? 0} tasks\n\n${unread.length ? `*Still needs attention:*\n${unread.slice(0, 3).map((e) => `• ${e.from} — ${e.subject}`).join("\n")}` : "✅ All clear!"}`,
-  });
-
-  await sendClawCloudWhatsAppMessage(userId, msg);
-  await upsertAnalyticsDaily(userId, { emails_processed: emails.length, tasks_run: 1, wa_messages_sent: 1 });
-  return { message: msg };
+  return sendEveningSummary(userId);
 }
 
-function parseReminder(text: string): { fireAt: string; reminderText: string } | null {
-  const now = new Date();
-  const timeM = text.match(/\b(?:at|of|for)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
-  const inM = text.match(/\bin\s+(\d+)\s+(minute|hour|min|hr)s?\b/i);
-  const tmrw = /\btomorrow\b/i.test(text);
-  let fireAt: Date | null = null;
-
-  if (timeM) {
-    let h = parseInt(timeM[1], 10);
-    const m = parseInt(timeM[2] ?? "0", 10);
-    const mer = timeM[3]?.toLowerCase();
-    if (mer === "pm" && h < 12) h += 12;
-    if (mer === "am" && h === 12) h = 0;
-    fireAt = new Date(now);
-    if (tmrw) fireAt.setDate(fireAt.getDate() + 1);
-    fireAt.setHours(h, m, 0, 0);
-    if (fireAt <= now && !tmrw) fireAt.setDate(fireAt.getDate() + 1);
-  } else if (inM) {
-    const amt = parseInt(inM[1], 10);
-    const unit = inM[2].toLowerCase();
-    fireAt = new Date(now.getTime() + amt * (unit.startsWith("h") ? 3600000 : 60000));
-  } else if (tmrw) {
-    fireAt = new Date(now);
-    fireAt.setDate(fireAt.getDate() + 1);
-    fireAt.setHours(9, 0, 0, 0);
-  }
-
-  if (!fireAt) return null;
-
-  const toMatch = text.match(/\bto\s+(.+)/i)?.[1]?.trim();
-  const fallbackMatch = text.match(/\b(?:about|that|for)\s+(.+)/i)?.[1]?.trim();
-  let rt = toMatch || fallbackMatch || text;
-  rt = rt.replace(/^(tomorrow|today|tonight)\s+/i, "").trim();
-  if (!rt) {
-    rt = "Reminder";
-  }
-
-  return { fireAt: fireAt.toISOString(), reminderText: rt };
-}
-
-async function getLatestReminderStatus(userId: string): Promise<{ fireAt: string; reminderText: string } | null> {
+async function getUserReminderTimezone(userId: string) {
   const { data } = await getClawCloudSupabaseAdmin()
-    .from("agent_tasks")
-    .select("config,is_enabled")
-    .eq("user_id", userId)
-    .eq("task_type", "custom_reminder")
-    .eq("is_enabled", true)
-    .limit(20)
+    .from("users")
+    .select("timezone")
+    .eq("id", userId)
+    .maybeSingle()
     .catch(() => ({ data: null }));
 
-  const tasks = (data ?? []) as Array<{ config?: unknown; is_enabled?: boolean }>;
-  if (!tasks.length) {
-    return null;
-  }
-
-  const now = Date.now();
-  const parsed = tasks
-    .map((row) => {
-      const cfg = (row.config ?? {}) as Record<string, unknown>;
-      const fireAtRaw = typeof cfg.fire_at === "string" ? cfg.fire_at : "";
-      const reminderTextRaw =
-        typeof cfg.reminder_text === "string" && cfg.reminder_text.trim()
-          ? cfg.reminder_text.trim()
-          : "Your reminder";
-      const fireAtMs = fireAtRaw ? Date.parse(fireAtRaw) : Number.NaN;
-      if (!Number.isFinite(fireAtMs)) return null;
-      return {
-        fireAt: new Date(fireAtMs).toISOString(),
-        fireAtMs,
-        reminderText: reminderTextRaw,
-      };
-    })
-    .filter((value): value is { fireAt: string; fireAtMs: number; reminderText: string } => Boolean(value));
-
-  if (!parsed.length) {
-    return null;
-  }
-
-  const future = parsed
-    .filter((row) => row.fireAtMs >= now)
-    .sort((a, b) => a.fireAtMs - b.fireAtMs);
-
-  if (future.length > 0) {
-    return { fireAt: future[0].fireAt, reminderText: future[0].reminderText };
-  }
-
-  parsed.sort((a, b) => b.fireAtMs - a.fireAtMs);
-  return { fireAt: parsed[0].fireAt, reminderText: parsed[0].reminderText };
+  return (data?.timezone as string | undefined) ?? "Asia/Kolkata";
 }
 
 async function runCustomReminder(userId: string, userMessage: string | null | undefined) {
   const raw = userMessage?.trim() ?? "";
   if (!raw) throw new Error("Reminder requires a message.");
 
-  const parsed = parseReminder(raw);
+  const userTimezone = await getUserReminderTimezone(userId);
+  const parsed = await parseReminderAI(raw, userTimezone);
   if (!parsed) {
-    await sendClawCloudWhatsAppMessage(userId,
-      "⏰ *Couldn't parse that reminder*\n\nTry:\n• _Remind me at 5pm to call Priya_\n• _Remind me in 30 minutes to take medicine_\n• _Remind me tomorrow to send the report_"
+    await sendClawCloudWhatsAppMessage(
+      userId,
+      [
+        "⏰ *I couldn't parse that reminder.*",
+        "",
+        "Try:",
+        "• _Remind me at 5pm to call Priya_",
+        "• _Remind me in 30 minutes to take medicine_",
+        "• _Remind me tomorrow to send the report_",
+      ].join("\n"),
     );
     await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
     return { set: false };
   }
 
-  await getClawCloudSupabaseAdmin().from("agent_tasks").upsert({
-    user_id: userId, task_type: "custom_reminder", is_enabled: true,
-    config: { reminder_text: parsed.reminderText, fire_at: parsed.fireAt, one_time: true, source_message: raw },
-  }, { onConflict: "user_id,task_type" });
+  try {
+    const saved = await saveReminder(
+      userId,
+      parsed.fireAt,
+      parsed.reminderText,
+      parsed.recurRule,
+      raw,
+    );
+    const reminders = await listActiveReminders(userId).catch(() => [saved]);
+    await sendClawCloudWhatsAppMessage(
+      userId,
+      formatReminderSetReply(saved, reminders.length, userTimezone),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to save reminder.";
+    await sendClawCloudWhatsAppMessage(
+      userId,
+      /active reminders/i.test(message)
+        ? `⚠️ *${message}*\n\nReply _show reminders_ to manage them.`
+        : "❌ *I couldn't save that reminder right now.*",
+    );
+    await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+    return { set: false };
+  }
 
-  const timeStr = new Date(parsed.fireAt).toLocaleString("en-IN", { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-  await sendClawCloudWhatsAppMessage(userId,
-    `✅ *Reminder Set!*\n\n📌 *Task:* ${parsed.reminderText}\n⏰ *When:* ${timeStr}\n\nI'll remind you right on time! 🎯`
-  );
   await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
   return { set: true, fireAt: parsed.fireAt, reminderText: parsed.reminderText };
 }
@@ -4802,6 +5540,183 @@ async function handleWeatherQuery(
   );
 }
 
+function buildIntentSpecificInstruction(intent: IntentType, message: string) {
+  const normalized = message.toLowerCase();
+
+  if (intent === "technology" && looksLikeConceptualTechnologyQuestion(normalized)) {
+    return "Answer as a technology comparison: define both sides, compare strengths, failure modes, trade-offs, and close with when to choose each.";
+  }
+
+  if (intent === "science" && /\b(why|how|difference|compare)\b/.test(normalized)) {
+    return "Answer with mechanism first, then explain why it matters in practice. Use precise scientific terms but keep the flow teachable.";
+  }
+
+  if ((intent === "general" || intent === "explain") && /\b(framework|playbook|plan|steps|approach)\b/.test(normalized)) {
+    return "Answer with a named framework or numbered playbook, not loose prose. Keep each step concrete and operational.";
+  }
+
+  if (intent === "language" && /\btranslate|translation\b/.test(normalized)) {
+    return "Return the translation directly, preserve the original meaning, and clearly label each language.";
+  }
+
+  return undefined;
+}
+
+function postProcessIntentReply(intent: IntentType, question: string, reply: string) {
+  const normalizedQuestion = question.toLowerCase();
+  const normalizedReply = reply.toLowerCase();
+
+  if (
+    /\b(framework|playbook|plan|steps|approach)\b/.test(normalizedQuestion)
+    && !/\b(framework|playbook)\b/.test(normalizedReply.slice(0, 120))
+  ) {
+    return `*Framework*\n\n${reply}`;
+  }
+
+  return reply;
+}
+
+async function answerCalendarQuestion(
+  userId: string,
+  text: string,
+  locale: SupportedLocale,
+): Promise<string> {
+  const connected = await isGoogleCalendarConnected(userId);
+  if (!connected) {
+    return translateMessage(
+      "ðŸ“… *Google Calendar is not connected.*\n\nReconnect it in the dashboard, then I can answer schedule questions directly.",
+      locale,
+    );
+  }
+
+  const timezone = await getUserReminderTimezone(userId);
+  const window = buildCalendarQueryWindow(text);
+  const events = await getClawCloudCalendarEvents(userId, {
+    timeMin: window.timeMin,
+    timeMax: window.timeMax,
+    maxResults: 20,
+  });
+
+  if (!events.length) {
+    return translateMessage(
+      `ðŸ“… *No meetings found for ${window.label}.*\n\nYour calendar looks clear in that window.`,
+      locale,
+    );
+  }
+
+  const lines = events.map((event) => {
+    const start = formatCalendarEventTime(event.start, timezone);
+    const end = formatCalendarEventTime(event.end || event.start, timezone);
+    const extras = [
+      event.location ? `ðŸ“ ${event.location}` : "",
+      event.hangoutLink ? `ðŸ”— ${event.hangoutLink}` : "",
+    ].filter(Boolean);
+
+    return [
+      `â€¢ *${event.summary}*`,
+      `  ${start} - ${end}`,
+      ...extras.map((item) => `  ${item}`),
+    ].join("\n");
+  });
+
+  const overlapNotes = findCalendarOverlaps(events);
+  const spacingNotes = findCalendarBackToBack(events);
+  const summary: string[] = [];
+
+  if (window.checksSpacing) {
+    if (overlapNotes.length) {
+      summary.push(`âš ï¸ *Overlap:* ${overlapNotes.join("; ")}`);
+    } else {
+      summary.push("âœ… *Overlap:* none detected.");
+    }
+
+    if (spacingNotes.length) {
+      summary.push(`â±ï¸ *Back-to-back:* ${spacingNotes.join("; ")}`);
+    } else {
+      summary.push("âœ… *Back-to-back:* none detected.");
+    }
+  }
+
+  await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+  return translateMessage(
+    [
+      `ðŸ“… *Calendar for ${window.label}*`,
+      "",
+      ...lines,
+      ...(summary.length ? ["", ...summary] : []),
+    ].join("\n"),
+    locale,
+  );
+}
+
+async function answerCalendarQuestionSafe(
+  userId: string,
+  text: string,
+  locale: SupportedLocale,
+): Promise<string> {
+  const connected = await isGoogleCalendarConnected(userId);
+  if (!connected) {
+    return translateMessage(
+      "Google Calendar is not connected.\n\nReconnect it in the dashboard, then I can answer schedule questions directly.",
+      locale,
+    );
+  }
+
+  const timezone = await getUserReminderTimezone(userId);
+  const window = buildCalendarQueryWindow(text);
+  const events = await getClawCloudCalendarEvents(userId, {
+    timeMin: window.timeMin,
+    timeMax: window.timeMax,
+    maxResults: 20,
+  });
+
+  if (!events.length) {
+    return translateMessage(
+      `No meetings found for ${window.label}.\n\nYour calendar looks clear in that window.`,
+      locale,
+    );
+  }
+
+  const lines = events.map((event) => {
+    const start = formatCalendarEventTime(event.start, timezone);
+    const end = formatCalendarEventTime(event.end || event.start, timezone);
+    const extras = [
+      event.location ? `Location: ${event.location}` : "",
+      event.hangoutLink ? `Link: ${event.hangoutLink}` : "",
+    ].filter(Boolean);
+
+    return [
+      `- *${event.summary}*`,
+      `  ${start} - ${end}`,
+      ...extras.map((item) => `  ${item}`),
+    ].join("\n");
+  });
+
+  const overlapNotes = findCalendarOverlaps(events);
+  const spacingNotes = findCalendarBackToBack(events);
+  const summary: string[] = [];
+
+  if (window.checksSpacing) {
+    summary.push(
+      overlapNotes.length ? `*Overlap:* ${overlapNotes.join("; ")}` : "*Overlap:* none detected.",
+    );
+    summary.push(
+      spacingNotes.length ? `*Back-to-back:* ${spacingNotes.join("; ")}` : "*Back-to-back:* none detected.",
+    );
+  }
+
+  await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+  return translateMessage(
+    [
+      `*Calendar for ${window.label}*`,
+      "",
+      ...lines,
+      ...(summary.length ? ["", ...summary] : []),
+    ].join("\n"),
+    locale,
+  );
+}
+
 async function handleSendMessageToContact(
   userId: string,
   text: string,
@@ -4825,26 +5740,30 @@ async function handleSendMessageToContact(
   }
 
   const { contactName, message } = parsed;
-  const phone = await lookupContact(userId, contactName);
-  if (!phone) {
+  const fuzzyResult = await lookupContactFuzzy(userId, contactName);
+  if (fuzzyResult.type === "not_found") {
     return translateMessage(
-      [
-        `📵 *I do not have ${contactName}'s number saved yet.*`,
-        "",
-        `Save it first: _Save contact: ${contactName} = +91XXXXXXXXXX_`,
-        "",
-        "Then I can send messages instantly.",
-      ].join("\n"),
+      formatNotFoundReply(contactName, fuzzyResult.suggestions),
       locale,
     );
   }
+
+  if (fuzzyResult.type === "ambiguous") {
+    return translateMessage(
+      formatAmbiguousReply(contactName, fuzzyResult.matches),
+      locale,
+    );
+  }
+
+  const phone = fuzzyResult.contact.phone;
+  const resolvedName = fuzzyResult.contact.name;
 
   try {
     await sendClawCloudWhatsAppToPhone(phone, message);
     await upsertAnalyticsDaily(userId, { wa_messages_sent: 1, tasks_run: 1 });
     return translateMessage(
       [
-        `✅ *Message sent to ${contactName}!*`,
+        `✅ *Message sent to ${resolvedName}!*`,
         "",
         `📩 *Message:* ${message}`,
         `📱 *To:* +${phone}`,
@@ -4855,7 +5774,7 @@ async function handleSendMessageToContact(
     console.error("[agent] sendClawCloudWhatsAppToPhone failed:", error);
     return translateMessage(
       [
-        `❌ *Could not send the message to ${contactName}.*`,
+        `❌ *Could not send the message to ${resolvedName}.*`,
         "",
         "This usually happens when the number is not on WhatsApp or the session is disconnected.",
         "Reconnect WhatsApp in the dashboard and try again.",
@@ -4950,8 +5869,22 @@ export async function runClawCloudTask(input: RunTaskInput) {
   const limit = clawCloudRunLimits[plan];
 
   if (runs >= limit) {
-    await sendClawCloudWhatsAppMessage(input.userId,
-      `⚠️ *Daily limit reached*\n\nUsed all *${limit} runs* on *${plan}* plan today.\n\nUpgrade → swift-deploy.in/pricing`
+    const upgradeUrl = "swift-deploy.in/pricing";
+    const planEmoji = plan === "free" ? "🆓" : "⭐";
+    const nextPlan = plan === "free" ? "Starter" : "Pro";
+
+    await sendClawCloudWhatsAppMessage(
+      input.userId,
+      [
+        "⏱️ *Daily limit reached*",
+        "",
+        `${planEmoji} You've used all *${limit} runs* today on the *${plan}* plan.`,
+        "",
+        "Runs reset at *midnight IST* automatically.",
+        "",
+        "🚀 *Want unlimited runs?*",
+        `Upgrade to ${nextPlan} -> ${upgradeUrl}`,
+      ].join("\n"),
     );
     throw new Error("Daily limit reached.");
   }

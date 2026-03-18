@@ -152,7 +152,10 @@ export async function buildConversationMemory(
   };
 }
 
-export function buildMemorySystemSnippet(memory: ConversationMemory): string {
+export function buildMemorySystemSnippet(
+  memory: ConversationMemory,
+  userProfileSnippet?: string,
+): string {
   const lines: string[] = [];
 
   if (memory.topicSummary) {
@@ -164,6 +167,11 @@ export function buildMemorySystemSnippet(memory: ConversationMemory): string {
   if (memory.isFollowUp) {
     lines.push("Current message is a follow-up. Use prior context.");
     lines.push(`Resolved question: ${memory.resolvedQuestion}`);
+  }
+
+  if (userProfileSnippet) {
+    lines.push("");
+    lines.push(userProfileSnippet);
   }
 
   return lines.join("\n");

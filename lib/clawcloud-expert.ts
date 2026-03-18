@@ -1,5 +1,11 @@
 import { completeClawCloudFast, completeClawCloudPrompt, type IntentType } from "@/lib/clawcloud-ai";
 import { runResearchAgent } from "@/lib/research-agent";
+import {
+  classifyClawCloudLiveSearchRoute,
+  decorateLiveSearchAnswer,
+  fetchLiveDataAndSynthesize,
+  shouldUseLiveSearch,
+} from "@/lib/clawcloud-live-search";
 
 type ChatHistory = Array<{ role: "user" | "assistant"; content: string }>;
 type ExpertDomain =
@@ -2338,11 +2344,21 @@ async function solveAnyExpertQuestion(input: {
       "Produce the complete piece without truncation and keep it specific.",
     ].join("\n"),
     greeting: "Respond warmly and briefly.",
+    help: "Respond warmly with a concise capability overview and the most useful next step.",
+    memory: "Respond clearly and briefly about saved user profile information and memory actions.",
     reminder: "Confirm the reminder clearly with exact details.",
     send_message: "Confirm the message send action clearly and keep it concise.",
     save_contact: "Confirm the contact-save action clearly with the normalized phone number.",
     calendar: "Present the calendar answer clearly and concisely.",
     spending: "Give a concrete spending analysis with numbers and actions.",
+    finance: [
+      "You are a careful financial analyst.",
+      "Lead with the direct answer, clearly separate live facts from general context, and avoid overclaiming precision when data may move quickly.",
+    ].join("\n"),
+    web_search: [
+      "You are a research analyst summarizing fresh web findings.",
+      "Lead with the direct answer, then the most useful findings, and note uncertainty when sources are weak or conflicting.",
+    ].join("\n"),
     science: [
       "You are an expert scientific explainer.",
       "Lead with the key concept, then mechanism, then implications.",
@@ -2437,53 +2453,8 @@ async function solveAnyExpertQuestion(input: {
 }
 
 export function looksLikeRealtimeResearch(question: string): boolean {
-  const t = question.toLowerCase().trim();
-  if (!t) return false;
-
-  // Hard YES: queries that genuinely need live internet data.
-  const hardLive: RegExp[] = [
-    /\b(stock price|share price|bitcoin price|btc price|eth price|crypto price)\b/,
-    /\b(today'?s? price|current price|price right now|price today)\b/,
-    /\b(nifty|sensex|nasdaq|dow jones|s&p 500)\s+(today|now|live|current)\b/,
-    /\b(forex|exchange rate|usd to inr|inr to usd)\s*(today|now|live)?\b/,
-    /\b(lpg price|petrol price|diesel price)\s*(today|this month)?\b/,
-    /\b(live score|match score|today'?s? score|cricket score|ipl score|football score)\b/,
-    /\b(breaking news|news today|today'?s? news|latest news today|news right now)\b/,
-    /\bwhat (is|happened|are) (happening|going on) (right now|today|currently)\b/,
-    /\b(weather today|weather right now|temperature today|rain today|forecast today)\b/,
-    /\b(aqi|air quality) (today|right now|now)\b/,
-    /\b(election result|vote count|exit poll|who won the election)\b/,
-    /\b(just happened|just announced|just released|just launched)\b/,
-    /\b(died today|passed away today|arrested today|fired today|resigned today)\b/,
-    /\bright now\b/,
-    /\bas of today\b/,
-    /\bcurrently happening\b/,
-  ];
-  if (hardLive.some((re) => re.test(t))) return true;
-
-  // Hard NO: stable knowledge/explanation questions.
-  const hardKnowledge: RegExp[] = [
-    /^(what is|what are|what does|what was|what were|define|explain|describe|tell me about|meaning of|definition of)\b/,
-    /^(how does|how do|how is|how are|how did|how was)\b/,
-    /^(why does|why do|why is|why are|why did|why was)\b/,
-    /^(who (invented|discovered|created|founded|made|built|designed|wrote|composed))\b/,
-    /\b(chemical formula|molecular formula|element|compound|atom|molecule|reaction|enzyme|protein|dna|rna)\b/,
-    /\b(periodic table|boiling point|melting point|density of|speed of light)\b/,
-    /\b(history of|historical|ancient|medieval|world war|revolution|empire|dynasty|civilization)\b/,
-    /\b(capital of|located in|continent|geography)\b/,
-    /\b(calculate|compute|solve|prove|derive|algorithm|code|program|debug|function|syntax|sql|api)\b/,
-    /\b(factorial|fibonacci|prime number|sort|recursion|loop|array|string|integer)\b/,
-    /\b(difference between|formula for|how many (bones|planets|countries|continents|elements))\b/,
-    /\b(largest|smallest|tallest|deepest) (country|city|ocean|mountain|river|desert|building)\b/,
-  ];
-  if (hardKnowledge.some((re) => re.test(t))) return false;
-
-  // Soft live only with strong temporal cue.
-  const strongTemporal = /\b(right now|as of today|this moment|currently|live|real-?time|breaking)\b/.test(t);
-  const softLive = /\b(ceo of|president of|prime minister of|who is currently)\b/.test(t);
-  if (strongTemporal && softLive) return true;
-
-  return false;
+  // Live finance/news freshness patterns are owned by clawcloud-live-search.ts.
+  return shouldUseLiveSearch(question);
 }
 
 function codingReviewHints(question: string) {
@@ -2582,7 +2553,15 @@ export async function runGroundedResearchReply(input: {
     || solveCopilotArchitectureMemo(input.question);
   if (memo) return memo;
 
-  if (!looksLikeRealtimeResearch(input.question)) {
+  const liveSearchRoute = classifyClawCloudLiveSearchRoute(input.question);
+  if (liveSearchRoute.requiresWebSearch) {
+    const directLiveAnswer = await fetchLiveDataAndSynthesize(input.question).catch(() => "");
+    if (directLiveAnswer.trim()) {
+      return directLiveAnswer.trim();
+    }
+  }
+
+  if (!liveSearchRoute.requiresWebSearch) {
     const answer = await completeClawCloudPrompt({
       system: [
         "You are writing a decision memo for an expert operator.",
@@ -2613,7 +2592,12 @@ export async function runGroundedResearchReply(input: {
     user: { uid: input.userId },
   });
 
-  return result.answer.markdown?.trim() || null;
+  const groundedAnswer = result.answer.markdown?.trim() || null;
+  if (!groundedAnswer) {
+    return null;
+  }
+
+  return decorateLiveSearchAnswer(groundedAnswer, liveSearchRoute);
 }
 
 export function solveHardMathQuestion(question: string) {

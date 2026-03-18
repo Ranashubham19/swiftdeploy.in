@@ -1,5 +1,15 @@
 import { runClawCloudTask } from "@/lib/clawcloud-agent";
+import { upsertAnalyticsDaily } from "@/lib/clawcloud-analytics";
 import { getClawCloudCalendarEvents } from "@/lib/clawcloud-google";
+import {
+  parseCalendarAttendees,
+  sendMeetingBriefing,
+} from "@/lib/clawcloud-meeting-briefing";
+import {
+  fetchDueReminders,
+  fireReminder,
+  formatReminderFireMessage,
+} from "@/lib/clawcloud-reminders";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 import {
   clawCloudActiveTaskLimits,
@@ -136,15 +146,25 @@ function formatEventDateTime(start: string, timeZone: string) {
 
 async function claimCronSlot(
   supabaseAdmin: SupabaseAdminClient,
-  taskId: string,
+  taskId: string | null,
   userId: string,
   bucket: string,
+  reminderId?: string | null,
 ) {
-  const { error } = await supabaseAdmin.from("cron_log").insert({
-    task_id: taskId,
+  const payload: Record<string, unknown> = {
     user_id: userId,
     minute_bucket: bucket,
-  });
+  };
+
+  if (taskId) {
+    payload.task_id = taskId;
+  }
+
+  if (reminderId) {
+    payload.reminder_id = reminderId;
+  }
+
+  const { error } = await supabaseAdmin.from("cron_log").insert(payload);
 
   if (!error) {
     return true;
@@ -495,85 +515,43 @@ export async function runDueClawCloudTasks(): Promise<{
     }
   }
 
-  const { data: reminderTasks, error: reminderError } = await supabaseAdmin
-    .from("agent_tasks")
-    .select("id, user_id, task_type, config, is_enabled")
-    .eq("is_enabled", true)
-    .eq("task_type", "custom_reminder");
+  const dueReminders = await fetchDueReminders().catch((error) => {
+    console.error("[cron] Failed to fetch due reminders:", error instanceof Error ? error.message : error);
+    return [];
+  });
 
-  if (reminderError) {
-    console.error("[cron] Failed to fetch reminder tasks:", reminderError.message);
-  } else {
-    const reminderWindowStart = now.getTime() - 90_000;
-    const reminderWindowEnd = now.getTime() + 30_000;
+  for (const reminder of dueReminders) {
+    const reminderBucket = minuteBucket(new Date(reminder.fire_at));
+    const claimed = await claimCronSlot(
+      supabaseAdmin,
+      null,
+      reminder.user_id,
+      reminderBucket,
+      reminder.id,
+    );
+    if (!claimed) {
+      continue;
+    }
 
-    for (const task of (reminderTasks ?? []) as AgentTaskRow[]) {
-      const config = task.config ?? {};
-      const fireAt = typeof config.fire_at === "string" ? config.fire_at : "";
-      if (!fireAt) {
-        continue;
-      }
-
-      const fireAtMs = new Date(fireAt).getTime();
-      if (!Number.isFinite(fireAtMs)) {
-        continue;
-      }
-
-      if (fireAtMs < reminderWindowStart || fireAtMs > reminderWindowEnd) {
-        continue;
-      }
-
-      const reminderBucket = `reminder:${task.id}:${fireAt}`;
-      const claimed = await claimCronSlot(
-        supabaseAdmin,
-        task.id,
-        task.user_id,
-        reminderBucket,
+    try {
+      await sendClawCloudWhatsAppMessage(
+        reminder.user_id,
+        formatReminderFireMessage(reminder),
       );
-      if (!claimed) {
-        continue;
-      }
+      await fireReminder(reminder);
+      await upsertAnalyticsDaily(reminder.user_id, { tasks_run: 1, wa_messages_sent: 1 });
 
-      const reminderText =
-        typeof config.reminder_text === "string" && config.reminder_text.trim()
-          ? config.reminder_text.trim()
-          : "Your reminder";
-
-      try {
-        await sendClawCloudWhatsAppMessage(
-          task.user_id,
-          `⏰ *Reminder!*\n\n📌 ${reminderText}\n\n_Set earlier via ClawCloud_`,
-        );
-
-        const nextConfig = {
-          ...config,
-          fired_at: now.toISOString(),
-          ...(config.one_time ? { fire_at: null, one_time: false } : {}),
-        };
-
-        const { error: updateError } = await supabaseAdmin
-          .from("agent_tasks")
-          .update({ config: nextConfig })
-          .eq("id", task.id);
-
-        if (updateError) {
-          console.warn(
-            `[cron] Reminder state update failed for ${task.user_id}: ${updateError.message}`,
-          );
-        }
-
-        fired.push({
-          userId: task.user_id,
-          taskType: presentClawCloudTaskType(normalizeClawCloudTaskType(task.task_type)),
-          detail: reminderText,
-        });
-      } catch (error) {
-        errors.push({
-          userId: task.user_id,
-          taskType: presentClawCloudTaskType(normalizeClawCloudTaskType(task.task_type)),
-          error: error instanceof Error ? error.message : "Unknown error",
-        });
-      }
+      fired.push({
+        userId: reminder.user_id,
+        taskType: "custom_reminder",
+        detail: reminder.reminder_text,
+      });
+    } catch (error) {
+      errors.push({
+        userId: reminder.user_id,
+        taskType: "custom_reminder",
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
     }
   }
 
@@ -631,6 +609,34 @@ export async function runDueClawCloudTasks(): Promise<{
           continue;
         }
 
+        try {
+          const meetingTitle = event.summary?.trim() || "Upcoming meeting";
+          const briefingSent = await sendMeetingBriefing({
+            userId: task.user_id,
+            eventId: event.id || `${task.id}:${event.start}`,
+            eventTitle: meetingTitle,
+            eventStart: event.start,
+            hangoutLink: event.hangoutLink ?? null,
+            attendees: parseCalendarAttendees(event as unknown as Record<string, unknown>),
+            minutesBefore,
+          });
+
+          if (briefingSent) {
+            fired.push({
+              userId: task.user_id,
+              taskType: presentClawCloudTaskType(normalizeClawCloudTaskType(task.task_type)),
+              detail: meetingTitle,
+            });
+          }
+        } catch (error) {
+          errors.push({
+            userId: task.user_id,
+            taskType: presentClawCloudTaskType(normalizeClawCloudTaskType(task.task_type)),
+            error: String(error ?? "Unknown error"),
+          });
+        }
+        continue;
+
         const title = event.summary?.trim() || "Upcoming meeting";
         const when = formatEventDateTime(event.start, timeZone);
         const lines = [
@@ -659,7 +665,7 @@ export async function runDueClawCloudTasks(): Promise<{
           errors.push({
             userId: task.user_id,
             taskType: presentClawCloudTaskType(normalizeClawCloudTaskType(task.task_type)),
-            error: error instanceof Error ? error.message : "Unknown error",
+            error: String(error ?? "Unknown error"),
           });
         }
       }

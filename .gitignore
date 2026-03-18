@@ -46,6 +46,9 @@ backend/dist-bot/
 
 # Local scratch outputs
 tmp-*
+.codex-temp/
+tmp_patch_*/
+tmp_runtime_logs/
 *.tsbuildinfo
 
 # Local deployment/env dumps (never commit)

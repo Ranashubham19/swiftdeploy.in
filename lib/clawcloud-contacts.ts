@@ -5,7 +5,7 @@ type ContactMap = Record<string, string>;
 const CONTACTS_TASK_TYPE = "user_contacts";
 
 function normalizeName(name: string) {
-  return name.trim().toLowerCase();
+  return name.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 function normalizePhone(phone: string) {
@@ -85,22 +85,39 @@ export async function lookupContact(userId: string, name: string): Promise<strin
 }
 
 export function parseSaveContactCommand(text: string): { name: string; phone: string } | null {
-  const t = text.trim();
+  const t = text.trim().replace(/[.]+$/, "");
+  const namePattern = "([a-zA-Z\\u0900-\\u097F][a-zA-Z\\u0900-\\u097F\\s.&'\\-]{0,40}?)";
+  const phonePattern = "([\\d\\s+\\-()]{7,20})";
 
   const p1 = t.match(
-    /^(?:save|add)\s+contact[:\s]+([a-zA-Z\u0900-\u097F\s]{1,30}?)\s*[=:]\s*([\d\s+\-()]{7,20})$/i,
+    new RegExp(`^(?:save|add)\\s+contact[:\\s]+${namePattern}\\s*[=:]\\s*${phonePattern}$`, "i"),
   );
   if (p1) return { name: p1[1].trim(), phone: p1[2].trim() };
 
   const p2 = t.match(
-    /^(?:save|add)\s+([a-zA-Z\u0900-\u097F\s]{1,30}?)\s+(?:as|=|:)\s*([\d\s+\-()]{7,20})$/i,
+    new RegExp(`^(?:save|add)\\s+${namePattern}\\s+(?:as|=|:)\\s*${phonePattern}$`, "i"),
   );
   if (p2) return { name: p2[1].trim(), phone: p2[2].trim() };
 
   const p3 = t.match(
-    /^([a-zA-Z\u0900-\u097F\s]{1,30}?)(?:'s)?\s+(?:number|phone|contact)\s+(?:is|=|:)\s*([\d\s+\-()]{7,20})$/i,
+    new RegExp(`^${namePattern}(?:'s)?\\s+(?:number|phone|contact)\\s+(?:is|=|:)\\s*${phonePattern}$`, "i"),
   );
   if (p3) return { name: p3[1].trim(), phone: p3[2].trim() };
+
+  const p4 = t.match(
+    new RegExp(`^(?:save|add)\\s+contact[:\\s]+(?:name\\s+)?${namePattern}\\s*,\\s*(?:phone|number)\\s*[:=]?\\s*${phonePattern}$`, "i"),
+  );
+  if (p4) return { name: p4[1].trim(), phone: p4[2].trim() };
+
+  const p5 = t.match(
+    new RegExp(`^(?:save|add)\\s+${namePattern}\\s*,\\s*(?:phone|number)\\s*[:=]?\\s*${phonePattern}$`, "i"),
+  );
+  if (p5) return { name: p5[1].trim(), phone: p5[2].trim() };
+
+  const p6 = t.match(
+    new RegExp(`^(?:save|add)\\s+contact[:\\s]+(?:name\\s+)?${namePattern}\\s+(?:phone|number)\\s*[:=]?\\s*${phonePattern}$`, "i"),
+  );
+  if (p6) return { name: p6[1].trim(), phone: p6[2].trim() };
 
   return null;
 }
@@ -109,6 +126,11 @@ export function parseSendMessageCommand(
   text: string,
 ): { contactName: string; message: string } | null {
   const t = text.trim().replace(/^ok\s+/i, "").trim();
+
+  const p0 = t.match(
+    /^(?:send\s+(?:a\s+)?(?:message|msg|whatsapp|wa)\s+to|message|whatsapp|wa)\s+([a-zA-Z\u0900-\u097F][a-zA-Z\u0900-\u097F\s.&'\-]{0,40}?)[\s]*:\s*(.+)$/i,
+  );
+  if (p0) return { contactName: p0[1].trim(), message: p0[2].trim() };
 
   const p1 = t.match(
     /^(?:send\s+(?:a\s+)?(?:message|msg|whatsapp|wa)\s+to|message|whatsapp|wa)\s+([a-zA-Z\u0900-\u097F\s]{1,30}?)[\s:,]+(.+)$/i,

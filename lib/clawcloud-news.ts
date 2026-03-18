@@ -20,6 +20,12 @@ const NEWS_PATTERNS: RegExp[] = [
   /\b(ipl|cricket|nba|nfl|premier league|champions league|f1|formula 1|tennis|world cup|oscars?|grammys?|box office|bollywood|hollywood)\b/i,
 ];
 
+const WEB_SEARCH_PATTERNS: RegExp[] = [
+  /^(?:search|search for|find|look up|lookup|google|bing|fetch)\s+/i,
+  /\b(?:search the web for|search online for|find online|look it up)\b/i,
+  /\b(?:search for|look up|find info on|find information about)\b.{3,}/i,
+];
+
 const NOT_NEWS_PATTERNS: RegExp[] = [
   /\b(how (do|does|to|can|should|would)|explain|define|difference between|meaning of|history of|theory of|concept of)\b/i,
   /\b(write|create|make|generate|code|implement|design|build|calculate|compute|solve|debug|refactor)\b/i,
@@ -52,6 +58,10 @@ const TRUSTED_DOMAINS = [
   "espn.com",
   "espncricinfo.com",
   "cricbuzz.com",
+  "techcrunch.com",
+  "wired.com",
+  "theverge.com",
+  "arstechnica.com",
 ];
 
 const LOW_QUALITY_DOMAINS = [
@@ -67,6 +77,14 @@ const LOW_QUALITY_DOMAINS = [
 export function detectNewsQuestion(question: string): boolean {
   const text = question.trim();
   if (!text) return false;
+  if (
+    /\b(bitcoin|btc|crypto price|stock price|share price|exchange rate|usd to inr|inr to usd)\b/i.test(text)
+    || /\b(richest|wealthiest|billionaire|net worth|forbes list|top \d+ richest)\b/i.test(text)
+    || /\b(current ceo of|who is the ceo of|who is ceo of|ceo of)\b/i.test(text)
+    || /\b(latest iphone model|newest iphone model)\b/i.test(text)
+  ) {
+    return false;
+  }
   if (/\b(weather|whether|temperature|forecast|rain|humidity|wind|aqi)\b/i.test(text)) {
     return false;
   }
@@ -76,11 +94,16 @@ export function detectNewsQuestion(question: string): boolean {
   return NEWS_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+export function detectWebSearchIntent(question: string): boolean {
+  return WEB_SEARCH_PATTERNS.some((pattern) => pattern.test(question.trim()));
+}
+
 function formatCurrentDate(): string {
-  return new Intl.DateTimeFormat("en-US", {
+  return new Intl.DateTimeFormat("en-IN", {
     month: "long",
     day: "numeric",
     year: "numeric",
+    timeZone: "Asia/Kolkata",
   }).format(new Date());
 }
 
@@ -88,14 +111,13 @@ function formatPublishedDate(value?: string) {
   if (!value) return "";
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return "";
-  return new Intl.DateTimeFormat("en-US", {
+  return new Intl.DateTimeFormat("en-IN", {
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-    hour12: false,
-    timeZone: "UTC",
-    timeZoneName: "short",
+    hour12: true,
+    timeZone: "Asia/Kolkata",
   }).format(parsed);
 }
 
@@ -105,7 +127,7 @@ function currentYear(): string {
 
 function cleanedTopic(question: string) {
   return question
-    .replace(/^(tell me about|give me (the )?(latest|news|update) on|what('?s| is) (the )?(latest|news|status) on|latest|recent|breaking)\s+/i, "")
+    .replace(/^(tell me about|give me (the )?(latest|news|update) on|what('?s| is) (the )?(latest|news|status) on|latest|recent|breaking|search for|look up)\s+/i, "")
     .replace(/\?+$/, "")
     .trim();
 }
@@ -310,6 +332,85 @@ async function jinaNewsSearch(query: string): Promise<NewsSource[]> {
   }
 }
 
+async function duckDuckGoSearch(query: string): Promise<NewsSource[]> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5_000);
+    const url = new URL("https://api.duckduckgo.com/");
+    url.searchParams.set("q", query);
+    url.searchParams.set("format", "json");
+    url.searchParams.set("no_html", "1");
+    url.searchParams.set("skip_disambig", "1");
+    url.searchParams.set("no_redirect", "1");
+
+    const response = await fetch(url.toString(), {
+      signal: controller.signal,
+      cache: "no-store",
+      headers: {
+        "User-Agent": "ClawCloud/1.0 (WhatsApp AI Assistant)",
+      },
+    }).finally(() => clearTimeout(timer));
+
+    if (!response.ok) {
+      return [];
+    }
+
+    const data = await response.json() as {
+      AbstractText?: string;
+      AbstractURL?: string;
+      AbstractSource?: string;
+      RelatedTopics?: Array<{
+        Text?: string;
+        FirstURL?: string;
+        Topics?: Array<{
+          Text?: string;
+          FirstURL?: string;
+        }>;
+      }>;
+    };
+
+    const sources: NewsSource[] = [];
+
+    if (data.AbstractText && data.AbstractURL) {
+      sources.push({
+        title: `${query} - ${data.AbstractSource ?? "DuckDuckGo"}`,
+        url: data.AbstractURL,
+        snippet: data.AbstractText.slice(0, 400),
+        domain: extractDomain(data.AbstractURL),
+        score: 0.55,
+      });
+    }
+
+    for (const topic of (data.RelatedTopics ?? []).slice(0, 6)) {
+      if (topic.Text && topic.FirstURL) {
+        sources.push({
+          title: topic.Text.split(" - ")[0] ?? topic.Text.slice(0, 80),
+          url: topic.FirstURL,
+          snippet: topic.Text.slice(0, 300),
+          domain: extractDomain(topic.FirstURL),
+          score: 0.35,
+        });
+      }
+
+      for (const subTopic of (topic.Topics ?? []).slice(0, 2)) {
+        if (subTopic.Text && subTopic.FirstURL) {
+          sources.push({
+            title: subTopic.Text.slice(0, 80),
+            url: subTopic.FirstURL,
+            snippet: subTopic.Text.slice(0, 300),
+            domain: extractDomain(subTopic.FirstURL),
+            score: 0.25,
+          });
+        }
+      }
+    }
+
+    return sources;
+  } catch {
+    return [];
+  }
+}
+
 function dedupeByUrl(sources: NewsSource[]) {
   const seen = new Set<string>();
   return sources.filter((source) => {
@@ -359,6 +460,8 @@ export async function fastNewsSearch(queries: string[]): Promise<NewsSource[]> {
     }
   }
 
+  tasks.push(duckDuckGoSearch(queries[0] ?? ""));
+
   const settled = await Promise.allSettled(tasks);
   const combined = settled
     .filter((result): result is PromiseFulfilledResult<NewsSource[]> => result.status === "fulfilled")
@@ -368,6 +471,43 @@ export async function fastNewsSearch(queries: string[]): Promise<NewsSource[]> {
     .map((source) => ({ ...source, score: scoreSource(source) }))
     .sort((left, right) => right.score - left.score)
     .slice(0, 10);
+}
+
+function buildFreshnessLabel(sources: NewsSource[]) {
+  const now = new Date();
+  const timeText = now.toLocaleTimeString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
+  const dateText = now.toLocaleDateString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "numeric",
+    month: "short",
+  });
+
+  const topDomains = [...new Set(sources.slice(0, 3).map((source) => source.domain))].join(", ");
+  const hasFreshSource = sources.some((source) => {
+    if (!source.publishedDate) return false;
+    const published = new Date(source.publishedDate);
+    return Number.isFinite(published.getTime()) && Date.now() - published.getTime() < 24 * 60 * 60 * 1000;
+  });
+
+  if (hasFreshSource) {
+    return `\n\n\u{1F4E1} _Live data as of ${dateText} ${timeText} IST - Sources: ${topDomains || "web search"}_`;
+  }
+
+  return `\n\n\u{1F50D} _Searched: ${dateText} ${timeText} IST - Sources: ${topDomains || "web search"}_`;
+}
+
+function buildStaleKnowledgeWarning() {
+  return [
+    "\u26A0\uFE0F *Live search unavailable for this query.*",
+    "",
+    "Here is knowledge-based context:",
+    "_Note: this may not reflect the latest events. Verify current details online._",
+  ].join("\n");
 }
 
 function buildSourceContext(sources: NewsSource[]) {
@@ -384,24 +524,63 @@ function buildSourceContext(sources: NewsSource[]) {
     .join("\n\n---\n\n");
 }
 
+function looksLikeExactFigureQuery(question: string) {
+  return /\b(pricing|price|cost|plan|plans|rate|fees?|subscription|tariff|market cap|volume|24h|high|low|exchange rate)\b/i.test(
+    question,
+  );
+}
+
+function buildEvidenceOnlyAnswer(question: string, sources: NewsSource[]) {
+  if (!sources.length) {
+    return [
+      `\u{1F50D} *No strong live sources found for:* _${question}_`,
+      "",
+      "Try a narrower query with product + region + date.",
+      "- Example: _Supabase Pro plan pricing today_",
+      "- Example: _OpenAI API pricing official page_",
+    ].join("\n") + buildFreshnessLabel(sources);
+  }
+
+  const lines = [`*Live findings for:* ${question}`, ""];
+  for (const source of sources.slice(0, 4)) {
+    const published = formatPublishedDate(source.publishedDate);
+    lines.push(`- *${source.title}*`);
+    lines.push(`  Source: ${source.domain}${published ? ` | ${published}` : ""}`);
+    if (source.snippet) {
+      lines.push(`  ${source.snippet.slice(0, 220)}${source.snippet.length > 220 ? "..." : ""}`);
+    }
+    lines.push("");
+  }
+  lines.push("_Note: Exact figures may change quickly; verify on official pages before decisions._");
+  return lines.join("\n").trim() + buildFreshnessLabel(sources);
+}
+
 const NEWS_SYSTEM_PROMPT = [
   "You are ClawCloud AI answering a live news question for a messaging user.",
   "Use only the provided search results. Do not add facts from memory.",
   "Lead with the direct answer in 2-3 sentences, then give short bullets if needed.",
   "If sources conflict or look incomplete, say so clearly.",
   "Never invent numbers, scores, names, or timelines.",
-  "End with a short source line listing the source domains.",
+  "If exact pricing/financial figures are not explicit in sources, say they are unavailable.",
+  "Format for WhatsApp with short paragraphs and bullets when useful.",
+  "Do not include source URLs in your response.",
   "Keep the answer concise and scan-friendly.",
 ].join("\n");
 
 async function synthesiseNewsAnswer(question: string, sources: NewsSource[]) {
-  if (!sources.length) {
+  if (!sources.length || sources.every((source) => source.score < 0.2)) {
     return [
-      `*No reliable recent news found for:* ${question}`,
+      `\u{1F50D} *No strong live sources found for:* _${question}_`,
       "",
-      "- I searched live news providers but did not find strong recent coverage.",
-      "- Try a more specific topic, name, place, or event.",
-    ].join("\n");
+      "Try a more specific query:",
+      "- Include a topic, date, person, team, or location",
+      "- Example: _IPL score today_ instead of _cricket_",
+      "- Example: _OpenAI news today_ instead of _AI_",
+    ].join("\n") + buildFreshnessLabel(sources);
+  }
+
+  if (looksLikeExactFigureQuery(question)) {
+    return buildEvidenceOnlyAnswer(question, sources);
   }
 
   const answer = await completeClawCloudPrompt({
@@ -423,11 +602,10 @@ async function synthesiseNewsAnswer(question: string, sources: NewsSource[]) {
   }).catch(() => "");
 
   if (answer.trim()) {
-    return answer.trim();
+    return answer.trim() + buildFreshnessLabel(sources);
   }
 
   const topSources = sources.slice(0, 3);
-  const sourceList = [...new Set(topSources.map((source) => source.domain))].join(", ");
   const lines = [`*Latest on:* ${question}`, ""];
 
   for (const source of topSources) {
@@ -442,9 +620,7 @@ async function synthesiseNewsAnswer(question: string, sources: NewsSource[]) {
     lines.push("");
   }
 
-  lines.push(`*Sources:* ${sourceList}`);
-  lines.push(`*As of:* ${formatCurrentDate()}`);
-  return lines.join("\n");
+  return lines.join("\n").trim() + buildFreshnessLabel(sources);
 }
 
 export async function answerNewsQuestion(question: string): Promise<string> {
@@ -453,6 +629,37 @@ export async function answerNewsQuestion(question: string): Promise<string> {
   return synthesiseNewsAnswer(question, sources);
 }
 
+export async function answerWebSearch(question: string): Promise<string> {
+  const cleaned = question
+    .replace(/^(?:search(?: for)?|look up|lookup|google|bing|find(?: me)?|fetch)\s+/i, "")
+    .trim();
+
+  const query = cleaned || question;
+  const queries = [query, `${query} ${currentYear()}`];
+  const domainHints: Array<{ re: RegExp; domain: string }> = [
+    { re: /\bsupabase\b/i, domain: "supabase.com" },
+    { re: /\bopenai\b/i, domain: "openai.com" },
+    { re: /\bstripe\b/i, domain: "stripe.com" },
+    { re: /\bvercel\b/i, domain: "vercel.com" },
+    { re: /\bcloudflare\b/i, domain: "cloudflare.com" },
+  ];
+  const matchedHint = domainHints.find((hint) => hint.re.test(query));
+  if (matchedHint) {
+    queries.push(`${query} site:${matchedHint.domain}`);
+  }
+
+  const sources = await fastNewsSearch(queries);
+  return synthesiseNewsAnswer(question, sources);
+}
+
+export function buildNoLiveDataReply(_question: string): string {
+  return [
+    "\u{1F50D} _No live results found. Here is knowledge-based context:_",
+    "",
+    buildStaleKnowledgeWarning(),
+  ].join("\n");
+}
+
 export function hasNewsProviders(): boolean {
-  return Boolean(env.TAVILY_API_KEY || env.SERPAPI_API_KEY || env.JINA_API_KEY);
+  return true;
 }

@@ -17,6 +17,8 @@ import { env } from "@/lib/env";
 
 export type IntentType =
   | "greeting"
+  | "help"
+  | "memory"
   | "general"
   | "coding"
   | "math"
@@ -26,6 +28,8 @@ export type IntentType =
   | "save_contact"
   | "calendar"
   | "spending"
+  | "finance"
+  | "web_search"
   | "research"
   | "creative"
   | "science"
@@ -77,6 +81,8 @@ const MODEL_FAILURE_MAX_COOLDOWN_MS = 8 * 60 * 1000;
 
 const INTENT_TIMEOUT_MS: Record<IntentType, number> = {
   greeting: 4_000,
+  help: 4_000,
+  memory: 4_000,
   reminder: 4_000,
   send_message: 4_000,
   save_contact: 4_000,
@@ -84,6 +90,8 @@ const INTENT_TIMEOUT_MS: Record<IntentType, number> = {
   general: 8_000,
   email: 8_000,
   spending: 8_000,
+  finance: 15_000,
+  web_search: 18_000,
   creative: 9_000,
   coding: 14_000,
   math: 12_000,
@@ -103,6 +111,8 @@ const INTENT_TIMEOUT_MS: Record<IntentType, number> = {
 
 const INTENT_PARALLELISM: Record<IntentType, number> = {
   greeting: 1,
+  help: 1,
+  memory: 1,
   reminder: 1,
   send_message: 1,
   save_contact: 1,
@@ -110,6 +120,8 @@ const INTENT_PARALLELISM: Record<IntentType, number> = {
   general: 3,
   email: 2,
   spending: 2,
+  finance: 4,
+  web_search: 4,
   creative: 2,
   coding: 4,
   math: 4,
@@ -129,6 +141,8 @@ const INTENT_PARALLELISM: Record<IntentType, number> = {
 
 const INTENT_MAX_TOTAL_MS: Record<IntentType, number> = {
   greeting: 5_000,
+  help: 5_000,
+  memory: 5_000,
   reminder: 5_000,
   send_message: 6_000,
   save_contact: 6_000,
@@ -136,6 +150,8 @@ const INTENT_MAX_TOTAL_MS: Record<IntentType, number> = {
   general: 12_000,
   email: 12_000,
   spending: 12_000,
+  finance: 20_000,
+  web_search: 22_000,
   creative: 14_000,
   coding: 22_000,
   math: 18_000,
@@ -155,6 +171,8 @@ const INTENT_MAX_TOTAL_MS: Record<IntentType, number> = {
 
 const INTENT_CANDIDATE_LIMIT: Record<IntentType, number> = {
   greeting: 2,
+  help: 2,
+  memory: 2,
   reminder: 2,
   send_message: 2,
   save_contact: 2,
@@ -162,6 +180,8 @@ const INTENT_CANDIDATE_LIMIT: Record<IntentType, number> = {
   general: 4,
   email: 4,
   spending: 4,
+  finance: 4,
+  web_search: 4,
   creative: 4,
   coding: 5,
   math: 5,
@@ -181,6 +201,8 @@ const INTENT_CANDIDATE_LIMIT: Record<IntentType, number> = {
 
 const INTENT_HISTORY_LIMIT: Record<IntentType, number> = {
   greeting: 2,
+  help: 2,
+  memory: 2,
   reminder: 2,
   send_message: 2,
   save_contact: 2,
@@ -188,6 +210,8 @@ const INTENT_HISTORY_LIMIT: Record<IntentType, number> = {
   general: 3,
   email: 3,
   spending: 3,
+  finance: 2,
+  web_search: 2,
   creative: 3,
   coding: 2,
   math: 2,
@@ -207,6 +231,8 @@ const INTENT_HISTORY_LIMIT: Record<IntentType, number> = {
 
 const INTENT_HISTORY_CHAR_LIMIT: Record<IntentType, number> = {
   greeting: 180,
+  help: 180,
+  memory: 180,
   reminder: 180,
   send_message: 220,
   save_contact: 220,
@@ -214,6 +240,8 @@ const INTENT_HISTORY_CHAR_LIMIT: Record<IntentType, number> = {
   general: 260,
   email: 260,
   spending: 260,
+  finance: 240,
+  web_search: 240,
   creative: 260,
   coding: 240,
   math: 220,
@@ -233,6 +261,18 @@ const INTENT_HISTORY_CHAR_LIMIT: Record<IntentType, number> = {
 
 const INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
   greeting: [
+    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2-instruct-0905",
+    "meta/llama-3.1-8b-instruct",
+    "moonshotai/kimi-k2-instruct",
+  ],
+  help: [
+    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2-instruct-0905",
+    "meta/llama-3.1-8b-instruct",
+    "moonshotai/kimi-k2-instruct",
+  ],
+  memory: [
     "meta/llama-3.3-70b-instruct",
     "moonshotai/kimi-k2-instruct-0905",
     "meta/llama-3.1-8b-instruct",
@@ -295,6 +335,20 @@ const INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
     "moonshotai/kimi-k2-instruct-0905",
     "meta/llama-3.3-70b-instruct",
     "mistralai/mistral-large-3-675b-instruct-2512",
+  ],
+  finance: [
+    "mistralai/mistral-large-3-675b-instruct-2512",
+    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2-instruct-0905",
+    "z-ai/glm5",
+    "meta/llama-3.1-405b-instruct",
+  ],
+  web_search: [
+    "mistralai/mistral-large-3-675b-instruct-2512",
+    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2-instruct-0905",
+    "z-ai/glm5",
+    "meta/llama-3.1-405b-instruct",
   ],
   research: [
     "mistralai/mistral-large-3-675b-instruct-2512",
@@ -368,6 +422,8 @@ const INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
 
 const DEEP_INTENT_TIMEOUT_MS: Record<IntentType, number> = {
   greeting: 5_000,
+  help: 5_000,
+  memory: 5_000,
   reminder: 5_000,
   send_message: 6_000,
   save_contact: 6_000,
@@ -375,6 +431,8 @@ const DEEP_INTENT_TIMEOUT_MS: Record<IntentType, number> = {
   general: 20_000,
   email: 18_000,
   spending: 18_000,
+  finance: 35_000,
+  web_search: 35_000,
   creative: 20_000,
   coding: 35_000,
   math: 30_000,
@@ -394,6 +452,8 @@ const DEEP_INTENT_TIMEOUT_MS: Record<IntentType, number> = {
 
 const DEEP_INTENT_PARALLELISM: Record<IntentType, number> = {
   greeting: 1,
+  help: 1,
+  memory: 1,
   reminder: 1,
   send_message: 1,
   save_contact: 1,
@@ -401,6 +461,8 @@ const DEEP_INTENT_PARALLELISM: Record<IntentType, number> = {
   general: 4,
   email: 4,
   spending: 4,
+  finance: 5,
+  web_search: 5,
   creative: 4,
   coding: 5,
   math: 5,
@@ -420,6 +482,8 @@ const DEEP_INTENT_PARALLELISM: Record<IntentType, number> = {
 
 const DEEP_INTENT_MAX_TOTAL_MS: Record<IntentType, number> = {
   greeting: 6_000,
+  help: 6_000,
+  memory: 6_000,
   reminder: 6_000,
   send_message: 8_000,
   save_contact: 8_000,
@@ -427,6 +491,8 @@ const DEEP_INTENT_MAX_TOTAL_MS: Record<IntentType, number> = {
   general: 30_000,
   email: 26_000,
   spending: 26_000,
+  finance: 60_000,
+  web_search: 60_000,
   creative: 30_000,
   coding: 60_000,
   math: 55_000,
@@ -446,6 +512,8 @@ const DEEP_INTENT_MAX_TOTAL_MS: Record<IntentType, number> = {
 
 const DEEP_INTENT_CANDIDATE_LIMIT: Record<IntentType, number> = {
   greeting: 2,
+  help: 2,
+  memory: 2,
   reminder: 2,
   send_message: 2,
   save_contact: 2,
@@ -453,6 +521,8 @@ const DEEP_INTENT_CANDIDATE_LIMIT: Record<IntentType, number> = {
   general: 4,
   email: 4,
   spending: 4,
+  finance: 8,
+  web_search: 8,
   creative: 4,
   coding: 8,
   math: 8,
@@ -472,6 +542,8 @@ const DEEP_INTENT_CANDIDATE_LIMIT: Record<IntentType, number> = {
 
 const DEEP_INTENT_HISTORY_LIMIT: Record<IntentType, number> = {
   greeting: 2,
+  help: 2,
+  memory: 2,
   reminder: 2,
   send_message: 2,
   save_contact: 2,
@@ -479,6 +551,8 @@ const DEEP_INTENT_HISTORY_LIMIT: Record<IntentType, number> = {
   general: 4,
   email: 4,
   spending: 4,
+  finance: 4,
+  web_search: 4,
   creative: 4,
   coding: 4,
   math: 4,
@@ -498,6 +572,8 @@ const DEEP_INTENT_HISTORY_LIMIT: Record<IntentType, number> = {
 
 const DEEP_INTENT_HISTORY_CHAR_LIMIT: Record<IntentType, number> = {
   greeting: 180,
+  help: 180,
+  memory: 180,
   reminder: 180,
   send_message: 240,
   save_contact: 240,
@@ -505,6 +581,8 @@ const DEEP_INTENT_HISTORY_CHAR_LIMIT: Record<IntentType, number> = {
   general: 360,
   email: 360,
   spending: 320,
+  finance: 420,
+  web_search: 420,
   creative: 360,
   coding: 420,
   math: 340,
@@ -524,6 +602,14 @@ const DEEP_INTENT_HISTORY_CHAR_LIMIT: Record<IntentType, number> = {
 
 const DEEP_INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
   greeting: [
+    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2-instruct-0905",
+  ],
+  help: [
+    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2-instruct-0905",
+  ],
+  memory: [
     "meta/llama-3.3-70b-instruct",
     "moonshotai/kimi-k2-instruct-0905",
   ],
@@ -561,6 +647,14 @@ const DEEP_INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
   ],
   spending: [
     "z-ai/glm5",
+    "meta/llama-3.3-70b-instruct",
+  ],
+  finance: [
+    "mistralai/mistral-large-3-675b-instruct-2512",
+    "meta/llama-3.3-70b-instruct",
+  ],
+  web_search: [
+    "mistralai/mistral-large-3-675b-instruct-2512",
     "meta/llama-3.3-70b-instruct",
   ],
   research: [
@@ -799,6 +893,8 @@ function prioritizeHealthyModels(models: string[], healthScope: string) {
 function baseModelsForIntent(intent: IntentType) {
   switch (intent) {
     case "greeting":
+    case "help":
+    case "memory":
     case "reminder":
     case "send_message":
     case "save_contact":
@@ -807,6 +903,8 @@ function baseModelsForIntent(intent: IntentType) {
     case "coding":
       return uniqueModels([...codeModels(), ...globalModels(), ...reasoningModels(), ...chatModels()]);
     case "math":
+    case "finance":
+    case "web_search":
     case "research":
       return uniqueModels([...reasoningModels(), ...globalModels(), ...chatModels()]);
     default:
@@ -817,6 +915,8 @@ function baseModelsForIntent(intent: IntentType) {
 function tierForIntent(intent: IntentType): ModelTier {
   switch (intent) {
     case "greeting":
+    case "help":
+    case "memory":
     case "reminder":
     case "send_message":
     case "save_contact":
@@ -825,6 +925,8 @@ function tierForIntent(intent: IntentType): ModelTier {
     case "coding":
       return "code";
     case "math":
+    case "finance":
+    case "web_search":
     case "research":
       return "reasoning";
     default:
@@ -888,6 +990,8 @@ function modelCandidatesForIntent(
 
 const TOKEN_BUDGETS: Record<IntentType, number> = {
   greeting: 200,
+  help: 200,
+  memory: 200,
   reminder: 180,
   send_message: 260,
   save_contact: 260,
@@ -895,6 +999,8 @@ const TOKEN_BUDGETS: Record<IntentType, number> = {
   general: 400,
   email: 400,
   spending: 420,
+  finance: 520,
+  web_search: 520,
   creative: 450,
   coding: 560,
   math: 420,
@@ -914,6 +1020,8 @@ const TOKEN_BUDGETS: Record<IntentType, number> = {
 
 const DEEP_TOKEN_BUDGETS: Record<IntentType, number> = {
   greeting: 220,
+  help: 220,
+  memory: 220,
   reminder: 180,
   send_message: 320,
   save_contact: 320,
@@ -921,6 +1029,8 @@ const DEEP_TOKEN_BUDGETS: Record<IntentType, number> = {
   general: 700,
   email: 700,
   spending: 600,
+  finance: 1_300,
+  web_search: 1_300,
   creative: 800,
   coding: 1_600,
   math: 900,

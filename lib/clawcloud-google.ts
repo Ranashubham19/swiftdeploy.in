@@ -576,6 +576,10 @@ export async function getClawCloudCalendarEvents(
     singleEvents: "true",
     orderBy: "startTime",
   });
+  params.set(
+    "fields",
+    "items(id,summary,start,end,location,hangoutLink,attendees,description)",
+  );
 
   const response = await fetch(
     `https://www.googleapis.com/calendar/v3/calendars/primary/events?${params.toString()}`,
