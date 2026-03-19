@@ -25,6 +25,8 @@ import {
   buildClawCloudSafetyReply,
   detectClawCloudSafetyRisk,
 } from "@/lib/clawcloud-safety";
+import { buildDisclaimer } from "@/lib/clawcloud-disclaimers";
+import { detectLocalePreferenceCommand } from "@/lib/clawcloud-i18n";
 import { answerTaxQuery, detectTaxQuery } from "@/lib/clawcloud-tax";
 import {
   clawCloudActiveTaskLimits,
@@ -191,4 +193,45 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
     }),
   );
   assert.match(lowConfidenceReply, /lawyer/i);
+});
+
+test("locale preference commands are explicit and do not depend on email domains", () => {
+  assert.deepEqual(detectLocalePreferenceCommand("reply in english"), {
+    type: "set",
+    locale: "en",
+    label: "English",
+  });
+
+  assert.deepEqual(detectLocalePreferenceCommand("set language to hindi"), {
+    type: "set",
+    locale: "hi",
+    label: "Hindi",
+  });
+
+  assert.deepEqual(detectLocalePreferenceCommand("what is my language"), {
+    type: "show",
+  });
+
+  assert.deepEqual(detectLocalePreferenceCommand("translate this to english"), {
+    type: "none",
+  });
+});
+
+test("disclaimer matching stays domain-aware and avoids health bleed on stats questions", () => {
+  const didDisclaimer = buildDisclaimer({
+    intent: "math",
+    category: "math",
+    question:
+      "In a difference-in-differences policy evaluation, the treatment coefficient beta is -0.18 and the standard error is 0.05. Explain the estimator, confidence interval, and parallel-trends checks.",
+    answer: "This is a causal inference answer.",
+  });
+  assert.equal(didDisclaimer, null);
+
+  const healthDisclaimer = buildDisclaimer({
+    intent: "general",
+    category: "general",
+    question: "Can I take 650 mg paracetamol every 4 hours for fever?",
+    answer: "General guidance only.",
+  });
+  assert.match(healthDisclaimer ?? "", /medical advice/i);
 });

@@ -66,7 +66,14 @@ export type DashboardFeatureStatus = {
 };
 
 export type DashboardData = {
-  user: { id: string; email: string; plan: string; full_name: string | null; timezone?: string | null } | null;
+  user: {
+    id: string;
+    email: string;
+    plan: string;
+    full_name: string | null;
+    timezone?: string | null;
+    language?: string | null;
+  } | null;
   connected_accounts: DashboardConnectedAccount[];
   tasks: DashboardTask[];
   recent_activity: Array<{

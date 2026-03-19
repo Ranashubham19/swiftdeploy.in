@@ -251,12 +251,17 @@ export async function getClawCloudDashboardData(userId: string) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const today = formatDateKey();
 
-  const [userProfile, connectedAccounts, agentTasks, recentRuns, todayAnalytics, last7Days, subscription] =
+  const [userProfile, userPreferences, connectedAccounts, agentTasks, recentRuns, todayAnalytics, last7Days, subscription] =
     await Promise.all([
       supabaseAdmin
         .from("users")
         .select("id, email, full_name, avatar_url, plan, onboarding_done, timezone")
         .eq("id", userId)
+        .maybeSingle(),
+      supabaseAdmin
+        .from("user_preferences")
+        .select("language")
+        .eq("user_id", userId)
         .maybeSingle(),
       supabaseAdmin
         .from("connected_accounts")
@@ -304,7 +309,12 @@ export async function getClawCloudDashboardData(userId: string) {
   }));
 
   return {
-    user: userProfile.data,
+    user: userProfile.data
+      ? {
+        ...userProfile.data,
+        language: userPreferences.data?.language ?? "en",
+      }
+      : null,
     connected_accounts: connectedAccounts.data ?? [],
     tasks: dashboardTasks,
     recent_activity: recentActivity,

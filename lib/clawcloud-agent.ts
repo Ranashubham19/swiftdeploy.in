@@ -91,8 +91,13 @@ import { handleReplyApprovalCommand, sendReplyApprovalRequests } from "@/lib/cla
 import { answerSpendingQuestion, runWeeklySpendSummary } from "@/lib/clawcloud-spending";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 import {
+  buildLocalePreferenceSavedReply,
+  buildLocalePreferenceStatusReply,
+  buildLocalePreferenceUnsupportedReply,
   buildMultilingualBriefingSystem,
+  detectLocalePreferenceCommand,
   getUserLocale,
+  setUserLocale,
   translateMessage,
   type SupportedLocale,
 } from "@/lib/clawcloud-i18n";
@@ -4678,6 +4683,7 @@ function buildProfessionalHelpMessage(): string {
     "*Power tips*",
     "- Start with *deep:* for a detailed answer",
     "- Start with *quick:* for a short answer",
+    "- Say _reply in English_ or _set language to Hindi_ to change my reply language",
     "- Save repeatable prompts with custom slash commands like */standup*",
     "",
     "*Safety*",
@@ -5089,6 +5095,23 @@ export async function routeInboundAgentMessage(
       reply,
       alreadyTranslated: true,
     });
+  const finalizeEarlyWithLocale = async (
+    reply: string,
+    locale: SupportedLocale,
+    intent: string,
+    category: string,
+    alreadyTranslated = true,
+  ) =>
+    finalizeAgentReply({
+      userId,
+      locale,
+      question: trimmed,
+      intent,
+      category,
+      startedAt: routeStartedAt,
+      reply,
+      alreadyTranslated,
+    });
 
   const commandIntent = detectCommandIntent(trimmed);
   if (commandIntent.type !== "none") {
@@ -5137,6 +5160,34 @@ export async function routeInboundAgentMessage(
       ? formatMemorySavedReply(memoryCommand.key, memoryCommand.value)
       : "⚠️ *I couldn't save that right now.* Please try again in a moment.";
     return finalizeEarlyRaw(reply, "memory", "memory");
+  }
+
+  const localeCommand = detectLocalePreferenceCommand(trimmed);
+  if (localeCommand.type === "show") {
+    const currentLocale = await localePromise;
+    const baseReply = buildLocalePreferenceStatusReply(currentLocale);
+    const reply = currentLocale === "en" ? baseReply : await translateMessage(baseReply, currentLocale);
+    return finalizeEarlyWithLocale(reply, currentLocale, "language", "language");
+  }
+
+  if (localeCommand.type === "unsupported") {
+    return finalizeEarlyRaw(
+      buildLocalePreferenceUnsupportedReply(localeCommand.requested),
+      "language",
+      "language",
+    );
+  }
+
+  if (localeCommand.type === "set") {
+    await setUserLocale(userId, localeCommand.locale);
+    await saveMemoryFact(userId, "language_preference", localeCommand.label, "explicit", 1.0);
+
+    const baseReply = buildLocalePreferenceSavedReply(localeCommand.locale);
+    const reply = localeCommand.locale === "en"
+      ? baseReply
+      : await translateMessage(baseReply, localeCommand.locale);
+
+    return finalizeEarlyWithLocale(reply, localeCommand.locale, "language", "language");
   }
 
   if (detectBillingIntent(trimmed)) {

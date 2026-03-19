@@ -7,6 +7,7 @@ import {
   useDashboardData,
   type DashboardRuntimeFeatureState,
 } from "@/hooks/useDashboardData";
+import { supportedClawCloudLocaleOptions } from "@/lib/clawcloud-locales";
 import { useUpgrade } from "@/hooks/useUpgrade";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 import type { PublicAppConfig } from "@/lib/types";
@@ -72,12 +73,14 @@ export function SettingsPage({ config }: SettingsPageProps) {
   const [toastVisible, setToastVisible] = useState(false);
   const [fullName, setFullName] = useState("");
   const [timezone, setTimezone] = useState("Asia/Kolkata");
+  const [language, setLanguage] = useState("en");
   const [saving, setSaving] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     if (data?.user) {
       setFullName(data.user.full_name ?? "");
       setTimezone(data.user.timezone ?? "Asia/Kolkata");
+      setLanguage(data.user.language ?? "en");
     }
   }, [data?.user]);
 
@@ -128,7 +131,7 @@ export function SettingsPage({ config }: SettingsPageProps) {
     try {
       await authedFetch("/api/settings/profile", {
         method: "PATCH",
-        body: JSON.stringify({ full_name: trimmedName, timezone }),
+        body: JSON.stringify({ full_name: trimmedName, timezone, language }),
       });
       refetch();
       showToast("Profile updated.");
@@ -302,6 +305,15 @@ export function SettingsPage({ config }: SettingsPageProps) {
                         <option key={option} value={option}>{option}</option>
                       ))}
                     </select>
+                  </div>
+                  <div className={styles.field}>
+                    <div className={styles.label}>Reply language</div>
+                    <select className={styles.select} value={language} onChange={(event) => setLanguage(event.target.value)}>
+                      {supportedClawCloudLocaleOptions.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                    <div className={styles.fieldHint}>This controls the language ClawCloud uses by default in WhatsApp replies.</div>
                   </div>
                   <div className={styles.cardFooter}>
                     <button type="button" className={styles.primaryButton} disabled={Boolean(saving.profile)} onClick={() => void saveProfile()}>

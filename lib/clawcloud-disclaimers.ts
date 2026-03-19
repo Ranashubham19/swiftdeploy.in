@@ -43,8 +43,15 @@ const HEALTH_INTENTS = new Set(["health", "medicine", "medical"]);
 const LEGAL_INTENTS = new Set(["law", "legal"]);
 
 const HEALTH_PATTERNS = [
-  /\b(symptom|disease|illness|diagnosis|medicine|drug|dose|dosage|tablet|injection|surgery|treatment|doctor|hospital|cancer|diabetes|infection|fever|pain|blood pressure|cholesterol|anxiety|depression|mental health|side effects?)\b/i,
+  /\b(symptom|symptoms|disease|illness|diagnosis|diagnose|medicine|medication|drug|dose|dosage|tablet|capsule|injection|surgery|hospital|cancer|diabetes|infection|fever|pain|blood pressure|cholesterol|anxiety|depression|mental health|side effects?)\b/i,
+  /\b(treatment (?:for|of)|medical treatment|doctor said|doctor told me|prescribed|prescription)\b/i,
   /\b(is it safe to|can i take|should i take|overdose|interaction between|combine .* with|mix .* with)\b/i,
+];
+
+const NON_CLINICAL_HEALTH_CONTEXT_PATTERNS = [
+  /\b(treatment coefficient|treatment effect|effect estimate)\b/i,
+  /\b(difference-?in-?differences?|parallel trends|event study|policy evaluation|regression)\b/i,
+  /\b(t-?stat(?:istic)?|confidence interval|standard error|beta coefficient|att estimator)\b/i,
 ];
 
 const LEGAL_PATTERNS = [
@@ -89,6 +96,18 @@ function isBlockedIntent(intentOrCategory: string): boolean {
   return DISCLAIMER_BLOCKLIST.has(intentOrCategory);
 }
 
+function looksLikeHealthQuestion(ctx: DisclaimerContext, question: string): boolean {
+  if (HEALTH_INTENTS.has(ctx.intent) || HEALTH_INTENTS.has(ctx.category)) {
+    return true;
+  }
+
+  if (NON_CLINICAL_HEALTH_CONTEXT_PATTERNS.some((pattern) => pattern.test(question))) {
+    return false;
+  }
+
+  return HEALTH_PATTERNS.some((pattern) => pattern.test(question));
+}
+
 function firstMatchingDisclaimer(ctx: DisclaimerContext): string | null {
   const question = ctx.question.toLowerCase();
 
@@ -96,8 +115,7 @@ function firstMatchingDisclaimer(ctx: DisclaimerContext): string | null {
     !isBlockedIntent(ctx.intent)
     && !isBlockedIntent(ctx.category)
     && !alreadyHasEquivalentDisclaimer(ctx.answer, "health")
-    && (HEALTH_INTENTS.has(ctx.intent) || HEALTH_INTENTS.has(ctx.category)
-      || HEALTH_PATTERNS.some((pattern) => pattern.test(question)))
+    && looksLikeHealthQuestion(ctx, question)
   ) {
     return HEALTH_DISCLAIMER;
   }
