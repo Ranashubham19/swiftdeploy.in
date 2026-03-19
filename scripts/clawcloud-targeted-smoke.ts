@@ -26,7 +26,7 @@ async function main() {
   loadEnvFile(".env.local");
 
   const { routeInboundAgentMessage } = await import("@/lib/clawcloud-agent");
-  const user = "targeted-smoke-user";
+  const user = "00000000-0000-0000-0000-000000000705";
   const prompts = [
     "Ok give me code for n queen",
     "Rat in maze",

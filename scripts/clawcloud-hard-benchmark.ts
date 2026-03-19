@@ -26,7 +26,7 @@ type BenchResult = {
   answer: string;
 };
 
-const benchUserId = "benchmark-user";
+const benchUserId = "00000000-0000-0000-0000-000000000702";
 const reportPath = "tmp-clawcloud-hard-benchmark.json";
 
 function loadEnvFile(filePath: string) {

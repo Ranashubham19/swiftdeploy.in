@@ -12,10 +12,16 @@
     "start": "next start",
     "agent": "tsx --import ./lib/postgrest-builder-catch.ts agent-server.ts",
     "typecheck": "tsc --noEmit",
+    "test:unit": "tsx --test tests/clawcloud-core.test.ts",
     "verify:setup": "node verify-setup.mjs",
     "smoke:live": "node scripts/live-smoke.mjs",
     "smoke:categories": "node scripts/category-smoke.mjs",
-    "qa:live-agent": "tsx scripts/clawcloud-live-api-qa.ts"
+    "qa:live-agent": "tsx scripts/clawcloud-live-api-qa.ts",
+    "qa:replay": "tsx scripts/clawcloud-replay-eval.ts",
+    "qa:regression": "tsx scripts/clawcloud-whatsapp-regression.ts",
+    "qa:benchmark": "tsx scripts/clawcloud-hard-benchmark.ts",
+    "qa:scorecard": "tsx scripts/clawcloud-scorecard.ts",
+    "qa:canary": "tsx scripts/clawcloud-daily-canary.ts"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",

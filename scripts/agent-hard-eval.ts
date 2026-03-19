@@ -26,7 +26,7 @@ async function main() {
 
   const { routeInboundAgentMessage } = await import("../lib/clawcloud-agent");
 
-  const userId = "00000000-0000-0000-0000-000000000001";
+  const userId = "00000000-0000-0000-0000-000000000704";
 
   const cases = [
     {

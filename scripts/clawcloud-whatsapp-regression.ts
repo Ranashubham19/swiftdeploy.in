@@ -79,7 +79,7 @@ async function main() {
   loadEnvFile(".env.local");
 
   const { routeInboundAgentMessage } = await import("@/lib/clawcloud-agent");
-  const userId = "regression-user";
+  const userId = "00000000-0000-0000-0000-000000000703";
   const results: RegressionResult[] = [];
 
   for (const testCase of cases) {

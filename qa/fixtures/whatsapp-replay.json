@@ -1,0 +1,61 @@
+{
+  "suite": "whatsapp_replay_core",
+  "cases": [
+    {
+      "id": "math_percent",
+      "prompt": "What is 15% of 840?",
+      "tags": ["math", "core"],
+      "minimumLength": 3,
+      "maxLatencyMs": 45000,
+      "mustMatchAll": ["\\b126\\b"]
+    },
+    {
+      "id": "geo_capital",
+      "prompt": "What is the capital of Japan?",
+      "tags": ["knowledge", "core"],
+      "minimumLength": 5,
+      "maxLatencyMs": 45000,
+      "mustMatchAll": ["\\btokyo\\b"]
+    },
+    {
+      "id": "coding_n_queens",
+      "prompt": "Can you give Python code for N-Queens with a brief explanation?",
+      "tags": ["coding"],
+      "minimumLength": 60,
+      "maxLatencyMs": 60000,
+      "mustMatchAny": ["n_queens", "backtracking", "dfs"]
+    },
+    {
+      "id": "email_followup",
+      "prompt": "Draft a professional follow-up email to a client who missed a meeting.",
+      "tags": ["writing"],
+      "minimumLength": 60,
+      "maxLatencyMs": 60000,
+      "mustMatchAny": ["subject:", "best regards", "follow-up"]
+    },
+    {
+      "id": "ai_ml_dl",
+      "prompt": "Explain the difference between AI, ML, and deep learning in simple terms.",
+      "tags": ["explain"],
+      "minimumLength": 60,
+      "maxLatencyMs": 60000,
+      "mustMatchAny": ["artificial intelligence", "machine learning", "deep learning"]
+    },
+    {
+      "id": "gst_calc",
+      "prompt": "GST on Rs 1180 at 18% inclusive",
+      "tags": ["india", "tax"],
+      "minimumLength": 40,
+      "maxLatencyMs": 45000,
+      "mustMatchAny": ["\\bGST\\b", "\\b180\\b", "base amount"]
+    },
+    {
+      "id": "holiday_onam",
+      "prompt": "When is Onam in Kerala?",
+      "tags": ["india", "holidays"],
+      "minimumLength": 20,
+      "maxLatencyMs": 45000,
+      "mustMatchAny": ["Onam", "Kerala"]
+    }
+  ]
+}

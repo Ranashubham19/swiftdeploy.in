@@ -55,4 +55,22 @@ npm run typecheck
 npm run build
 ```
 
+## QA and evals
+
+```bash
+npm run test:unit
+npm run qa:replay
+npm run qa:benchmark
+npm run qa:scorecard
+npm run qa:canary -- --dry-run
+```
+
+- `npm run test:unit`: deterministic parser, safety, tax, and routing helper coverage
+- `npm run qa:replay`: fixture-driven WhatsApp replay against `routeInboundAgentMessage`
+- `npm run qa:benchmark`: deep benchmark with scored criteria and a JSON report
+- `npm run qa:scorecard`: weighted readiness summary across replay and benchmark
+- `npm run qa:canary`: production canary for `/api/health` plus a few live agent prompts
+
+Generated reports are written to local `tmp-*.json` files and stay out of git.
+
 For production environment details, see [PRODUCTION-SETUP.md](c:\Users\ranas\Downloads\swiftdeploy-ai%20(2)\PRODUCTION-SETUP.md).
