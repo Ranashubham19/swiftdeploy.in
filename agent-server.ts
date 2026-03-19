@@ -26,10 +26,14 @@ import {
   isImageGenAvailable,
 } from "./lib/clawcloud-imagegen";
 import {
-  buildDocumentPromptPrefix,
+  buildDocumentQuestionPrompt,
   extractDocumentText,
   isSupportedDocument,
 } from "./lib/clawcloud-docs";
+import {
+  buildVideoPromptFromMedia,
+  isVideoProcessingAvailable,
+} from "./lib/clawcloud-video";
 import { handleUrlMessage, hasUrlIntent } from "./lib/clawcloud-url-reader";
 import { detectCodeRunIntent, runUserCode } from "./lib/clawcloud-code-runner";
 import {
@@ -737,6 +741,8 @@ async function downloadMediaBuffer(
       ? message.message?.imageMessage
       : mediaType === "audio"
         ? message.message?.audioMessage
+        : mediaType === "video"
+          ? message.message?.videoMessage
         : mediaType === "document"
           ? message.message?.documentMessage
           : null;
@@ -1619,10 +1625,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
           if (documentBuffer) {
             const extracted = await extractDocumentText(documentBuffer, mimeType, fileName);
             if (extracted) {
-              const prefix = buildDocumentPromptPrefix(extracted);
-              text = caption
-                ? `${prefix}\n\nUser question about this document: ${caption}`
-                : `${prefix}\n\nPlease summarize this document and highlight the key points.`;
+              text = buildDocumentQuestionPrompt(extracted, caption);
             } else {
               await sendReply(
                 userId,
@@ -1651,7 +1654,52 @@ async function connectSession(userId: string): Promise<SessionRecord> {
 
       if (!text && !mediaHandled && message.message?.videoMessage) {
         const caption = message.message.videoMessage.caption?.trim() ?? "";
-        if (caption) {
+        const mimeType = message.message.videoMessage.mimetype ?? "video/mp4";
+        if (isVideoProcessingAvailable()) {
+          const session = sessions.get(userId);
+          const jid = session ? resolveReplyJid(session, replyTargetJid) : null;
+          if (jid && session) {
+            await session.sock.sendPresenceUpdate("composing", jid).catch(() => null);
+          }
+
+          console.log(`[agent] Video received for ${userId}; extracting transcript and frame`);
+          const videoBuffer = await downloadMediaBuffer(message, "video");
+
+          if (videoBuffer) {
+            const videoPrompt = await buildVideoPromptFromMedia({
+              videoBuffer,
+              mimeType,
+              caption,
+            });
+
+            if (videoPrompt) {
+              text = videoPrompt;
+            } else if (caption) {
+              text = caption;
+            } else {
+              await sendReply(
+                userId,
+                [
+                  "I received your video but could not extract enough audio or visual detail to answer confidently.",
+                  "",
+                  "Try one of these:",
+                  "- add a caption with your question",
+                  "- send the key frame as an image",
+                  "- send the audio as a voice note",
+                ].join("\n"),
+                replyTargetJid,
+              );
+              mediaHandled = true;
+            }
+          } else {
+            await sendReply(
+              userId,
+              "I received your video but couldn't download it. Please try again.",
+              replyTargetJid,
+            );
+            mediaHandled = true;
+          }
+        } else if (caption) {
           text = caption;
         } else {
           await sendReply(
@@ -1659,9 +1707,9 @@ async function connectSession(userId: string): Promise<SessionRecord> {
             [
               "🎥 *Video received!*",
               "",
-              "I can't process video files yet, but I'm working on it.",
+              "Video analysis is not configured on this deployment yet.",
               "",
-              "In the meantime, you can:",
+              "To enable it, add an ffmpeg binary plus voice or vision support.",
               "• Send me the *audio only* as a voice note - I'll transcribe it",
               "• *Type your question* and I'll answer immediately",
               "• Share a *YouTube link* and I'll summarise the video for you",

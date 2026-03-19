@@ -12,6 +12,8 @@
 
 const MAX_EXTRACT_CHARS = 12_000; // ~3 000 tokens — safe for a single LLM call
 const MAX_FILE_SIZE_BYTES = 15 * 1024 * 1024; // 15 MB hard limit
+export const DOCUMENT_CONTEXT_MARKER_START = "--- Document content ---";
+export const DOCUMENT_CONTEXT_MARKER_END = "--- End of document ---";
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -290,8 +292,81 @@ export function buildDocumentPromptPrefix(result: DocExtractResult): string {
       `⚠️ Document is large — showing first ${MAX_EXTRACT_CHARS} characters.`,
     );
   }
-  lines.push("", "--- Document content ---", result.text, "--- End of document ---");
+  lines.push("", DOCUMENT_CONTEXT_MARKER_START, result.text, DOCUMENT_CONTEXT_MARKER_END);
   return lines.join("\n");
+}
+
+export function buildDocumentQuestionPrompt(
+  result: DocExtractResult,
+  userQuestion?: string | null,
+): string {
+  const prefix = buildDocumentPromptPrefix(result);
+  const trimmedQuestion = userQuestion?.trim();
+
+  if (trimmedQuestion) {
+    return `${prefix}\n\nUser question about this document: ${trimmedQuestion}`;
+  }
+
+  return `${prefix}\n\nPlease summarize this document and highlight the key points.`;
+}
+
+export function looksLikeDocumentPrompt(text: string): boolean {
+  if (!text.trim()) {
+    return false;
+  }
+
+  return (
+    /user sent a document:/i.test(text)
+    || text.includes(DOCUMENT_CONTEXT_MARKER_START)
+    || text.includes(DOCUMENT_CONTEXT_MARKER_END)
+    || /\buser question about this document:/i.test(text)
+    || /\bfollow-up question about this document:/i.test(text)
+  );
+}
+
+export function extractDocumentContextSnippet(
+  text: string,
+  maxChars = 3_200,
+): string | null {
+  const trimmed = text.trim();
+  if (!looksLikeDocumentPrompt(trimmed)) {
+    return null;
+  }
+
+  const startIndex = trimmed.indexOf(DOCUMENT_CONTEXT_MARKER_START);
+  const endIndex = trimmed.indexOf(DOCUMENT_CONTEXT_MARKER_END);
+  const hasMarkers = startIndex >= 0 && endIndex > startIndex;
+  const snippet = hasMarkers
+    ? trimmed.slice(0, endIndex + DOCUMENT_CONTEXT_MARKER_END.length)
+    : trimmed;
+
+  if (snippet.length <= maxChars) {
+    return snippet;
+  }
+
+  if (!hasMarkers) {
+    return `${snippet.slice(0, Math.max(0, maxChars - 1)).trimEnd()}...`;
+  }
+
+  const header = trimmed.slice(0, startIndex).trimEnd();
+  const contentStart = startIndex + DOCUMENT_CONTEXT_MARKER_START.length;
+  const documentText = trimmed.slice(contentStart, endIndex).trim();
+  const questionMatch = trimmed
+    .slice(endIndex + DOCUMENT_CONTEXT_MARKER_END.length)
+    .trim();
+  const reservedChars = `${header}\n${DOCUMENT_CONTEXT_MARKER_START}\n${DOCUMENT_CONTEXT_MARKER_END}\n\n${questionMatch}`.length;
+  const availableChars = Math.max(400, maxChars - reservedChars - 1);
+  const shortenedDocument = documentText.length > availableChars
+    ? `${documentText.slice(0, Math.max(0, availableChars - 1)).trimEnd()}...`
+    : documentText;
+
+  return [
+    header,
+    DOCUMENT_CONTEXT_MARKER_START,
+    shortenedDocument,
+    DOCUMENT_CONTEXT_MARKER_END,
+    questionMatch,
+  ].filter(Boolean).join("\n");
 }
 
 // ─── PDF extraction ───────────────────────────────────────────────────────────

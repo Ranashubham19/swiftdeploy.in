@@ -1,3 +1,7 @@
+import {
+  extractDocumentContextSnippet,
+  looksLikeDocumentPrompt,
+} from "@/lib/clawcloud-docs";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 
 export type MemoryTurn = {
@@ -11,11 +15,13 @@ export type ConversationMemory = {
   activeTopics: string[];
   isFollowUp: boolean;
   resolvedQuestion: string;
+  recentDocumentContext: string | null;
 };
 
 const RAW_RECENT_TURNS = 20;
 const SUMMARY_LOOK_BACK = 40;
 const MAX_CONTENT_CHARS = 800;
+const MAX_DOCUMENT_CONTENT_CHARS = 3_200;
 
 const FOLLOW_UP_SIGNALS = [
   /\b(it|this|that|those|these|they|he|she|him|her|its|their)\b/i,
@@ -26,6 +32,10 @@ const FOLLOW_UP_SIGNALS = [
 ];
 
 const PRONOUN_START = /^(it|this|that|those|they|he|she)\s/i;
+const DOCUMENT_FOLLOW_UP_SIGNAL =
+  /\b(document|file|pdf|sheet|page|row|table|section|clause|invoice|statement|receipt|contract|resume|cv)\b/i;
+const DOCUMENT_DECISION_SIGNAL =
+  /\b(which|compare|better|best|cheapest|lowest|highest|difference|summary|summarize|explain|mention|show)\b/i;
 
 const TOPIC_EXTRACTORS: Array<{ re: RegExp; topic: string }> = [
   { re: /\b(bitcoin|btc|ethereum|eth|crypto|blockchain|nft|defi|web3)\b/i, topic: "cryptocurrency" },
@@ -86,6 +96,49 @@ function resolveFollowUp(currentMessage: string, recentTurns: MemoryTurn[], acti
   return msg;
 }
 
+function looksLikeDocumentFollowUp(currentMessage: string): boolean {
+  const trimmed = currentMessage.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (DOCUMENT_FOLLOW_UP_SIGNAL.test(trimmed) || PRONOUN_START.test(trimmed)) {
+    return true;
+  }
+
+  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+  return trimmed.endsWith("?") && wordCount <= 16 && DOCUMENT_DECISION_SIGNAL.test(trimmed);
+}
+
+function truncateHistoryContent(content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  if (looksLikeDocumentPrompt(trimmed)) {
+    return extractDocumentContextSnippet(trimmed, MAX_DOCUMENT_CONTENT_CHARS) ?? trimmed.slice(0, MAX_DOCUMENT_CONTENT_CHARS);
+  }
+
+  return trimmed.slice(0, MAX_CONTENT_CHARS);
+}
+
+function findRecentDocumentContext(recentTurns: MemoryTurn[]): string | null {
+  for (let index = recentTurns.length - 1; index >= 0; index -= 1) {
+    const turn = recentTurns[index];
+    if (turn.role !== "user") {
+      continue;
+    }
+
+    const snippet = extractDocumentContextSnippet(turn.content, MAX_DOCUMENT_CONTENT_CHARS);
+    if (snippet) {
+      return snippet;
+    }
+  }
+
+  return null;
+}
+
 async function loadRawHistory(userId: string, limit: number): Promise<MemoryTurn[]> {
   try {
     const { data } = await getClawCloudSupabaseAdmin()
@@ -101,7 +154,7 @@ async function loadRawHistory(userId: string, limit: number): Promise<MemoryTurn
       .reverse()
       .map((row) => ({
         role: (row.direction === "inbound" ? "user" : "assistant") as "user" | "assistant",
-        content: String(row.content ?? "").trim().slice(0, MAX_CONTENT_CHARS),
+        content: truncateHistoryContent(String(row.content ?? "")),
       }))
       .filter((turn) => turn.content.length > 0);
   } catch {
@@ -139,15 +192,22 @@ export async function buildConversationMemory(
   const activeTopics = extractTopics(`${recentTurns.map((turn) => turn.content).join(" ")} ${currentMessage}`);
   const topicSummary = buildOlderSummary(olderTurns);
   const isFollowUp = isFollowUpQuestion(currentMessage, recentTurns);
-  const resolvedQuestion = isFollowUp
+  const recentDocumentContext = findRecentDocumentContext(recentTurns);
+  const resolvedQuestionBase = isFollowUp
     ? resolveFollowUp(currentMessage, recentTurns, activeTopics)
     : currentMessage.trim();
+  const resolvedQuestion = recentDocumentContext
+    && !looksLikeDocumentPrompt(currentMessage)
+    && looksLikeDocumentFollowUp(currentMessage)
+    ? `${recentDocumentContext}\n\nFollow-up question about this document: ${resolvedQuestionBase || currentMessage.trim()}`
+    : resolvedQuestionBase;
 
   return {
     recentTurns,
     topicSummary,
     activeTopics,
     isFollowUp,
+    recentDocumentContext,
     resolvedQuestion: resolvedQuestion || currentMessage.trim(),
   };
 }
@@ -166,7 +226,14 @@ export function buildMemorySystemSnippet(
   }
   if (memory.isFollowUp) {
     lines.push("Current message is a follow-up. Use prior context.");
-    lines.push(`Resolved question: ${memory.resolvedQuestion}`);
+    if (looksLikeDocumentPrompt(memory.resolvedQuestion)) {
+      lines.push("Resolved question includes the recent uploaded document context.");
+    } else {
+      lines.push(`Resolved question: ${memory.resolvedQuestion}`);
+    }
+  }
+  if (memory.recentDocumentContext && !looksLikeDocumentPrompt(memory.resolvedQuestion)) {
+    lines.push("Recent document context is available from the previous uploaded file. Use it when the user refers back to the document.");
   }
 
   if (userProfileSnippet) {
