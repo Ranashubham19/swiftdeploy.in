@@ -85,6 +85,8 @@ const tldLocaleMap: Record<string, SupportedLocale> = {
   ".cn": "zh",
 };
 
+const INDIAN_LOCALES = new Set<SupportedLocale>(["hi", "pa", "ta", "te", "kn", "bn", "mr", "gu"]);
+
 export function detectLocaleFromEmail(email: string): SupportedLocale {
   const lower = email.toLowerCase();
   for (const [tld, locale] of Object.entries(tldLocaleMap)) {
@@ -137,7 +139,13 @@ export async function translateMessage(message: string, locale: SupportedLocale)
   }
 
   const translated = await completeClawCloudPrompt({
-    system: `Translate the user's message into ${localeNames[locale]}. Return only the translated text.`,
+    system: [
+      `Translate the user's message into ${localeNames[locale]}. Return only the translated text.`,
+      "Preserve numbers, dates, currency amounts, URLs, slash commands, stock tickers, UPI IDs, GST/TDS names, and product names exactly when they should stay unchanged.",
+      INDIAN_LOCALES.has(locale)
+        ? "Use natural modern wording for Indian users and do not over-translate banking, tax, or app terms that are commonly kept in English."
+        : "Keep the translation natural and concise.",
+    ].join(" "),
     user: message,
     maxTokens: 1000,
     fallback: message,
@@ -153,6 +161,9 @@ export function buildMultilingualBriefingSystem(locale: SupportedLocale) {
     `Write the entire response in ${languageName}.`,
     "Keep it warm, brief, and easy to read on a phone screen.",
     "Use short paragraphs and line breaks.",
+    INDIAN_LOCALES.has(locale)
+      ? "Keep app names, reminders, commands, and important financial terms in their most natural user-facing form."
+      : "Preserve product names and commands exactly where needed.",
   ].join(" ");
 }
 

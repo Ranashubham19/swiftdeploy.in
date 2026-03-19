@@ -169,9 +169,11 @@ export function detectHinglish(message: string): boolean {
 export function buildHinglishSystemSnippet(): string {
   return [
     "The user is writing in Hinglish (Roman-script Hindi mixed with English).",
-    "Respond naturally in Hinglish and match the user's casual tone.",
+    "Respond naturally in Hinglish and match the user's casual tone, but stay clear and professional.",
+    "Keep technical words, product names, and financial terms in simple English when that sounds more natural.",
     "Do not translate everything into pure Hindi or pure English.",
     "Use Roman script for Hindi words, not Devanagari.",
+    "Keep sentences short and WhatsApp-friendly.",
   ].join(" ");
 }
 

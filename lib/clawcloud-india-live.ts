@@ -1,13 +1,15 @@
+import { formatFinanceReply, getLiveFinanceData } from "@/lib/clawcloud-finance";
+
 const FETCH_TIMEOUT_MS = 8_000;
 const IRCTC_API_HOST = "irctc1.p.rapidapi.com";
 
 const NSE_SYMBOL_MAP: Record<string, string> = {
   "hdfc bank": "HDFCBANK.NS",
-  "hdfcbank": "HDFCBANK.NS",
-  "sbi": "SBIN.NS",
+  hdfcbank: "HDFCBANK.NS",
+  sbi: "SBIN.NS",
   "state bank": "SBIN.NS",
   "icici bank": "ICICIBANK.NS",
-  "icicibank": "ICICIBANK.NS",
+  icicibank: "ICICIBANK.NS",
   "axis bank": "AXISBANK.NS",
   "kotak bank": "KOTAKBANK.NS",
   "kotak mahindra": "KOTAKBANK.NS",
@@ -15,57 +17,57 @@ const NSE_SYMBOL_MAP: Record<string, string> = {
   "indusind bank": "INDUSINDBK.NS",
   "bajaj finance": "BAJFINANCE.NS",
   "bajaj finserv": "BAJAJFINSV.NS",
-  "tcs": "TCS.NS",
+  tcs: "TCS.NS",
   "tata consultancy": "TCS.NS",
-  "infosys": "INFY.NS",
-  "infy": "INFY.NS",
-  "wipro": "WIPRO.NS",
+  infosys: "INFY.NS",
+  infy: "INFY.NS",
+  wipro: "WIPRO.NS",
   "hcl tech": "HCLTECH.NS",
   "hcl technologies": "HCLTECH.NS",
   "tech mahindra": "TECHM.NS",
-  "ltimindtree": "LTIM.NS",
-  "reliance": "RELIANCE.NS",
-  "ril": "RELIANCE.NS",
+  ltimindtree: "LTIM.NS",
+  reliance: "RELIANCE.NS",
+  ril: "RELIANCE.NS",
   "adani enterprises": "ADANIENT.NS",
   "adani ports": "ADANIPORTS.NS",
   "adani green": "ADANIGREEN.NS",
   "tata motors": "TATAMOTORS.NS",
   "tata steel": "TATASTEEL.NS",
   "tata power": "TATAPOWER.NS",
-  "ongc": "ONGC.NS",
-  "ntpc": "NTPC.NS",
+  ongc: "ONGC.NS",
+  ntpc: "NTPC.NS",
   "power grid": "POWERGRID.NS",
   "coal india": "COALINDIA.NS",
   "hindustan unilever": "HINDUNILVR.NS",
-  "hul": "HINDUNILVR.NS",
-  "itc": "ITC.NS",
+  hul: "HINDUNILVR.NS",
+  itc: "ITC.NS",
   "nestle india": "NESTLEIND.NS",
-  "britannia": "BRITANNIA.NS",
-  "dabur": "DABUR.NS",
-  "marico": "MARICO.NS",
-  "maruti": "MARUTI.NS",
+  britannia: "BRITANNIA.NS",
+  dabur: "DABUR.NS",
+  marico: "MARICO.NS",
+  maruti: "MARUTI.NS",
   "maruti suzuki": "MARUTI.NS",
   "bajaj auto": "BAJAJ-AUTO.NS",
   "hero motocorp": "HEROMOTOCO.NS",
-  "mahindra": "M&M.NS",
+  mahindra: "M&M.NS",
   "m&m": "M&M.NS",
   "eicher motors": "EICHERMOT.NS",
   "sun pharma": "SUNPHARMA.NS",
   "dr reddy": "DRREDDY.NS",
   "dr. reddy": "DRREDDY.NS",
-  "cipla": "CIPLA.NS",
+  cipla: "CIPLA.NS",
   "divi's lab": "DIVISLAB.NS",
   "bharti airtel": "BHARTIARTL.NS",
-  "airtel": "BHARTIARTL.NS",
-  "jio": "RELIANCE.NS",
-  "nifty": "^NSEI",
+  airtel: "BHARTIARTL.NS",
+  jio: "RELIANCE.NS",
+  nifty: "^NSEI",
   "nifty 50": "^NSEI",
-  "nifty50": "^NSEI",
-  "sensex": "^BSESN",
+  nifty50: "^NSEI",
+  sensex: "^BSESN",
   "bse sensex": "^BSESN",
   "bank nifty": "^NSEBANK",
-  "banknifty": "^NSEBANK",
-  "midcap": "^NSEMDCP50",
+  banknifty: "^NSEBANK",
+  midcap: "^NSEMDCP50",
 };
 
 type StockQuote = {
@@ -108,6 +110,11 @@ type TrainStatus = {
   currentStation?: string;
   delay?: number;
   runningStatus?: string;
+};
+
+type RapidTrainResult<T> = {
+  data: T | null;
+  status: number | null;
 };
 
 export function detectIndianStockQuery(message: string): string | null {
@@ -215,8 +222,8 @@ async function fetchYahooQuote(symbol: string): Promise<StockQuote | null> {
 }
 
 function formatStockReply(quote: StockQuote): string {
-  const currencySymbol = quote.currency === "INR" ? "₹" : "$";
-  const arrow = quote.change >= 0 ? "📈" : "📉";
+  const currencySymbol = quote.currency === "INR" ? "Rs " : "$";
+  const arrow = quote.change >= 0 ? "[UP]" : "[DOWN]";
   const sign = quote.change >= 0 ? "+" : "";
   const isIndex = quote.symbol.startsWith("^");
   const formatNum = (value: number) => {
@@ -248,7 +255,7 @@ function formatStockReply(quote: StockQuote): string {
 
   lines.push("");
   lines.push(`_As of ${quote.asOf} IST_`);
-  lines.push("⚠️ _Not financial advice. Verify before investing._");
+  lines.push("_Not financial advice. Verify before investing._");
 
   return lines.join("\n");
 }
@@ -260,16 +267,22 @@ export async function answerIndianStockQuery(message: string): Promise<string | 
   }
 
   const quote = await fetchYahooQuote(symbol);
-  if (!quote) {
-    return [
-      `📊 *Could not fetch live data for ${symbol}*`,
-      "",
-      "NSE/BSE data may be delayed. Try again in a moment.",
-      "Markets are open Mon-Fri 9:15 AM - 3:30 PM IST.",
-    ].join("\n");
+  if (quote) {
+    return formatStockReply(quote);
   }
 
-  return formatStockReply(quote);
+  const financeFallback = await getLiveFinanceData(message).catch(() => null);
+  if (financeFallback) {
+    return formatFinanceReply(financeFallback);
+  }
+
+  return [
+    `Live market data for ${symbol} is unavailable right now.`,
+    "",
+    "Yahoo market data looks temporarily delayed right now.",
+    "Please retry in a minute or share the exact NSE/BSE ticker.",
+    "Markets are open Mon-Fri 9:15 AM - 3:30 PM IST.",
+  ].join("\n");
 }
 
 export function detectTrainIntent(message: string): { type: "pnr" | "running" | "schedule" | null; value: string } {
@@ -284,6 +297,10 @@ export function detectTrainIntent(message: string): { type: "pnr" | "running" | 
   }
 
   const trainMatch = message.match(/\b(\d{5})\b/);
+  if (/\b(schedule|timetable|time table|departure|arrival|platform)\b/.test(normalized) && trainMatch) {
+    return { type: "schedule", value: trainMatch[1] };
+  }
+
   if (trainMatch && /\b(train|running|live|status|where is)\b/.test(normalized)) {
     return { type: "running", value: trainMatch[1] };
   }
@@ -293,17 +310,13 @@ export function detectTrainIntent(message: string): { type: "pnr" | "running" | 
     return { type: "running", value: nameMatch?.[1]?.trim() ?? "" };
   }
 
-  if (/\b(schedule|timetable|time table|departure|arrival|platform)\b/.test(normalized) && trainMatch) {
-    return { type: "schedule", value: trainMatch[1] };
-  }
-
   return { type: null, value: "" };
 }
 
-async function fetchPnrStatus(pnr: string): Promise<PnrStatus | null> {
+async function fetchPnrStatus(pnr: string): Promise<RapidTrainResult<PnrStatus>> {
   const apiKey = process.env.RAPIDAPI_KEY?.trim();
   if (!apiKey) {
-    return null;
+    return { data: null, status: null };
   }
 
   const controller = new AbortController();
@@ -319,22 +332,22 @@ async function fetchPnrStatus(pnr: string): Promise<PnrStatus | null> {
     });
 
     if (!response.ok) {
-      return null;
+      return { data: null, status: response.status };
     }
 
     const data = await response.json() as { data?: PnrStatus };
-    return data.data ?? null;
+    return { data: data.data ?? null, status: response.status };
   } catch {
-    return null;
+    return { data: null, status: null };
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function fetchTrainRunningStatus(trainNumber: string): Promise<TrainStatus | null> {
+async function fetchTrainRunningStatus(trainNumber: string): Promise<RapidTrainResult<TrainStatus>> {
   const apiKey = process.env.RAPIDAPI_KEY?.trim();
   if (!apiKey) {
-    return null;
+    return { data: null, status: null };
   }
 
   const controller = new AbortController();
@@ -350,13 +363,13 @@ async function fetchTrainRunningStatus(trainNumber: string): Promise<TrainStatus
     });
 
     if (!response.ok) {
-      return null;
+      return { data: null, status: response.status };
     }
 
     const data = await response.json() as { data?: TrainStatus };
-    return data.data ?? null;
+    return { data: data.data ?? null, status: response.status };
   } catch {
-    return null;
+    return { data: null, status: null };
   } finally {
     clearTimeout(timer);
   }
@@ -365,19 +378,19 @@ async function fetchTrainRunningStatus(trainNumber: string): Promise<TrainStatus
 function formatPnrReply(pnr: PnrStatus): string {
   const statusIcon = (status: string) => {
     if (/confirm|cnf/i.test(status)) {
-      return "✅";
+      return "[CONFIRMED]";
     }
     if (/wait/i.test(status)) {
-      return "⏳";
+      return "[WAITLIST]";
     }
     if (/rac/i.test(status)) {
-      return "🔶";
+      return "[RAC]";
     }
-    return "❓";
+    return "[STATUS]";
   };
 
   return [
-    `🚂 *PNR Status: ${pnr.pnr}*`,
+    `Train PNR Status: ${pnr.pnr}`,
     "",
     `*Train:* ${pnr.trainName} (${pnr.trainNumber})`,
     `*Route:* ${pnr.from} -> ${pnr.to}`,
@@ -386,17 +399,17 @@ function formatPnrReply(pnr: PnrStatus): string {
     "",
     "*Passengers:*",
     ...pnr.passengers.map((passenger) =>
-      `  ${statusIcon(passenger.currentStatus)} Pax ${passenger.number}: ${passenger.currentStatus} (was: ${passenger.bookingStatus}) | Coach: ${passenger.coach} | Berth: ${passenger.berth}`
+      `- ${statusIcon(passenger.currentStatus)} Pax ${passenger.number}: ${passenger.currentStatus} (was: ${passenger.bookingStatus}) | Coach: ${passenger.coach} | Berth: ${passenger.berth}`,
     ),
   ].join("\n");
 }
 
 function formatTrainRunningReply(status: TrainStatus): string {
   const delay = status.delay ?? 0;
-  const delayLabel = delay === 0 ? "On time ✅" : `Late by ${delay} min ⚠️`;
+  const delayLabel = delay === 0 ? "On time" : `Late by ${delay} min`;
 
   return [
-    `🚂 *Train Status: ${status.trainName} (${status.trainNumber})*`,
+    `Train Status: ${status.trainName} (${status.trainNumber})`,
     "",
     `*Route:* ${status.from} -> ${status.to}`,
     status.currentStation ? `*Currently at:* ${status.currentStation}` : "",
@@ -405,6 +418,40 @@ function formatTrainRunningReply(status: TrainStatus): string {
     "",
     "_Live data from IRCTC_",
   ].filter(Boolean).join("\n");
+}
+
+function buildTrainFallbackReply(
+  type: "pnr" | "running" | "schedule",
+  value: string,
+  status: number | null,
+) {
+  const statusHint =
+    status === 429
+      ? "The live train provider has likely hit its free-tier quota for now."
+      : status === 400
+        ? "The train input looks invalid or the provider rejected the start-day details."
+        : status === 403 || status === 401
+          ? "The live train provider is currently rejecting API access."
+          : "Live train data is temporarily unavailable from the provider.";
+
+  const actionLine =
+    type === "pnr"
+      ? `Use the same PNR ${value} on enquiry.indianrail.gov.in for an official check.`
+      : type === "schedule"
+        ? `Use train number ${value} on NTES or enquiry.indianrail.gov.in to check schedule and platform details.`
+        : `Use train number ${value} on the NTES app or enquiry.indianrail.gov.in/live to confirm the latest running status.`;
+
+  return [
+    "Train status update",
+    "",
+    statusHint,
+    actionLine,
+    "",
+    "Official fallbacks:",
+    "- NTES app (Indian Railways official)",
+    "- enquiry.indianrail.gov.in",
+    "- RailMadad or station enquiry if you are already travelling",
+  ].join("\n");
 }
 
 export async function answerTrainQuery(message: string): Promise<string | null> {
@@ -416,28 +463,32 @@ export async function answerTrainQuery(message: string): Promise<string | null> 
   const apiKey = process.env.RAPIDAPI_KEY?.trim();
   if (!apiKey) {
     return [
-      "🚂 *Train & PNR status*",
+      "Train & PNR status",
       "",
       "To check PNR or train status live, I need the IRCTC API configured.",
       "In the meantime, check at:",
-      "• *NTES app* (Indian Railways official)",
-      "• *enquiry.indianrail.gov.in*",
-      "• *WhereIsMyTrain app* by Google",
+      "- NTES app (Indian Railways official)",
+      "- enquiry.indianrail.gov.in",
+      "- Where Is My Train",
     ].join("\n");
   }
 
   if (detected.type === "pnr") {
-    const status = await fetchPnrStatus(detected.value);
-    return status
-      ? formatPnrReply(status)
-      : `❌ *Could not fetch PNR ${detected.value}.*\n\nThe PNR may be invalid or data is temporarily unavailable. Check at enquiry.indianrail.gov.in`;
+    const result = await fetchPnrStatus(detected.value);
+    return result.data
+      ? formatPnrReply(result.data)
+      : buildTrainFallbackReply("pnr", detected.value, result.status);
   }
 
   if (detected.type === "running" && detected.value) {
-    const status = await fetchTrainRunningStatus(detected.value);
-    return status
-      ? formatTrainRunningReply(status)
-      : `❌ *Could not fetch live status for train ${detected.value}.*\n\nCheck the NTES app or enquiry.indianrail.gov.in`;
+    const result = await fetchTrainRunningStatus(detected.value);
+    return result.data
+      ? formatTrainRunningReply(result.data)
+      : buildTrainFallbackReply("running", detected.value, result.status);
+  }
+
+  if (detected.type === "schedule" && detected.value) {
+    return buildTrainFallbackReply("schedule", detected.value, 400);
   }
 
   return null;

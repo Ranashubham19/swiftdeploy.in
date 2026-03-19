@@ -1,4 +1,9 @@
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
+import {
+  detectKnownMerchantInText,
+  inferSpendingCategory,
+  normalizeMerchantName,
+} from "@/lib/clawcloud-india-normalization";
 
 export type UpiTransaction = {
   id?: string;
@@ -33,31 +38,31 @@ const UPI_CREDIT_PATTERNS = [
 
 const MERCHANT_PATTERNS = [
   /(?:sent to|paid to|to vpa|transferred to)\s+([a-zA-Z0-9.\-_]+@[a-zA-Z0-9.\-_]+)/i,
-  /(?:\bat\b|\bto\b)\s+([A-Z][a-zA-Z0-9 &'.-]{2,30})(?:\s|$|\.)/,
-  /(?:for|toward[s]?)\s+([A-Z][a-zA-Z0-9 &'.-]{2,30})/,
+  /(?:\bat\b|\bto\b)\s+([A-Z][a-zA-Z0-9 &'.-]{2,40})(?:\s|$|\.)/,
+  /(?:for|toward[s]?|from)\s+([A-Z][a-zA-Z0-9 &'.-]{2,40})/,
+  /(?:merchant|payee|beneficiary)\s*[:\-]?\s*([A-Z][a-zA-Z0-9 &'.-]{2,40})/i,
 ];
 
-const BANK_NAMES = [
-  "SBI",
-  "HDFC",
-  "ICICI",
-  "Axis",
-  "Kotak",
-  "PNB",
-  "BOI",
-  "Union Bank",
-  "Canara",
-  "Yes Bank",
-  "IndusInd",
-  "IDBI",
-  "Federal Bank",
-  "South Indian Bank",
-  "PhonePe",
-  "Google Pay",
-  "GPay",
-  "Paytm",
-  "BHIM",
-  "Amazon Pay",
+const BANK_PATTERNS = [
+  { name: "SBI", pattern: /\b(?:sbi|state bank)\b/i },
+  { name: "HDFC Bank", pattern: /\b(?:hdfc|hdfcbk|hdfcbank)\b/i },
+  { name: "ICICI Bank", pattern: /\b(?:icici|icicibank)\b/i },
+  { name: "Axis Bank", pattern: /\b(?:axis|axisbk|axisbank)\b/i },
+  { name: "Kotak Mahindra Bank", pattern: /\b(?:kotak|kotakbank)\b/i },
+  { name: "PNB", pattern: /\b(?:pnb|punjab national)\b/i },
+  { name: "Bank of India", pattern: /\b(?:boi|bank of india)\b/i },
+  { name: "Union Bank", pattern: /\bunion bank\b/i },
+  { name: "Canara Bank", pattern: /\bcanara\b/i },
+  { name: "Yes Bank", pattern: /\byes bank\b/i },
+  { name: "IndusInd Bank", pattern: /\bindusind\b/i },
+  { name: "IDBI Bank", pattern: /\bidbi\b/i },
+  { name: "Federal Bank", pattern: /\bfederal bank\b/i },
+  { name: "South Indian Bank", pattern: /\bsouth indian bank\b/i },
+  { name: "PhonePe", pattern: /\bphonepe\b/i },
+  { name: "Google Pay", pattern: /\b(?:google pay|gpay|tez)\b/i },
+  { name: "Paytm", pattern: /\bpaytm\b/i },
+  { name: "BHIM", pattern: /\bbhim\b/i },
+  { name: "Amazon Pay", pattern: /\bamazon pay\b/i },
 ] as const;
 
 export function detectUpiSms(message: string): boolean {
@@ -103,24 +108,36 @@ function extractAmount(sms: string): { amount: number; type: "debit" | "credit" 
 }
 
 function extractMerchant(sms: string): string {
+  const knownMerchant = detectKnownMerchantInText(sms);
+  if (knownMerchant) {
+    return knownMerchant;
+  }
+
   for (const pattern of MERCHANT_PATTERNS) {
     const match = sms.match(pattern);
     if (match?.[1]) {
-      const merchant = match[1].trim().replace(/@.*/, "");
+      const merchant = normalizeMerchantName(match[1].trim(), sms);
       if (merchant.length >= 2) {
         return merchant;
       }
     }
   }
 
-  return "Unknown";
+  const upiId = extractUpiId(sms);
+  if (upiId) {
+    const merchantFromUpi = normalizeMerchantName(upiId.split("@")[0] ?? upiId, sms);
+    if (merchantFromUpi.length >= 2 && merchantFromUpi !== "Unknown") {
+      return merchantFromUpi;
+    }
+  }
+
+  return knownMerchant ?? "Unknown";
 }
 
 function extractBank(sms: string): string {
-  const upper = sms.toUpperCase();
-  for (const bank of BANK_NAMES) {
-    if (upper.includes(bank.toUpperCase())) {
-      return bank;
+  for (const bank of BANK_PATTERNS) {
+    if (bank.pattern.test(sms)) {
+      return bank.name;
     }
   }
   return "Unknown Bank";
@@ -132,34 +149,7 @@ function extractUpiId(sms: string): string | undefined {
 }
 
 function categorise(merchant: string, sms: string): string {
-  const combined = `${merchant} ${sms}`.toLowerCase();
-
-  if (/swiggy|zomato|domino|pizza|food|restaurant|cafe|eat|blinkit|zepto|dunzo|bigbasket/.test(combined)) {
-    return "food";
-  }
-  if (/amazon|flipkart|myntra|ajio|meesho|nykaa|shop|store|mart|bazar/.test(combined)) {
-    return "shopping";
-  }
-  if (/uber|ola|rapido|metro|bus|auto|cab|petrol|fuel|toll/.test(combined)) {
-    return "transport";
-  }
-  if (/netflix|spotify|youtube|prime|hotstar|zee5|sony|disney|jio|airtel|vi\b|bsnl/.test(combined)) {
-    return "subscription";
-  }
-  if (/doctor|hospital|pharmacy|medicine|clinic|health|apollo/.test(combined)) {
-    return "health";
-  }
-  if (/electricity|water|gas|broadband|wifi|rent|maintenance|society/.test(combined)) {
-    return "utilities";
-  }
-  if (/hotel|flight|train|irctc|makemytrip|goibibo|airbnb|oyo|travel/.test(combined)) {
-    return "travel";
-  }
-  if (/school|college|university|course|udemy|coursera|education|tuition/.test(combined)) {
-    return "education";
-  }
-
-  return "other";
+  return inferSpendingCategory(merchant, sms);
 }
 
 export function parseUpiSms(sms: string, userId: string): UpiTransaction | null {

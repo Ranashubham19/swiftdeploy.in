@@ -1,6 +1,10 @@
 import { completeClawCloudPrompt } from "@/lib/clawcloud-ai";
 import { upsertAnalyticsDaily } from "@/lib/clawcloud-analytics";
 import { getClawCloudGmailMessages } from "@/lib/clawcloud-google";
+import {
+  normalizeMerchantName,
+  normalizeSpendingCategory,
+} from "@/lib/clawcloud-india-normalization";
 import { getUserLocale, translateMessage } from "@/lib/clawcloud-i18n";
 import { getUpiTransactions } from "@/lib/clawcloud-upi";
 import { sendClawCloudWhatsAppMessage } from "@/lib/clawcloud-whatsapp";
@@ -13,19 +17,34 @@ type SpendEntry = {
   category: string;
 };
 
-type WeeklySpendSummary = {
+type SpendSummary = {
+  periodLabel: string;
+  windowDays: number;
   totalAmount: number;
   currency: string;
   entries: SpendEntry[];
   topCategories: Array<{ category: string; total: number }>;
   topMerchants: Array<{ merchant: string; total: number }>;
+  averageTicket: number;
+  biggestExpense: SpendEntry | null;
 };
 
-const receiptQuery = [
-  'subject:(receipt OR invoice OR order OR payment OR transaction OR "your order" OR "payment received" OR "order confirmation")',
-  "newer_than:7d",
-  "-label:spam",
-].join(" ");
+function buildReceiptQuery(days: number) {
+  return [
+    'subject:(receipt OR invoice OR order OR payment OR transaction OR "your order" OR "payment received" OR "order confirmation")',
+    `newer_than:${days}d`,
+    "-label:spam",
+  ].join(" ");
+}
+
+function normalizeSpendEntry(entry: SpendEntry, context = ""): SpendEntry {
+  const merchant = normalizeMerchantName(entry.merchant, context);
+  return {
+    ...entry,
+    merchant,
+    category: normalizeSpendingCategory(entry.category, merchant, context),
+  };
+}
 
 async function extractSpendFromEmail(emailText: string): Promise<SpendEntry | null> {
   try {
@@ -53,36 +72,47 @@ async function extractSpendFromEmail(emailText: string): Promise<SpendEntry | nu
     }
 
     return {
-      merchant: String(parsed.merchant),
+      merchant: normalizeMerchantName(String(parsed.merchant), emailText),
       amount: Number(parsed.amount),
       currency: String(parsed.currency).toUpperCase(),
       date: String(parsed.date || new Date().toISOString().split("T")[0]),
-      category: String(parsed.category || "other"),
+      category: normalizeSpendingCategory(String(parsed.category || "other"), String(parsed.merchant), emailText),
     };
   } catch {
     return null;
   }
 }
 
-function buildWeeklySummary(entries: SpendEntry[]): WeeklySpendSummary {
-  if (entries.length === 0) {
+function buildSpendSummary(entries: SpendEntry[], windowDays: number, periodLabel: string): SpendSummary {
+  const cutoff = new Date(Date.now() - windowDays * 86_400_000);
+  const scopedEntries = entries.filter((entry) => {
+    const parsed = new Date(`${entry.date}T00:00:00`);
+    return Number.isFinite(parsed.getTime()) ? parsed >= cutoff : true;
+  });
+
+  if (scopedEntries.length === 0) {
     return {
+      periodLabel,
+      windowDays,
       totalAmount: 0,
       currency: "USD",
       entries: [],
       topCategories: [],
       topMerchants: [],
+      averageTicket: 0,
+      biggestExpense: null,
     };
   }
 
+  const normalizedEntries = scopedEntries.map((entry) => normalizeSpendEntry(entry));
   const currencyCount: Record<string, number> = {};
-  for (const entry of entries) {
+  for (const entry of normalizedEntries) {
     currencyCount[entry.currency] = (currencyCount[entry.currency] ?? 0) + 1;
   }
 
   const dominantCurrency =
     Object.entries(currencyCount).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "USD";
-  const sameCurrencyEntries = entries.filter((entry) => entry.currency === dominantCurrency);
+  const sameCurrencyEntries = normalizedEntries.filter((entry) => entry.currency === dominantCurrency);
   const totalAmount = sameCurrencyEntries.reduce((sum, entry) => sum + entry.amount, 0);
 
   const categoryTotals: Record<string, number> = {};
@@ -93,7 +123,11 @@ function buildWeeklySummary(entries: SpendEntry[]): WeeklySpendSummary {
     merchantTotals[entry.merchant] = (merchantTotals[entry.merchant] ?? 0) + entry.amount;
   }
 
+  const biggestExpense = [...sameCurrencyEntries].sort((a, b) => b.amount - a.amount)[0] ?? null;
+
   return {
+    periodLabel,
+    windowDays,
     totalAmount,
     currency: dominantCurrency,
     entries: sameCurrencyEntries,
@@ -105,43 +139,151 @@ function buildWeeklySummary(entries: SpendEntry[]): WeeklySpendSummary {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5)
       .map(([merchant, total]) => ({ merchant, total })),
+    averageTicket: sameCurrencyEntries.length ? totalAmount / sameCurrencyEntries.length : 0,
+    biggestExpense,
   };
 }
 
-function formatSpendMessage(summary: WeeklySpendSummary) {
+function buildMonthlyInsights(summary: SpendSummary): string[] {
   if (summary.entries.length === 0) {
-    return "Weekly spending summary\n\nNo transactions were found in your inbox this week.";
+    return [];
   }
 
+  const lines: string[] = [];
   const formatAmount = (amount: number) =>
     `${summary.currency} ${amount.toLocaleString("en", {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     })}`;
 
+  if (summary.topCategories[0]) {
+    lines.push(`Top category this month: ${summary.topCategories[0].category} (${formatAmount(summary.topCategories[0].total)})`);
+  }
+
+  if (summary.biggestExpense) {
+    lines.push(`Largest payment: ${summary.biggestExpense.merchant} (${formatAmount(summary.biggestExpense.amount)})`);
+  }
+
+  if (summary.averageTicket > 0) {
+    lines.push(`Average transaction size: ${formatAmount(summary.averageTicket)}`);
+  }
+
+  return lines;
+}
+
+function formatAmount(currency: string, amount: number) {
+  return `${currency} ${amount.toLocaleString("en", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+function formatSpendMessage(weeklySummary: SpendSummary, monthlySummary: SpendSummary) {
+  if (weeklySummary.entries.length === 0 && monthlySummary.entries.length === 0) {
+    return "Weekly spending summary\n\nNo transactions were found in your recent inbox or saved UPI history.";
+  }
+
+  const weeklyCurrency = weeklySummary.entries.length ? weeklySummary.currency : monthlySummary.currency;
   const lines = [
     "Weekly spending summary",
     "",
-    `Total spent: ${formatAmount(summary.totalAmount)} (${summary.entries.length} transactions)`,
-    "",
-    "By category:",
-    ...summary.topCategories.map((entry) => `- ${entry.category}: ${formatAmount(entry.total)}`),
-    "",
-    "Top merchants:",
-    ...summary.topMerchants.map((entry) => `- ${entry.merchant}: ${formatAmount(entry.total)}`),
-    "",
-    'Ask me things like "How much did I spend on food?"',
+    `Last 7 days: ${formatAmount(weeklyCurrency, weeklySummary.totalAmount)} (${weeklySummary.entries.length} transactions)`,
   ];
+
+  if (weeklySummary.topCategories.length) {
+    lines.push("");
+    lines.push("This week by category:");
+    lines.push(...weeklySummary.topCategories.map((entry) => `- ${entry.category}: ${formatAmount(weeklyCurrency, entry.total)}`));
+  }
+
+  if (weeklySummary.topMerchants.length) {
+    lines.push("");
+    lines.push("This week top merchants:");
+    lines.push(...weeklySummary.topMerchants.map((entry) => `- ${entry.merchant}: ${formatAmount(weeklyCurrency, entry.total)}`));
+  }
+
+  if (monthlySummary.entries.length) {
+    lines.push("");
+    lines.push("Monthly snapshot:");
+    lines.push(`- Last 30 days: ${formatAmount(monthlySummary.currency, monthlySummary.totalAmount)} (${monthlySummary.entries.length} transactions)`);
+    lines.push(...buildMonthlyInsights(monthlySummary).map((line) => `- ${line}`));
+  }
+
+  lines.push("");
+  lines.push('Ask me things like "How much did I spend on food this month?"');
+  return lines.join("\n");
+}
+
+function buildSpendingFacts(weeklySummary: SpendSummary, monthlySummary: SpendSummary) {
+  const weeklyCurrency = weeklySummary.entries.length ? weeklySummary.currency : monthlySummary.currency;
+  const lines = [
+    `Last 7 days total: ${formatAmount(weeklyCurrency, weeklySummary.totalAmount)} across ${weeklySummary.entries.length} transactions.`,
+    `Last 30 days total: ${formatAmount(monthlySummary.currency, monthlySummary.totalAmount)} across ${monthlySummary.entries.length} transactions.`,
+  ];
+
+  if (monthlySummary.topCategories.length) {
+    lines.push(`Top categories last 30 days: ${monthlySummary.topCategories.map((entry) => `${entry.category} ${formatAmount(monthlySummary.currency, entry.total)}`).join(", ")}.`);
+  }
+
+  if (monthlySummary.topMerchants.length) {
+    lines.push(`Top merchants last 30 days: ${monthlySummary.topMerchants.map((entry) => `${entry.merchant} ${formatAmount(monthlySummary.currency, entry.total)}`).join(", ")}.`);
+  }
+
+  if (monthlySummary.biggestExpense) {
+    lines.push(`Largest payment last 30 days: ${monthlySummary.biggestExpense.merchant} ${formatAmount(monthlySummary.currency, monthlySummary.biggestExpense.amount)} on ${monthlySummary.biggestExpense.date}.`);
+  }
 
   return lines.join("\n");
 }
 
+function buildTransactionContext(entries: SpendEntry[]) {
+  return entries
+    .slice(0, 120)
+    .map((entry) => `${entry.date} | ${entry.merchant} | ${entry.amount} ${entry.currency} | ${entry.category}`)
+    .join("\n");
+}
+
+function getLookbackDays(question: string) {
+  const lower = question.toLowerCase();
+  if (/\b(quarter|90 days|3 months)\b/.test(lower)) {
+    return 90;
+  }
+  if (/\b(month|30 days|last 30)\b/.test(lower)) {
+    return 60;
+  }
+  return 30;
+}
+
+function mergeSpendEntries(emailEntries: SpendEntry[], upiEntries: SpendEntry[]) {
+  return [...emailEntries, ...upiEntries].map((entry) => normalizeSpendEntry(entry));
+}
+
+function buildWeeklySummary(entries: SpendEntry[]): SpendSummary {
+  if (entries.length === 0) {
+    return {
+      periodLabel: "Last 7 days",
+      windowDays: 7,
+      totalAmount: 0,
+      currency: "USD",
+      entries: [],
+      topCategories: [],
+      topMerchants: [],
+      averageTicket: 0,
+      biggestExpense: null,
+    };
+  }
+  return buildSpendSummary(entries, 7, "Last 7 days");
+}
+
 export async function runWeeklySpendSummary(userId: string) {
   const locale = await getUserLocale(userId);
-  const emails = await getClawCloudGmailMessages(userId, {
-    query: receiptQuery,
-    maxResults: 50,
-  });
+  const [emails, upiTransactions] = await Promise.all([
+    getClawCloudGmailMessages(userId, {
+      query: buildReceiptQuery(30),
+      maxResults: 60,
+    }),
+    getUpiTransactions(userId, 30).catch(() => []),
+  ]);
 
   const entries: SpendEntry[] = [];
   for (let index = 0; index < emails.length; index += 5) {
@@ -154,8 +296,18 @@ export async function runWeeklySpendSummary(userId: string) {
     entries.push(...results.filter((value): value is SpendEntry => value !== null));
   }
 
-  const summary = buildWeeklySummary(entries);
-  const translatedMessage = await translateMessage(formatSpendMessage(summary), locale);
+  const upiEntries: SpendEntry[] = upiTransactions.map((txn) => ({
+    merchant: txn.merchant,
+    amount: txn.amount,
+    currency: txn.currency,
+    date: txn.transacted_at.split("T")[0] ?? txn.transacted_at,
+    category: txn.category,
+  }));
+
+  const mergedEntries = mergeSpendEntries(entries, upiEntries);
+  const weeklySummary = buildWeeklySummary(mergedEntries);
+  const monthlySummary = buildSpendSummary(mergedEntries, 30, "Last 30 days");
+  const translatedMessage = await translateMessage(formatSpendMessage(weeklySummary, monthlySummary), locale);
 
   await sendClawCloudWhatsAppMessage(userId, translatedMessage);
   await upsertAnalyticsDaily(userId, {
@@ -165,20 +317,21 @@ export async function runWeeklySpendSummary(userId: string) {
   });
 
   return {
-    transactions: summary.entries.length,
-    total: summary.totalAmount,
-    currency: summary.currency,
+    transactions: weeklySummary.entries.length,
+    total: weeklySummary.totalAmount,
+    currency: weeklySummary.currency,
   };
 }
 
 export async function answerSpendingQuestion(userId: string, question: string) {
   const locale = await getUserLocale(userId);
+  const lookbackDays = getLookbackDays(question);
   const [emails, upiTransactions] = await Promise.all([
     getClawCloudGmailMessages(userId, {
-      query: receiptQuery,
-      maxResults: 30,
+      query: buildReceiptQuery(lookbackDays),
+      maxResults: 50,
     }),
-    getUpiTransactions(userId, 30).catch(() => []),
+    getUpiTransactions(userId, lookbackDays).catch(() => []),
   ]);
 
   const entries: SpendEntry[] = [];
@@ -194,20 +347,24 @@ export async function answerSpendingQuestion(userId: string, question: string) {
     amount: txn.amount,
     currency: txn.currency,
     date: txn.transacted_at.split("T")[0] ?? txn.transacted_at,
-    category: txn.category,
+      category: txn.category,
   }));
 
-  const allEntries = [...entries, ...upiEntries];
-
-  const context = allEntries
-    .map((entry) => `${entry.date} | ${entry.merchant} | ${entry.amount} ${entry.currency} | ${entry.category}`)
-    .join("\n");
+  const allEntries = mergeSpendEntries(entries, upiEntries);
+  const weeklySummary = buildWeeklySummary(allEntries);
+  const monthlySummary = buildSpendSummary(allEntries, 30, "Last 30 days");
+  const facts = buildSpendingFacts(weeklySummary, monthlySummary);
+  const context = buildTransactionContext(allEntries);
 
   const answer = await completeClawCloudPrompt({
-    system:
-      "You are a concise personal finance assistant. Answer only from the transaction data provided.",
-    user: `Question: ${question}\n\nTransactions:\n${context || "No transactions found."}`,
-    maxTokens: 250,
+    system: [
+      "You are a concise personal finance assistant.",
+      "Answer only from the transaction facts and transactions provided.",
+      "Prefer exact totals from the summary facts when possible.",
+      "If the requested period or category is not covered by the data, say that clearly instead of guessing.",
+    ].join(" "),
+    user: `Question: ${question}\n\nSummary facts:\n${facts}\n\nTransactions:\n${context || "No transactions found."}`,
+    maxTokens: 300,
     fallback: "I could not find enough spending data to answer that.",
   });
 

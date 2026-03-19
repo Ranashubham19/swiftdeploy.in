@@ -298,6 +298,105 @@ async function yahooFinanceQuote(symbols: string[]): Promise<FinanceResult[]> {
   }
 }
 
+async function yahooFinanceChartQuote(symbol: string): Promise<FinanceResult | null> {
+  try {
+    const response = await fetchWithTimeout(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`,
+      {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 (compatible; ClawCloud/1.0)",
+        },
+      },
+    );
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = await response.json() as {
+      chart?: {
+        result?: Array<{
+          meta?: {
+            regularMarketPrice?: number;
+            previousClose?: number;
+            regularMarketDayHigh?: number;
+            regularMarketDayLow?: number;
+            regularMarketVolume?: number;
+            marketCap?: number;
+            currency?: string;
+            exchangeName?: string;
+            shortName?: string;
+            longName?: string;
+            regularMarketTime?: number;
+            symbol?: string;
+          };
+        }>;
+      };
+    };
+
+    const meta = data.chart?.result?.[0]?.meta;
+    if (!meta?.regularMarketPrice) {
+      return null;
+    }
+
+    const price = meta.regularMarketPrice;
+    const previousClose = meta.previousClose ?? price;
+
+    return {
+      symbol: meta.symbol ?? symbol,
+      name: meta.shortName ?? meta.longName ?? meta.symbol ?? symbol,
+      price,
+      currency: meta.currency ?? "USD",
+      change: price - previousClose,
+      changePct: previousClose ? ((price - previousClose) / previousClose) * 100 : 0,
+      high24h: meta.regularMarketDayHigh,
+      low24h: meta.regularMarketDayLow,
+      volume: meta.regularMarketVolume,
+      marketCap: meta.marketCap,
+      exchange: meta.exchangeName,
+      asOf: meta.regularMarketTime
+        ? new Date(meta.regularMarketTime * 1000).toISOString()
+        : new Date().toISOString(),
+      source: "Yahoo Finance (chart)",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function sortFinanceResultsBySymbolOrder(symbols: string[], results: FinanceResult[]) {
+  const order = new Map(symbols.map((symbol, index) => [symbol.toUpperCase(), index]));
+  return [...results].sort((a, b) => {
+    const left = order.get(a.symbol.toUpperCase()) ?? Number.MAX_SAFE_INTEGER;
+    const right = order.get(b.symbol.toUpperCase()) ?? Number.MAX_SAFE_INTEGER;
+    return left - right;
+  });
+}
+
+async function getBestYahooQuotes(symbols: string[]): Promise<FinanceResult[]> {
+  const uniqueSymbols = [...new Set(symbols.filter(Boolean))];
+  if (uniqueSymbols.length === 0) {
+    return [];
+  }
+
+  const primaryQuotes = await yahooFinanceQuote(uniqueSymbols);
+  if (primaryQuotes.length > 0) {
+    return sortFinanceResultsBySymbolOrder(uniqueSymbols, primaryQuotes);
+  }
+
+  const fallbackQuotes = await Promise.all(uniqueSymbols.map((symbol) => yahooFinanceChartQuote(symbol)));
+  return sortFinanceResultsBySymbolOrder(
+    uniqueSymbols,
+    fallbackQuotes.filter((quote): quote is FinanceResult => quote !== null),
+  );
+}
+
+function expandIndianStockSymbols(symbol: string): string[] {
+  const normalized = symbol.toUpperCase().replace(/\.(NS|BO)$/i, "");
+  return [`${normalized}.NS`, `${normalized}.BO`, normalized];
+}
+
 async function coinGeckoPrice(
   coinId: string,
   preferredCurrency: "usd" | "inr" = "usd",
@@ -398,7 +497,7 @@ async function fetchForexRate(from: string, to: string): Promise<FinanceResult |
       source: "ExchangeRate-API",
     };
   } catch {
-    const fallback = await yahooFinanceQuote([`${from}${to}=X`]);
+    const fallback = await getBestYahooQuotes([`${from}${to}=X`]);
     return fallback[0] ?? null;
   }
 }
@@ -418,7 +517,7 @@ export async function getLiveFinanceData(question: string): Promise<FinanceResul
       }
       case "index": {
         const symbol = INDEX_SYMBOLS[detected.query.toLowerCase()];
-        const quotes = symbol ? await yahooFinanceQuote([symbol]) : [];
+        const quotes = symbol ? await getBestYahooQuotes([symbol]) : [];
         return quotes[0] ?? null;
       }
       case "forex": {
@@ -427,16 +526,15 @@ export async function getLiveFinanceData(question: string): Promise<FinanceResul
       }
       case "commodity": {
         const symbol = COMMODITY_SYMBOLS[detected.query.toLowerCase()];
-        const quotes = symbol ? await yahooFinanceQuote([symbol]) : [];
+        const quotes = symbol ? await getBestYahooQuotes([symbol]) : [];
         return quotes[0] ?? null;
       }
       case "stock_india": {
-        const symbol = detected.query.toUpperCase();
-        const quotes = await yahooFinanceQuote([`${symbol}.NS`, `${symbol}.BO`, symbol]);
+        const quotes = await getBestYahooQuotes(expandIndianStockSymbols(detected.query));
         return quotes[0] ?? null;
       }
       case "stock_us": {
-        const quotes = await yahooFinanceQuote([detected.query.toUpperCase()]);
+        const quotes = await getBestYahooQuotes([detected.query.toUpperCase()]);
         return quotes[0] ?? null;
       }
       default:
