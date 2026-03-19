@@ -208,6 +208,50 @@ function parseLanguageReply(text: string): { locale: SupportedLocale; label: str
   return LANGUAGE_MAP[normalized] ?? { locale: "en", label: "English" };
 }
 
+function professionalStep1Message(): string {
+  return [
+    "Welcome to *ClawCloud AI*",
+    "",
+    "I'm your personal AI assistant on WhatsApp.",
+    "I'll help you set up the basics in under a minute.",
+    "",
+    "*What should I call you?*",
+    "_Just type your name or what you'd like to be called._",
+  ].join("\n");
+}
+
+function professionalStep2Message(name: string): string {
+  return [
+    `Nice to meet you, *${name}*.`,
+    "",
+    "*What city are you in?*",
+    "_For example: Mumbai, Delhi, Dubai, London, Singapore._",
+  ].join("\n");
+}
+
+function professionalStep3Message(city: string): string {
+  return [
+    `Got it - *${city}*`,
+    "",
+    "*What language do you prefer?*",
+    "Reply with: *English*, *Hindi*, *Punjabi*, *Tamil*, *Telugu*, *Kannada*, *Bengali*, *Marathi*, *Gujarati*, or *other: Spanish*.",
+  ].join("\n");
+}
+
+function professionalCompletionMessage(name: string, city: string, language: string): string {
+  return [
+    `*All set, ${name}.*`,
+    "",
+    `City: *${city}*`,
+    `Language: *${language}*`,
+    "",
+    "I can now help with code, email, reminders, calendar, news, finance, images, voice notes, documents, and your connected workflows.",
+    "For medical, legal, tax, mental-health, or financial decisions, I'll be careful and tell you when something should be verified with a qualified professional.",
+    "",
+    "*What's your first question?*",
+  ].join("\n");
+}
+
 export async function getActiveOnboardingState(
   userId: string,
 ): Promise<OnboardingState | null> {
@@ -227,7 +271,7 @@ export async function getActiveOnboardingState(
 
 export async function startOnboarding(userId: string): Promise<string> {
   await setOnboardingState(userId, { step: 1 });
-  return step1Message();
+  return professionalStep1Message();
 }
 
 export async function handleOnboardingReply(
@@ -253,7 +297,7 @@ export async function handleOnboardingReply(
 
     await saveMemoryFact(userId, "name", name, "explicit", 1);
     await setOnboardingState(userId, { step: 2, name });
-    return step2Message(name);
+    return professionalStep2Message(name);
   }
 
   if (state.step === 2) {
@@ -273,7 +317,7 @@ export async function handleOnboardingReply(
       name: state.name,
       city,
     });
-    return step3Message(city);
+    return professionalStep3Message(city);
   }
 
   const language = parseLanguageReply(trimmed);
@@ -285,7 +329,7 @@ export async function handleOnboardingReply(
   await clearOnboardingState(userId);
   await markOnboardingComplete(userId);
 
-  return completionMessage(name, city, language.label);
+  return professionalCompletionMessage(name, city, language.label);
 }
 
 export async function isNewUserNeedingOnboarding(userId: string): Promise<boolean> {

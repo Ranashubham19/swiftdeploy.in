@@ -7,6 +7,7 @@ export type ClawCloudAnswerDomain =
   | "live"
   | "finance"
   | "health"
+  | "mental_health"
   | "legal"
   | "tax"
   | "document";
@@ -37,6 +38,11 @@ const HEALTH_PATTERNS = [
   /\b(symptom|symptoms|disease|illness|diagnosis|diagnose|medicine|medication|tablet|capsule|dose|dosage|treatment|doctor|hospital|surgery|side effects?|infection|fever|pain|blood pressure|cholesterol|diabetes|cancer|anxiety|depression|pregnan|mental health)\b/i,
   /\b(can i take|should i take|what should i take|how much .* take|is it safe to take|mix .* medicine|combine .* medicine)\b/i,
   /\b(my child|my father|my mother|my wife|my husband|my symptoms|i have .* pain|i feel .* pain)\b/i,
+];
+
+const MENTAL_HEALTH_PATTERNS = [
+  /\b(anxiety|depression|panic attack|panic attacks|mental health|therapy|therapist|psychiatrist|counsellor|counselor|burnout|trauma|grief|hopeless|empty inside)\b/i,
+  /\b(i feel numb|i feel hopeless|i cannot cope|i can't cope|i do not feel okay|i don't feel okay)\b/i,
 ];
 
 const LEGAL_PATTERNS = [
@@ -112,6 +118,15 @@ const UNSAFE_FINANCE_PATTERNS = [
   /\ball in\b/i,
 ];
 
+const SUPPORTIVE_MENTAL_HEALTH_PATTERNS = [
+  /\btherapist\b/i,
+  /\bmental health professional\b/i,
+  /\bsupport person\b/i,
+  /\bif you feel unsafe\b/i,
+  /\bimmediate help\b/i,
+  /\byou are not alone\b/i,
+];
+
 function matchesAny(value: string, patterns: RegExp[]) {
   return patterns.some((pattern) => pattern.test(value));
 }
@@ -127,6 +142,7 @@ function domainForQuestion(question: string, intent: string, category: string, i
   if (isDocumentBound) return "document";
   if (detectTaxQuery(question)) return "tax";
   if (intent === "finance" || category === "finance") return "finance";
+  if (matchesAny(question, MENTAL_HEALTH_PATTERNS)) return "mental_health";
   if (intent === "health" || category === "health" || matchesAny(question, HEALTH_PATTERNS)) return "health";
   if (intent === "law" || category === "law" || matchesAny(question, LEGAL_PATTERNS)) return "legal";
   if (shouldUseLiveSearch(question) || category === "news" || category === "web_search") return "live";
@@ -149,9 +165,9 @@ export function buildClawCloudAnswerQualityProfile(input: {
     || /\bcan i take\b/i.test(question)
     || /\bhow much tax\b/i.test(question)
     || /\bwhich option is best for me\b/i.test(question);
-  const isHighStakes = domain === "health" || domain === "legal" || domain === "tax" || domain === "finance";
+  const isHighStakes = domain === "health" || domain === "mental_health" || domain === "legal" || domain === "tax" || domain === "finance";
   const requiresLiveGrounding = domain === "live" || domain === "finance";
-  const requiresEvidence = requiresLiveGrounding || domain === "health" || domain === "legal";
+  const requiresEvidence = requiresLiveGrounding || domain === "health" || domain === "mental_health" || domain === "legal";
   const requiresVerification = requiresEvidence || domain === "tax" || isAdvice || input.category === "news";
 
   return {
@@ -194,6 +210,12 @@ export function buildClawCloudEvidenceInstruction(profile: ClawCloudAnswerQualit
     lines.push("- Explain general guidance, red flags, and the safest next step.");
   }
 
+  if (profile.domain === "mental_health") {
+    lines.push("- Do not diagnose the user or speak with false certainty about their condition.");
+    lines.push("- Respond with calm, supportive language, general guidance, and encourage licensed mental health support when needed.");
+    lines.push("- If the user sounds unsafe or at risk of self-harm, prioritize immediate local emergency help.");
+  }
+
   if (profile.domain === "legal") {
     lines.push("- Do not present personal legal strategy as certain.");
     lines.push("- State the general legal principle, what depends on jurisdiction/facts, and the safest next step.");
@@ -231,6 +253,9 @@ export function clawCloudAnswerHasEvidenceSignals(
 function hasUnsafeAdviceSignals(answer: string, profile: ClawCloudAnswerQualityProfile) {
   if (profile.domain === "health") {
     return matchesAny(answer, UNSAFE_HEALTH_PATTERNS);
+  }
+  if (profile.domain === "mental_health") {
+    return matchesAny(answer, UNSAFE_HEALTH_PATTERNS) || !matchesAny(answer, SUPPORTIVE_MENTAL_HEALTH_PATTERNS);
   }
   if (profile.domain === "legal") {
     return matchesAny(answer, UNSAFE_LEGAL_PATTERNS);
@@ -300,6 +325,7 @@ function parseVerificationBlock(raw: string): ClawCloudAnswerVerification | null
 function verifierIntentForProfile(profile: ClawCloudAnswerQualityProfile): IntentType {
   switch (profile.domain) {
     case "health":
+    case "mental_health":
       return "health";
     case "legal":
       return "law";
@@ -325,7 +351,7 @@ export async function verifyClawCloudAnswer(input: {
   const verifierPrompt = [
     "You are the final answer verifier for ClawCloud.",
     "Review the candidate answer for factual safety, completeness, and overconfidence.",
-    "Reject answers that bluff, invent current facts, or give personalized medical, legal, financial, or tax advice as certainty.",
+    "Reject answers that bluff, invent current facts, or give personalized medical, legal, mental-health, financial, or tax advice as certainty.",
     "If the answer is mostly good but needs caveats or safer wording, revise it.",
     "If the answer is acceptable, approve it.",
     "Return exactly this structure:",
@@ -371,6 +397,16 @@ export function buildClawCloudLowConfidenceReply(
       "",
       "If this is about symptoms, diagnosis, dosage, or medication safety, please check with a qualified doctor.",
       "If you want, I can still give general background information or help you phrase the question more clearly.",
+      reason ? `\nReason: ${reason}` : "",
+    ].filter(Boolean).join("\n");
+  }
+
+  if (profile.domain === "mental_health") {
+    return [
+      "I want to be careful here because mental-health questions can be personal and high-stakes.",
+      "",
+      "I'm not confident enough to answer this as personal guidance without better context and, where needed, support from a licensed mental-health professional.",
+      "If you want, I can still offer general coping ideas, help you phrase what you're feeling, or help you decide what kind of support to seek next.",
       reason ? `\nReason: ${reason}` : "",
     ].filter(Boolean).join("\n");
   }

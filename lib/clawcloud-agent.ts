@@ -69,6 +69,16 @@ import {
   verifyClawCloudAnswer,
 } from "@/lib/clawcloud-answer-quality";
 import {
+  buildActiveAutomationLimitMessage,
+  buildBackgroundTaskFailureMessage,
+  buildDailyLimitReachedMessage,
+  getClawCloudPricingUrl,
+} from "@/lib/clawcloud-professional-copy";
+import {
+  buildClawCloudSafetyReply,
+  detectClawCloudSafetyRisk,
+} from "@/lib/clawcloud-safety";
+import {
   looksLikeRealtimeResearch,
   refineCodingAnswer,
   runGroundedResearchReply,
@@ -4641,6 +4651,42 @@ function buildHelpMessage(): string {
   ].join("\n");
 }
 
+function buildProfessionalHelpMessage(): string {
+  return [
+    "ClawCloud AI - quick guide",
+    "",
+    "*Ask naturally*",
+    "- Explanations, coding, writing, math, planning, and everyday questions",
+    "- Example: _Explain quantum entanglement simply_",
+    "",
+    "*Documents and media*",
+    "- Send PDF, DOCX, XLSX, TXT, images, or voice notes",
+    "- I can summarize, extract details, and answer questions from them",
+    "",
+    "*Personal assistant*",
+    "- Reminders, memory, morning briefings, spending questions, and reusable slash commands",
+    "- Example: _Remind me at 6pm to call Raj_",
+    "- Example: _How much did I spend on food this month?_",
+    "",
+    "*Connected workflows*",
+    "- Gmail, Calendar, Drive, Docs, Sheets, Telegram, and billing support when connected",
+    "",
+    "*India-first features*",
+    "- Cricket, NSE/BSE stocks, train and PNR help, tax, holidays, Hinglish, and UPI-aware spending",
+    "",
+    "*Power tips*",
+    "- Start with *deep:* for a detailed answer",
+    "- Start with *quick:* for a short answer",
+    "- Save repeatable prompts with custom slash commands like */standup*",
+    "",
+    "*Safety*",
+    "- For medical, legal, mental-health, tax, or financial decisions, I give careful general guidance and may ask you to verify with a qualified professional",
+    "",
+    "Manage account and connections at *https://swift-deploy.in*",
+    "Need something specific? Just ask in one sentence.",
+  ].join("\n");
+}
+
 function isLowCoverageResearchReply(reply: string): boolean {
   const t = (reply ?? "").toLowerCase().trim();
   return (
@@ -4956,7 +5002,20 @@ async function notifyBackgroundTaskFailure(
     ? `⚠️ *${taskLabel} finished but delivery failed.*\n\nPlease try again in a moment.`
     : `⚠️ *${taskLabel} ran into a problem.*\n\nPlease try again in a few minutes.`;
 
-  await sendClawCloudWhatsAppMessage(userId, await translateMessage(userError, locale)).catch(
+  void userError;
+
+  const failureType = messageText.includes("Daily limit")
+    ? "daily_limit"
+    : /(gmail|token|oauth|google)/i.test(messageText)
+      ? "gmail"
+      : /(calendar)/i.test(messageText)
+        ? "calendar"
+        : /(whatsapp|session|deliver)/i.test(messageText)
+          ? "delivery"
+          : "general";
+  const professionalUserError = buildBackgroundTaskFailureMessage(taskLabel, failureType);
+
+  await sendClawCloudWhatsAppMessage(userId, await translateMessage(professionalUserError, locale)).catch(
     () => null,
   );
 }
@@ -5088,7 +5147,7 @@ export async function routeInboundAgentMessage(
   }
 
   if (!shouldBypassInboundRunLimit(trimmed)) {
-    const limitReply = await buildInboundRunLimitReply(userId);
+    const limitReply = await buildProfessionalInboundRunLimitReply(userId);
     if (limitReply) {
       return finalizeEarlyRaw(limitReply, "general", "general");
     }
@@ -5104,6 +5163,11 @@ export async function routeInboundAgentMessage(
   ]);
   const memorySnippet = buildMemorySystemSnippet(memory, userProfileSnippet);
   const finalMessage = memory.resolvedQuestion.trim() || trimmed;
+  const safetyRisk = detectClawCloudSafetyRisk(finalMessage);
+  if (safetyRisk) {
+    await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+    return finalizeEarlyRaw(buildClawCloudSafetyReply(safetyRisk), "safety", "safety");
+  }
   const hasDocumentContext = looksLikeDocumentContext(finalMessage);
   const isHinglish = detectHinglish(trimmed);
   const hinglishIntentOverride = isHinglish ? extractHinglishIntent(trimmed) : null;
@@ -5749,7 +5813,7 @@ export async function routeInboundAgentMessage(
     }
 
     case "help": {
-      return finalizeRaw(buildHelpMessage(), "help", "help");
+      return finalizeRaw(buildProfessionalHelpMessage(), "help", "help");
     }
 
     case "greeting": {
@@ -5868,6 +5932,21 @@ async function buildInboundRunLimitReply(userId: string) {
   ].join("\n");
 }
 
+async function buildProfessionalInboundRunLimitReply(userId: string) {
+  const plan = await getUserPlan(userId);
+  if (plan === "pro") {
+    return null;
+  }
+
+  const runs = await getTodayRuns(userId);
+  const limit = clawCloudRunLimits[plan];
+  if (runs < limit) {
+    return null;
+  }
+
+  return buildDailyLimitReachedMessage({ plan, limit });
+}
+
 export async function createClawCloudTask(input: {
   userId: string; taskType: ClawCloudTaskType; scheduleTime: string | null;
   scheduleDays: string[] | null; config: Record<string, unknown>;
@@ -5876,6 +5955,7 @@ export async function createClawCloudTask(input: {
   const plan = await getUserPlan(input.userId);
   const { data: existing } = await db.from("agent_tasks").select("id").eq("user_id", input.userId).eq("is_enabled", true);
   if ((existing?.length ?? 0) >= clawCloudActiveTaskLimits[plan]) {
+    throw new Error(buildActiveAutomationLimitMessage({ plan, limit: clawCloudActiveTaskLimits[plan] }));
     throw new Error(`Limit of ${clawCloudActiveTaskLimits[plan]} active tasks on ${plan} plan. Upgrade to add more.`);
   }
   const { data, error } = await db.from("agent_tasks").upsert({
@@ -6644,6 +6724,16 @@ export async function runClawCloudTask(input: RunTaskInput) {
   const limit = clawCloudRunLimits[plan];
 
   if (runs >= limit) {
+    await sendClawCloudWhatsAppMessage(
+      input.userId,
+      buildDailyLimitReachedMessage({
+        plan,
+        limit,
+        upgradeUrl: getClawCloudPricingUrl(),
+      }),
+    );
+    throw new Error("Daily limit reached.");
+
     const upgradeUrl = "swift-deploy.in/pricing";
     const planEmoji = plan === "free" ? "🆓" : "⭐";
     const nextPlan = plan === "free" ? "Starter" : "Pro";

@@ -1,46 +1,58 @@
-# Adaptive AI Search
+# ClawCloud AI
 
-Adaptive AI Search is a full-stack Next.js platform for production-grade search, research, and retrieval-backed answers. It resolves follow-up questions with conversation memory, rewrites the query, searches the live web, extracts source content, stores and retrieves evidence from a vector store, and returns structured answers with sources over a streaming UI.
+ClawCloud AI is a WhatsApp-first personal assistant built with Next.js, Supabase, and a Railway-hosted messaging agent.
 
-## Core stack
+It combines general AI answers with practical workflows:
 
-- Next.js App Router for the product UI and API routes
-- NVIDIA AI for reasoning and embeddings
-- Tavily, SerpAPI, and Jina Search for live search
-- Firecrawl, Jina Reader, Apify, and ScraperAPI for extraction
-- Pinecone with Weaviate fallback for vector storage and retrieval
-- Firebase Auth for browser-side authentication
-- Supabase REST for optional thread and research-run persistence
+- WhatsApp and Telegram messaging flows
+- Gmail, Calendar, Drive, Docs, and Sheets support
+- reminders, memory, custom slash commands, and morning briefings
+- document OCR, XLSX parsing, image understanding, and voice-note handling
+- India-first features such as UPI SMS parsing, spending insights, trains, cricket, tax help, holidays, Hinglish, and regional languages
 
-## API surface
+## Architecture
 
-- `POST /api/research`
-- `POST /api/search`
-- `POST /api/crawl`
-- `POST /api/embed`
-- `POST /api/retrieve`
-- `GET /api/health`
+- `app/*`: Next.js product UI and API routes
+- `agent-server.ts`: Railway-hosted WhatsApp agent
+- `lib/clawcloud-agent.ts`: main routing, guardrails, and assistant orchestration
+- `lib/clawcloud-*`: feature modules for finance, docs, billing, memory, Google, Telegram, India utilities, and safety
 
-## Runtime flow
+## Key product behavior
 
-1. Build conversation memory from recent thread history.
-2. Rewrite ambiguous follow-ups into standalone search questions.
-3. Fan out live search across multiple providers.
-4. Crawl and normalize the strongest sources.
-5. Chunk, embed, index, retrieve, and rerank evidence.
-6. Generate a structured answer or report with source grounding.
-7. Persist research runs and stream the result to the UI.
+- Answers regular questions directly in chat
+- Routes high-stakes questions through extra guardrails
+- Reads uploaded files and answers from their contents
+- Runs assistant workflows like reminders, draft replies, and spend summaries
+- Keeps lightweight user memory for personalization
+- Applies honest fallbacks when live data or external providers are not reliable enough
 
-## Smoke tests
+## Local development
 
-- `node scripts/live-smoke.mjs`
-- `node scripts/category-smoke.mjs`
+1. Install dependencies
 
-These verify greeting, live search, follow-up memory, research, website analysis, document retrieval, and coding-mode routing against the running app.
+```bash
+npm install
+```
 
-## Notes
+2. Add environment variables in `.env.local`
 
-- The UI streams research progress and renders a structured report with sources.
-- If the chat model is unavailable, the search, research, website, and document flows still fall back to deterministic source-backed synthesis.
-- Thread sync is best-effort. If the Supabase `chat_threads` table is missing, the app falls back to local browser history.
-- The included `supabase/schema.sql` creates the `chat_threads` and `research_runs` tables expected by the app.
+3. Start the web app
+
+```bash
+npm run dev
+```
+
+4. Start the WhatsApp agent when needed
+
+```bash
+npm run agent
+```
+
+## Verification
+
+```bash
+npm run typecheck
+npm run build
+```
+
+For production environment details, see [PRODUCTION-SETUP.md](c:\Users\ranas\Downloads\swiftdeploy-ai%20(2)\PRODUCTION-SETUP.md).

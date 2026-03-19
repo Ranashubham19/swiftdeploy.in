@@ -653,13 +653,10 @@ export async function answerWebSearch(question: string): Promise<string> {
 }
 
 export function buildNoLiveDataReply(_question: string): string {
-  return [
-    "\u{1F50D} _No live results found. Here is knowledge-based context:_",
-    "",
-    buildStaleKnowledgeWarning(),
-  ].join("\n");
+  return [buildNoLiveDataProfessionalReply(), "", buildStaleKnowledgeWarning()].join("\n");
 }
 
 export function hasNewsProviders(): boolean {
   return true;
 }
+import { buildNoLiveDataProfessionalReply } from "@/lib/clawcloud-professional-copy";

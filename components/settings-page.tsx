@@ -475,19 +475,19 @@ export function SettingsPage({ config }: SettingsPageProps) {
                 <div className={styles.upgradeCard}>
                   <div>
                     <div className={styles.upgradeTitle}>Starter - INR 799/month</div>
-                    <div className={styles.upgradeDescription}>More automations, Telegram, and higher limits.</div>
+                    <div className={styles.upgradeDescription}>Higher daily limits, more automations, and connected assistant workflows for regular use.</div>
                   </div>
                   <button type="button" className={styles.primaryButton} disabled={upgradeLoading} onClick={() => void upgrade({ plan: "starter", period: "monthly", currency: "inr" })}>
-                    {upgradeLoading ? "Opening..." : "Upgrade"}
+                    {upgradeLoading ? "Opening..." : "See Starter"}
                   </button>
                 </div>
                 <div className={cx(styles.upgradeCard, styles.upgradeCardMuted)}>
                   <div>
                     <div className={styles.upgradeTitle}>Pro - INR 2,499/month</div>
-                    <div className={styles.upgradeDescription}>Highest limits and the full ClawCloud experience.</div>
+                    <div className={styles.upgradeDescription}>Highest limits, priority workflows, and the full ClawCloud experience for power users.</div>
                   </div>
                   <button type="button" className={styles.secondaryButton} disabled={upgradeLoading} onClick={() => void upgrade({ plan: "pro", period: "monthly", currency: "inr" })}>
-                    {upgradeLoading ? "Opening..." : "Get Pro"}
+                    {upgradeLoading ? "Opening..." : "See Pro"}
                   </button>
                 </div>
               </div>
