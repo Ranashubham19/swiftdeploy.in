@@ -20,6 +20,7 @@ import {
   extractImagePrompt,
   getImageGenerationStatus,
 } from "@/lib/clawcloud-imagegen";
+import { solveHardMathQuestion } from "@/lib/clawcloud-expert";
 import {
   buildClawCloudSafetyReply,
   detectClawCloudSafetyRisk,
@@ -114,6 +115,24 @@ test("holiday and tax helpers answer India-specific questions", () => {
   assert.ok(incomeTaxAnswer);
   assert.match(incomeTaxAnswer ?? "", /Income Tax Estimate/i);
   assert.match(incomeTaxAnswer ?? "", /Total Tax Payable/i);
+});
+
+test("quant expert solvers keep deterministic DiD and energy-risk answers complete", () => {
+  const didAnswer = solveHardMathQuestion(
+    "In a difference-in-differences policy evaluation, the treatment coefficient beta is -0.18 and the standard error is 0.05. Explain the estimator, compute the t-statistic, 95% confidence interval, significance, and list the parallel-trends checks and robustness tests.",
+  );
+  assert.ok(didAnswer);
+  assert.match(didAnswer ?? "", /Numerical Readout/i);
+  assert.match(didAnswer ?? "", /t-statistic:\s*-?3\.600/i);
+  assert.match(didAnswer ?? "", /95% CI/i);
+
+  const energyAnswer = solveHardMathQuestion(
+    "A European power retailer needs weekly 95% VaR and stress loss estimation under spot price spikes and heat waves while hedging with forwards. Give the correct loss definition, estimation structure, stress testing approach, and explain why naive Gaussian normality fails.",
+  );
+  assert.ok(energyAnswer);
+  assert.match(energyAnswer ?? "", /Loss Definition/i);
+  assert.match(energyAnswer ?? "", /L_week/i);
+  assert.match(energyAnswer ?? "", /Final Answer/i);
 });
 
 test("safety interception catches emergencies and leaves informational queries alone", () => {

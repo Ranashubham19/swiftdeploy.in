@@ -3935,6 +3935,7 @@ function isMathOrStatisticsQuestion(text: string): boolean {
     || /\b\d[\d,]*(?:\.\d+)?\s*[\+\-\*\/\^]\s*\d[\d,]*(?:\.\d+)?\b/.test(normalized)
     || /\b(probability (of|that)|expected value|confidence interval|p-?value|standard deviation|variance of|mean of|standard error|t-?stat)\b/.test(normalized)
     || /\b(statistical(ly)?|regression|correlation|significance|hypothesis|distribution of|normal distribution|beta|coefficient|policy study|program evaluation)\b/.test(normalized)
+    || /\b(value at risk|var|cvar|expected shortfall|stress loss|tail risk|spot price spikes|heat waves|hedging with forwards|forward hedge|hedge book|power retailer)\b/.test(normalized)
     || /\b(if .{0,40}what (is|are|would|will)|given .{0,40}(find|calculate|compute|estimate|what))\b/.test(normalized)
     || /\b(\d+%.*\d+%|\d+\s*(?:out of|of)\s*\d+)\b/.test(normalized)
   );
@@ -5219,7 +5220,7 @@ export async function routeInboundAgentMessage(
       resolvedType = "general";
       resolvedCategory = "general";
     } else if (
-      resolvedCategory === "research"
+      (resolvedCategory === "research" || resolvedCategory === "economics")
       && !looksLikeRealtimeResearch(finalMessage)
       && finalMessage.length > 70
     ) {

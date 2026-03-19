@@ -133,6 +133,31 @@ function matchNumber(pattern: RegExp, text: string) {
   return Number.parseFloat(match[1]);
 }
 
+function extractLabeledNumber(question: string, labels: string[], options?: { positiveOnly?: boolean }) {
+  const normalized = question.replace(/,/g, "");
+  const labelPattern = labels.join("|");
+  const signPattern = options?.positiveOnly ? "\\d+(?:\\.\\d+)?" : "-?\\d+(?:\\.\\d+)?";
+  const patterns = [
+    new RegExp(
+      `(?:\\b(?:${labelPattern})\\b)(?:\\s*(?:coefficient|estimate|term|value))?(?:\\s*(?:is|was|equals?|=|:|of))\\s*(${signPattern})`,
+      "i",
+    ),
+    new RegExp(
+      `(?:\\b(?:${labelPattern})\\b)(?:\\s*(?:coefficient|estimate|term|value))?\\s*(${signPattern})`,
+      "i",
+    ),
+  ];
+
+  for (const pattern of patterns) {
+    const match = pattern.exec(normalized);
+    if (match) {
+      return Number.parseFloat(match[1]);
+    }
+  }
+
+  return null;
+}
+
 function normalizePct(value: number) {
   return value > 1 ? value / 100 : value;
 }
@@ -1216,10 +1241,12 @@ function solvePolicyEffectSignificanceQuestion(question: string) {
     return null;
   }
 
-  const betaMatch = /(?:beta|coefficient|effect|estimate)[:\s=]+(-?\d+(?:\.\d+)?)/i.exec(question);
-  const seMatch = /(?:se|standard error)[:\s=]+(\d+(?:\.\d+)?)/i.exec(question);
-  const beta = betaMatch ? Number.parseFloat(betaMatch[1]) : null;
-  const se = seMatch ? Number.parseFloat(seMatch[1]) : null;
+  if (containsAny(text, [/\b(difference-?in-?differences?|did estimate|parallel trends|event study|staggered did)\b/])) {
+    return null;
+  }
+
+  const beta = extractLabeledNumber(question, ["beta", "coefficient", "effect", "estimate"]);
+  const se = extractLabeledNumber(question, ["standard error", "se"], { positiveOnly: true });
 
   if (beta == null || se == null || se <= 0) {
     return null;
@@ -1264,10 +1291,8 @@ function solveDifferenceInDifferencesQuestion(question: string) {
     return null;
   }
 
-  const betaMatch = /(?:beta|coefficient|effect|estimate|tau)[:\s=]+(-?\d+(?:\.\d+)?)/i.exec(question);
-  const seMatch = /(?:se|standard error)[:\s=]+(\d+(?:\.\d+)?)/i.exec(question);
-  const beta = betaMatch ? Number.parseFloat(betaMatch[1]) : null;
-  const se = seMatch ? Number.parseFloat(seMatch[1]) : null;
+  const beta = extractLabeledNumber(question, ["beta", "coefficient", "effect", "estimate", "tau"]);
+  const se = extractLabeledNumber(question, ["standard error", "se"], { positiveOnly: true });
 
   const lines = [
     "*Difference-in-Differences Causal Analysis*",
@@ -2612,9 +2637,9 @@ export function solveHardMathQuestion(question: string) {
     || solveBlackScholesQuestion(question)
     || solveBondPricingQuestion(question)
     || solveEnergyHedgeRiskQuestion(question)
+    || solveDifferenceInDifferencesQuestion(question)
     || solvePolicyEffectSignificanceQuestion(question)
     || solveVaRCVaRQuestion(question)
-    || solveDifferenceInDifferencesQuestion(question)
     || solveInsuranceReservingQuestion(question)
   );
 }
