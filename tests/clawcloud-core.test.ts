@@ -53,7 +53,12 @@ test("plan limits and India day helpers stay stable", () => {
 test("billing, drive, finance, train, and image intents classify correctly", () => {
   assert.equal(detectBillingIntent("upgrade me to pro plan"), "upgrade");
   assert.equal(detectBillingIntent("what is my current plan status"), "plan_status");
+  assert.equal(detectBillingIntent("billing status"), "plan_status");
   assert.equal(detectBillingIntent("cancel my pro subscription"), "cancel");
+  assert.equal(
+    detectBillingIntent("deep: Design a zero-downtime Stripe billing migration with dual-write, idempotent webhooks, rollback, and ledger cutover"),
+    null,
+  );
 
   assert.equal(detectDriveIntent("list my Google Drive files"), "list");
   assert.equal(detectDriveIntent("find my sales sheet in google drive"), "search");

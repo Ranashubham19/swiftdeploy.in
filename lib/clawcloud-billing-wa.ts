@@ -39,6 +39,17 @@ const CANCEL_PATTERNS = [
   /\b(how to cancel|stop subscription|cancel billing)\b/i,
 ];
 
+const BILLING_STATUS_PATTERNS = [
+  /\b(billing status|my billing|account billing|payment status|renewal date|next billing|billing cycle)\b/i,
+  /^\s*(billing|plans?|subscription)\s*$/i,
+];
+
+const TECHNICAL_BILLING_PATTERNS = [
+  /\b(stripe|razorpay|webhook|ledger|idempotent|schema|database|sql|event(?:s)?|inbox|dedupe|migration|cutover|rollback|shadow mode|dual-?write|architecture|system design|api|worker|queue|typescript|pseudocode)\b/i,
+  /\b(design|implement|build|architect|model|migrate|debug|refactor|review|explain)\b/i,
+  /\b(exactly-?once|eventual consistency|transaction boundaries|reconciliation|projection|balance mutation)\b/i,
+];
+
 const PLAN_FEATURES: Record<ClawCloudPlan, string[]> = {
   free: [
     "✅ 3 active tasks",
@@ -67,9 +78,23 @@ const PLAN_FEATURES: Record<ClawCloudPlan, string[]> = {
 };
 
 export function detectBillingIntent(message: string): BillingIntent {
+  const normalized = message.trim();
+
+  if (
+    /\bbilling\b/i.test(normalized)
+    && TECHNICAL_BILLING_PATTERNS.some((pattern) => pattern.test(normalized))
+  ) {
+    return null;
+  }
+
   if (UPGRADE_PATTERNS.some((pattern) => pattern.test(message))) return "upgrade";
-  if (PLAN_STATUS_PATTERNS.some((pattern) => pattern.test(message))) return "plan_status";
   if (CANCEL_PATTERNS.some((pattern) => pattern.test(message))) return "cancel";
+  if (
+    PLAN_STATUS_PATTERNS.some((pattern) => pattern.test(message))
+    || BILLING_STATUS_PATTERNS.some((pattern) => pattern.test(message))
+  ) {
+    return "plan_status";
+  }
   return null;
 }
 
