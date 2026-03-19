@@ -56,6 +56,15 @@ import {
   type ResponseMode,
 } from "@/lib/clawcloud-ai";
 import {
+  buildClawCloudAnswerQualityProfile,
+  buildClawCloudEvidenceInstruction,
+  buildClawCloudLowConfidenceReply,
+  clawCloudAnswerHasEvidenceSignals,
+  clawCloudConfidenceBelowFloor,
+  scoreClawCloudAnswerConfidence,
+  verifyClawCloudAnswer,
+} from "@/lib/clawcloud-answer-quality";
+import {
   looksLikeRealtimeResearch,
   refineCodingAnswer,
   runGroundedResearchReply,
@@ -1088,6 +1097,8 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || normalized.includes("try again later")
     || normalized.includes("i don't have enough information")
     || normalized.includes("i cannot answer")
+    || normalized.includes("i'm not confident enough")
+    || normalized.includes("i am not confident enough")
     || normalized.includes("outside my expertise")
     || normalized.includes("nvidia generation unavailable")
     || normalized.includes("scope addressed:")
@@ -3408,7 +3419,8 @@ async function buildProfessionalRecoveryReply(input: {
       "You are the final recovery layer for a production assistant.",
       "Answer the user's question directly with a complete, professional, self-contained reply.",
       "Never mention failure, retries, or latency.",
-      "If exact facts are not derivable from the prompt, state assumptions briefly and still give the safest useful answer.",
+      "If exact facts are not derivable from the prompt, state assumptions briefly.",
+      "If confidence is below medium, say plainly that you are not confident enough without better grounding.",
       "Never leave the final answer unfinished.",
     ].join("\n\n"),
     user: input.message,
@@ -3509,8 +3521,8 @@ async function ensureProfessionalReply(input: {
   const forcedAnswer = await completeClawCloudPrompt({
     system: [
       "You are ClawCloud AI. Answer the user's question completely and professionally.",
-      "Never say you cannot answer.",
       "If exact facts are missing, give the safest professional answer and label assumptions.",
+      "If confidence is below medium, say: I'm not confident enough to answer that safely without better grounding.",
       "Return a complete answer, not a placeholder.",
     ].join("\n"),
     user: input.message,
@@ -4771,6 +4783,148 @@ async function buildLiveCoverageRecoveryReply(
   ].join("\n");
 }
 
+async function buildEvidenceFirstReply(input: {
+  userId: string;
+  question: string;
+  intent: IntentType;
+  category: string;
+  memorySnippet?: string;
+  extraInstruction?: string;
+  isDocumentBound?: boolean;
+}) {
+  const profile = buildClawCloudAnswerQualityProfile({
+    question: input.question,
+    intent: input.intent,
+    category: input.category,
+    isDocumentBound: input.isDocumentBound,
+  });
+
+  const answer = await completeClawCloudPrompt({
+    system: [
+      buildSmartSystem(
+        "deep",
+        input.intent,
+        input.question,
+        [
+          input.extraInstruction,
+          buildClawCloudEvidenceInstruction(profile),
+        ].filter(Boolean).join("\n\n") || undefined,
+        input.memorySnippet,
+      ),
+      "Return only the final answer.",
+    ].join("\n\n"),
+    user: input.question,
+    history: await buildSmartHistory(input.userId, input.question, "deep", input.intent),
+    intent: input.intent,
+    responseMode: "deep",
+    maxTokens: 1_200,
+    fallback: "",
+    skipCache: true,
+    temperature: 0.15,
+  }).catch(() => "");
+
+  return answer.trim();
+}
+
+async function enforceAnswerQuality(input: {
+  userId: string;
+  question: string;
+  intent: IntentType;
+  category: string;
+  reply: string;
+  memorySnippet?: string;
+  extraInstruction?: string;
+  history?: Array<{ role: "user" | "assistant"; content: string }>;
+  isDocumentBound?: boolean;
+}) {
+  const profile = buildClawCloudAnswerQualityProfile({
+    question: input.question,
+    intent: input.intent,
+    category: input.category,
+    isDocumentBound: input.isDocumentBound,
+  });
+
+  let answer = input.reply.trim();
+  if (!answer) {
+    return buildClawCloudLowConfidenceReply(input.question, profile);
+  }
+
+  if (profile.requiresLiveGrounding && !isAcceptableLiveAnswer(answer)) {
+    const history = input.history?.length
+      ? input.history
+      : await buildSmartHistory(input.userId, input.question, "deep", input.intent);
+    const grounded = await runGroundedResearchReply({
+      userId: input.userId,
+      question: input.question,
+      history,
+    }).catch(() => "");
+    const normalizedGrounded = normalizeResearchMarkdownForWhatsApp((grounded ?? "").trim());
+    if (isAcceptableLiveAnswer(normalizedGrounded)) {
+      answer = normalizedGrounded;
+    } else {
+      return buildClawCloudLowConfidenceReply(input.question, profile);
+    }
+  }
+
+  if (
+    profile.requiresEvidence
+    && !profile.requiresLiveGrounding
+    && !clawCloudAnswerHasEvidenceSignals(answer, profile)
+  ) {
+    const evidenceFirstAnswer = await buildEvidenceFirstReply({
+      userId: input.userId,
+      question: input.question,
+      intent: input.intent,
+      category: input.category,
+      memorySnippet: input.memorySnippet,
+      extraInstruction: input.extraInstruction,
+      isDocumentBound: input.isDocumentBound,
+    }).catch(() => "");
+
+    if (evidenceFirstAnswer.trim()) {
+      answer = evidenceFirstAnswer.trim();
+    }
+  }
+
+  const verification = await verifyClawCloudAnswer({
+    question: input.question,
+    answer,
+    profile,
+  }).catch(() => null);
+
+  if (verification?.verdict === "reject") {
+    return buildClawCloudLowConfidenceReply(input.question, profile, verification.rationale);
+  }
+
+  if (verification?.verdict === "revise" && verification.revisedAnswer.trim()) {
+    answer = verification.revisedAnswer.trim();
+  }
+
+  const confidence = verification?.confidence ?? scoreClawCloudAnswerConfidence({
+    question: input.question,
+    answer,
+    profile,
+  });
+
+  if (clawCloudConfidenceBelowFloor(confidence, profile.confidenceFloor)) {
+    return buildClawCloudLowConfidenceReply(input.question, profile, verification?.rationale);
+  }
+
+  if (
+    profile.requiresEvidence
+    && !profile.requiresLiveGrounding
+    && !clawCloudAnswerHasEvidenceSignals(answer, profile)
+  ) {
+    return buildClawCloudLowConfidenceReply(
+      input.question,
+      profile,
+      verification?.rationale || "The answer still lacks enough grounded support.",
+    );
+  }
+
+  return answer;
+}
+
 async function notifyBackgroundTaskFailure(
   userId: string,
   locale: SupportedLocale,
@@ -5007,6 +5161,27 @@ export async function routeInboundAgentMessage(
   const explicitMode = requested.explicit;
   const combineExtraInstruction = (instruction?: string) =>
     [instruction, hinglishSnippet].filter(Boolean).join("\n\n") || undefined;
+  const guardReply = (
+    reply: string,
+    intent: string = resolvedType,
+    category: string = resolvedCategory,
+    options?: {
+      extraInstruction?: string;
+      history?: Array<{ role: "user" | "assistant"; content: string }>;
+      isDocumentBound?: boolean;
+    },
+  ) =>
+    enforceAnswerQuality({
+      userId,
+      question: finalMessage,
+      intent: intent as IntentType,
+      category,
+      reply,
+      memorySnippet,
+      extraInstruction: options?.extraInstruction,
+      history: options?.history,
+      isDocumentBound: options?.isDocumentBound ?? hasDocumentContext,
+    });
   const finalizeRaw = (
     reply: string,
     intent: string = resolvedType,
@@ -5067,7 +5242,11 @@ export async function routeInboundAgentMessage(
     const taxReply = answerTaxQuery(finalMessage);
     if (taxReply) {
       await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
-      return finalizeRaw(taxReply, "economics", "economics");
+      return finalizeRaw(
+        await guardReply(taxReply, "economics", "economics"),
+        "economics",
+        "economics",
+      );
     }
   }
 
@@ -5259,7 +5438,11 @@ export async function routeInboundAgentMessage(
       const financeData = await getLiveFinanceData(finalMessage).catch(() => null);
       if (financeData) {
         await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
-        return finalizeRaw(formatFinanceReply(financeData), "finance", "finance");
+        return finalizeRaw(
+          await guardReply(formatFinanceReply(financeData), "finance", "finance"),
+          "finance",
+          "finance",
+        );
       }
 
       const searchAnswer = await answerWebSearch(finalMessage).catch(() => "");
@@ -5270,7 +5453,12 @@ export async function routeInboundAgentMessage(
           : `${normalizedSearch}\n\n\u26A0\uFE0F _Not financial advice. Verify before trading._`;
         await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
         return finalizeRaw(
-          normalizeResearchMarkdownForWhatsApp(withSafety),
+          await guardReply(
+            normalizeResearchMarkdownForWhatsApp(withSafety),
+            "finance",
+            "finance",
+            { history: memory.recentTurns },
+          ),
           "finance",
           "finance",
         );
@@ -5293,7 +5481,12 @@ export async function routeInboundAgentMessage(
       if (isAcceptableLiveAnswer(normalizedSearch)) {
         await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
         return finalizeRaw(
-          normalizeResearchMarkdownForWhatsApp(normalizedSearch),
+          await guardReply(
+            normalizeResearchMarkdownForWhatsApp(normalizedSearch),
+            "web_search",
+            "web_search",
+            { history: memory.recentTurns },
+          ),
           "web_search",
           "web_search",
         );
@@ -5312,7 +5505,12 @@ export async function routeInboundAgentMessage(
       const normalizedResearch = researchAnswer?.trim() ?? "";
       if (isAcceptableLiveAnswer(normalizedResearch)) {
         return finalizeRaw(
-          normalizeResearchMarkdownForWhatsApp(normalizedResearch),
+          await guardReply(
+            normalizeResearchMarkdownForWhatsApp(normalizedResearch),
+            "web_search",
+            "web_search",
+            { history },
+          ),
           "web_search",
           "web_search",
         );
@@ -5327,7 +5525,12 @@ export async function routeInboundAgentMessage(
       if (isAcceptableLiveAnswer(normalizedNews)) {
         await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
         return finalizeRaw(
-          normalizeResearchMarkdownForWhatsApp(normalizedNews),
+          await guardReply(
+            normalizeResearchMarkdownForWhatsApp(normalizedNews),
+            "news",
+            "news",
+            { history: memory.recentTurns },
+          ),
           "news",
           "news",
         );
@@ -5346,28 +5549,30 @@ export async function routeInboundAgentMessage(
       const normalizedGrounded = groundedAnswer?.trim() ?? "";
       if (isAcceptableLiveAnswer(normalizedGrounded)) {
         return finalizeRaw(
-          normalizeResearchMarkdownForWhatsApp(normalizedGrounded),
+          await guardReply(
+            normalizeResearchMarkdownForWhatsApp(normalizedGrounded),
+            "news",
+            "news",
+            { history },
+          ),
           "news",
           "news",
         );
       }
 
-      const staleWarning = `${buildNoLiveDataReply(finalMessage)}\n\n`;
-      const freshnessSafeQuestion = finalMessage
-        .replace(/\b(right now|currently|at the moment|as of now|today|live)\b/gi, "")
-        .replace(/\s{2,}/g, " ")
-        .trim();
-
-      const knowledgeReply = await smartReply(
-        userId,
-        freshnessSafeQuestion || finalMessage,
-        "research",
-        responseMode,
-        explicitMode,
-        combineExtraInstruction("Answer directly using best available knowledge. If this topic changes frequently, add one short freshness note at the end."),
-        memorySnippet,
+      return finalizeRaw(
+        buildClawCloudLowConfidenceReply(
+          finalMessage,
+          buildClawCloudAnswerQualityProfile({
+            question: finalMessage,
+            intent: "research",
+            category: "news",
+          }),
+          "I could not verify enough reliable live news coverage for a safe answer.",
+        ),
+        "news",
+        "news",
       );
-      return finalizeRaw(staleWarning + knowledgeReply, "news", "news");
 
     }
 
@@ -5413,36 +5618,67 @@ export async function routeInboundAgentMessage(
     }
 
     case "explain": {
+      const explainInstruction = combineExtraInstruction("Answer this explanation question clearly, accurately, and in teaching style with WhatsApp-friendly formatting.");
       const reply = await smartReply(
         userId,
         finalMessage,
         "explain",
         responseMode,
         explicitMode,
-        combineExtraInstruction("Answer this explanation question clearly, accurately, and in teaching style with WhatsApp-friendly formatting."),
+        explainInstruction,
         memorySnippet,
       );
-      return finalizeRaw(reply, "explain", "explain");
+      return finalizeRaw(
+        await guardReply(
+          reply,
+          "explain",
+          "explain",
+          {
+            extraInstruction: explainInstruction,
+            history: memory.recentTurns,
+          },
+        ),
+        "explain",
+        "explain",
+      );
     }
 
     case "research": {
       if (hasDocumentContext) {
+        const documentInstruction = combineExtraInstruction("Use only the document content already included in the message. Answer the user's question directly, check every stated constraint explicitly, and if choosing among options, name the winner, briefly explain why the others do not qualify, and mention one extra supporting operational differentiator from the winning row when the document provides it, such as support level, incident response, SLA, turnaround time, or another concrete field that was not already one of the hard constraints. Do not use Gmail, spending history, or outside knowledge.");
         const reply = await smartReply(
           userId,
           finalMessage,
           "research",
           responseMode,
           explicitMode,
-          combineExtraInstruction("Use only the document content already included in the message. Answer the user's question directly, check every stated constraint explicitly, and if choosing among options, name the winner, briefly explain why the others do not qualify, and mention one extra supporting operational differentiator from the winning row when the document provides it, such as support level, incident response, SLA, turnaround time, or another concrete field that was not already one of the hard constraints. Do not use Gmail, spending history, or outside knowledge."),
+          documentInstruction,
           memorySnippet,
         );
-        return finalizeRaw(reply, "research", "research");
+        return finalizeRaw(
+          await guardReply(
+            reply,
+            "research",
+            "research",
+            {
+              extraInstruction: documentInstruction,
+              history: memory.recentTurns,
+              isDocumentBound: true,
+            },
+          ),
+          "research",
+          "research",
+        );
       }
 
       const realtimeResearch = looksLikeRealtimeResearch(finalMessage);
       const expertAnswer = await expertReply(userId, finalMessage, "research");
       if (expertAnswer && !isVisibleFallbackReply(expertAnswer) && !isLowCoverageResearchReply(expertAnswer)) {
-        return finalizeRaw(expertAnswer, "research", "research");
+        return finalizeRaw(
+          await guardReply(expertAnswer, "research", "research", { history: memory.recentTurns }),
+          "research",
+          "research",
+        );
       }
 
       if (realtimeResearch) {
@@ -5463,7 +5699,12 @@ export async function routeInboundAgentMessage(
         const normalizedGrounded = grounded?.trim() ?? "";
         if (normalizedGrounded && !isVisibleFallbackReply(normalizedGrounded) && !isLowCoverageResearchReply(normalizedGrounded)) {
           return finalizeRaw(
-            normalizeResearchMarkdownForWhatsApp(normalizedGrounded),
+            await guardReply(
+              normalizeResearchMarkdownForWhatsApp(normalizedGrounded),
+              "research",
+              "research",
+              { history },
+            ),
             "research",
             "research",
           );
@@ -5473,8 +5714,21 @@ export async function routeInboundAgentMessage(
         return finalizeRaw(recovery, "research", "research");
       }
 
-      const reply = await smartReply(userId, finalMessage, "research", responseMode, explicitMode, combineExtraInstruction(), memorySnippet);
-      return finalizeRaw(reply, "research", "research");
+      const researchInstruction = combineExtraInstruction();
+      const reply = await smartReply(userId, finalMessage, "research", responseMode, explicitMode, researchInstruction, memorySnippet);
+      return finalizeRaw(
+        await guardReply(
+          reply,
+          "research",
+          "research",
+          {
+            extraInstruction: researchInstruction,
+            history: memory.recentTurns,
+          },
+        ),
+        "research",
+        "research",
+      );
     }
 
     case "help": {
@@ -5500,7 +5754,12 @@ export async function routeInboundAgentMessage(
         const normalizedGrounded = grounded?.trim() ?? "";
         if (normalizedGrounded && !isVisibleFallbackReply(normalizedGrounded) && !isLowCoverageResearchReply(normalizedGrounded)) {
           return finalizeRaw(
-            normalizeResearchMarkdownForWhatsApp(normalizedGrounded),
+            await guardReply(
+              normalizeResearchMarkdownForWhatsApp(normalizedGrounded),
+              resolvedType,
+              resolvedCategory,
+              { history },
+            ),
             resolvedType,
             resolvedCategory,
           );
@@ -5510,17 +5769,26 @@ export async function routeInboundAgentMessage(
         return finalizeRaw(recovery, resolvedType, resolvedCategory);
       }
 
+      const intentInstruction = combineExtraInstruction(buildIntentSpecificInstruction(resolvedType, finalMessage));
       const reply = await smartReply(
         userId,
         finalMessage,
         resolvedType,
         responseMode,
         explicitMode,
-        combineExtraInstruction(buildIntentSpecificInstruction(resolvedType, finalMessage)),
+        intentInstruction,
         memorySnippet,
       );
       return finalizeRaw(
-        postProcessIntentReply(resolvedType, finalMessage, reply),
+        await guardReply(
+          postProcessIntentReply(resolvedType, finalMessage, reply),
+          resolvedType,
+          resolvedCategory,
+          {
+            extraInstruction: intentInstruction,
+            history: memory.recentTurns,
+          },
+        ),
         resolvedType,
         resolvedCategory,
       );
