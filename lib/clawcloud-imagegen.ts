@@ -1,3 +1,5 @@
+import { logClawCloudProviderEvent } from "@/lib/clawcloud-provider-telemetry";
+
 const IMAGEGEN_TIMEOUT_MS = 40_000;
 
 const IMAGE_GEN_PATTERNS = [
@@ -51,7 +53,10 @@ async function generateWithPollinations(prompt: string): Promise<Buffer | null> 
     const encodedPrompt = encodeURIComponent(enhancePrompt(prompt));
     const url = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&model=flux&nologo=true&enhance=true`;
 
-    console.log(`[imagegen] Trying Pollinations.ai for: "${prompt.slice(0, 60)}"`);
+    logClawCloudProviderEvent("info", "imagegen", "provider_attempt", {
+      provider: "pollinations",
+      prompt_preview: prompt.slice(0, 60),
+    });
 
     const response = await fetch(url, {
       signal: controller.signal,
@@ -61,13 +66,21 @@ async function generateWithPollinations(prompt: string): Promise<Buffer | null> 
     });
 
     if (!response.ok) {
-      console.error(`[imagegen] Pollinations returned ${response.status}`);
+      logClawCloudProviderEvent("warn", "imagegen", "provider_failed", {
+        provider: "pollinations",
+        status: response.status,
+        reason: "non_ok_response",
+      });
       return null;
     }
 
     const contentType = response.headers.get("content-type") ?? "";
     if (!contentType.includes("image")) {
-      console.error(`[imagegen] Pollinations returned non-image: ${contentType}`);
+      logClawCloudProviderEvent("warn", "imagegen", "provider_failed", {
+        provider: "pollinations",
+        reason: "non_image_response",
+        content_type: contentType,
+      });
       return null;
     }
 
@@ -75,15 +88,26 @@ async function generateWithPollinations(prompt: string): Promise<Buffer | null> 
     const buffer = Buffer.from(arrayBuffer);
 
     if (buffer.length < 5_000) {
-      console.error(`[imagegen] Pollinations returned suspiciously small buffer: ${buffer.length} bytes`);
+      logClawCloudProviderEvent("warn", "imagegen", "provider_failed", {
+        provider: "pollinations",
+        reason: "small_buffer",
+        bytes: buffer.length,
+      });
       return null;
     }
 
-    console.log(`[imagegen] Pollinations success: ${buffer.length} bytes`);
+    logClawCloudProviderEvent("info", "imagegen", "provider_succeeded", {
+      provider: "pollinations",
+      bytes: buffer.length,
+    });
     return buffer;
   } catch (error) {
     if ((error as Error)?.name !== "AbortError") {
-      console.error("[imagegen] Pollinations error:", error instanceof Error ? error.message : error);
+      logClawCloudProviderEvent("error", "imagegen", "provider_failed", {
+        provider: "pollinations",
+        reason: "exception",
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
     return null;
   } finally {
@@ -101,7 +125,10 @@ async function generateWithHuggingFace(prompt: string): Promise<Buffer | null> {
   const timer = setTimeout(() => controller.abort(), IMAGEGEN_TIMEOUT_MS);
 
   try {
-    console.log(`[imagegen] Trying Hugging Face for: "${prompt.slice(0, 60)}"`);
+    logClawCloudProviderEvent("info", "imagegen", "provider_attempt", {
+      provider: "huggingface",
+      prompt_preview: prompt.slice(0, 60),
+    });
 
     const response = await fetch(
       "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
@@ -124,12 +151,20 @@ async function generateWithHuggingFace(prompt: string): Promise<Buffer | null> {
     );
 
     if (response.status === 503) {
-      console.warn("[imagegen] HF model loading (503) - skipping");
+      logClawCloudProviderEvent("warn", "imagegen", "provider_failed", {
+        provider: "huggingface",
+        status: 503,
+        reason: "model_loading",
+      });
       return null;
     }
 
     if (!response.ok) {
-      console.error(`[imagegen] Hugging Face returned ${response.status}`);
+      logClawCloudProviderEvent("warn", "imagegen", "provider_failed", {
+        provider: "huggingface",
+        status: response.status,
+        reason: "non_ok_response",
+      });
       return null;
     }
 
@@ -139,11 +174,18 @@ async function generateWithHuggingFace(prompt: string): Promise<Buffer | null> {
       return null;
     }
 
-    console.log(`[imagegen] Hugging Face success: ${buffer.length} bytes`);
+    logClawCloudProviderEvent("info", "imagegen", "provider_succeeded", {
+      provider: "huggingface",
+      bytes: buffer.length,
+    });
     return buffer;
   } catch (error) {
     if ((error as Error)?.name !== "AbortError") {
-      console.error("[imagegen] Hugging Face error:", error instanceof Error ? error.message : error);
+      logClawCloudProviderEvent("error", "imagegen", "provider_failed", {
+        provider: "huggingface",
+        reason: "exception",
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
     return null;
   } finally {
@@ -161,7 +203,10 @@ async function generateWithGemini(prompt: string): Promise<Buffer | null> {
   const timer = setTimeout(() => controller.abort(), IMAGEGEN_TIMEOUT_MS);
 
   try {
-    console.log(`[imagegen] Trying Gemini for: "${prompt.slice(0, 60)}"`);
+    logClawCloudProviderEvent("info", "imagegen", "provider_attempt", {
+      provider: "gemini",
+      prompt_preview: prompt.slice(0, 60),
+    });
 
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-preview-image-generation:generateContent?key=${apiKey}`,
@@ -179,7 +224,11 @@ async function generateWithGemini(prompt: string): Promise<Buffer | null> {
     );
 
     if (!response.ok) {
-      console.error(`[imagegen] Gemini returned ${response.status}`);
+      logClawCloudProviderEvent("warn", "imagegen", "provider_failed", {
+        provider: "gemini",
+        status: response.status,
+        reason: "non_ok_response",
+      });
       return null;
     }
 
@@ -202,11 +251,18 @@ async function generateWithGemini(prompt: string): Promise<Buffer | null> {
     }
 
     const buffer = Buffer.from(imagePart.inlineData.data, "base64");
-    console.log(`[imagegen] Gemini success: ${buffer.length} bytes`);
+    logClawCloudProviderEvent("info", "imagegen", "provider_succeeded", {
+      provider: "gemini",
+      bytes: buffer.length,
+    });
     return buffer;
   } catch (error) {
     if ((error as Error)?.name !== "AbortError") {
-      console.error("[imagegen] Gemini error:", error instanceof Error ? error.message : error);
+      logClawCloudProviderEvent("error", "imagegen", "provider_failed", {
+        provider: "gemini",
+        reason: "exception",
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
     return null;
   } finally {
@@ -219,8 +275,27 @@ export type ImageGenResult = {
   mimeType: "image/jpeg" | "image/png";
 };
 
+export function getImageGenerationStatus() {
+  const providers = ["pollinations"];
+
+  if (process.env.HF_TOKEN?.trim()) {
+    providers.push("huggingface");
+  }
+
+  if (process.env.GOOGLE_GEMINI_API_KEY?.trim()) {
+    providers.push("gemini");
+  }
+
+  return {
+    available: providers.length > 0,
+    providers,
+  };
+}
+
 export async function generateImage(prompt: string): Promise<ImageGenResult | null> {
-  console.log(`[imagegen] Starting generation for: "${prompt.slice(0, 80)}"`);
+  logClawCloudProviderEvent("info", "imagegen", "generation_started", {
+    prompt_preview: prompt.slice(0, 80),
+  });
 
   const pollinations = await generateWithPollinations(prompt);
   if (pollinations) {
@@ -237,10 +312,13 @@ export async function generateImage(prompt: string): Promise<ImageGenResult | nu
     return { imageBuffer: gemini, mimeType: "image/png" };
   }
 
-  console.warn("[imagegen] All providers failed or unavailable");
+  logClawCloudProviderEvent("warn", "imagegen", "generation_failed", {
+    reason: "all_providers_failed",
+    providers: getImageGenerationStatus().providers,
+  });
   return null;
 }
 
 export function isImageGenAvailable(): boolean {
-  return true;
+  return getImageGenerationStatus().available;
 }

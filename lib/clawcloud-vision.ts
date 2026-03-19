@@ -1,3 +1,5 @@
+import { logClawCloudProviderEvent } from "@/lib/clawcloud-provider-telemetry";
+
 // lib/clawcloud-vision.ts
 // ─────────────────────────────────────────────────────────────────────────────
 // Image understanding for WhatsApp image messages.
@@ -68,9 +70,12 @@ async function callVisionModel(
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => "");
-      console.error(
-        `[vision] ${response.status} from ${model}: ${errorText.slice(0, 200)}`,
-      );
+      logClawCloudProviderEvent("warn", "vision", "provider_failed", {
+        provider: model,
+        status: response.status,
+        reason: "non_ok_response",
+        error: errorText.slice(0, 200),
+      });
       return null;
     }
 
@@ -78,12 +83,16 @@ async function callVisionModel(
     return data.choices?.[0]?.message?.content?.trim() ?? null;
   } catch (error) {
     if ((error as Error)?.name === "AbortError") {
-      console.warn("[vision] Vision request timed out");
+      logClawCloudProviderEvent("warn", "vision", "provider_failed", {
+        provider: model,
+        reason: "timeout",
+      });
     } else {
-      console.error(
-        "[vision] Error:",
-        error instanceof Error ? error.message : error,
-      );
+      logClawCloudProviderEvent("error", "vision", "provider_failed", {
+        provider: model,
+        reason: "exception",
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
     return null;
   } finally {
@@ -118,9 +127,12 @@ async function callTextModel(
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => "");
-      console.error(
-        `[vision:text] ${response.status} from ${model}: ${errorText.slice(0, 200)}`,
-      );
+      logClawCloudProviderEvent("warn", "vision_reasoning", "provider_failed", {
+        provider: model,
+        status: response.status,
+        reason: "non_ok_response",
+        error: errorText.slice(0, 200),
+      });
       return null;
     }
 
@@ -128,12 +140,16 @@ async function callTextModel(
     return data.choices?.[0]?.message?.content?.trim() ?? null;
   } catch (error) {
     if ((error as Error)?.name === "AbortError") {
-      console.warn("[vision:text] Reasoning request timed out");
+      logClawCloudProviderEvent("warn", "vision_reasoning", "provider_failed", {
+        provider: model,
+        reason: "timeout",
+      });
     } else {
-      console.error(
-        "[vision:text] Error:",
-        error instanceof Error ? error.message : error,
-      );
+      logClawCloudProviderEvent("error", "vision_reasoning", "provider_failed", {
+        provider: model,
+        reason: "exception",
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
     return null;
   } finally {
@@ -217,7 +233,11 @@ async function runVisionPrompt(
   ];
 
   if (nvidiaKey) {
-    console.log(`[vision] Trying NVIDIA ${NVIDIA_VISION_MODEL} for ${prompt.length} char prompt`);
+    logClawCloudProviderEvent("info", "vision", "provider_attempt", {
+      provider: "nvidia",
+      model: NVIDIA_VISION_MODEL,
+      prompt_chars: prompt.length,
+    });
     const result = await callVisionModel(
       messages,
       nvidiaUrl,
@@ -225,14 +245,26 @@ async function runVisionPrompt(
       NVIDIA_VISION_MODEL,
     );
     if (result) {
-      console.log(`[vision] NVIDIA success (${result.length} chars)`);
+      logClawCloudProviderEvent("info", "vision", "provider_succeeded", {
+        provider: "nvidia",
+        model: NVIDIA_VISION_MODEL,
+        chars: result.length,
+      });
       return result;
     }
-    console.warn("[vision] NVIDIA vision failed, trying OpenAI fallback");
+    logClawCloudProviderEvent("warn", "vision", "fallback_triggered", {
+      from: "nvidia",
+      to: "openai",
+      reason: "primary_failed",
+    });
   }
 
   if (openaiKey) {
-    console.log("[vision] Trying OpenAI vision fallback");
+    logClawCloudProviderEvent("info", "vision", "provider_attempt", {
+      provider: "openai",
+      model: OPENAI_VISION_MODEL,
+      prompt_chars: prompt.length,
+    });
     const result = await callVisionModel(
       messages,
       "https://api.openai.com/v1/chat/completions",
@@ -240,10 +272,18 @@ async function runVisionPrompt(
       OPENAI_VISION_MODEL,
     );
     if (result) {
-      console.log(`[vision] OpenAI vision success (${result.length} chars)`);
+      logClawCloudProviderEvent("info", "vision", "provider_succeeded", {
+        provider: "openai",
+        model: OPENAI_VISION_MODEL,
+        chars: result.length,
+      });
       return result;
     }
-    console.warn("[vision] OpenAI vision also failed");
+    logClawCloudProviderEvent("warn", "vision", "provider_failed", {
+      provider: "openai",
+      model: OPENAI_VISION_MODEL,
+      reason: "fallback_failed",
+    });
   }
 
   return null;
@@ -306,14 +346,17 @@ export async function analyseImage(
   userQuestion: string = "",
 ): Promise<string | null> {
   if (!imageBuffer || imageBuffer.length === 0) {
-    console.warn("[vision] Empty image buffer");
+    logClawCloudProviderEvent("warn", "vision", "provider_failed", {
+      reason: "empty_image_buffer",
+    });
     return null;
   }
 
   if (imageBuffer.length > MAX_IMAGE_BYTES) {
-    console.warn(
-      `[vision] Image too large: ${(imageBuffer.length / 1024 / 1024).toFixed(1)} MB`,
-    );
+    logClawCloudProviderEvent("warn", "vision", "provider_failed", {
+      reason: "image_too_large",
+      size_mb: Number((imageBuffer.length / 1024 / 1024).toFixed(1)),
+    });
     return null;
   }
 
@@ -332,7 +375,10 @@ export async function analyseImage(
     .replace(/\/chat\/completions$/i, "");
   const nvidiaUrl = `${/\/v\d+$/i.test(nvidiaBase) ? nvidiaBase : `${nvidiaBase}/v1`}/chat/completions`;
 
-  console.log(`[vision] Received ${imageBuffer.length} byte image`);
+  logClawCloudProviderEvent("info", "vision", "analysis_started", {
+    bytes: imageBuffer.length,
+    had_question: hasUserQuestion,
+  });
 
   if (hasUserQuestion) {
     const extractedEvidence = await runVisionPrompt(
@@ -380,7 +426,9 @@ export async function analyseImage(
   }
 
   if (!nvidiaKey && !openaiKey) {
-    console.warn("[vision] No API key configured for vision models");
+    logClawCloudProviderEvent("warn", "vision", "provider_unavailable", {
+      reason: "missing_api_keys",
+    });
   }
 
   return null;

@@ -1539,8 +1539,8 @@ async function connectSession(userId: string): Promise<SessionRecord> {
             [
               "🖼️ *Image received!*",
               "",
-              "Image analysis isn't set up yet on this account.",
-              "To enable it, visit *swift-deploy.in/settings* and connect a vision provider.",
+              "Image analysis isn't configured on this deployment yet.",
+              "Add `NVIDIA_API_KEY` or `OPENAI_API_KEY` to enable vision support.",
               "",
               "_Tip: You can also describe the image in text and I'll help you from there._",
             ].join("\n"),
@@ -1789,8 +1789,8 @@ async function connectSession(userId: string): Promise<SessionRecord> {
             [
               "🎨 *Image generation isn't set up yet.*",
               "",
-              "Add `TOGETHER_API_KEY` to your environment to enable AI image generation.",
-              "Get a free key at *api.together.xyz*",
+              "This deployment needs at least one working image provider.",
+              "Supported options: *Pollinations*, `HF_TOKEN`, or `GOOGLE_GEMINI_API_KEY`.",
             ].join("\n"),
             replyTargetJid,
           );

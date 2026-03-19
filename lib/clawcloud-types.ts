@@ -102,6 +102,32 @@ export function parseMeridiemTimeTo24Hour(value: string) {
   return `${hour24.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}`;
 }
 
-export function formatDateKey(date = new Date()) {
-  return date.toISOString().split("T")[0] ?? "";
+export function formatDateKey(date = new Date(), timeZone = "Asia/Kolkata") {
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(date);
+
+    const year = parts.find((part) => part.type === "year")?.value ?? "1970";
+    const month = parts.find((part) => part.type === "month")?.value ?? "01";
+    const day = parts.find((part) => part.type === "day")?.value ?? "01";
+    return `${year}-${month}-${day}`;
+  } catch {
+    return date.toISOString().split("T")[0] ?? "";
+  }
+}
+
+export function getIndiaDayWindow(date = new Date()) {
+  const dateKey = formatDateKey(date, "Asia/Kolkata");
+  const start = new Date(`${dateKey}T00:00:00+05:30`);
+  const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+
+  return {
+    dateKey,
+    startIso: start.toISOString(),
+    endIso: end.toISOString(),
+  };
 }

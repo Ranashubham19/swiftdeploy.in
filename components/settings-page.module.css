@@ -652,6 +652,20 @@
   white-space: nowrap;
 }
 
+.statusBadgeMuted {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid var(--border2);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text2);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
 .timeOptions {
   display: flex;
   flex-wrap: wrap;

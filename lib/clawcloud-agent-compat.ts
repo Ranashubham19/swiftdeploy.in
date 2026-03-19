@@ -22,6 +22,7 @@ import {
   type ClawCloudTaskConfig,
   type ClawCloudTaskType,
 } from "@/lib/clawcloud-types";
+import { getClawCloudRuntimeFeatureStatus } from "@/lib/clawcloud-feature-status";
 import { sendClawCloudWhatsAppMessage } from "@/lib/clawcloud-whatsapp";
 
 type AgentTaskRow = {
@@ -51,16 +52,15 @@ async function getUserPlan(userId: string) {
 
 async function getTodayRunCount(userId: string) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
 
-  const { count } = await supabaseAdmin
-    .from("task_runs")
-    .select("*", { count: "exact", head: true })
+  const { data } = await supabaseAdmin
+    .from("analytics_daily")
+    .select("tasks_run")
     .eq("user_id", userId)
-    .gte("started_at", todayStart.toISOString());
+    .eq("date", formatDateKey())
+    .maybeSingle();
 
-  return count ?? 0;
+  return Number(data?.tasks_run ?? 0);
 }
 
 function getCurrentTimeInTz(timeZone: string) {
@@ -251,7 +251,7 @@ export async function getClawCloudDashboardData(userId: string) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const today = formatDateKey();
 
-  const [userProfile, connectedAccounts, agentTasks, recentRuns, todayAnalytics, last7Days] =
+  const [userProfile, connectedAccounts, agentTasks, recentRuns, todayAnalytics, last7Days, subscription] =
     await Promise.all([
       supabaseAdmin
         .from("users")
@@ -285,6 +285,11 @@ export async function getClawCloudDashboardData(userId: string) {
         .eq("user_id", userId)
         .order("date", { ascending: false })
         .limit(7),
+      supabaseAdmin
+        .from("subscriptions")
+        .select("status, current_period_end, cancel_at_period_end")
+        .eq("user_id", userId)
+        .maybeSingle(),
     ]);
 
   const userPlan = (userProfile.data?.plan ?? "free") as ClawCloudPlan;
@@ -322,6 +327,8 @@ export async function getClawCloudDashboardData(userId: string) {
       runs_remaining: Math.max(0, clawCloudRunLimits[userPlan] - todayRuns),
       active_task_limit: clawCloudActiveTaskLimits[userPlan],
     },
+    subscription: subscription.data ?? null,
+    feature_status: getClawCloudRuntimeFeatureStatus(),
   };
 }
 

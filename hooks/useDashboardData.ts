@@ -48,8 +48,25 @@ export type DashboardConnectedAccount = {
   is_active: boolean;
 };
 
+export type DashboardRuntimeFeatureState = {
+  available: boolean;
+  reason: string | null;
+  providers?: string[];
+};
+
+export type DashboardFeatureStatus = {
+  google_workspace_connect: DashboardRuntimeFeatureState;
+  whatsapp_agent: DashboardRuntimeFeatureState;
+  telegram_bot: DashboardRuntimeFeatureState;
+  voice_transcription: DashboardRuntimeFeatureState;
+  image_analysis: DashboardRuntimeFeatureState;
+  image_generation: DashboardRuntimeFeatureState;
+  cricket_live: DashboardRuntimeFeatureState;
+  train_live: DashboardRuntimeFeatureState;
+};
+
 export type DashboardData = {
-  user: { id: string; email: string; plan: string; full_name: string | null } | null;
+  user: { id: string; email: string; plan: string; full_name: string | null; timezone?: string | null } | null;
   connected_accounts: DashboardConnectedAccount[];
   tasks: DashboardTask[];
   recent_activity: Array<{
@@ -61,6 +78,12 @@ export type DashboardData = {
   }>;
   analytics: DashboardAnalytics;
   agent_status: DashboardAgentStatus;
+  subscription: {
+    status: string;
+    current_period_end: string | null;
+    cancel_at_period_end: boolean;
+  } | null;
+  feature_status: DashboardFeatureStatus;
 };
 
 type UseDashboardDataReturn = {

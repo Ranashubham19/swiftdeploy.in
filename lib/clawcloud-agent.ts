@@ -4916,6 +4916,13 @@ export async function routeInboundAgentMessage(
     }
   }
 
+  if (!shouldBypassInboundRunLimit(trimmed)) {
+    const limitReply = await buildInboundRunLimitReply(userId);
+    if (limitReply) {
+      return finalizeEarlyRaw(limitReply, "general", "general");
+    }
+  }
+
   void autoExtractAndSaveFacts(userId, trimmed).catch(() => null);
   void autoDetectAndSaveTimezone(userId, trimmed).catch(() => null);
 
@@ -5537,9 +5544,43 @@ async function getUserPlan(userId: string) {
 
 async function getTodayRuns(userId: string) {
   const { data } = await getClawCloudSupabaseAdmin()
-    .from("analytics_daily").select("tasks_run")
-    .eq("user_id", userId).eq("date_key", formatDateKey(new Date())).maybeSingle();
+    .from("analytics_daily")
+    .select("tasks_run")
+    .eq("user_id", userId)
+    .eq("date", formatDateKey())
+    .maybeSingle();
   return Number(data?.tasks_run ?? 0);
+}
+
+function shouldBypassInboundRunLimit(message: string) {
+  const detected = detectIntent(message);
+  return detected.category === "help" || detected.category === "greeting";
+}
+
+async function buildInboundRunLimitReply(userId: string) {
+  const plan = await getUserPlan(userId);
+  if (plan === "pro") {
+    return null;
+  }
+
+  const runs = await getTodayRuns(userId);
+  const limit = clawCloudRunLimits[plan];
+  if (runs < limit) {
+    return null;
+  }
+
+  const planEmoji = plan === "free" ? "🆓" : "⭐";
+  const nextPlan = plan === "free" ? "Starter" : "Pro";
+  return [
+    "⏱️ *Daily limit reached*",
+    "",
+    `${planEmoji} You've used all *${limit} runs* today on the *${plan}* plan.`,
+    "",
+    "Runs reset at *midnight IST* automatically.",
+    "",
+    "🚀 *Want more runs?*",
+    `Upgrade to ${nextPlan} -> swift-deploy.in/settings`,
+  ].join("\n");
 }
 
 export async function createClawCloudTask(input: {

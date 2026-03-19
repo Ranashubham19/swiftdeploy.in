@@ -81,6 +81,11 @@ function readNvidiaApiKey() {
 const defaultPublicGoogleEnabled = /localhost|127\.0\.0\.1/i.test(
   readFirstString(["NEXT_PUBLIC_APP_URL", "NEXTJS_URL"]),
 );
+const defaultWorkspaceGoogleEnabled = Boolean(
+  readFirstString(["GOOGLE_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_ID"])
+  && readFirstString(["GOOGLE_CLIENT_SECRET", "GOOGLE_OAUTH_CLIENT_SECRET"])
+  && readFirstString(["NEXT_PUBLIC_APP_URL", "NEXTJS_URL"]),
+);
 
 export const env = {
   NVIDIA_API_KEY: readNvidiaApiKey(),
@@ -179,10 +184,10 @@ export const env = {
   ),
   GOOGLE_WORKSPACE_PUBLIC_ENABLED: readBoolean(
     "GOOGLE_WORKSPACE_PUBLIC_ENABLED",
-    defaultPublicGoogleEnabled,
+    defaultWorkspaceGoogleEnabled || defaultPublicGoogleEnabled,
   ),
-  // Temporary global hold for Gmail/Calendar connect while verification is pending.
-  GOOGLE_WORKSPACE_TEMPORARY_HOLD: readBoolean("GOOGLE_WORKSPACE_TEMPORARY_HOLD", true),
+  // Emergency brake for Workspace connect. Defaults off when OAuth is configured.
+  GOOGLE_WORKSPACE_TEMPORARY_HOLD: readBoolean("GOOGLE_WORKSPACE_TEMPORARY_HOLD", false),
   TELEGRAM_BOT_TOKEN: readString("TELEGRAM_BOT_TOKEN"),
   TELEGRAM_BOT_USERNAME: readString("TELEGRAM_BOT_USERNAME"),
   TELEGRAM_WEBHOOK_SECRET: readString("TELEGRAM_WEBHOOK_SECRET"),
@@ -242,6 +247,7 @@ export function getPublicAppConfig(): PublicAppConfig {
     supabaseUrl: env.SUPABASE_URL,
     supabaseAnonKey: env.SUPABASE_ANON_KEY,
     appUrl: env.NEXT_PUBLIC_APP_URL,
+    telegramBotUsername: env.TELEGRAM_BOT_USERNAME,
     googleRollout: {
       publicSignInEnabled: env.GOOGLE_SIGNIN_PUBLIC_ENABLED,
       publicWorkspaceEnabled:

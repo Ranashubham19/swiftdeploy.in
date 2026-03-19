@@ -270,6 +270,7 @@ export interface PublicAppConfig {
   supabaseUrl: string;
   supabaseAnonKey: string;
   appUrl: string;
+  telegramBotUsername?: string;
   googleRollout: {
     publicSignInEnabled: boolean;
     publicWorkspaceEnabled: boolean;
