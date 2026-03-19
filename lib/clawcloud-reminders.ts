@@ -468,7 +468,7 @@ export function detectReminderIntent(text: string): ReminderIntentResult {
   return { intent: "unknown" };
 }
 
-export function formatReminderSetReply(
+function legacyFormatReminderSetReply(
   reminder: ReminderRow,
   total: number,
   timeZone = DEFAULT_TIMEZONE,
@@ -487,6 +487,35 @@ export function formatReminderSetReply(
   lines.push("");
   lines.push(`You now have *${total}* active reminder${total === 1 ? "" : "s"}.`);
   lines.push("Reply _show reminders_ to manage them.");
+  return lines.join("\n");
+}
+
+export function formatReminderSetReply(
+  reminder: ReminderRow,
+  total: number,
+  timeZone = DEFAULT_TIMEZONE,
+): string {
+  const lines = [
+    "*Reminder saved.*",
+    "",
+    `Task: ${reminder.reminder_text}`,
+    `When: ${formatReminderTime(reminder.fire_at, timeZone)}`,
+  ];
+
+  if (reminder.recur_rule) {
+    lines.push(`Repeats: ${formatRecurLabel(reminder.recur_rule)}`);
+  }
+
+  lines.push("");
+  lines.push(`You now have *${total}* active reminder${total === 1 ? "" : "s"}.`);
+  lines.push("Reply _show reminders_ to manage them.");
+
+  if (!reminder.recur_rule) {
+    lines.push("");
+    lines.push("For routines, you can save a one-tap shortcut like:");
+    lines.push("_save /rent as remind me on the 1st of every month to pay rent_");
+  }
+
   return lines.join("\n");
 }
 

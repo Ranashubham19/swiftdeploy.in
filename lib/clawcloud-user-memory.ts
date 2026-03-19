@@ -12,6 +12,14 @@ export type MemoryKey =
   | "timezone"
   | "age"
   | "interests"
+  | "preferred_tone"
+  | "wake_time"
+  | "work_hours"
+  | "goals"
+  | "priorities"
+  | "briefing_style"
+  | "focus_areas"
+  | "routine"
   | string;
 
 export type MemorySource = "explicit" | "extracted" | "inferred";
@@ -38,6 +46,7 @@ export type MemoryCommandIntent =
   | { type: "forget_key"; key: MemoryKey }
   | { type: "forget_all" }
   | { type: "show_profile" }
+  | { type: "show_suggestions" }
   | { type: "none" };
 
 const EXTRACT_TIMEOUT_MS = 5_000;
@@ -67,7 +76,43 @@ const KEY_LABELS: Record<string, string> = {
   timezone: "Timezone",
   age: "Age",
   interests: "Interests",
+  preferred_tone: "Preferred tone",
+  wake_time: "Wake time",
+  work_hours: "Work hours",
+  goals: "Goals",
+  priorities: "Priorities",
+  briefing_style: "Briefing style",
+  focus_areas: "Focus areas",
+  routine: "Routine",
 };
+
+const MEMORY_GROUPS: Array<{ title: string; keys: MemoryKey[] }> = [
+  {
+    title: "Identity",
+    keys: ["preferred_name", "name", "age", "city", "country", "timezone", "language_preference"],
+  },
+  {
+    title: "Work",
+    keys: ["profession", "company", "work_hours"],
+  },
+  {
+    title: "Preferences",
+    keys: ["preferred_tone", "briefing_style", "focus_areas", "interests"],
+  },
+  {
+    title: "Goals and routines",
+    keys: ["priorities", "goals", "routine", "wake_time"],
+  },
+];
+
+const PERSONALIZATION_PROMPTS: Array<{ key: MemoryKey; prompt: string }> = [
+  { key: "preferred_tone", prompt: "Remember my preferred tone is concise and direct" },
+  { key: "focus_areas", prompt: "Remember my focus areas are product launches and hiring" },
+  { key: "priorities", prompt: "Remember my priorities are closing enterprise deals and shipping Sprint 4" },
+  { key: "wake_time", prompt: "Remember my wake time is 6:30 AM" },
+  { key: "work_hours", prompt: "Remember my work hours are 9 AM to 6 PM IST" },
+  { key: "goals", prompt: "Remember my goals are to grow revenue and stay fit" },
+];
 
 export async function saveMemoryFact(
   userId: string,
@@ -171,7 +216,7 @@ async function extractFactsFromMessage(message: string): Promise<ExtractedFact[]
   const systemPrompt = [
     "Extract personal facts about the user from their message.",
     "Return ONLY a JSON array of objects with: key, value, confidence (0-1).",
-    "Keys must be one of: name, preferred_name, city, country, profession, company, age, interests, language_preference.",
+    "Keys must be one of: name, preferred_name, city, country, profession, company, age, interests, language_preference, preferred_tone, wake_time, work_hours, goals, priorities, briefing_style, focus_areas, routine.",
     "",
     "Rules:",
     "  - Only extract facts the user states about themselves, not hypotheticals or questions.",
@@ -182,6 +227,13 @@ async function extractFactsFromMessage(message: string): Promise<ExtractedFact[]
     "  - 'I work at Google' -> [{\"key\":\"company\",\"value\":\"Google\",\"confidence\":0.90}]",
     "  - 'I'm 28 years old' -> [{\"key\":\"age\",\"value\":\"28\",\"confidence\":0.95}]",
     "  - 'I love cricket and coding' -> [{\"key\":\"interests\",\"value\":\"cricket, coding\",\"confidence\":0.85}]",
+    "  - 'Keep my briefings concise' -> [{\"key\":\"briefing_style\",\"value\":\"concise\",\"confidence\":0.88}]",
+    "  - 'My preferred tone is direct and concise' -> [{\"key\":\"preferred_tone\",\"value\":\"direct and concise\",\"confidence\":0.92}]",
+    "  - 'My priorities are hiring and the product launch' -> [{\"key\":\"priorities\",\"value\":\"hiring, product launch\",\"confidence\":0.9}]",
+    "  - 'My focus areas are sales and customer success' -> [{\"key\":\"focus_areas\",\"value\":\"sales, customer success\",\"confidence\":0.88}]",
+    "  - 'I wake up at 6:30 am' -> [{\"key\":\"wake_time\",\"value\":\"6:30 AM\",\"confidence\":0.9}]",
+    "  - 'My work hours are 9am to 6pm' -> [{\"key\":\"work_hours\",\"value\":\"9am to 6pm\",\"confidence\":0.9}]",
+    "  - 'My goals are to lose weight and grow the business' -> [{\"key\":\"goals\",\"value\":\"lose weight, grow the business\",\"confidence\":0.88}]",
     "  - If nothing extractable exists, return []",
     "  - Never add explanations or markdown.",
     "Return ONLY the JSON array.",
@@ -303,9 +355,15 @@ export function detectMemoryCommand(text: string): MemoryCommandIntent {
   const lower = trimmed.toLowerCase();
 
   if (
-    /^(what do you know about me|what have you (?:learned|remembered|saved) about me|show(?: my)? profile|my profile|about me|mera profile|mujhe kya pata hai)\??$/i.test(lower)
+    /^(what do you know about me|what do you remember about me|what have you (?:learned|remembered|saved) about me|show(?: my)? (?:profile|memory)|my profile|about me|mera profile|mujhe kya pata hai)\??$/i.test(lower)
   ) {
     return { type: "show_profile" };
+  }
+
+  if (
+    /^(memory suggestions|how can i personalize you|what should i tell you about me|what else should i save|how do i make you more personal|how can you know me better)\??$/i.test(lower)
+  ) {
+    return { type: "show_suggestions" };
   }
 
   if (
@@ -323,7 +381,7 @@ export function detectMemoryCommand(text: string): MemoryCommandIntent {
   }
 
   const directKeyValueMatch = trimmed.match(
-    /^(?:remember|save|note)\s+my\s+(.+?)\s+is\s+(.+?)\.?\s*$/i,
+    /^(?:remember|save|note|update|change|set)\s+my\s+(.+?)\s+(?:is|to)\s+(.+?)\.?\s*$/i,
   );
   if (directKeyValueMatch) {
     const key = resolveKeyAlias(directKeyValueMatch[1]);
@@ -337,7 +395,7 @@ export function detectMemoryCommand(text: string): MemoryCommandIntent {
   }
 
   const rememberMatch = trimmed.match(
-    /^(?:remember|save|note|store|keep in mind)(?:\s+that)?[:\s]+(.+)/i,
+    /^(?:remember|save|note|store|keep in mind|update|change|set)(?:\s+that)?[:\s]+(.+)/i,
   );
   if (rememberMatch) {
     const factText = rememberMatch[1].trim().replace(/[.!?]+$/, "");
@@ -366,7 +424,25 @@ export function isMemoryCommand(text: string): boolean {
   return detectMemoryCommand(text).type !== "none";
 }
 
-export function formatProfileReply(facts: MemoryRow[]): string {
+function groupMemoryFacts(facts: MemoryRow[]) {
+  return MEMORY_GROUPS
+    .map((group) => ({
+      title: group.title,
+      facts: group.keys
+        .map((key) => facts.find((fact) => fact.key === key))
+        .filter((fact): fact is MemoryRow => Boolean(fact)),
+    }))
+    .filter((group) => group.facts.length > 0);
+}
+
+function buildMissingPersonalizationPrompts(facts: MemoryRow[]) {
+  const presentKeys = new Set(facts.map((fact) => fact.key));
+  return PERSONALIZATION_PROMPTS
+    .filter((item) => !presentKeys.has(item.key))
+    .slice(0, 4);
+}
+
+function legacyFormatProfileReply(facts: MemoryRow[]): string {
   if (!facts.length) {
     return [
       "🧠 *I don't know much about you yet.*",
@@ -395,7 +471,72 @@ export function formatProfileReply(facts: MemoryRow[]): string {
   ].join("\n");
 }
 
-export function formatMemorySavedReply(key: MemoryKey, value: string): string {
+export function formatProfileReply(facts: MemoryRow[]): string {
+  if (!facts.length) {
+    return [
+      "I do not know much about you yet.",
+      "",
+      "You can tell me things like:",
+      "- _My name is Rahul_",
+      "- _I live in Delhi_",
+      "- _I am a software engineer_",
+      "- _My priorities are product launches and hiring_",
+      "",
+      "I'll remember them for future conversations.",
+    ].join("\n");
+  }
+
+  const grouped = groupMemoryFacts(facts);
+  const missingPrompts = buildMissingPersonalizationPrompts(facts);
+  const lines = [
+    `Here is your saved profile (${facts.length} fact${facts.length === 1 ? "" : "s"}).`,
+  ];
+
+  for (const group of grouped) {
+    lines.push("", `*${group.title}*`);
+    for (const fact of group.facts) {
+      const label = KEY_LABELS[fact.key] ?? humanizeKey(fact.key);
+      const sourceTag = fact.source === "explicit" ? "" : " _(auto-learned)_";
+      lines.push(`- *${label}:* ${fact.value}${sourceTag}`);
+    }
+  }
+
+  if (missingPrompts.length) {
+    lines.push("", "*Useful things you can still teach me:*");
+    for (const suggestion of missingPrompts) {
+      lines.push(`- _${suggestion.prompt}_`);
+    }
+  }
+
+  lines.push("", "To update something: _Update my city to Bangalore_");
+  lines.push("To forget something: _Forget my profession_");
+  lines.push("To clear everything: _Forget everything about me_");
+  return lines.join("\n");
+}
+
+export function formatMemorySuggestionsReply(facts: MemoryRow[]): string {
+  const missingPrompts = buildMissingPersonalizationPrompts(facts);
+  if (!missingPrompts.length) {
+    return [
+      "Your profile is already well personalized.",
+      "",
+      "You can still fine-tune it with things like:",
+      "- _Update my priorities to closing deals and hiring_",
+      "- _Remember my preferred tone is concise and direct_",
+      "- _Remember my focus areas are product, sales, and hiring_",
+    ].join("\n");
+  }
+
+  return [
+    "Here are the highest-value things you can tell me to make ClawCloud more personal:",
+    "",
+    ...missingPrompts.map((item) => `- _${item.prompt}_`),
+    "",
+    "These help me personalize briefings, reusable commands, and follow-up suggestions.",
+  ].join("\n");
+}
+
+function legacyFormatMemorySavedReply(key: MemoryKey, value: string): string {
   const label = KEY_LABELS[key] ?? humanizeKey(key);
   return [
     "🧠 *Got it! I'll remember that.*",
@@ -406,7 +547,19 @@ export function formatMemorySavedReply(key: MemoryKey, value: string): string {
   ].join("\n");
 }
 
-export function formatMemoryForgotReply(key: MemoryKey, found: boolean): string {
+export function formatMemorySavedReply(key: MemoryKey, value: string): string {
+  const label = KEY_LABELS[key] ?? humanizeKey(key);
+  return [
+    "Got it. I'll remember that.",
+    "",
+    `- *${label}:* ${value}`,
+    "",
+    `This will be used in future conversations. To remove it: _Forget my ${label.toLowerCase()}_`,
+    "To review everything I know: _Show my memory_",
+  ].join("\n");
+}
+
+function legacyFormatMemoryForgotReply(key: MemoryKey, found: boolean): string {
   const label = KEY_LABELS[key] ?? humanizeKey(key);
   if (!found) {
     return `🧠 *I didn't have your ${label.toLowerCase()} saved anyway.*`;
@@ -414,7 +567,7 @@ export function formatMemoryForgotReply(key: MemoryKey, found: boolean): string 
   return `🗑️ *Done - I've forgotten your ${label.toLowerCase()}.*`;
 }
 
-export function formatMemoryClearedReply(count: number): string {
+function legacyFormatMemoryClearedReply(count: number): string {
   if (!count) {
     return "🧠 *Nothing to clear - your memory profile was already empty.*";
   }
@@ -427,7 +580,28 @@ export function formatMemoryClearedReply(count: number): string {
   ].join("\n");
 }
 
-export function buildUserProfileSnippet(facts: MemoryRow[]): string {
+export function formatMemoryForgotReply(key: MemoryKey, found: boolean): string {
+  const label = KEY_LABELS[key] ?? humanizeKey(key);
+  if (!found) {
+    return `I did not have your ${label.toLowerCase()} saved anyway.`;
+  }
+  return `Done. I have forgotten your ${label.toLowerCase()}.`;
+}
+
+export function formatMemoryClearedReply(count: number): string {
+  if (!count) {
+    return "Nothing to clear. Your memory profile was already empty.";
+  }
+
+  return [
+    "*Memory cleared.*",
+    "",
+    `Removed *${count}* saved fact${count === 1 ? "" : "s"} about you.`,
+    "I'll start fresh from your next message.",
+  ].join("\n");
+}
+
+function legacyBuildUserProfileSnippet(facts: MemoryRow[]): string {
   const highConfidence = facts.filter((fact) => fact.confidence >= MIN_CONFIDENCE_TO_SAVE);
   if (!highConfidence.length) return "";
 
@@ -440,6 +614,27 @@ export function buildUserProfileSnippet(facts: MemoryRow[]): string {
     "- Use profile details only when they improve the answer.",
     "- Do not mention this profile unless the user asks.",
   ].join("\n");
+}
+
+export function buildUserProfileSnippet(facts: MemoryRow[]): string {
+  const highConfidence = facts.filter((fact) => fact.confidence >= MIN_CONFIDENCE_TO_SAVE);
+  if (!highConfidence.length) return "";
+
+  const grouped = groupMemoryFacts(highConfidence);
+  const lines = ["USER PROFILE:"];
+
+  for (const group of grouped) {
+    lines.push(`${group.title}:`);
+    for (const fact of group.facts) {
+      const label = KEY_LABELS[fact.key] ?? humanizeKey(fact.key);
+      lines.push(`- ${label}: ${fact.value}`);
+    }
+  }
+
+  lines.push("- Use saved priorities, tone, and routine details to personalize briefings, reminders, and reusable workflows.");
+  lines.push("- Use profile details only when they improve the answer.");
+  lines.push("- Do not mention this profile unless the user asks.");
+  return lines.join("\n");
 }
 
 export async function loadUserProfileSnippet(userId: string): Promise<string> {
@@ -478,6 +673,20 @@ function resolveKeyAlias(raw: string): MemoryKey | null {
     age: "age",
     interests: "interests",
     hobbies: "interests",
+    tone: "preferred_tone",
+    "preferred tone": "preferred_tone",
+    style: "briefing_style",
+    "briefing style": "briefing_style",
+    "wake time": "wake_time",
+    "wake up time": "wake_time",
+    "work hours": "work_hours",
+    goals: "goals",
+    goal: "goals",
+    priorities: "priorities",
+    priority: "priorities",
+    focus: "focus_areas",
+    "focus areas": "focus_areas",
+    routine: "routine",
   };
 
   return aliases[normalized] ?? null;
@@ -536,6 +745,86 @@ function extractFactFromShortStatement(
     };
   }
 
+  const preferredToneMatch = trimmed.match(
+    /^(?:my preferred tone is|i prefer a|keep it|make it|use a)\s+(.{2,60})\s*(?:tone|replies|messages|answers)?$/i,
+  );
+  if (preferredToneMatch) {
+    return {
+      key: "preferred_tone",
+      value: normalizeMemoryValue("preferred_tone", preferredToneMatch[1]),
+    };
+  }
+
+  const briefingStyleMatch = trimmed.match(
+    /^(?:my briefing style is|keep my briefings|my briefings should be)\s+(.{2,60})$/i,
+  );
+  if (briefingStyleMatch) {
+    return {
+      key: "briefing_style",
+      value: normalizeMemoryValue("briefing_style", briefingStyleMatch[1]),
+    };
+  }
+
+  const prioritiesMatch = trimmed.match(
+    /^(?:my top priorities are|my priorities are|my priority is)\s+(.{2,140})$/i,
+  );
+  if (prioritiesMatch) {
+    return {
+      key: "priorities",
+      value: normalizeMemoryValue("priorities", prioritiesMatch[1]),
+    };
+  }
+
+  const focusAreasMatch = trimmed.match(
+    /^(?:my focus areas are|my focus is|i am focused on)\s+(.{2,140})$/i,
+  );
+  if (focusAreasMatch) {
+    return {
+      key: "focus_areas",
+      value: normalizeMemoryValue("focus_areas", focusAreasMatch[1]),
+    };
+  }
+
+  const goalsMatch = trimmed.match(
+    /^(?:my goals are|my goal is|i am working toward|i'm working toward)\s+(.{2,140})$/i,
+  );
+  if (goalsMatch) {
+    return {
+      key: "goals",
+      value: normalizeMemoryValue("goals", goalsMatch[1]),
+    };
+  }
+
+  const wakeTimeMatch = trimmed.match(
+    /^(?:i wake up at|my wake time is|i usually wake up at)\s+(.{2,40})$/i,
+  );
+  if (wakeTimeMatch) {
+    return {
+      key: "wake_time",
+      value: normalizeMemoryValue("wake_time", wakeTimeMatch[1]),
+    };
+  }
+
+  const workHoursMatch = trimmed.match(
+    /^(?:my work hours are|i usually work|my working hours are)\s+(.{2,80})$/i,
+  );
+  if (workHoursMatch) {
+    return {
+      key: "work_hours",
+      value: normalizeMemoryValue("work_hours", workHoursMatch[1]),
+    };
+  }
+
+  const routineMatch = trimmed.match(
+    /^(?:my routine is|every morning i|every day i)\s+(.{2,140})$/i,
+  );
+  if (routineMatch) {
+    return {
+      key: "routine",
+      value: normalizeMemoryValue("routine", routineMatch[1]),
+    };
+  }
+
   const professionMatch = trimmed.match(/^i(?:'m| am)\s+(?:an?\s+)?(.{2,60})$/i);
   if (professionMatch && PROFESSION_HINT_RE.test(professionMatch[1])) {
     return {
@@ -561,7 +850,13 @@ function normalizeMemoryValue(key: MemoryKey, value: string): string {
     case "age":
       return trimmed.replace(/[^\d]/g, "").slice(0, 3) || trimmed;
     case "interests":
+    case "goals":
+    case "priorities":
+    case "focus_areas":
       return normalizeCommaList(trimmed);
+    case "preferred_tone":
+    case "briefing_style":
+      return trimmed.toLowerCase();
     default:
       return trimmed;
   }
