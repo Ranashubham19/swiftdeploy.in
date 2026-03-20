@@ -652,6 +652,24 @@ export function DashboardShell({ config }: DashboardShellProps) {
     setSidebarOpen(false);
   }
 
+  function openWhatsAppWorkspace() {
+    closeSidebar();
+
+    const scrollToWorkspace = () => {
+      const target = document.getElementById("whatsapp-workspace");
+
+      if (!target) {
+        showToast("WhatsApp workspace is not available yet");
+        return;
+      }
+
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      window.history.replaceState({}, "", "/dashboard#whatsapp-workspace");
+    };
+
+    window.setTimeout(scrollToWorkspace, 80);
+  }
+
   function openSettings() {
     closeSidebar();
     router.push("/settings");
@@ -905,7 +923,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
           <button
             type="button"
             className={styles.navItem}
-            onClick={() => showToast("WhatsApp connected")}
+            onClick={openWhatsAppWorkspace}
           >
             <span className={styles.navIcon}>{ICONS.chat}</span>
             WhatsApp
