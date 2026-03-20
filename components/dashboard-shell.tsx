@@ -329,6 +329,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
   const commandInputRef = useRef<HTMLInputElement | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const responseTimersRef = useRef<number[]>([]);
+  const targetHighlightTimerRef = useRef<number | null>(null);
   const messageIdRef = useRef(3);
 
   const [userEmail, setUserEmail] = useState("");
@@ -347,6 +348,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
   const [toastMessage, setToastMessage] = useState("");
   const [toastVisible, setToastVisible] = useState(false);
   const [taskToggling, setTaskToggling] = useState<Record<string, boolean>>({});
+  const [highlightedDashboardTarget, setHighlightedDashboardTarget] = useState<string | null>(null);
 
   const plan = (dashboardData?.user?.plan ?? "free") as "free" | "starter" | "pro";
   const planLabel = plan.toUpperCase();
@@ -585,6 +587,10 @@ export function DashboardShell({ config }: DashboardShellProps) {
         window.clearTimeout(toastTimerRef.current);
       }
 
+      if (targetHighlightTimerRef.current) {
+        window.clearTimeout(targetHighlightTimerRef.current);
+      }
+
       responseTimersRef.current.forEach((timer) => {
         window.clearTimeout(timer);
       });
@@ -652,22 +658,43 @@ export function DashboardShell({ config }: DashboardShellProps) {
     setSidebarOpen(false);
   }
 
-  function openWhatsAppWorkspace() {
+  function jumpToDashboardTarget(targetId: string, missingMessage: string) {
     closeSidebar();
 
-    const scrollToWorkspace = () => {
-      const target = document.getElementById("whatsapp-workspace");
+    const scrollToTarget = () => {
+      const target = document.getElementById(targetId);
 
       if (!target) {
-        showToast("WhatsApp workspace is not available yet");
+        showToast(missingMessage);
         return;
       }
 
       target.scrollIntoView({ behavior: "smooth", block: "start" });
-      window.history.replaceState({}, "", "/dashboard#whatsapp-workspace");
+      window.history.replaceState({}, "", `/dashboard#${targetId}`);
+      setHighlightedDashboardTarget(targetId);
+
+      if (targetHighlightTimerRef.current) {
+        window.clearTimeout(targetHighlightTimerRef.current);
+      }
+
+      targetHighlightTimerRef.current = window.setTimeout(() => {
+        setHighlightedDashboardTarget((current) => (current === targetId ? null : current));
+      }, 1800);
     };
 
-    window.setTimeout(scrollToWorkspace, 80);
+    window.setTimeout(scrollToTarget, 80);
+  }
+
+  function openGmailWorkspace() {
+    jumpToDashboardTarget("connection-gmail", "Gmail section is not available yet");
+  }
+
+  function openCalendarWorkspace() {
+    jumpToDashboardTarget("connection-calendar", "Calendar section is not available yet");
+  }
+
+  function openWhatsAppWorkspace() {
+    jumpToDashboardTarget("whatsapp-workspace", "WhatsApp workspace is not available yet");
   }
 
   function openSettings() {
@@ -905,7 +932,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
           <button
             type="button"
             className={styles.navItem}
-            onClick={() => showToast("Gmail connected")}
+            onClick={openGmailWorkspace}
           >
             <span className={styles.navIcon}>{ICONS.mail}</span>
             Gmail
@@ -914,7 +941,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
           <button
             type="button"
             className={styles.navItem}
-            onClick={() => showToast("Calendar connected")}
+            onClick={openCalendarWorkspace}
           >
             <span className={styles.navIcon}>{ICONS.calendar}</span>
             Calendar
@@ -1148,43 +1175,64 @@ export function DashboardShell({ config }: DashboardShellProps) {
 
                 <div className={styles.accountsWorkspace}>
                   <div className={styles.accountsList}>
-                    {accounts.map((account) => (
-                      <div key={account.id} className={styles.accountRow}>
+                    {accounts.map((account) => {
+                      const accountTargetId = `connection-${account.id}`;
+
+                      return (
                         <div
-                          className={`${styles.accountIcon} ${
-                            account.status === "upgrade" ? styles.accountIconMuted : ""
+                          key={account.id}
+                          id={accountTargetId}
+                          className={`${styles.accountRow} ${
+                            highlightedDashboardTarget === accountTargetId
+                              ? styles.accountRowTargeted
+                              : ""
                           }`}
                         >
-                          {account.icon}
-                        </div>
-                        <div className={styles.accountInfo}>
                           <div
-                            className={`${styles.accountName} ${
-                              account.status === "upgrade" ? styles.accountNameMuted : ""
+                            className={`${styles.accountIcon} ${
+                              account.status === "upgrade" ? styles.accountIconMuted : ""
                             }`}
                           >
-                            {account.name}
+                            {account.icon}
                           </div>
-                          <div className={styles.accountDetail}>{account.detail}</div>
+                          <div className={styles.accountInfo}>
+                            <div
+                              className={`${styles.accountName} ${
+                                account.status === "upgrade" ? styles.accountNameMuted : ""
+                              }`}
+                            >
+                              {account.name}
+                            </div>
+                            <div className={styles.accountDetail}>{account.detail}</div>
+                          </div>
+                          {account.status === "connected" ? (
+                            <div
+                              className={`${styles.accountStatus} ${styles.accountStatusConnected}`}
+                            >
+                              {"\u25CF Connected"}
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              className={styles.connectButton}
+                              onClick={() => showToast(account.upgradeCopy ?? "Upgrade required")}
+                            >
+                              Upgrade -&gt;
+                            </button>
+                          )}
                         </div>
-                        {account.status === "connected" ? (
-                          <div className={`${styles.accountStatus} ${styles.accountStatusConnected}`}>
-                            {"\u25CF Connected"}
-                          </div>
-                        ) : (
-                          <button
-                            type="button"
-                            className={styles.connectButton}
-                            onClick={() => showToast(account.upgradeCopy ?? "Upgrade required")}
-                          >
-                            Upgrade -&gt;
-                          </button>
-                        )}
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
 
-                  <div id="whatsapp-workspace" className={styles.whatsAppWorkspace}>
+                  <div
+                    id="whatsapp-workspace"
+                    className={`${styles.whatsAppWorkspace} ${
+                      highlightedDashboardTarget === "whatsapp-workspace"
+                        ? styles.whatsAppWorkspaceTargeted
+                        : ""
+                    }`}
+                  >
                     <div className={styles.workspaceHeader}>
                       <div>
                         <div className={styles.workspaceEyebrow}>WhatsApp workspace</div>
