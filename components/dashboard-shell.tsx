@@ -1166,7 +1166,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
                     ))}
                   </div>
 
-                  <div className={styles.whatsAppWorkspace}>
+                  <div id="whatsapp-workspace" className={styles.whatsAppWorkspace}>
                     <div className={styles.workspaceHeader}>
                       <div>
                         <div className={styles.workspaceEyebrow}>WhatsApp workspace</div>
@@ -1175,7 +1175,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
                         </div>
                       </div>
                       <Link href="/whatsapp" className={styles.workspaceLink}>
-                        Open full workspace
+                        Open advanced workspace
                       </Link>
                     </div>
 

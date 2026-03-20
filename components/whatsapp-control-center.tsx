@@ -509,16 +509,19 @@ export function WhatsAppControlCenter({ config }: WhatsAppControlCenterProps) {
     <div className={styles.shell}>
       <div className={styles.hero}>
         <div>
-          <p className={styles.eyebrow}>WhatsApp Control Center</p>
-          <h1 className={styles.title}>Operate ClawCloud like a real WhatsApp assistant.</h1>
-          <p className={styles.subtitle}>Tune automation, search history, watch groups and media, and manage inbox priority from one place.</p>
+          <p className={styles.eyebrow}>Advanced WhatsApp Workspace</p>
+          <h1 className={styles.title}>Deep WhatsApp controls for ClawCloud.</h1>
+          <p className={styles.subtitle}>Normal WhatsApp monitoring now lives on your main dashboard. Use this page for advanced approvals, history, workflows, privacy, and governance.</p>
         </div>
         <div className={styles.heroActions}>
-          <Link href="/dashboard" className={styles.secondaryLink}>Back to dashboard</Link>
-          <Link href="/settings?tab=integrations" className={styles.primaryLink}>Open integrations</Link>
+          <Link href="/dashboard#whatsapp-workspace" className={styles.primaryLink}>Back to dashboard</Link>
+          <Link href="/settings?tab=integrations" className={styles.secondaryLink}>Open integrations</Link>
         </div>
       </div>
 
+      <div className={styles.notice}>
+        Dashboard is now the primary WhatsApp home. This page is kept for advanced control work only.
+      </div>
       {notice ? <div className={styles.notice}>{notice}</div> : null}
       {error ? <div className={styles.error}>{error}</div> : null}
 

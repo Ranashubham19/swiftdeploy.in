@@ -464,9 +464,9 @@ export function SettingsPage({ config }: SettingsPageProps) {
                       <button
                         type="button"
                         className={styles.secondaryButton}
-                        onClick={() => router.push(whatsapp ? "/whatsapp" : "/setup")}
+                        onClick={() => router.push(whatsapp ? "/dashboard#whatsapp-workspace" : "/setup")}
                       >
-                        {whatsapp ? "Open control center" : "Open setup"}
+                        {whatsapp ? "Open dashboard panel" : "Open setup"}
                       </button>
                       {whatsapp ? <button type="button" className={styles.dangerButton} disabled={Boolean(saving.whatsapp)} onClick={() => void disconnect("whatsapp")}>{saving.whatsapp ? "Working..." : "Disconnect"}</button> : null}
                     </div>

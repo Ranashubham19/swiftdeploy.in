@@ -4,8 +4,8 @@ import { WhatsAppControlCenter } from "@/components/whatsapp-control-center";
 import { getPublicAppConfig } from "@/lib/env";
 
 export const metadata: Metadata = {
-  title: "ClawCloud - WhatsApp Control Center",
-  description: "Manage WhatsApp automation, approvals, history, and inbox priorities.",
+  title: "ClawCloud - Advanced WhatsApp Workspace",
+  description: "Advanced WhatsApp approvals, history, workflows, privacy, and governance controls.",
 };
 
 export default function WhatsAppControlCenterRoute() {
