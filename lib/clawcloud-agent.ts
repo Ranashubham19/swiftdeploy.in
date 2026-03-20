@@ -93,6 +93,11 @@ import {
   solveWithUniversalExpert,
 } from "@/lib/clawcloud-expert";
 import { handleReplyApprovalCommand, sendReplyApprovalRequests } from "@/lib/clawcloud-reply-approval";
+import {
+  handleWhatsAppApprovalCommand,
+  queueWhatsAppReplyApproval,
+} from "@/lib/clawcloud-whatsapp-approval";
+import { getWhatsAppSettings } from "@/lib/clawcloud-whatsapp-control";
 import { answerSpendingQuestion, runWeeklySpendSummary } from "@/lib/clawcloud-spending";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 import {
@@ -5432,6 +5437,10 @@ export async function routeInboundAgentMessage(
   // 1. Approval commands (SEND/EDIT/SKIP)
   const approval = await handleReplyApprovalCommand(userId, trimmed);
   if (approval.handled) return finalizeEarlyTranslated(approval.response, "help", "help");
+  const whatsappApproval = await handleWhatsAppApprovalCommand(userId, trimmed);
+  if (whatsappApproval.handled) {
+    return finalizeEarlyTranslated(whatsappApproval.response, "help", "help");
+  }
   const memoryCommand = detectMemoryCommand(trimmed);
 
   if (memoryCommand.type === "show_profile") {
@@ -5744,6 +5753,18 @@ export async function routeInboundAgentMessage(
   switch (resolvedCategory) {
 
     case "send_message": {
+      const whatsAppSettings = await getWhatsAppSettings(userId).catch(() => null);
+      if (whatsAppSettings && !whatsAppSettings.allowDirectSendCommands) {
+        return finalizeTranslated(
+          await translateMessage(
+            "Direct WhatsApp send commands are disabled in your control center. Re-enable them there if you want ClawCloud to send outbound messages on command.",
+            locale,
+          ),
+          "send_message",
+          "send_message",
+        );
+      }
+
       return finalizeTranslated(
         await handleSendMessageToContactProfessional(userId, trimmed, locale),
         "send_message",
@@ -7246,6 +7267,25 @@ async function handleSendMessageToContact(
   }
 }
 
+async function hasWhatsAppConversationHistory(userId: string, phone: string) {
+  const normalizedPhone = phone.replace(/\D/g, "");
+  if (!normalizedPhone) {
+    return false;
+  }
+
+  const { count, error } = await getClawCloudSupabaseAdmin()
+    .from("whatsapp_messages")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", userId)
+    .eq("remote_phone", normalizedPhone);
+
+  if (error) {
+    return false;
+  }
+
+  return (count ?? 0) > 0;
+}
+
 async function handleSendMessageToContactProfessional(
   userId: string,
   text: string,
@@ -7276,6 +7316,35 @@ async function handleSendMessageToContactProfessional(
   const message = parsed.message;
 
   if (parsed.kind === "phone" && parsed.phone) {
+    const whatsAppSettings = await getWhatsAppSettings(userId).catch(() => null);
+    const hasHistory = await hasWhatsAppConversationHistory(userId, parsed.phone);
+
+    if (whatsAppSettings?.requireApprovalForFirstOutreach && !hasHistory) {
+      const approval = await queueWhatsAppReplyApproval({
+        userId,
+        remoteJid: parsed.phone ? `${parsed.phone}@s.whatsapp.net` : null,
+        remotePhone: parsed.phone,
+        contactName: parsed.contactName,
+        sourceMessage: `First outreach requested: ${parsed.contactName || parsed.phone}`,
+        draftReply: message,
+        sensitivity: "normal",
+        confidence: 0.76,
+        reason: "First outreach requires approval before sending.",
+        priority: "normal",
+        metadata: {
+          approval_origin: "send_command",
+          first_outreach: true,
+        },
+      }).catch(() => null);
+
+      if (approval) {
+        return translateMessage(
+          `Queued a first-outreach WhatsApp approval for ${parsed.contactName || parsed.phone}. Use WSEND ${approval.id.slice(0, 8)} to send it when you're ready.`,
+          locale,
+        );
+      }
+    }
+
     try {
       await sendClawCloudWhatsAppToPhone(parsed.phone, message, {
         userId,
@@ -7363,8 +7432,38 @@ async function handleSendMessageToContactProfessional(
   const recipients = [...resolvedRecipients.values()];
   const successes: Array<{ name: string; phone: string | null; jid: string | null }> = [];
   const failures: Array<{ name: string; phone: string | null; jid: string | null }> = [];
+  const queuedApprovals: Array<{ name: string; phone: string | null; jid: string | null }> = [];
 
   for (const recipient of recipients) {
+    const whatsAppSettings = await getWhatsAppSettings(userId).catch(() => null);
+    const hasHistory = recipient.phone
+      ? await hasWhatsAppConversationHistory(userId, recipient.phone)
+      : false;
+
+    if (whatsAppSettings?.requireApprovalForFirstOutreach && !hasHistory) {
+      const approval = await queueWhatsAppReplyApproval({
+        userId,
+        remoteJid: recipient.phone ? `${recipient.phone}@s.whatsapp.net` : recipient.jid,
+        remotePhone: recipient.phone,
+        contactName: recipient.name,
+        sourceMessage: `First outreach requested: ${recipient.name}`,
+        draftReply: message,
+        sensitivity: "normal",
+        confidence: 0.76,
+        reason: "First outreach requires approval before sending.",
+        priority: "normal",
+        metadata: {
+          approval_origin: "send_command",
+          first_outreach: true,
+        },
+      }).catch(() => null);
+
+      if (approval) {
+        queuedApprovals.push(recipient);
+        continue;
+      }
+    }
+
     try {
       await sendClawCloudWhatsAppToPhone(recipient.phone, message, {
         userId,
@@ -7378,7 +7477,7 @@ async function handleSendMessageToContactProfessional(
     }
   }
 
-  if (!successes.length) {
+  if (!successes.length && !queuedApprovals.length) {
     const failedLabel = recipients.length === 1 ? recipients[0]?.name ?? "that contact" : "those contacts";
     return translateMessage(
       [
@@ -7394,10 +7493,10 @@ async function handleSendMessageToContactProfessional(
   await upsertAnalyticsDaily(userId, { wa_messages_sent: successes.length, tasks_run: 1 });
 
   const successTitle = parsed.kind === "broadcast_all"
-    ? `Broadcast sent to ${successes.length} contact${successes.length === 1 ? "" : "s"}.`
-    : successes.length === 1
+    ? `Broadcast handled for ${successes.length + queuedApprovals.length} contact${successes.length + queuedApprovals.length === 1 ? "" : "s"}.`
+    : successes.length === 1 && !queuedApprovals.length
       ? `Message sent to ${successes[0]!.name}.`
-      : `Message sent to ${successes.length} contacts.`;
+      : `Message handled for ${successes.length + queuedApprovals.length} contacts.`;
 
   const lines = [
     successTitle,
@@ -7417,6 +7516,18 @@ async function handleSendMessageToContactProfessional(
       "",
       "Not sent to:",
       ...failures.map((recipient) =>
+        recipient.phone
+          ? `- ${recipient.name} - +${recipient.phone}`
+          : `- ${recipient.name}`,
+      ),
+    );
+  }
+
+  if (queuedApprovals.length) {
+    lines.push(
+      "",
+      "Queued for approval:",
+      ...queuedApprovals.map((recipient) =>
         recipient.phone
           ? `- ${recipient.name} - +${recipient.phone}`
           : `- ${recipient.name}`,

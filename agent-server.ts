@@ -53,7 +53,27 @@ import {
   upsertWhatsAppContacts,
   type WhatsAppContactSyncInput,
 } from "./lib/clawcloud-whatsapp-contacts";
+import { buildWhatsAppApprovalNotice, queueWhatsAppReplyApproval } from "./lib/clawcloud-whatsapp-approval";
+import {
+  applyWhatsAppReplyMode,
+  decideWhatsAppReplyAction,
+  detectWhatsAppSensitivity,
+  getWhatsAppPriorityForMessage,
+  getWhatsAppSettings,
+  markLatestWhatsAppThreadState,
+  normalizeWhatsAppPriority,
+  scoreWhatsAppReplyConfidence,
+  writeWhatsAppAuditLog,
+} from "./lib/clawcloud-whatsapp-control";
+import {
+  processDueWhatsAppWorkflowRuns,
+  scheduleWhatsAppWorkflowRunsFromInbound,
+} from "./lib/clawcloud-whatsapp-workflows";
 import { registerClawCloudWhatsAppRuntime } from "./lib/clawcloud-whatsapp";
+import type {
+  WhatsAppContactPriority,
+  WhatsAppSettings,
+} from "./lib/clawcloud-whatsapp-workspace-types";
 
 loadEnvConfig(process.cwd());
 
@@ -876,6 +896,64 @@ function buildMessageLogFields(
   };
 }
 
+function getInboundMessageType(message: WAMessage | null | undefined) {
+  const payload = message?.message;
+  if (!payload) return "text";
+  if (payload.imageMessage) return "image";
+  if (payload.audioMessage) return "audio";
+  if (payload.documentMessage) return "document";
+  if (payload.videoMessage) return "video";
+  if (payload.locationMessage) return "location";
+  if (payload.contactMessage || payload.contactsArrayMessage) return "contact";
+  if (payload.reactionMessage) return "reaction";
+  return "text";
+}
+
+function buildWhatsAppRoutingContext(input: {
+  baseText: string;
+  chatType: "direct" | "group" | "self" | "broadcast" | "unknown";
+  messageType: string;
+  contactName: string | null;
+  priority: WhatsAppContactPriority;
+  tags: string[];
+}) {
+  const notes: string[] = [];
+
+  if (input.contactName) {
+    notes.push(`Contact: ${input.contactName}.`);
+  }
+
+  if (input.priority === "vip" || input.priority === "high") {
+    notes.push(`This is a ${input.priority.toUpperCase()} priority conversation.`);
+  }
+
+  if (input.tags.length) {
+    notes.push(`Known contact tags: ${input.tags.slice(0, 4).join(", ")}.`);
+  }
+
+  if (input.tags.some((tag) => /client|work|business|lead|finance/i.test(tag))) {
+    notes.push("Default to a concise professional tone unless the user asks for something else.");
+  }
+
+  if (input.tags.some((tag) => /family|friend|personal/i.test(tag))) {
+    notes.push("A warmer and more familiar tone is acceptable when it fits the message.");
+  }
+
+  if (input.chatType === "group") {
+    notes.push("This reply is for a WhatsApp group audience. Keep it concise and avoid sounding overly personal.");
+  }
+
+  if (input.messageType !== "text") {
+    notes.push(`The original WhatsApp message arrived as ${input.messageType}. Use the extracted text as the source content.`);
+  }
+
+  if (!notes.length) {
+    return input.baseText;
+  }
+
+  return `[WhatsApp workspace context]\n${notes.map((note) => `- ${note}`).join("\n")}\n\n${input.baseText}`;
+}
+
 function resolveReplyJid(
   session: SessionRecord,
   targetJid?: string | null,
@@ -941,6 +1019,78 @@ async function persistPreferredChatTarget(
     .eq("user_id", userId)
     .eq("provider", "whatsapp")
     .catch(() => null);
+}
+
+async function getUserWhatsAppTimeZone(userId: string) {
+  const { data } = await db()
+    .from("users")
+    .select("timezone")
+    .eq("id", userId)
+    .maybeSingle()
+    .catch(() => ({ data: null }));
+
+  return (data?.timezone as string | undefined) ?? "Asia/Kolkata";
+}
+
+async function loadWhatsAppWorkspaceContact(
+  userId: string,
+  remoteJid: string | null,
+  remotePhone: string | null,
+) {
+  const byJid = remoteJid
+    ? await db()
+      .from("whatsapp_contacts")
+      .select("contact_name, notify_name, verified_name, priority, tags")
+      .eq("user_id", userId)
+      .eq("jid", remoteJid)
+      .maybeSingle()
+      .catch(() => ({ data: null }))
+    : { data: null };
+
+  if (byJid.data) {
+    return {
+      displayName:
+        sanitizeContactName(byJid.data.contact_name)
+        || sanitizeContactName(byJid.data.notify_name)
+        || sanitizeContactName(byJid.data.verified_name),
+      isKnown: true,
+      priority: normalizeWhatsAppPriority(byJid.data.priority),
+      tags: Array.isArray(byJid.data.tags)
+        ? byJid.data.tags.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        : [],
+    };
+  }
+
+  const byPhone = remotePhone
+    ? await db()
+      .from("whatsapp_contacts")
+      .select("contact_name, notify_name, verified_name, priority, tags")
+      .eq("user_id", userId)
+      .eq("phone_number", remotePhone)
+      .maybeSingle()
+      .catch(() => ({ data: null }))
+    : { data: null };
+
+  if (!byPhone.data) {
+    return {
+      displayName: null,
+      isKnown: false,
+      priority: "normal" as WhatsAppContactPriority,
+      tags: [] as string[],
+    };
+  }
+
+  return {
+    displayName:
+      sanitizeContactName(byPhone.data.contact_name)
+      || sanitizeContactName(byPhone.data.notify_name)
+      || sanitizeContactName(byPhone.data.verified_name),
+    isKnown: true,
+    priority: normalizeWhatsAppPriority(byPhone.data.priority),
+    tags: Array.isArray(byPhone.data.tags)
+      ? byPhone.data.tags.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      : [],
+  };
 }
 
 const STATIC_WELCOME_TEXT = [
@@ -1543,9 +1693,11 @@ async function handleInbound(
   remoteJid: string | null,
   originalMessage?: WAMessage | null,
   routedTextOverride?: string,
+  settingsOverride?: WhatsAppSettings | null,
 ) {
   const session = sessions.get(userId);
   const logFields = buildMessageLogFields(originalMessage ?? null, remoteJid, session);
+  const messageType = getInboundMessageType(originalMessage ?? null);
   const sentAt = new Date().toISOString();
 
   void db()
@@ -1554,7 +1706,7 @@ async function handleInbound(
       user_id: userId,
       direction: "inbound",
       content: text,
-      message_type: "text",
+      message_type: messageType,
       wa_message_id: waId,
       ...logFields,
       sent_at: sentAt,
@@ -1566,7 +1718,7 @@ async function handleInbound(
           user_id: userId,
           direction: "inbound",
           content: text,
-          message_type: "text",
+          message_type: messageType,
           wa_message_id: waId,
           sent_at: sentAt,
         })
@@ -1591,7 +1743,27 @@ async function handleInbound(
   }
 
   let finalReply: string | null = null;
-  const routedText = routedTextOverride?.trim() || text;
+  const settings = settingsOverride ?? await getWhatsAppSettings(userId).catch(() => null);
+  const userTimeZone = await getUserWhatsAppTimeZone(userId).catch(() => "Asia/Kolkata");
+  const workspaceContact = await loadWhatsAppWorkspaceContact(
+    userId,
+    logFields.remote_jid,
+    logFields.remote_phone,
+  ).catch(() => ({
+    displayName: null,
+    isKnown: false,
+    priority: "normal" as WhatsAppContactPriority,
+    tags: [] as string[],
+  }));
+  const priority = getWhatsAppPriorityForMessage(text, workspaceContact.priority);
+  const routedText = buildWhatsAppRoutingContext({
+    baseText: routedTextOverride?.trim() || text,
+    chatType: logFields.chat_type,
+    messageType,
+    contactName: workspaceContact.displayName || logFields.contact_name,
+    priority,
+    tags: workspaceContact.tags,
+  });
 
   console.log(`[agent] PATH A direct reply for ${userId}`);
   const directReply = await runDirectAgentReply(userId, routedText);
@@ -1635,20 +1807,181 @@ async function handleInbound(
     finalReply = buildEmergencyProfessionalFallback(text);
   }
 
+  const sensitivity = detectWhatsAppSensitivity(`${text}\n${finalReply}`);
+  const replyConfidence = scoreWhatsAppReplyConfidence({
+    sourceMessage: text,
+    draftReply: finalReply,
+    sensitivity,
+    isGroupMessage: logFields.chat_type === "group",
+  });
+  const decision = decideWhatsAppReplyAction({
+    settings: settings ?? {
+      automationMode: "auto_reply",
+      replyMode: "balanced",
+      groupReplyMode: "mention_only",
+      requireApprovalForSensitive: true,
+      allowGroupReplies: true,
+      allowDirectSendCommands: true,
+      quietHoursStart: null,
+      quietHoursEnd: null,
+    },
+    sensitivity,
+    isGroupMessage: logFields.chat_type === "group",
+    isKnownContact: workspaceContact.isKnown,
+    timeZone: userTimeZone,
+  });
+  finalReply = applyWhatsAppReplyMode(finalReply, settings?.replyMode ?? "balanced");
+  const scheduleWorkflows = (replySent: boolean) =>
+    scheduleWhatsAppWorkflowRunsFromInbound({
+      userId,
+      remoteJid: logFields.remote_jid,
+      remotePhone: logFields.remote_phone,
+      contactName: workspaceContact.displayName || logFields.contact_name,
+      text,
+      chatType: logFields.chat_type,
+      priority,
+      tags: workspaceContact.tags,
+      messageType,
+      finalReply,
+      replySent,
+    }).catch((error) =>
+      console.error(
+        `[agent] Failed to schedule WhatsApp workflows for ${userId}:`,
+        error instanceof Error ? error.message : error,
+      ),
+    );
+  const processDueWorkflows = () =>
+    processDueWhatsAppWorkflowRuns({ userId, limit: 8 }).catch((error) =>
+      console.error(
+        `[agent] Failed to process WhatsApp workflows for ${userId}:`,
+        error instanceof Error ? error.message : error,
+      ),
+    );
+
   if (jid && session) {
     void session.sock.sendPresenceUpdate("paused", jid).catch(() => null);
   }
 
-  if (jid && session && finalReply) {
-    await sendReply(userId, finalReply, jid).catch((error) =>
+  if (decision.action === "queue" && finalReply) {
+    const approval = await queueWhatsAppReplyApproval({
+      userId,
+      remoteJid: logFields.remote_jid,
+      remotePhone: logFields.remote_phone,
+      contactName: workspaceContact.displayName || logFields.contact_name,
+      sourceMessage: text,
+      draftReply: finalReply,
+      sensitivity,
+      confidence: replyConfidence,
+      reason: decision.reason,
+      priority,
+      auditPayload: {
+        contact_tags: workspaceContact.tags,
+        message_type: messageType,
+        chat_type: logFields.chat_type,
+      },
+    }).catch((error) => {
       console.error(
-        `[agent] Reply send failed for ${userId}:`,
+        `[agent] Failed to queue WhatsApp approval for ${userId}:`,
         error instanceof Error ? error.message : error,
-      ),
-    );
+      );
+      return null;
+    });
+
+    if (approval && session?.phone) {
+      await sendReply(
+        userId,
+        buildWhatsAppApprovalNotice(approval),
+        jidFromPhone(session.phone),
+      ).catch(() => null);
+    }
+    void scheduleWorkflows(false);
+    void processDueWorkflows();
     return;
   }
 
+  if (decision.action === "block") {
+    await markLatestWhatsAppThreadState({
+      userId,
+      remoteJid: logFields.remote_jid,
+      remotePhone: logFields.remote_phone,
+      needsReply: true,
+      approvalState: "blocked",
+      priority,
+      sensitivity,
+      replyConfidence,
+      auditPayload: {
+        reason: decision.reason,
+        contact_tags: workspaceContact.tags,
+        message_type: messageType,
+        blocked_at: new Date().toISOString(),
+      },
+    }).catch(() => null);
+
+    await writeWhatsAppAuditLog(userId, {
+      eventType: "reply_blocked",
+      actor: "system",
+      summary: `Blocked WhatsApp auto-reply for ${workspaceContact.displayName || logFields.contact_name || logFields.remote_phone || "contact"}.`,
+      targetValue: logFields.remote_jid ?? logFields.remote_phone,
+      metadata: {
+        reason: decision.reason,
+        sensitivity,
+        priority,
+        message_type: messageType,
+        chat_type: logFields.chat_type,
+      },
+    }).catch(() => null);
+    void scheduleWorkflows(false);
+    void processDueWorkflows();
+    return;
+  }
+
+  if (jid && session && finalReply) {
+    const sent = await sendReply(userId, finalReply, jid).catch((error) => {
+      console.error(
+        `[agent] Reply send failed for ${userId}:`,
+        error instanceof Error ? error.message : error,
+      );
+      return false;
+    });
+
+    await markLatestWhatsAppThreadState({
+      userId,
+      remoteJid: logFields.remote_jid,
+      remotePhone: logFields.remote_phone,
+      needsReply: !sent,
+      approvalState: sent ? "not_required" : "blocked",
+      priority,
+      sensitivity,
+      replyConfidence,
+      auditPayload: {
+        reason: decision.reason,
+        contact_tags: workspaceContact.tags,
+        message_type: messageType,
+        sent_at: sent ? new Date().toISOString() : null,
+      },
+    }).catch(() => null);
+
+    if (sent) {
+      await writeWhatsAppAuditLog(userId, {
+        eventType: "reply_sent",
+        actor: "system",
+        summary: `Sent WhatsApp auto-reply to ${workspaceContact.displayName || logFields.contact_name || logFields.remote_phone || "contact"}.`,
+        targetValue: logFields.remote_jid ?? logFields.remote_phone,
+        metadata: {
+          priority,
+          sensitivity,
+          confidence: replyConfidence,
+          message_type: messageType,
+          chat_type: logFields.chat_type,
+        },
+      }).catch(() => null);
+      void scheduleWorkflows(true);
+      void processDueWorkflows();
+      return;
+    }
+  }
+
+  void processDueWorkflows();
   console.error(`[agent] Could not send reply for ${userId}: jid=${jid}, session=${Boolean(session)}`);
 }
 
@@ -1872,11 +2205,19 @@ async function connectSession(userId: string): Promise<SessionRecord> {
       const isGroupMessage = Boolean(remoteJid && isGroupChatJid(remoteJid));
       const mentionedJids = isGroupMessage ? getMentionedJids(message) : [];
       let replyTargetJid = safeRemoteJid;
+      let whatsAppSettings: WhatsAppSettings | null = null;
 
       if (isGroupMessage) {
+        whatsAppSettings = await getWhatsAppSettings(userId).catch(() => null);
         const isMentioned = isBotMentioned(message, current);
+        const allowGroupReplies = whatsAppSettings?.allowGroupReplies ?? true;
+        const groupReplyMode = whatsAppSettings?.groupReplyMode ?? "mention_only";
 
-        if (!isMentioned) {
+        if (!allowGroupReplies || groupReplyMode === "never") {
+          continue;
+        }
+
+        if (groupReplyMode === "mention_only" && !isMentioned) {
           continue;
         }
 
@@ -2358,7 +2699,15 @@ async function connectSession(userId: string): Promise<SessionRecord> {
       const agentText = isGroupMessage
         ? `[Group message — respond concisely for a group audience]\n${text}`
         : text;
-      await handleInbound(userId, text, message.key.id ?? null, replyTargetJid, message, agentText);
+      await handleInbound(
+        userId,
+        text,
+        message.key.id ?? null,
+        replyTargetJid,
+        message,
+        agentText,
+        whatsAppSettings,
+      );
     }
   });
 

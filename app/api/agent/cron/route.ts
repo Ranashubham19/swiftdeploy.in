@@ -5,6 +5,7 @@ import {
   getClawCloudErrorMessage,
   isValidSharedSecret,
 } from "@/lib/clawcloud-supabase";
+import { processDueWhatsAppWorkflowRuns } from "@/lib/clawcloud-whatsapp-workflows";
 import { env } from "@/lib/env";
 
 export const runtime = "nodejs";
@@ -15,12 +16,16 @@ async function handleCronRequest(request: NextRequest) {
   }
 
   try {
-    const result = await runDueClawCloudTasks();
+    const [result, workflowRuns] = await Promise.all([
+      runDueClawCloudTasks(),
+      processDueWhatsAppWorkflowRuns({ limit: 100 }).catch(() => []),
+    ]);
     return NextResponse.json({
       success: true,
       timestamp: result.timestamp,
       fired: result.fired.length,
       errors: result.errors.length,
+      whatsappWorkflowsProcessed: workflowRuns.length,
       details: result,
     });
   } catch (error) {

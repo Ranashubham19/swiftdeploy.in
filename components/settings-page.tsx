@@ -461,7 +461,13 @@ export function SettingsPage({ config }: SettingsPageProps) {
                     </div>
                     <div className={styles.integrationActions}>
                       <span className={whatsapp ? styles.connectedBadge : styles.statusBadgeMuted}>{whatsapp ? "Connected" : "Needs setup"}</span>
-                      <button type="button" className={styles.secondaryButton} onClick={() => router.push("/setup")}>Open setup</button>
+                      <button
+                        type="button"
+                        className={styles.secondaryButton}
+                        onClick={() => router.push(whatsapp ? "/whatsapp" : "/setup")}
+                      >
+                        {whatsapp ? "Open control center" : "Open setup"}
+                      </button>
                       {whatsapp ? <button type="button" className={styles.dangerButton} disabled={Boolean(saving.whatsapp)} onClick={() => void disconnect("whatsapp")}>{saving.whatsapp ? "Working..." : "Disconnect"}</button> : null}
                     </div>
                   </div>
