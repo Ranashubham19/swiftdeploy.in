@@ -78,6 +78,9 @@ import type {
 loadEnvConfig(process.cwd());
 
 const STALE_MS = 60_000;
+const QR_WAIT_TIMEOUT_MS = 6_000;
+const QR_WAIT_POLL_MS = 250;
+const QR_CONNECTING_RESET_MS = 4_000;
 const DIRECT_REPLY_TIMEOUT_MS = 50_000;
 const HTTP_REPLY_TIMEOUT_MS = 55_000;
 const STREAM_REPLY_MIN_LENGTH = 900;
@@ -2714,13 +2717,36 @@ async function connectSession(userId: string): Promise<SessionRecord> {
   return record;
 }
 
-function shouldRegenerateQr(session: SessionRecord, forceRefresh: boolean) {
-  if (session.status !== "waiting") {
-    return false;
+async function waitForQrOrConnection(userId: string, timeoutMs = QR_WAIT_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const session = sessions.get(userId);
+    if (!session) {
+      return null;
+    }
+
+    if (session.qr || session.status === "connected") {
+      return session;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, QR_WAIT_POLL_MS));
   }
 
+  return sessions.get(userId) ?? null;
+}
+
+function shouldRegenerateQr(session: SessionRecord, forceRefresh: boolean) {
   if (forceRefresh) {
     return true;
+  }
+
+  if (session.status === "connecting") {
+    return !session.qr && Date.now() - session.startedAt > QR_CONNECTING_RESET_MS;
+  }
+
+  if (session.status !== "waiting") {
+    return false;
   }
 
   if (!session.qr || !session.qrIssuedAt) {
@@ -2879,14 +2905,18 @@ app.get("/wa/qr/:userId", auth, async (req, res) => {
     const forceRefresh = String(req.query.refresh ?? "").trim() === "1";
 
     let session = await connectSession(userId);
+    session = (await waitForQrOrConnection(userId, forceRefresh ? 2_500 : QR_WAIT_TIMEOUT_MS)) ?? session;
+
     if (shouldRegenerateQr(session, forceRefresh)) {
       console.log(
-        `[agent] Refreshing QR for ${userId} (forced=${forceRefresh}, ageMs=${
-          session.qrIssuedAt ? Date.now() - session.qrIssuedAt : -1
+        `[agent] Refreshing QR for ${userId} (forced=${forceRefresh}, status=${session.status}, ageMs=${
+          session.qrIssuedAt ? Date.now() - session.qrIssuedAt : Date.now() - session.startedAt
         })`,
       );
       await discardSession(userId, sessions.get(userId), { deleteAuth: true });
+      await markDisconnected(userId);
       session = await connectSession(userId);
+      session = (await waitForQrOrConnection(userId, QR_WAIT_TIMEOUT_MS)) ?? session;
     }
 
     res.json({
