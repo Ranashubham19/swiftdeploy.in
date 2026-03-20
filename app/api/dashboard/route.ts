@@ -15,7 +15,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const data = await getClawCloudDashboardData(auth.user.id);
+    const data = await getClawCloudDashboardData(auth.user.id, auth.user.email ?? null);
     return NextResponse.json(data);
   } catch (error) {
     return NextResponse.json(

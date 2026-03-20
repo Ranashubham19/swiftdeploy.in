@@ -1,6 +1,10 @@
 import { env } from "@/lib/env";
 import { isCricketAvailable } from "@/lib/clawcloud-cricket";
 import { getImageGenerationStatus } from "@/lib/clawcloud-imagegen";
+import {
+  getGoogleWorkspaceCoreAccess,
+  getGoogleWorkspaceExtendedAccess,
+} from "@/lib/google-workspace-rollout";
 import { isVisionAvailable } from "@/lib/clawcloud-vision";
 import { isWhisperAvailable } from "@/lib/clawcloud-whisper";
 
@@ -12,6 +16,7 @@ export type RuntimeFeatureState = {
 
 export type ClawCloudRuntimeFeatureStatus = {
   google_workspace_connect: RuntimeFeatureState;
+  google_workspace_extended_connect: RuntimeFeatureState;
   whatsapp_agent: RuntimeFeatureState;
   telegram_bot: RuntimeFeatureState;
   voice_transcription: RuntimeFeatureState;
@@ -33,23 +38,27 @@ function buildState(
   };
 }
 
-export function getGoogleWorkspaceConnectAvailable() {
-  return Boolean(
-    env.GOOGLE_WORKSPACE_PUBLIC_ENABLED
-    && !env.GOOGLE_WORKSPACE_TEMPORARY_HOLD
-    && env.GOOGLE_CLIENT_ID
-    && env.GOOGLE_CLIENT_SECRET
-    && env.NEXT_PUBLIC_APP_URL,
-  );
+export function getGoogleWorkspaceConnectAvailable(userEmail?: string | null) {
+  return getGoogleWorkspaceCoreAccess(userEmail).available;
 }
 
-export function getClawCloudRuntimeFeatureStatus(): ClawCloudRuntimeFeatureStatus {
+export function getGoogleWorkspaceExtendedConnectAvailable(userEmail?: string | null) {
+  return getGoogleWorkspaceExtendedAccess(userEmail).available;
+}
+
+export function getClawCloudRuntimeFeatureStatus(userEmail?: string | null): ClawCloudRuntimeFeatureStatus {
   const imageGeneration = getImageGenerationStatus();
+  const googleWorkspaceAccess = getGoogleWorkspaceCoreAccess(userEmail);
+  const googleWorkspaceExtendedAccess = getGoogleWorkspaceExtendedAccess(userEmail);
 
   return {
     google_workspace_connect: buildState(
-      getGoogleWorkspaceConnectAvailable(),
-      "Google OAuth is disabled or not fully configured for public Workspace connect.",
+      googleWorkspaceAccess.available,
+      googleWorkspaceAccess.reason,
+    ),
+    google_workspace_extended_connect: buildState(
+      googleWorkspaceExtendedAccess.available,
+      googleWorkspaceExtendedAccess.reason,
     ),
     whatsapp_agent: buildState(
       Boolean((env.AGENT_SERVER_URL || env.BACKEND_API_URL) && env.AGENT_SECRET),

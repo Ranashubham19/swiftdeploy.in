@@ -1,6 +1,32 @@
 import { env } from "@/lib/env";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 
+type LocalWhatsAppResolveResult = {
+  name: string;
+  phone: string | null;
+  jid: string | null;
+};
+
+type LocalWhatsAppRuntime = {
+  send?: (input: {
+    userId?: string | null;
+    phone?: string | null;
+    jid?: string | null;
+    message: string;
+    contactName?: string | null;
+  }) => Promise<boolean>;
+  resolveContact?: (input: {
+    userId: string;
+    contactName: string;
+  }) => Promise<LocalWhatsAppResolveResult | null>;
+};
+
+let localWhatsAppRuntime: LocalWhatsAppRuntime | null = null;
+
+export function registerClawCloudWhatsAppRuntime(runtime: LocalWhatsAppRuntime) {
+  localWhatsAppRuntime = runtime;
+}
+
 function normalizeAgentServerUrl(url: string) {
   return url.trim().replace(/\/+$/, "");
 }
@@ -98,10 +124,36 @@ export async function disconnectClawCloudWhatsApp(userId: string) {
   return true;
 }
 
-export async function sendClawCloudWhatsAppToPhone(phone: string, message: string) {
+export async function sendClawCloudWhatsAppToPhone(
+  phone: string | null,
+  message: string,
+  options?: { userId?: string; contactName?: string | null; jid?: string | null },
+) {
+  if (!getAgentServerBaseUrl() || !env.AGENT_SECRET) {
+    if (localWhatsAppRuntime?.send) {
+      const ok = await localWhatsAppRuntime.send({
+        userId: options?.userId ?? null,
+        phone,
+        jid: options?.jid ?? null,
+        message,
+        contactName: options?.contactName ?? null,
+      });
+      if (!ok) {
+        throw new Error("Failed to send WhatsApp message.");
+      }
+      return true;
+    }
+  }
+
   const response = await agentServerFetch("/wa/send", {
     method: "POST",
-    body: JSON.stringify({ phone, message }),
+    body: JSON.stringify({
+      phone: phone ?? null,
+      jid: options?.jid ?? null,
+      message,
+      userId: options?.userId ?? null,
+      contactName: options?.contactName ?? null,
+    }),
   });
 
   const json = (await response.json().catch(() => ({}))) as { error?: string };
@@ -110,6 +162,47 @@ export async function sendClawCloudWhatsAppToPhone(phone: string, message: strin
   }
 
   return true;
+}
+
+export async function resolveClawCloudWhatsAppContact(userId: string, contactName: string) {
+  if (!getAgentServerBaseUrl() || !env.AGENT_SECRET) {
+    if (localWhatsAppRuntime?.resolveContact) {
+      return localWhatsAppRuntime.resolveContact({ userId, contactName });
+    }
+  }
+
+  const response = await agentServerFetch("/wa/resolve-contact", {
+    method: "POST",
+    body: JSON.stringify({
+      userId,
+      contactName,
+    }),
+  });
+
+  if (response.status === 404) {
+    return null;
+  }
+
+  const json = (await response.json().catch(() => ({}))) as {
+    error?: string;
+    name?: string;
+    phone?: string | null;
+    jid?: string | null;
+  };
+
+  if (!response.ok) {
+    throw new Error(json.error || "Failed to resolve WhatsApp contact.");
+  }
+
+  if (!json.name || !json.phone) {
+    return null;
+  }
+
+  return {
+    name: json.name,
+    phone: json.phone ?? null,
+    jid: json.jid ?? null,
+  };
 }
 
 export async function sendClawCloudWhatsAppMessage(userId: string, message: string) {
@@ -125,7 +218,7 @@ export async function sendClawCloudWhatsAppMessage(userId: string, message: stri
       return false;
     }
 
-    await sendClawCloudWhatsAppToPhone(account.phone_number, message);
+    await sendClawCloudWhatsAppToPhone(account.phone_number, message, { userId });
     shouldLogLocally = true;
   }
 

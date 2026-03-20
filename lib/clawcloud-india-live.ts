@@ -112,6 +112,33 @@ type TrainStatus = {
   runningStatus?: string;
 };
 
+type TrainScheduleStop = {
+  station_name?: string;
+  stationCode?: string;
+  station_code?: string;
+  state_name?: string;
+  day?: string | number;
+  arrival_time?: string;
+  departure_time?: string;
+  halt_time?: string;
+  distance_from_source?: string | number;
+  stop?: boolean;
+};
+
+type TrainSchedule = {
+  trainName?: string;
+  trainNumber?: string;
+  train_name?: string;
+  train_number?: string;
+  from?: string;
+  to?: string;
+  from_station_name?: string;
+  to_station_name?: string;
+  source?: string;
+  destination?: string;
+  route?: TrainScheduleStop[];
+};
+
 type RapidTrainResult<T> = {
   data: T | null;
   status: number | null;
@@ -375,6 +402,106 @@ async function fetchTrainRunningStatus(trainNumber: string): Promise<RapidTrainR
   }
 }
 
+async function fetchTrainSchedule(trainNumber: string): Promise<RapidTrainResult<TrainSchedule>> {
+  const apiKey = process.env.RAPIDAPI_KEY?.trim();
+  if (!apiKey) {
+    return { data: null, status: null };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`https://${IRCTC_API_HOST}/api/v1/getTrainSchedule?trainNo=${trainNumber}`, {
+      signal: controller.signal,
+      headers: {
+        "X-RapidAPI-Key": apiKey,
+        "X-RapidAPI-Host": IRCTC_API_HOST,
+      },
+    });
+
+    if (!response.ok) {
+      return { data: null, status: response.status };
+    }
+
+    const payload = await response.json() as { data?: TrainSchedule };
+    return { data: payload.data ?? null, status: response.status };
+  } catch {
+    return { data: null, status: null };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function normalizeScheduleTime(value?: string | null): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  if (/^(n\/?a|source|dest|destination|--|00:00)$/i.test(trimmed)) return null;
+  return trimmed;
+}
+
+function normalizeScheduleStation(stop?: TrainScheduleStop | null): string | null {
+  const name = stop?.station_name?.trim()
+    || stop?.stationCode?.trim()
+    || stop?.station_code?.trim();
+  return name || null;
+}
+
+function formatScheduleTiming(stop?: TrainScheduleStop | null, edge: "origin" | "destination" | "mid" = "mid"): string {
+  if (!stop) return "Timing not available";
+
+  const arrival = normalizeScheduleTime(stop.arrival_time);
+  const departure = normalizeScheduleTime(stop.departure_time);
+  const halt = normalizeScheduleTime(stop.halt_time);
+  const day = stop.day ? `Day ${stop.day}` : null;
+
+  if (edge === "origin") {
+    return [departure ? `Departure ${departure}` : null, day].filter(Boolean).join(" | ") || "Departure time not available";
+  }
+
+  if (edge === "destination") {
+    return [arrival ? `Arrival ${arrival}` : null, day].filter(Boolean).join(" | ") || "Arrival time not available";
+  }
+
+  return [
+    arrival ? `Arrival ${arrival}` : null,
+    departure ? `Departure ${departure}` : null,
+    halt ? `Halt ${halt}` : null,
+    day,
+  ].filter(Boolean).join(" | ") || "Timing not available";
+}
+
+function formatTrainScheduleReply(schedule: TrainSchedule, trainNumber: string): string {
+  const route = (schedule.route ?? []).filter((stop) => stop && (stop.stop !== false));
+  const originStop = route[0] ?? null;
+  const destinationStop = route.length ? route[route.length - 1] : null;
+  const trainName = schedule.trainName || schedule.train_name || "Train";
+  const resolvedTrainNumber = schedule.trainNumber || schedule.train_number || trainNumber;
+  const originStation = schedule.from || schedule.from_station_name || schedule.source || normalizeScheduleStation(originStop) || "Origin station unavailable";
+  const destinationStation = schedule.to || schedule.to_station_name || schedule.destination || normalizeScheduleStation(destinationStop) || "Destination station unavailable";
+
+  const majorStops = route
+    .filter((stop, index) => index > 0 && index < route.length - 1)
+    .filter((stop) => normalizeScheduleStation(stop) && (normalizeScheduleTime(stop.arrival_time) || normalizeScheduleTime(stop.departure_time)))
+    .slice(0, 3);
+
+  return [
+    `Train Schedule: ${trainName} (${resolvedTrainNumber})`,
+    "",
+    `*Origin station:* ${originStation}`,
+    `*Departure:* ${formatScheduleTiming(originStop, "origin")}`,
+    `*Destination station:* ${destinationStation}`,
+    `*Arrival:* ${formatScheduleTiming(destinationStop, "destination")}`,
+    "",
+    "*Major timings:*",
+    ...(majorStops.length
+      ? majorStops.map((stop) => `- *${normalizeScheduleStation(stop)}:* ${formatScheduleTiming(stop)}`)
+      : ["- Major intermediate station timings were not returned by the provider."]),
+    "",
+    "_Schedule data via IRCTC provider._",
+  ].join("\n");
+}
+
 function formatPnrReply(pnr: PnrStatus): string {
   const statusIcon = (status: string) => {
     if (/confirm|cnf/i.test(status)) {
@@ -429,16 +556,24 @@ function buildTrainFallbackReply(
     status === 429
       ? "The live train provider has likely hit its free-tier quota for now."
       : status === 400
-        ? "The train input looks invalid or the provider rejected the start-day details."
+        ? (
+          type === "schedule"
+            ? `I could not get a usable schedule response for train ${value} from the rail provider.`
+            : "The train input looks invalid or the provider rejected the start-day details."
+        )
         : status === 403 || status === 401
           ? "The live train provider is currently rejecting API access."
-          : "Live train data is temporarily unavailable from the provider.";
+          : (
+            type === "schedule"
+              ? `I could not get live schedule details for train ${value} from the rail provider right now.`
+              : "Live train data is temporarily unavailable from the provider."
+          );
 
   const actionLine =
     type === "pnr"
       ? `Use the same PNR ${value} on enquiry.indianrail.gov.in for an official check.`
       : type === "schedule"
-        ? `Use train number ${value} on NTES or enquiry.indianrail.gov.in to check schedule and platform details.`
+        ? `Use train number ${value} on NTES or enquiry.indianrail.gov.in to check the origin station, destination station, departure time, and major arrival timings.`
         : `Use train number ${value} on the NTES app or enquiry.indianrail.gov.in/live to confirm the latest running status.`;
 
   return [
@@ -488,7 +623,10 @@ export async function answerTrainQuery(message: string): Promise<string | null> 
   }
 
   if (detected.type === "schedule" && detected.value) {
-    return buildTrainFallbackReply("schedule", detected.value, 400);
+    const result = await fetchTrainSchedule(detected.value);
+    return result.data
+      ? formatTrainScheduleReply(result.data, detected.value)
+      : buildTrainFallbackReply("schedule", detected.value, result.status);
   }
 
   return null;

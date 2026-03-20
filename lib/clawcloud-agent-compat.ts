@@ -247,7 +247,7 @@ export async function completeClawCloudOnboarding(input: {
   };
 }
 
-export async function getClawCloudDashboardData(userId: string) {
+export async function getClawCloudDashboardData(userId: string, userEmail?: string | null) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const today = formatDateKey();
 
@@ -338,7 +338,7 @@ export async function getClawCloudDashboardData(userId: string) {
       active_task_limit: clawCloudActiveTaskLimits[userPlan],
     },
     subscription: subscription.data ?? null,
-    feature_status: getClawCloudRuntimeFeatureStatus(),
+    feature_status: getClawCloudRuntimeFeatureStatus(userEmail ?? userProfile.data?.email ?? null),
   };
 }
 

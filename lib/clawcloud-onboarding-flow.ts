@@ -325,7 +325,7 @@ export async function handleOnboardingReply(
   const city = state.city ?? "your city";
 
   await setUserLocale(userId, language.locale);
-  await saveMemoryFact(userId, "language_preference", language.label, "explicit", 1);
+  await saveMemoryFact(userId, "reply_language", language.label, "explicit", 1);
   await clearOnboardingState(userId);
   await markOnboardingComplete(userId);
 

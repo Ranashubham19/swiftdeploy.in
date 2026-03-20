@@ -274,6 +274,7 @@ export interface PublicAppConfig {
   googleRollout: {
     publicSignInEnabled: boolean;
     publicWorkspaceEnabled: boolean;
+    publicWorkspaceExtendedEnabled: boolean;
   };
   firebase: {
     apiKey: string;

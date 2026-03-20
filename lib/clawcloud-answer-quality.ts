@@ -140,6 +140,7 @@ function clampConfidenceLevel(value: string | null | undefined): ClawCloudAnswer
 
 function domainForQuestion(question: string, intent: string, category: string, isDocumentBound: boolean): ClawCloudAnswerDomain {
   if (isDocumentBound) return "document";
+  if (intent === "language" || category === "language") return "general";
   if (detectTaxQuery(question)) return "tax";
   if (intent === "finance" || category === "finance") return "finance";
   if (matchesAny(question, MENTAL_HEALTH_PATTERNS)) return "mental_health";
@@ -168,7 +169,10 @@ export function buildClawCloudAnswerQualityProfile(input: {
   const isHighStakes = domain === "health" || domain === "mental_health" || domain === "legal" || domain === "tax" || domain === "finance";
   const requiresLiveGrounding = domain === "live" || domain === "finance";
   const requiresEvidence = requiresLiveGrounding || domain === "health" || domain === "mental_health" || domain === "legal";
-  const requiresVerification = requiresEvidence || domain === "tax" || isAdvice || input.category === "news";
+  const requiresVerification =
+    domain === "live"
+      ? false
+      : requiresEvidence || domain === "tax" || isAdvice || input.category === "news";
 
   return {
     intent: input.intent,
@@ -180,7 +184,7 @@ export function buildClawCloudAnswerQualityProfile(input: {
     requiresEvidence,
     requiresLiveGrounding,
     requiresVerification,
-    confidenceFloor: requiresVerification ? "medium" : "low",
+    confidenceFloor: requiresLiveGrounding || requiresVerification ? "medium" : "low",
   };
 }
 

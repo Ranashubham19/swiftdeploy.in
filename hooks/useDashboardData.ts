@@ -56,6 +56,7 @@ export type DashboardRuntimeFeatureState = {
 
 export type DashboardFeatureStatus = {
   google_workspace_connect: DashboardRuntimeFeatureState;
+  google_workspace_extended_connect: DashboardRuntimeFeatureState;
   whatsapp_agent: DashboardRuntimeFeatureState;
   telegram_bot: DashboardRuntimeFeatureState;
   voice_transcription: DashboardRuntimeFeatureState;

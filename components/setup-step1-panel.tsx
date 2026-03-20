@@ -145,18 +145,20 @@ export function SetupStepOnePanel({
         <h2>Connect Gmail and Calendar</h2>
         <p>
           Give ClawCloud secure access to your inbox and schedule so it can draft replies, create
-          briefings, and prepare meeting context professionally.
+          briefings, and prepare meeting context professionally. Drive and Sheets access can be
+          added later from Settings when you need it.
         </p>
       </div>
 
       <div className={styles.step1Body}>
         {!googleWorkspacePublicEnabled ? (
           <div className={styles.rolloutNotice}>
-            <strong className={styles.rolloutTitle}>Google Workspace is paused for now</strong>
+            <strong className={styles.rolloutTitle}>Google Workspace verification is pending</strong>
             <p className={styles.rolloutText}>
-              Gmail and Calendar connect is temporarily paused while verification finishes. You can
-              continue setup right now, test the rest of ClawCloud, and connect Google later from
-              the dashboard without hitting raw OAuth errors.
+              Gmail and Calendar connect stays behind a rollout gate until Google approves the app
+              for public use. You can continue setup right now, test the rest of ClawCloud, and
+              connect Google later from the dashboard without sending users into the raw
+              unverified-app warning.
             </p>
           </div>
         ) : null}
@@ -253,7 +255,7 @@ export function SetupStepOnePanel({
                 ? "Gmail and Calendar connected"
                 : googleWorkspacePublicEnabled
                   ? "Continue with Google"
-                  : "Google Workspace paused temporarily"}
+                  : "Google Workspace verification pending"}
           </span>
         </button>
 

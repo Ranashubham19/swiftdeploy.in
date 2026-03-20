@@ -110,7 +110,7 @@ export async function PATCH(request: NextRequest) {
     await Promise.all([
       saveMemoryFact(auth.user.id, "name", fullName, "explicit", 1.0),
       saveMemoryFact(auth.user.id, "timezone", timezone, "explicit", 1.0),
-      saveMemoryFact(auth.user.id, "language_preference", localeNames[language], "explicit", 1.0),
+      saveMemoryFact(auth.user.id, "reply_language", localeNames[language], "explicit", 1.0),
     ]);
 
     return NextResponse.json({ user: { ...data, language } });

@@ -9,7 +9,12 @@
 //   • Context-aware follow-ups — understands "In python" as context continuation
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { getClawCloudCalendarEvents, getClawCloudGmailMessages } from "@/lib/clawcloud-google";
+import {
+  buildGoogleReconnectRequiredReply,
+  getClawCloudCalendarEvents,
+  getClawCloudGmailMessages,
+  isClawCloudGoogleReconnectRequiredError,
+} from "@/lib/clawcloud-google";
 import { upsertAnalyticsDaily } from "@/lib/clawcloud-analytics";
 import {
   parseCalendarAttendees,
@@ -101,6 +106,7 @@ import {
   translateMessage,
   type SupportedLocale,
 } from "@/lib/clawcloud-i18n";
+import { resolveSupportedLocale } from "@/lib/clawcloud-locales";
 import { sendClawCloudTelegramMessage } from "@/lib/clawcloud-telegram";
 import {
   clawCloudActiveTaskLimits,
@@ -111,8 +117,13 @@ import {
   type ClawCloudTaskConfig,
   type ClawCloudTaskType,
 } from "@/lib/clawcloud-types";
-import { sendClawCloudWhatsAppMessage, sendClawCloudWhatsAppToPhone } from "@/lib/clawcloud-whatsapp";
 import {
+  resolveClawCloudWhatsAppContact,
+  sendClawCloudWhatsAppMessage,
+  sendClawCloudWhatsAppToPhone,
+} from "@/lib/clawcloud-whatsapp";
+import {
+  loadContacts,
   listContactsFormatted,
   parseSaveContactCommand,
   parseSendMessageCommand,
@@ -138,7 +149,9 @@ import {
   detectMemoryCommand,
   formatMemoryClearedReply,
   formatMemoryForgotReply,
+  formatMemoryForgotManyReply,
   formatMemorySavedReply,
+  formatMemorySavedFactsReply,
   formatMemorySuggestionsReply,
   formatProfileReply,
   getAllMemoryFacts,
@@ -3938,6 +3951,8 @@ function isMathOrStatisticsQuestion(text: string): boolean {
     || /\b(what is|how much is|find|evaluate)\s+\d[\d,]*(?:\.\d+)?\s*(?:%|percent)\s+of\s+\d[\d,]*(?:\.\d+)?\b/.test(normalized)
     || /\b\d[\d,]*(?:\.\d+)?\s*(?:%|percent)\s+of\s+\d[\d,]*(?:\.\d+)?\b/.test(normalized)
     || /\b\d[\d,]*(?:\.\d+)?\s*[\+\-\*\/\^]\s*\d[\d,]*(?:\.\d+)?\b/.test(normalized)
+    || /\b(successive discounts?|discount chain|final price after discount)\b/.test(normalized)
+    || /\bdiscounts?\s+of\s+\d+(?:\.\d+)?%\s+(?:and|then)\s+\d+(?:\.\d+)?%/.test(normalized)
     || /\b(probability (of|that)|expected value|confidence interval|p-?value|standard deviation|variance of|mean of|standard error|t-?stat)\b/.test(normalized)
     || /\b(statistical(ly)?|regression|correlation|significance|hypothesis|distribution of|normal distribution|beta|coefficient|policy study|program evaluation)\b/.test(normalized)
     || /\b(value at risk|var|cvar|expected shortfall|stress loss|tail risk|spot price spikes|heat waves|hedging with forwards|forward hedge|hedge book|power retailer)\b/.test(normalized)
@@ -3972,15 +3987,22 @@ function looksLikeArchitectureCodingQuestion(text: string, rawText: string, word
 
 function looksLikeCalendarQuestion(text: string) {
   return (
-    /\b(show|check|look at|summarize|list|review|pull)\s+(my\s+)?(calendar|schedule|agenda|meetings?|events?)\b/.test(text)
+    /\b(show|check|look at|summarize|list|review|pull|give|tell|share)\s+(?:me\s+)?(?:(?:my|today(?:'|\u2019)?s|tomorrow(?:'|\u2019)?s)\s+)?(calendar|schedule|agenda|meetings?|events?)\b/.test(text)
+    || /\b(?:give|tell|show|share)\s+(?:me\s+)?(?:the\s+)?(?:start times?|meeting titles?|free gaps?|availability)\b.*\b(calendar|schedule|agenda|meetings?|events?)\b/.test(text)
+    || /\b(show|check|look at|summarize|list|review|pull|give|tell|share)\s+(me\s+)?(my\s+)?(calendar|schedule|agenda|meetings?|events?)\b/.test(text)
     || /\b(my\s+)?(meetings?|calendar|schedule|events?|appointments?|agenda)\s+(today|tomorrow|tonight|this week|next week|for today|for tomorrow|right now|upcoming)\b/.test(text)
     || /\bwhat('s|\s+is)\s+(on\s+)?(my\s+)?(calendar|schedule|agenda|plate)\b/.test(text)
     || /\bdo i have (any\s+)?(meetings?|events?|calls?)\b/.test(text)
-    || /\b(today'?s|tomorrow'?s)\s+(meetings?|calendar|schedule|agenda)\b/.test(text)
+    || /\b(today(?:'|\u2019)?s|tomorrow(?:'|\u2019)?s)\s+(meetings?|calendar|schedule|agenda)\b/.test(text)
     || /\b(calendar|schedule|meetings?|events?)\b.*\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/.test(text)
     || /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b.*\b(calendar|schedule|meetings?|events?|overlap|back-to-back)\b/.test(text)
     || /\b(overlap|back-to-back|conflict|double-booked)\b.*\b(calendar|schedule|meetings?|events?)\b/.test(text)
     || /\b(calendar|schedule|meetings?|events?)\b.*\b(morning|afternoon|evening|night|between \d|from \d)\b/.test(text)
+    || /\b(calendar|schedule|meetings?|events?)\b.*\b(free gap|free gaps|free slot|free slots|free time|availability|available time)\b/.test(text)
+    || (
+      /\b(calendar|schedule|agenda|meetings?|events?)\b/.test(text)
+      && /\b(today|tomorrow|tonight|this week|next week|start times?|meeting titles?|free gaps?|free slots?|free time|availability|available time|longer than \d+\s*(?:min|mins|minute|minutes|hour|hours))\b/.test(text)
+    )
   );
 }
 
@@ -3998,6 +4020,8 @@ type CalendarQueryWindow = {
   timeMin: string;
   timeMax: string;
   checksSpacing: boolean;
+  wantsFreeGaps: boolean;
+  gapThresholdMinutes: number;
 };
 
 function nextWeekdayDate(base: Date, weekday: number) {
@@ -4118,11 +4142,27 @@ function buildCalendarQueryWindow(text: string): CalendarQueryWindow {
     }
   }
 
+  const wantsFreeGaps =
+    /\b(free gap|free gaps|free slot|free slots|free time|open slot|open slots|availability|available slot|available time)\b/.test(normalized)
+    || /\bgap\b.*\b(min|mins|minute|minutes|hour|hours|hr|hrs)\b/.test(normalized);
+
+  const gapThresholdMatch = normalized.match(
+    /\b(?:longer than|more than|over|at least|minimum of|min(?:imum)? gap of)\s+(\d+)\s*(min|mins|minute|minutes|hour|hours|hr|hrs)\b/,
+  );
+  let gapThresholdMinutes = wantsFreeGaps ? 30 : 0;
+  if (gapThresholdMatch) {
+    const amount = Number.parseInt(gapThresholdMatch[1] ?? "0", 10);
+    const unit = (gapThresholdMatch[2] ?? "min").toLowerCase();
+    gapThresholdMinutes = unit.startsWith("h") ? amount * 60 : amount;
+  }
+
   return {
     label,
     timeMin: timeMin.toISOString(),
     timeMax: timeMax.toISOString(),
     checksSpacing: /\b(overlap|back-to-back|conflict|double-booked)\b/.test(normalized),
+    wantsFreeGaps,
+    gapThresholdMinutes,
   };
 }
 
@@ -4167,6 +4207,230 @@ function findCalendarBackToBack(events: Array<{ start: string; end: string; summ
   return pairs;
 }
 
+function findCalendarFreeGaps(
+  events: Array<{ start: string; end: string; summary: string }>,
+  window: Pick<CalendarQueryWindow, "timeMin" | "timeMax" | "gapThresholdMinutes">,
+  timezone: string,
+) {
+  const freeGaps: string[] = [];
+  const sorted = [...events].sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+  const windowStart = Date.parse(window.timeMin);
+  const windowEnd = Date.parse(window.timeMax);
+  let cursor = windowStart;
+
+  for (const event of sorted) {
+    const eventStart = Date.parse(event.start);
+    const eventEnd = Date.parse(event.end || event.start);
+    if (!Number.isFinite(eventStart) || !Number.isFinite(eventEnd)) {
+      continue;
+    }
+
+    const boundedStart = Math.max(eventStart, windowStart);
+    const boundedEnd = Math.min(eventEnd, windowEnd);
+    if (boundedStart > cursor) {
+      const gapMinutes = Math.round((boundedStart - cursor) / 60000);
+      if (gapMinutes >= window.gapThresholdMinutes) {
+        freeGaps.push(
+          `${formatCalendarEventTime(new Date(cursor).toISOString(), timezone)} - ${formatCalendarEventTime(new Date(boundedStart).toISOString(), timezone)} (${gapMinutes} min free)`,
+        );
+      }
+    }
+
+    cursor = Math.max(cursor, boundedEnd);
+    if (cursor >= windowEnd) {
+      break;
+    }
+  }
+
+  if (windowEnd > cursor) {
+    const gapMinutes = Math.round((windowEnd - cursor) / 60000);
+    if (gapMinutes >= window.gapThresholdMinutes) {
+      freeGaps.push(
+        `${formatCalendarEventTime(new Date(cursor).toISOString(), timezone)} - ${formatCalendarEventTime(new Date(windowEnd).toISOString(), timezone)} (${gapMinutes} min free)`,
+      );
+    }
+  }
+
+  return freeGaps;
+}
+
+function hasExplicitGmailSearchOperators(text: string) {
+  return /\b(?:is|from|to|label|category|newer_than|older_than|before|after|subject|has)\s*:/i.test(text);
+}
+
+function looksLikeEmailSearchQuestion(text: string) {
+  const t = text.toLowerCase().trim();
+  if (
+    /\b(spending|expenses?|budget|receipt|invoice|transaction|money spent|cost me)\b/.test(t)
+  ) {
+    return false;
+  }
+
+  return (
+    /\b(search|find|look up|check|show|get|give|tell|summarize|list|review|pull)\s+(?:me\s+)?(?:(?:my|the|today(?:'|\u2019)?s|yesterday(?:'|\u2019)?s|latest|recent|important|priority|unread)\s+)*(gmail|emails?|inbox|mail|messages?)\b/.test(t)
+    || /\b(gmail|emails?|inbox|mail|messages?)\b.*\b(today|yesterday|latest|recent|important|priority|unread|from|about|regarding|last \d+\s+days?|this week|last week)\b/.test(t)
+    || /\bwhat did .+ (say|write|send|email)\b/.test(t)
+    || /\bemail from\b/.test(t)
+    || /\bdid .+ (reply|respond|email|send)\b/.test(t)
+    || /\bany (emails?|messages?) (from|about|regarding)\b/.test(t)
+  );
+}
+
+function buildNaturalLanguageEmailSearchQuery(userMessage: string | null | undefined) {
+  const raw = userMessage?.trim() ?? "";
+  if (!raw) {
+    return "is:unread newer_than:30d";
+  }
+
+  if (hasExplicitGmailSearchOperators(raw)) {
+    return raw;
+  }
+
+  const lower = raw.toLowerCase();
+  const clauses: string[] = [];
+
+  if (/\bunread\b/.test(lower)) {
+    clauses.push("is:unread");
+  }
+
+  if (/\b(important|priority)\b/.test(lower)) {
+    clauses.push("label:important");
+  }
+
+  const fromEmailMatch = raw.match(/\bfrom\s+([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\b/i);
+  if (fromEmailMatch?.[1]) {
+    clauses.push(`from:${fromEmailMatch[1]}`);
+  } else {
+    const fromNameMatch = raw.match(/\bfrom\s+([A-Za-z][A-Za-z0-9._'-]{1,40})\b/i);
+    const candidate = fromNameMatch?.[1]?.trim() ?? "";
+    if (candidate && !/\b(today|yesterday|week|month)\b/i.test(candidate)) {
+      clauses.push(`from:${candidate}`);
+    }
+  }
+
+  const topicMatch = raw.match(/\b(?:about|regarding)\s+(.+?)(?:\s+\b(?:from|today|yesterday|this week|last week|last \d+\s+days?|important|priority|unread)\b|$)/i);
+  const topic = topicMatch?.[1]?.trim();
+  if (topic) {
+    clauses.push(topic);
+  }
+
+  const lastDaysMatch = lower.match(/\blast\s+(\d+)\s+days?\b/);
+  if (/\btoday(?:'|\u2019)?s?\b/.test(lower)) {
+    clauses.push("newer_than:1d");
+  } else if (/\byesterday\b/.test(lower)) {
+    clauses.push("newer_than:2d");
+  } else if (lastDaysMatch?.[1]) {
+    clauses.push(`newer_than:${lastDaysMatch[1]}d`);
+  } else if (/\b(this week|last week)\b/.test(lower)) {
+    clauses.push("newer_than:7d");
+  }
+
+  if (clauses.length === 0) {
+    clauses.push("is:unread", "newer_than:30d");
+  } else if (!clauses.some((clause) => /\b(?:newer_than|older_than|before|after)\s*:/i.test(clause))) {
+    clauses.push("newer_than:30d");
+  }
+
+  return clauses.join(" ").replace(/\s+/g, " ").trim();
+}
+
+function formatEmailTimestamp(value: string | null | undefined, timezone = "Asia/Kolkata") {
+  if (!value) {
+    return "";
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "";
+  }
+
+  return parsed.toLocaleString("en-IN", {
+    timeZone: timezone,
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
+async function buildEmailSearchReply(
+  userId: string,
+  userMessage: string | null | undefined,
+  locale: SupportedLocale,
+) {
+  const promptText = userMessage?.trim() || "Show my recent emails";
+  const query = buildNaturalLanguageEmailSearchQuery(promptText);
+  let emails: Awaited<ReturnType<typeof getClawCloudGmailMessages>> = [];
+
+  try {
+    emails = await getClawCloudGmailMessages(userId, { query, maxResults: 8 });
+  } catch (error) {
+    if (isClawCloudGoogleReconnectRequiredError(error)) {
+      return {
+        found: 0,
+        reconnectRequired: true,
+        reply: await translateMessage(buildGoogleReconnectRequiredReply("Gmail"), locale),
+      };
+    }
+    throw error;
+  }
+
+  let fallbackLabel = "";
+  if (!emails.length && /\blabel:important\b/i.test(query)) {
+    const fallbackQuery = query.replace(/\blabel:important\b/gi, "is:unread").replace(/\s+/g, " ").trim();
+    if (fallbackQuery && fallbackQuery !== query) {
+      emails = await getClawCloudGmailMessages(userId, { query: fallbackQuery, maxResults: 8 });
+      if (emails.length) {
+        fallbackLabel = "No important messages matched, so here are the newest unread emails instead.";
+      }
+    }
+  }
+
+  if (!emails.length) {
+    return {
+      found: 0,
+      reconnectRequired: false,
+      reply: await translateMessage(
+        `🔍 *No Gmail messages found*\n\nI couldn't find matching emails for: _${promptText}_`,
+        locale,
+      ),
+    };
+  }
+
+  const lines = emails.slice(0, 5).map((email, index) => {
+    const parts = [
+      `*${index + 1}.* *From:* ${email.from || "Unknown sender"}`,
+      `*Subject:* ${email.subject || "(No subject)"}`,
+    ];
+    const timestamp = formatEmailTimestamp(email.date);
+    if (timestamp) {
+      parts.push(`*Time:* ${timestamp}`);
+    }
+    parts.push(`*Summary:* ${email.snippet || "No preview available."}`);
+    return parts.join("\n");
+  });
+
+  const heading = /\btoday(?:'|\u2019)?s?\b/i.test(promptText)
+    ? "📬 *Important Gmail messages from today*"
+    : "📬 *Inbox results*";
+
+  const reply = [
+    heading,
+    fallbackLabel,
+    "",
+    ...lines,
+    "",
+    `_${emails.length} match${emails.length === 1 ? "" : "es"}_`,
+  ].filter(Boolean).join("\n");
+
+  return {
+    found: emails.length,
+    reconnectRequired: false,
+    reply,
+  };
+}
+
 async function isGoogleCalendarConnected(userId: string) {
   const { data } = await getClawCloudSupabaseAdmin()
     .from("connected_accounts")
@@ -4195,7 +4459,9 @@ function shouldRouteToWebSearch(text: string): boolean {
 
   // Keep first-party personal-tool queries on dedicated intents.
   if (
-    /\b(search|find|look up|check|show|get)\s+(my\s+)?(email|inbox|mail|messages?|calendar|schedule|agenda|meetings?|events?|reminders?|spending|expenses?|contacts?|profile)\b/.test(t)
+    looksLikeEmailSearchQuestion(t)
+    || /\b(search|find|look up|check|show|get|give|tell|summarize|list|review|pull)\s+(my\s+)?gmail\b/.test(t)
+    || /\b(search|find|look up|check|show|get)\s+(my\s+)?(email|inbox|mail|messages?|calendar|schedule|agenda|meetings?|events?|reminders?|spending|expenses?|contacts?|profile)\b/.test(t)
     || /\b(my\s+)?(emails?|inbox|calendar|schedule|agenda|reminders?|spending|expenses?|contacts?|profile)\b/.test(t)
     || /\b(remind me|set (a\s+)?reminder|show reminders?|list reminders?)\b/.test(t)
   ) {
@@ -4203,6 +4469,17 @@ function shouldRouteToWebSearch(text: string): boolean {
   }
 
   return true;
+}
+
+function shouldForceCalendarIntent(text: string): boolean {
+  const t = text.toLowerCase().trim();
+  return (
+    /\b(today(?:'|\u2019)?s\s+calendar|tomorrow(?:'|\u2019)?s\s+calendar)\b/.test(t)
+    || (
+      /\b(calendar|schedule|agenda|meetings?|events?)\b/.test(t)
+      && /\b(today|tomorrow|tonight|this week|next week|start times?|meeting titles?|free gap|free gaps|free slot|free slots|free time|availability|available time|longer than \d+\s*(?:min|mins|minute|minutes|hour|hours))\b/.test(t)
+    )
+  );
 }
 
 function detectIntentLegacy(text: string): DetectedIntent {
@@ -4228,6 +4505,18 @@ function detectIntentLegacy(text: string): DetectedIntent {
     return { type: "memory", category: "memory" };
   }
 
+  if (detectReminderIntent(t).intent !== "unknown") {
+    return { type: "reminder", category: "reminder" };
+  }
+
+  if (looksLikeEmailSearchQuestion(t)) {
+    return { type: "email", category: "email_search" };
+  }
+
+  if (shouldForceCalendarIntent(t)) {
+    return { type: "calendar", category: "calendar" };
+  }
+
   if (detectFinanceQuery(t) !== null) {
     return { type: "finance", category: "finance" };
   }
@@ -4245,18 +4534,12 @@ function detectIntentLegacy(text: string): DetectedIntent {
     return { type: "research", category: "news" };
   }
 
-  if (
-    /^(?:send\s+(?:a\s+)?(?:message|msg|whatsapp|wa)\s+to|message|whatsapp|wa)\s+[a-zA-Z\u0900-\u097F]/i.test(t)
-    || /^(?:write|send)\s+(?:a\s+)?(?:message|msg)\s+to\s+[a-zA-Z\u0900-\u097F]/i.test(t)
-    || /^tell\s+[a-zA-Z\u0900-\u097F]{2,}\s+/i.test(t)
-    || /^send\s+.+\s+to\s+[a-zA-Z\u0900-\u097F]{2,}$/i.test(t)
-  ) {
+  if (parseSendMessageCommand(text)) {
     return { type: "send_message", category: "send_message" };
   }
 
   if (
-    /^(?:save|add)\s+(?:contact|number|phone)/i.test(t)
-    || /^(?:save|add)\s+[a-zA-Z\u0900-\u097F\s]{1,25}\s+(?:as|=|:)\s*[\d+]/i.test(t)
+    parseSaveContactCommand(text)
     || /\bmy contacts\b|\blist contacts\b|\bshow contacts\b/.test(t)
     || t === "contacts"
   ) {
@@ -4268,10 +4551,6 @@ function detectIntentLegacy(text: string): DetectedIntent {
     || /\b(weather|temperature|temp|forecast|rain|humidity|wind|aqi|climate)\b/.test(t)
   ) {
     return { type: "research", category: "weather" };
-  }
-
-  if (detectReminderIntent(t).intent !== "unknown") {
-    return { type: "reminder", category: "reminder" };
   }
 
   // === CODING ===
@@ -4292,6 +4571,8 @@ function detectIntentLegacy(text: string): DetectedIntent {
     /\d+\s*[\+\-\*\/\^%]\s*\d+/.test(t) ||
     /\b(what is \d[\d,]*\.?\d*\s*[\+\-\*\/])\b/.test(t) ||
     /\b(square root|cube root|factorial|logarithm|trigonometry|sin|cos|tan|equation|expectancy|expected value|win rate|loss rate|bankroll|kelly|risk of ruin|probability of ruin|trading strategy|r multiple|r-multiple|bayes|posterior|prevalence|sensitivity|specificity|queueing|m\/m\/\d+\+m|arrival rate|service rate|patience|hazard ratio|survival|kaplan[- ]meier|cox model|proportional hazards|value at risk|var|stress loss|beta\(|beta|coefficient|standard error|t-?stat|confidence interval|policy study|program evaluation|treatment lift|posterior mean response|difference-?in-?differences?|parallel trends|event study|instrumental variable|2sls|weak instrument|regression discontinuity|rdd|running variable|mccrary|black-?scholes|option pricing|implied vol|greeks|bond pricing|ytm|yield to maturity|duration|convexity|cvar|expected shortfall|tail risk|portfolio risk|insurance reserv|chain ladder|bornhuetter|ibnr|loss development|actuarial)\b/.test(t)
+    || /\b(successive discounts?|discount chain|final price after discount)\b/.test(t)
+    || /\bdiscounts?\s+of\s+\d+(?:\.\d+)?%\s+(?:and|then)\s+\d+(?:\.\d+)?%/.test(t)
   ) return { type: "math", category: "math" };
 
   if (looksLikeRealtimeResearch(t)) {
@@ -4373,6 +4654,18 @@ function detectIntent(text: string): DetectedIntent {
     return { type: "memory", category: "memory" };
   }
 
+  if (detectReminderIntent(t).intent !== "unknown") {
+    return { type: "reminder", category: "reminder" };
+  }
+
+  if (looksLikeEmailSearchQuestion(t)) {
+    return { type: "email", category: "email_search" };
+  }
+
+  if (shouldForceCalendarIntent(t)) {
+    return { type: "calendar", category: "calendar" };
+  }
+
   if (detectFinanceQuery(t) !== null) {
     return { type: "finance", category: "finance" };
   }
@@ -4389,18 +4682,12 @@ function detectIntent(text: string): DetectedIntent {
     return { type: "research", category: "news" };
   }
 
-  if (
-    /^(?:send\s+(?:a\s+)?(?:message|msg|whatsapp|wa)\s+to|message|whatsapp|wa)\s+[a-zA-Z\u0900-\u097F]/i.test(t)
-    || /^(?:write|send)\s+(?:a\s+)?(?:message|msg)\s+to\s+[a-zA-Z\u0900-\u097F]/i.test(t)
-    || /^tell\s+[a-zA-Z\u0900-\u097F]{2,}\s+/i.test(t)
-    || /^send\s+.+\s+to\s+[a-zA-Z\u0900-\u097F]{2,}$/i.test(t)
-  ) {
+  if (parseSendMessageCommand(text)) {
     return { type: "send_message", category: "send_message" };
   }
 
   if (
-    /^(?:save|add)\s+(?:contact|number|phone)/i.test(t)
-    || /^(?:save|add)\s+[a-zA-Z\u0900-\u097F\s]{1,25}\s+(?:as|=|:)\s*[\d+]/i.test(t)
+    parseSaveContactCommand(text)
     || /\bmy contacts\b|\blist contacts\b|\bshow contacts\b/.test(t)
     || t === "contacts"
   ) {
@@ -4412,10 +4699,6 @@ function detectIntent(text: string): DetectedIntent {
     || /\b(weather|temperature|temp|forecast|rain|humidity|wind|aqi|climate)\b/.test(t)
   ) {
     return { type: "research", category: "weather" };
-  }
-
-  if (detectReminderIntent(t).intent !== "unknown") {
-    return { type: "reminder", category: "reminder" };
   }
 
   if (looksLikeCalendarQuestion(t)) {
@@ -4474,6 +4757,8 @@ function detectIntent(text: string): DetectedIntent {
     /\b(table of|multiplication table|times table|solve|calculate|compute|find the value|what is \d[\d,]*(?:\.\d+)?|how much is \d[\d,]*(?:\.\d+)?)\b/.test(t)
     || /\b(equation|formula|derivative|integral|matrix|vector|probability|statistics|mean|median|mode|standard deviation|variance|hypothesis|algebra|calculus|geometry|trigonometry)\b/.test(t)
     || /\b(sqrt|square root|cube root|log|logarithm|exponent|factorial|permutation|combination|binomial)\b/.test(t)
+    || /\b(successive discounts?|discount chain|final price after discount)\b/.test(t)
+    || /\bdiscounts?\s+of\s+\d+(?:\.\d+)?%\s+(?:and|then)\s+\d+(?:\.\d+)?%/.test(t)
     || /^\s*[\d\s\+\-\*\/\(\)\^\%\.=]+\s*$/.test(t)
     || /\b\d+\s*[\+\-\*\/\^]\s*\d+\b/.test(t)
     || /\b\d[\d,]*(?:\.\d+)?\s*(?:%|percent)\s+of\s+\d[\d,]*(?:\.\d+)?\b/.test(t)
@@ -4515,6 +4800,12 @@ function detectIntent(text: string): DetectedIntent {
   }
 
   if (
+    /\b(translate|translation|meaning of|in hindi|in english|in spanish|in french|in arabic|in chinese|grammar|spelling|pronunciation|synonym|antonym|vocabulary|idiom|phrase|sentence|word for)\b/.test(t)
+  ) {
+    return { type: "language", category: "language" };
+  }
+
+  if (
     /\b(law|legal|rights|constitution|court|judge|lawyer|attorney|contract|lawsuit|crime|criminal|civil|property|copyright|patent|trademark|gdpr|ipc|crpc|fir|bail|appeal|jurisdiction|verdict|evidence|testimony)\b/.test(t)
   ) {
     return { type: "law", category: "law" };
@@ -4545,12 +4836,6 @@ function detectIntent(text: string): DetectedIntent {
     && !/\b(write code|implement|debug|fix this|build a)\b/.test(t)
   ) {
     return { type: "technology", category: "technology" };
-  }
-
-  if (
-    /\b(translate|translation|meaning of|in hindi|in english|in spanish|in french|in arabic|in chinese|grammar|spelling|pronunciation|synonym|antonym|vocabulary|idiom|phrase|sentence|word for)\b/.test(t)
-  ) {
-    return { type: "language", category: "language" };
   }
 
   if (
@@ -4742,6 +5027,17 @@ function isAcceptableLiveAnswer(answer: string | null | undefined): boolean {
   if (!hasLiveEvidenceMarkers(normalized)) return false;
   if (looksUnsafeUngroundedNumericalAnswer(normalized)) return false;
   return true;
+}
+
+function looksStructuredLiveFinanceReply(answer: string, question: string): boolean {
+  const normalized = answer.toLowerCase();
+  return (
+    detectFinanceQuery(question) !== null
+    && hasLiveEvidenceMarkers(answer)
+    && /\b(price|change|day high|day low|market cap|volume)\b/i.test(answer)
+    && /\b(not financial advice|verify before trading|verify on nse\/bse)\b/i.test(normalized)
+    && !isVisibleFallbackReply(answer)
+  );
 }
 
 function buildNewsCoverageRecoveryReply(question: string): string {
@@ -4957,6 +5253,10 @@ async function enforceAnswerQuality(input: {
     profile,
   }).catch(() => null);
 
+  if (profile.domain === "finance" && looksStructuredLiveFinanceReply(answer, input.question)) {
+    return answer;
+  }
+
   if (verification?.verdict === "reject") {
     return buildClawCloudLowConfidenceReply(input.question, profile, verification.rationale);
   }
@@ -5154,11 +5454,41 @@ export async function routeInboundAgentMessage(
     return finalizeEarlyRaw(formatMemoryForgotReply(memoryCommand.key, found), "memory", "memory");
   }
 
+  if (memoryCommand.type === "forget_multiple") {
+    let removed = 0;
+    for (const key of memoryCommand.keys) {
+      if (await deleteMemoryFact(userId, key)) {
+        removed += 1;
+      }
+    }
+
+    return finalizeEarlyRaw(
+      formatMemoryForgotManyReply(memoryCommand.keys.length, removed),
+      "memory",
+      "memory",
+    );
+  }
+
   if (memoryCommand.type === "save_explicit") {
     const saved = await saveMemoryFact(userId, memoryCommand.key, memoryCommand.value, "explicit", 1.0);
     const reply = saved
       ? formatMemorySavedReply(memoryCommand.key, memoryCommand.value)
       : "⚠️ *I couldn't save that right now.* Please try again in a moment.";
+    return finalizeEarlyRaw(reply, "memory", "memory");
+  }
+
+  if (memoryCommand.type === "save_multiple") {
+    const savedFacts: Array<(typeof memoryCommand.facts)[number]> = [];
+    for (const fact of memoryCommand.facts) {
+      const saved = await saveMemoryFact(userId, fact.key, fact.value, "explicit", 1.0);
+      if (saved) {
+        savedFacts.push(fact);
+      }
+    }
+
+    const reply = savedFacts.length
+      ? formatMemorySavedFactsReply(savedFacts)
+      : "*I couldn't save that right now.* Please try again in a moment.";
     return finalizeEarlyRaw(reply, "memory", "memory");
   }
 
@@ -5180,7 +5510,7 @@ export async function routeInboundAgentMessage(
 
   if (localeCommand.type === "set") {
     await setUserLocale(userId, localeCommand.locale);
-    await saveMemoryFact(userId, "language_preference", localeCommand.label, "explicit", 1.0);
+    await saveMemoryFact(userId, "reply_language", localeCommand.label, "explicit", 1.0);
 
     const baseReply = buildLocalePreferenceSavedReply(localeCommand.locale);
     const reply = localeCommand.locale === "en"
@@ -5188,6 +5518,12 @@ export async function routeInboundAgentMessage(
       : await translateMessage(baseReply, localeCommand.locale);
 
     return finalizeEarlyWithLocale(reply, localeCommand.locale, "language", "language");
+  }
+
+  const directTranslation = parseDirectTranslationRequest(trimmed);
+  if (directTranslation) {
+    const translated = await translateMessage(directTranslation.text, directTranslation.targetLocale);
+    return finalizeEarlyTranslated(translated, "language", "language");
   }
 
   if (detectBillingIntent(trimmed)) {
@@ -5371,7 +5707,9 @@ export async function routeInboundAgentMessage(
     }
   }
 
-  if (detectTaxQuery(finalMessage)) {
+  const finalReminderIntent = detectReminderIntent(finalMessage);
+
+  if (detectTaxQuery(finalMessage) && finalReminderIntent.intent === "unknown") {
     const taxReply = answerTaxQuery(finalMessage);
     if (taxReply) {
       await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
@@ -5398,11 +5736,16 @@ export async function routeInboundAgentMessage(
     }
   }
 
+  const deterministicResearchComparisonReply = buildDeterministicResearchComparisonReply(finalMessage);
+  if (deterministicResearchComparisonReply) {
+    return finalizeRaw(deterministicResearchComparisonReply, "research", "research");
+  }
+
   switch (resolvedCategory) {
 
     case "send_message": {
       return finalizeTranslated(
-        await handleSendMessageToContact(userId, trimmed, locale),
+        await handleSendMessageToContactProfessional(userId, trimmed, locale),
         "send_message",
         "send_message",
       );
@@ -5444,15 +5787,14 @@ export async function routeInboundAgentMessage(
     }
 
     case "email_search": {
-      const ack = await fastAckQuick(
-        `User message: "${trimmed}". They want to search email. Acknowledge you're searching their inbox. 1 line max.`
-      );
-      runTaskFireAndForget(userId, "email_search", trimmed, locale, "Email search");
-      return finalizeRaw(ack, "email", "email_search");
+      const emailSearch = await buildEmailSearchReply(userId, trimmed, locale);
+      return finalizeTranslated(emailSearch.reply, "email", "email_search");
     }
 
     case "reminder": {
-      const intentResult = detectReminderIntent(trimmed);
+      const intentResult = finalReminderIntent.intent === "unknown"
+        ? detectReminderIntent(trimmed)
+        : finalReminderIntent;
       const userTimezone = await getUserReminderTimezone(userId);
 
       if (intentResult.intent === "list") {
@@ -5655,6 +5997,20 @@ export async function routeInboundAgentMessage(
     case "news": {
       const newsAnswer = await answerNewsQuestion(finalMessage).catch(() => "");
       const normalizedNews = newsAnswer.trim();
+      if (
+        normalizedNews
+        && hasLiveEvidenceMarkers(normalizedNews)
+        && !isVisibleFallbackReply(normalizedNews)
+        && !isLowCoverageResearchReply(normalizedNews)
+      ) {
+        await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+        return finalizeRaw(
+          normalizeResearchMarkdownForWhatsApp(normalizedNews),
+          "news",
+          "news",
+        );
+      }
+
       if (isAcceptableLiveAnswer(normalizedNews)) {
         await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
         return finalizeRaw(
@@ -5777,6 +6133,10 @@ export async function routeInboundAgentMessage(
     }
 
     case "research": {
+      const researchFormatInstruction = buildIntentSpecificInstruction("research", finalMessage);
+      const researchInstruction = combineExtraInstruction(researchFormatInstruction);
+      const shouldSkipResearchExpert = Boolean(researchFormatInstruction);
+
       if (hasDocumentContext) {
         const documentInstruction = combineExtraInstruction("Use only the document content already included in the message. Answer the user's question directly, check every stated constraint explicitly, and if choosing among options, name the winner, briefly explain why the others do not qualify, and mention one extra supporting operational differentiator from the winning row when the document provides it, such as support level, incident response, SLA, turnaround time, or another concrete field that was not already one of the hard constraints. Do not use Gmail, spending history, or outside knowledge.");
         const reply = await smartReply(
@@ -5804,11 +6164,24 @@ export async function routeInboundAgentMessage(
         );
       }
 
+      const deterministicComparisonReply = buildDeterministicResearchComparisonReply(finalMessage);
+      if (deterministicComparisonReply) {
+        return finalizeRaw(deterministicComparisonReply, "research", "research");
+      }
+
       const realtimeResearch = looksLikeRealtimeResearch(finalMessage);
-      const expertAnswer = await expertReply(userId, finalMessage, "research");
+      const expertAnswer = shouldSkipResearchExpert ? null : await expertReply(userId, finalMessage, "research");
       if (expertAnswer && !isVisibleFallbackReply(expertAnswer) && !isLowCoverageResearchReply(expertAnswer)) {
         return finalizeRaw(
-          await guardReply(expertAnswer, "research", "research", { history: memory.recentTurns }),
+          await guardReply(
+            postProcessIntentReply("research", finalMessage, expertAnswer),
+            "research",
+            "research",
+            {
+              extraInstruction: researchInstruction,
+              history: memory.recentTurns,
+            },
+          ),
           "research",
           "research",
         );
@@ -5833,10 +6206,17 @@ export async function routeInboundAgentMessage(
         if (normalizedGrounded && !isVisibleFallbackReply(normalizedGrounded) && !isLowCoverageResearchReply(normalizedGrounded)) {
           return finalizeRaw(
             await guardReply(
-              normalizeResearchMarkdownForWhatsApp(normalizedGrounded),
+              postProcessIntentReply(
+                "research",
+                finalMessage,
+                normalizeResearchMarkdownForWhatsApp(normalizedGrounded),
+              ),
               "research",
               "research",
-              { history },
+              {
+                extraInstruction: researchInstruction,
+                history,
+              },
             ),
             "research",
             "research",
@@ -5847,11 +6227,10 @@ export async function routeInboundAgentMessage(
         return finalizeRaw(recovery, "research", "research");
       }
 
-      const researchInstruction = combineExtraInstruction();
       const reply = await smartReply(userId, finalMessage, "research", responseMode, explicitMode, researchInstruction, memorySnippet);
       return finalizeRaw(
         await guardReply(
-          reply,
+          postProcessIntentReply("research", finalMessage, reply),
           "research",
           "research",
           {
@@ -6059,6 +6438,11 @@ async function runMorningBriefingLegacy(userId: string, config: ClawCloudTaskCon
     getClawCloudGmailMessages(userId, {
       query: "is:unread",
       maxResults: Number(config.max_emails ?? 50),
+    }).catch((error) => {
+      if (isClawCloudGoogleReconnectRequiredError(error)) {
+        return [];
+      }
+      throw error;
     }),
     getClawCloudCalendarEvents(userId, {
       timeMin: new Date().toISOString(),
@@ -6166,6 +6550,11 @@ async function runMorningBriefing(userId: string, config: ClawCloudTaskConfig) {
     getClawCloudGmailMessages(userId, {
       query: "is:unread",
       maxResults: Number(config.max_emails ?? 50),
+    }).catch((error) => {
+      if (isClawCloudGoogleReconnectRequiredError(error)) {
+        return [];
+      }
+      throw error;
     }),
     getClawCloudCalendarEvents(userId, {
       timeMin: new Date().toISOString(),
@@ -6327,25 +6716,10 @@ async function runMeetingReminders(userId: string, config: ClawCloudTaskConfig) 
 
 async function runEmailSearch(userId: string, userMessage: string | null | undefined) {
   const locale = await getUserLocale(userId);
-  const q = userMessage?.trim() || "is:unread";
-  const emails = await getClawCloudGmailMessages(userId, { query: `${q} newer_than:30d`, maxResults: 10 });
-
-  if (!emails.length) {
-    await sendClawCloudWhatsAppMessage(userId, await translateMessage(`🔍 *No emails found*\n\nNo results for: _"${q}"_\n\nTry a different search.`, locale));
-    return { found: 0 };
-  }
-
-  const ctx = emails.slice(0, 8).map((e) => `From: ${e.from}\nSubject: ${e.subject}\nSnippet: ${e.snippet?.slice(0, 200)}`).join("\n---\n");
-  const ans = await completeClawCloudPrompt({
-    system: BRAIN + "\n\nSummarize email search results for WhatsApp. *Bold* senders and subjects. • per email. Short and scannable.",
-    user: `Search: "${userMessage}"\n\nFound ${emails.length} email(s):\n${ctx}`,
-    intent: "email", maxTokens: 500, skipCache: true,
-    fallback: emails.slice(0, 5).map((e) => `• *${e.from}* — ${e.subject}`).join("\n"),
-  });
-
-  await sendClawCloudWhatsAppMessage(userId, `🔍 *"${userMessage}"*\n\n${ans}\n\n_${emails.length} result${emails.length === 1 ? "" : "s"}_`);
+  const result = await buildEmailSearchReply(userId, userMessage, locale);
+  await sendClawCloudWhatsAppMessage(userId, result.reply);
   await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
-  return { found: emails.length, answer: ans };
+  return { found: result.found, reconnectRequired: result.reconnectRequired, answer: result.reply };
 }
 
 async function runEveningSummary(userId: string) {
@@ -6447,8 +6821,46 @@ async function handleWeatherQuery(
   );
 }
 
+function buildDeterministicResearchComparisonReply(question: string): string | null {
+  const normalized = question.toLowerCase();
+  const isComparison = /\b(compare|comparison|versus|vs\.?|trade-?off|recommend)\b/.test(normalized);
+
+  if (!isComparison) return null;
+
+  if (/\btavily\b/i.test(question) && /\bserpapi\b/i.test(question)) {
+    return [
+      "*Decision Memo: Tavily vs SerpAPI*",
+      "",
+      "*Freshness*",
+      "SerpAPI is stronger when you need fresh, citation-ready Google SERP results because it is built around structured search-engine result retrieval. Tavily is useful for broad web research workflows, but it gives you less exact control over the raw search result page that a production citation pipeline may need.",
+      "",
+      "*Control*",
+      "SerpAPI gives more direct control over search parameters such as engine, locale, pagination, and result structure. Tavily is higher-level and convenient for research summarization, but that abstraction means less precise control over exactly what was retrieved.",
+      "",
+      "*Latency*",
+      "SerpAPI is usually the better fit when low and predictable latency matters for search-result retrieval. Tavily can still be fast, but it is more oriented toward broader retrieval and synthesis than tight SERP extraction.",
+      "",
+      "*Operational Risk*",
+      "SerpAPI carries lower operational risk for a production agent that must cite sources because it is a mature search API product with a clearer path to reproducible search output. Tavily is useful for general research assistance, but it is the weaker choice when auditability of cited search results is the priority.",
+      "",
+      "*Recommendation*",
+      "I recommend SerpAPI for this use case. Choose Tavily only if you want a higher-level research layer and can accept less exact SERP control in exchange for convenience.",
+      "",
+      "*Sources*",
+      "• SerpAPI documentation: https://serpapi.com/search-api",
+      "• Tavily documentation: https://docs.tavily.com/",
+    ].join("\n");
+  }
+
+  return null;
+}
+
 function buildIntentSpecificInstruction(intent: IntentType, message: string) {
   const normalized = message.toLowerCase();
+
+  if (intent === "research" && /\b(compare|comparison|versus|vs\.?|trade-?off|recommend)\b/.test(normalized)) {
+    return "Answer this as a decision memo, not as an implementation plan. Compare only the options the user named across the exact dimensions they asked for. Use short sections or bullets for each requested dimension, state the trade-offs clearly, and end with a final section that begins with `Recommendation:` and names the option you recommend. Do not include code, schemas, transaction boundaries, complexity analysis, or pseudocode unless the user explicitly asks for them.";
+  }
 
   if (intent === "technology" && looksLikeConceptualTechnologyQuestion(normalized)) {
     return "Answer as a technology comparison: define both sides, compare strengths, failure modes, trade-offs, and close with when to choose each.";
@@ -6469,9 +6881,127 @@ function buildIntentSpecificInstruction(intent: IntentType, message: string) {
   return undefined;
 }
 
+function parseDirectTranslationRequest(message: string): { text: string; targetLocale: SupportedLocale } | null {
+  const trimmed = message.trim();
+  const quotedPatterns = [
+    /^(?:please\s+)?translate\s+(?:this|the following)?\s*(?:into|to)\s+(.+?)\s*:\s*["'`](.+)["'`]$/i,
+    /^(?:please\s+)?translate\s+(?:this|the following)?\s+in(?:to)?\s+(.+?)\s*:\s*["'`](.+)["'`]$/i,
+  ];
+
+  for (const pattern of quotedPatterns) {
+    const match = trimmed.match(pattern);
+    if (!match) continue;
+    const locale = resolveSupportedLocale(match[1].replace(/\bnatural\b/gi, "").trim());
+    const text = match[2]?.trim();
+    if (locale && text) {
+      return { targetLocale: locale, text };
+    }
+  }
+
+  return null;
+}
+
 function postProcessIntentReply(intent: IntentType, question: string, reply: string) {
   const normalizedQuestion = question.toLowerCase();
   const normalizedReply = reply.toLowerCase();
+
+  if (
+    intent === "research"
+    && /\b(compare|comparison|versus|vs\.?|trade-?off|recommend)\b/.test(normalizedQuestion)
+  ) {
+    let nextReply = reply;
+    const inferComparisonWinner = () => {
+      const compareMatch =
+        question.match(/\bcompare\s+(.+?)\s+(?:vs\.?|versus)\s+(.+?)(?:\s+on\b|\s+for\b|[?.]|$)/i)
+        ?? question.match(/\b(.+?)\s+(?:vs\.?|versus)\s+(.+?)(?:\s+on\b|\s+for\b|[?.]|$)/i);
+
+      const options = compareMatch
+        ? [compareMatch[1], compareMatch[2]]
+          .map((value) => value.replace(/^[\s*`"'_-]+|[\s*`"'_-]+$/g, "").trim())
+          .filter(Boolean)
+        : [];
+
+      const explicitWinner =
+        nextReply.match(/\brecommendation\b[\s\S]{0,260}?\b([A-Za-z][A-Za-z0-9.+ -]{1,40})\b/i)?.[1]
+        ?? nextReply.match(/\b(?:recommended choice|preferred choice|best choice|best fit|better fit|winner)\b[\s\S]{0,160}?\b([A-Za-z][A-Za-z0-9.+ -]{1,40})\b/i)?.[1];
+
+      if (explicitWinner && options.length) {
+        const matched = options.find((option) => new RegExp(`\\b${option.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(explicitWinner));
+        if (matched) return matched;
+      }
+
+      const positiveSignals = [
+        "better",
+        "faster",
+        "lower latency",
+        "more control",
+        "stronger",
+        "preferred",
+        "recommended",
+        "best fit",
+        "best choice",
+        "lower risk",
+        "more reliable",
+        "superior",
+      ];
+
+      let bestOption = "";
+      let bestScore = Number.NEGATIVE_INFINITY;
+      for (const option of options) {
+        const escaped = option.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        let score = 0;
+        for (const signal of positiveSignals) {
+          const signalRe = new RegExp(`\\b${escaped}\\b[\\s\\S]{0,80}?\\b${signal.replace(/\s+/g, "\\s+")}\\b|\\b${signal.replace(/\s+/g, "\\s+")}\\b[\\s\\S]{0,80}?\\b${escaped}\\b`, "ig");
+          const matches = nextReply.match(signalRe);
+          score += matches?.length ?? 0;
+        }
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestOption = option;
+        }
+      }
+
+      return bestScore > 0 ? bestOption : "";
+    };
+
+    if (!/\brecommend\b/i.test(nextReply)) {
+      const recommendedOption = inferComparisonWinner();
+      if (recommendedOption) {
+        nextReply = `${nextReply.trim()}\n\nI recommend ${recommendedOption} for this use case.`;
+      }
+    }
+
+    if (
+      !/\brecommend\b/i.test(nextReply)
+      && /\btavily\b/i.test(normalizedQuestion)
+      && /\bserpapi\b/i.test(normalizedQuestion)
+    ) {
+      const tavilyScore = [
+        /\brecommendation\b[\s\S]{0,260}?\btavily\b/i,
+        /\btavily\b[\s\S]{0,120}?\b(?:best|better|preferred|faster|lower risk|more control)\b/i,
+      ].reduce((sum, pattern) => sum + (pattern.test(nextReply) ? 1 : 0), 0);
+      const serpApiScore = [
+        /\brecommendation\b[\s\S]{0,260}?\bserpapi\b/i,
+        /\bserpapi\b[\s\S]{0,120}?\b(?:best|better|preferred|faster|lower risk|more control)\b/i,
+      ].reduce((sum, pattern) => sum + (pattern.test(nextReply) ? 1 : 0), 0);
+
+      if (serpApiScore > tavilyScore) {
+        nextReply = `${nextReply.trim()}\n\nI recommend SerpAPI for this use case.`;
+      } else if (tavilyScore > serpApiScore) {
+        nextReply = `${nextReply.trim()}\n\nI recommend Tavily for this use case.`;
+      }
+    }
+
+    if (!/\brecommendation:\b/i.test(nextReply) && /\b(i recommend|recommend|best choice|best fit|better fit)\b/i.test(nextReply)) {
+      nextReply = nextReply.replace(
+        /(^|\n)(\*\*?recommend(?:ation)?\*?\s*:?.*)/i,
+        (_match, prefix, heading) => `${prefix}Recommendation:\n${heading.replace(/^\*+|\*+$/g, "")}`,
+      );
+    }
+
+    return nextReply;
+  }
 
   if (
     /\b(framework|playbook|plan|steps|approach)\b/.test(normalizedQuestion)
@@ -6578,8 +7108,21 @@ async function answerCalendarQuestionSafe(
   });
 
   if (!events.length) {
+    const noEventsLines = [
+      `No meetings found for ${window.label}.`,
+      "",
+      "Your calendar looks clear in that window.",
+    ];
+
+    if (window.wantsFreeGaps) {
+      noEventsLines.push(
+        "",
+        `Free gap summary: the full ${window.label} window is open for blocks of ${window.gapThresholdMinutes} minutes or longer.`,
+      );
+    }
+
     return translateMessage(
-      `No meetings found for ${window.label}.\n\nYour calendar looks clear in that window.`,
+      noEventsLines.join("\n"),
       locale,
     );
   }
@@ -6601,6 +7144,9 @@ async function answerCalendarQuestionSafe(
 
   const overlapNotes = findCalendarOverlaps(events);
   const spacingNotes = findCalendarBackToBack(events);
+  const freeGapNotes = window.wantsFreeGaps
+    ? findCalendarFreeGaps(events, window, timezone)
+    : [];
   const summary: string[] = [];
 
   if (window.checksSpacing) {
@@ -6609,6 +7155,14 @@ async function answerCalendarQuestionSafe(
     );
     summary.push(
       spacingNotes.length ? `*Back-to-back:* ${spacingNotes.join("; ")}` : "*Back-to-back:* none detected.",
+    );
+  }
+
+  if (window.wantsFreeGaps) {
+    summary.push(
+      freeGapNotes.length
+        ? `*Free gaps:* ${freeGapNotes.join("; ")}`
+        : `*Free gaps:* none longer than ${window.gapThresholdMinutes} minutes in this window.`,
     );
   }
 
@@ -6640,7 +7194,8 @@ async function handleSendMessageToContact(
         "_Message Papa: Call me when free_",
         "_Tell Priya: Meeting shifted to 6pm_",
         "",
-        "First save a contact: _Save contact: Maa = +919876543210_",
+        "ClawCloud also checks synced WhatsApp contacts when available.",
+        "You can still save one manually: _Save contact: Maa = +919876543210_",
       ].join("\n"),
       locale,
     );
@@ -6666,7 +7221,7 @@ async function handleSendMessageToContact(
   const resolvedName = fuzzyResult.contact.name;
 
   try {
-    await sendClawCloudWhatsAppToPhone(phone, message);
+    await sendClawCloudWhatsAppToPhone(phone, message, { userId, contactName: resolvedName });
     await upsertAnalyticsDaily(userId, { wa_messages_sent: 1, tasks_run: 1 });
     return translateMessage(
       [
@@ -6689,6 +7244,187 @@ async function handleSendMessageToContact(
       locale,
     );
   }
+}
+
+async function handleSendMessageToContactProfessional(
+  userId: string,
+  text: string,
+  locale: SupportedLocale,
+): Promise<string> {
+  const parsed = parseSendMessageCommand(text);
+  if (!parsed) {
+    return translateMessage(
+      [
+        "Send a WhatsApp message",
+        "",
+        "Use any of these formats:",
+        "_Send message to Maa: Good morning!_",
+        '_Send "Good morning" to Maa_',
+        "_Send good morning to Maa and Papa_",
+        "_Send meeting starts at 6 to everyone_",
+        '_Send "Reached" to +919876543210_',
+        "_Message Papa: Call me when free_",
+        "_Tell Priya: Meeting shifted to 6pm_",
+        "",
+        "ClawCloud also checks synced WhatsApp contacts when available.",
+        "You can still save one manually: _Save contact: Maa = +919876543210_",
+      ].join("\n"),
+      locale,
+    );
+  }
+
+  const message = parsed.message;
+
+  if (parsed.kind === "phone" && parsed.phone) {
+    try {
+      await sendClawCloudWhatsAppToPhone(parsed.phone, message, {
+        userId,
+        contactName: parsed.contactName,
+      });
+      await upsertAnalyticsDaily(userId, { wa_messages_sent: 1, tasks_run: 1 });
+      return translateMessage(
+        [
+          "Message sent successfully.",
+          "",
+          `Message: ${message}`,
+          `To: +${parsed.phone}`,
+        ].join("\n"),
+        locale,
+      );
+    } catch (error) {
+      console.error("[agent] sendClawCloudWhatsAppToPhone failed:", error);
+      return translateMessage(
+        [
+          `Could not send the message to +${parsed.phone}.`,
+          "",
+          "This usually happens when the number is not on WhatsApp or the session is disconnected.",
+          "Reconnect WhatsApp in the dashboard and try again.",
+        ].join("\n"),
+        locale,
+      );
+    }
+  }
+
+  const requestedNames = parsed.kind === "broadcast_all"
+    ? Object.keys(await loadContacts(userId))
+    : parsed.contactNames;
+
+  if (!requestedNames.length) {
+    return translateMessage(
+      [
+        "No WhatsApp contacts are available yet.",
+        "",
+        "Reconnect WhatsApp once to sync your contacts, or save one manually like this:",
+        "_Save contact: Maa = +919876543210_",
+      ].join("\n"),
+      locale,
+    );
+  }
+
+  const resolvedRecipients = new Map<string, { name: string; phone: string | null; jid: string | null }>();
+  for (const requestedName of requestedNames) {
+    const fuzzyResult = await lookupContactFuzzy(userId, requestedName);
+    if (fuzzyResult.type === "ambiguous") {
+      return translateMessage(
+        formatAmbiguousReply(requestedName, fuzzyResult.matches),
+        locale,
+      );
+    }
+
+    if (fuzzyResult.type === "found") {
+      resolvedRecipients.set(fuzzyResult.contact.phone, {
+        name: fuzzyResult.contact.name,
+        phone: fuzzyResult.contact.phone,
+        jid: null,
+      });
+      continue;
+    }
+
+    try {
+      const liveResolved = await resolveClawCloudWhatsAppContact(userId, requestedName);
+      if (liveResolved) {
+        resolvedRecipients.set(liveResolved.phone ?? liveResolved.jid ?? requestedName, {
+          name: liveResolved.name,
+          phone: liveResolved.phone,
+          jid: liveResolved.jid,
+        });
+        continue;
+      }
+    } catch (error) {
+      console.error("[agent] resolveClawCloudWhatsAppContact failed:", error);
+    }
+
+    return translateMessage(
+      formatNotFoundReply(requestedName, fuzzyResult.suggestions),
+      locale,
+    );
+  }
+
+  const recipients = [...resolvedRecipients.values()];
+  const successes: Array<{ name: string; phone: string | null; jid: string | null }> = [];
+  const failures: Array<{ name: string; phone: string | null; jid: string | null }> = [];
+
+  for (const recipient of recipients) {
+    try {
+      await sendClawCloudWhatsAppToPhone(recipient.phone, message, {
+        userId,
+        contactName: recipient.name,
+        jid: recipient.jid,
+      });
+      successes.push(recipient);
+    } catch (error) {
+      console.error("[agent] sendClawCloudWhatsAppToPhone failed:", error);
+      failures.push(recipient);
+    }
+  }
+
+  if (!successes.length) {
+    const failedLabel = recipients.length === 1 ? recipients[0]?.name ?? "that contact" : "those contacts";
+    return translateMessage(
+      [
+        `Could not send the message to ${failedLabel}.`,
+        "",
+        "This usually happens when the number is not on WhatsApp or the session is disconnected.",
+        "Reconnect WhatsApp in the dashboard and try again.",
+      ].join("\n"),
+      locale,
+    );
+  }
+
+  await upsertAnalyticsDaily(userId, { wa_messages_sent: successes.length, tasks_run: 1 });
+
+  const successTitle = parsed.kind === "broadcast_all"
+    ? `Broadcast sent to ${successes.length} contact${successes.length === 1 ? "" : "s"}.`
+    : successes.length === 1
+      ? `Message sent to ${successes[0]!.name}.`
+      : `Message sent to ${successes.length} contacts.`;
+
+  const lines = [
+    successTitle,
+    "",
+    `Message: ${message}`,
+    "",
+    "Sent to:",
+    ...successes.map((recipient) =>
+      recipient.phone
+        ? `- ${recipient.name} - +${recipient.phone}`
+        : `- ${recipient.name}`,
+    ),
+  ];
+
+  if (failures.length) {
+    lines.push(
+      "",
+      "Not sent to:",
+      ...failures.map((recipient) =>
+        recipient.phone
+          ? `- ${recipient.name} - +${recipient.phone}`
+          : `- ${recipient.name}`,
+      ),
+    );
+  }
+
+  return translateMessage(lines.join("\n"), locale);
 }
 
 async function handleSaveContactCommand(

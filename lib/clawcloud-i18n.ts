@@ -62,13 +62,54 @@ export async function getUserLocale(userId: string): Promise<SupportedLocale> {
 
   const { data: prefs } = await supabaseAdmin
     .from("user_preferences")
-    .select("language")
+    .select("language,updated_at")
     .eq("user_id", userId)
     .maybeSingle();
 
+  const { data: explicitReplyLanguageMemory } = await supabaseAdmin
+    .from("user_memory")
+    .select("value,source,confidence,updated_at")
+    .eq("user_id", userId)
+    .eq("key", "reply_language")
+    .eq("source", "explicit")
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle()
+    .catch(() => ({ data: null }));
+
+  const { data: legacyLanguageMemory } = await supabaseAdmin
+    .from("user_memory")
+    .select("value,source,confidence,updated_at")
+    .eq("user_id", userId)
+    .eq("key", "language_preference")
+    .eq("source", "explicit")
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle()
+    .catch(() => ({ data: null }));
+
   const preferredLanguage = prefs?.language as string | undefined;
+  const replyLanguageLocale = resolveSupportedLocale(explicitReplyLanguageMemory?.value ?? "");
+  const legacyLocale = resolveSupportedLocale(legacyLanguageMemory?.value ?? "");
+  const explicitLocale = replyLanguageLocale ?? legacyLocale;
+  const prefUpdatedAt = Date.parse(String((prefs as { updated_at?: string } | null)?.updated_at ?? ""));
+  const memoryUpdatedAt = Date.parse(String((explicitReplyLanguageMemory ?? legacyLanguageMemory)?.updated_at ?? ""));
+
+  if (
+    explicitLocale
+    && (!preferredLanguage
+      || !(preferredLanguage in localeNames)
+      || (Number.isFinite(memoryUpdatedAt) && (!Number.isFinite(prefUpdatedAt) || memoryUpdatedAt >= prefUpdatedAt)))
+  ) {
+    return explicitLocale;
+  }
+
   if (preferredLanguage && preferredLanguage in localeNames) {
     return preferredLanguage as SupportedLocale;
+  }
+
+  if (explicitLocale) {
+    return explicitLocale;
   }
 
   return DEFAULT_CLAW_CLOUD_LOCALE;
@@ -76,24 +117,48 @@ export async function getUserLocale(userId: string): Promise<SupportedLocale> {
 
 export async function setUserLocale(userId: string, locale: SupportedLocale) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
-  await supabaseAdmin.from("user_preferences").upsert(
-    { user_id: userId, language: locale, updated_at: new Date().toISOString() },
-    { onConflict: "user_id" },
-  );
+  const updatedAt = new Date().toISOString();
+  const { data: existing, error: lookupError } = await supabaseAdmin
+    .from("user_preferences")
+    .select("user_id")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (lookupError) {
+    console.error("[i18n] user_preferences locale lookup error:", lookupError.message);
+  }
+
+  const mutation = existing?.user_id
+    ? supabaseAdmin
+      .from("user_preferences")
+      .update({ language: locale, updated_at: updatedAt })
+      .eq("user_id", userId)
+    : supabaseAdmin
+      .from("user_preferences")
+      .insert({ user_id: userId, language: locale, updated_at: updatedAt });
+
+  const { error } = await mutation;
+  if (error) {
+    console.error("[i18n] user_preferences locale save error:", error.message);
+  }
 }
 
 function normalizeLocaleRequest(value: string) {
   return value
     .trim()
     .replace(/^other[:\s]+/i, "")
+    .replace(/\s+(?:unless|except|but|and)\b[\s\S]*$/i, "")
     .replace(/[.!?]+$/g, "")
     .trim();
 }
 
 function extractLocalePreferenceCandidate(message: string): string | null {
   const patterns = [
-    /^(?:always\s+)?(?:reply|respond|answer|speak|talk|write)(?:\s+to\s+me)?\s+in\s+(.+)$/i,
+    /^(?:from\s+now\s+on\s+)?(?:always\s+)?(?:reply|respond|answer|speak|talk|write)(?:\s+to\s+me)?\s+in\s+(.+)$/i,
+    /^(?:from\s+now\s+on\s+)?(?:always\s+)?(?:reply|respond|answer|speak|talk|write)(?:\s+to\s+me)?\s+only\s+in\s+(.+)$/i,
     /^(?:set|change|switch|update)\s+(?:my\s+)?(?:reply\s+)?language(?:\s+to)?\s+(.+)$/i,
+    /^(?:switch|change|move|go)\s+back\s+to\s+(.+)$/i,
+    /^(?:switch|change)\s+to\s+(.+)$/i,
     /^(?:my\s+)?(?:preferred\s+)?language(?:\s+is|:)\s+(.+)$/i,
     /^(.+?)\s+only$/i,
   ];
@@ -117,6 +182,10 @@ export function detectLocalePreferenceCommand(message: string): LocalePreference
   if (
     /^(?:what(?:'s| is)|show|check)\s+my\s+(?:language|language preference|reply language)\??$/i.test(trimmed)
     || /^(?:current\s+)?(?:reply\s+)?language\??$/i.test(trimmed)
+    || /^what\s+language\s+are\s+you\s+(?:set|configured)\s+to(?:\s+for\s+me)?(?:\s+right\s+now)?\??$/i.test(trimmed)
+    || /^(?:what(?:'s| is)\s+)?language\s+are\s+you\s+(?:set|configured)\s+to(?:\s+for\s+me)?(?:\s+right\s+now)?\??$/i.test(trimmed)
+    || /^(?:what(?:'s| is)\s+)?my\s+current\s+(?:reply\s+)?language(?:\s+right\s+now)?\??$/i.test(trimmed)
+    || /^(?:what(?:'s| is)\s+)?which\s+language\s+are\s+you\s+replying\s+in\??$/i.test(trimmed)
   ) {
     return { type: "show" };
   }
@@ -179,8 +248,9 @@ export async function translateMessage(message: string, locale: SupportedLocale)
     system: [
       `Translate the user's message into ${localeNames[locale]}. Return only the translated text.`,
       "Preserve Markdown formatting, placeholders like [Name] or [Date], numbers, dates, currency amounts, URLs, slash commands, stock tickers, UPI IDs, GST/TDS names, and product names exactly when they should stay unchanged.",
+      "Do not add disclaimers, caveats, explanations, or extra commentary.",
       INDIAN_LOCALES.has(locale)
-        ? "Use natural modern wording for Indian users and do not over-translate banking, tax, or app terms that are commonly kept in English."
+        ? "Use natural modern wording for Indian users, prefer the native script for the target language by default (for example, Devanagari for Hindi), and do not over-translate banking, tax, or app terms that are commonly kept in English."
         : "Keep the translation natural and concise.",
     ].join(" "),
     user: message,

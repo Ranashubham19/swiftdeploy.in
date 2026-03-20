@@ -27,6 +27,14 @@ type WhatsAppQrPayload = {
   error?: string;
 };
 
+type GoogleWorkspaceAccessPayload = {
+  core?: {
+    available?: boolean;
+    allowlisted?: boolean;
+    reason?: string | null;
+  };
+};
+
 type TaskDefinition = {
   id: TaskId;
   icon: string;
@@ -102,7 +110,7 @@ const taskChipLabels: Record<TaskId, string> = {
 };
 
 const googleWorkspaceRolloutMessage =
-  "Google Workspace is temporarily paused while ClawCloud finishes verification. Continue setup now and connect Google later from the dashboard.";
+  "Google Workspace connect is not public yet. ClawCloud keeps Gmail and Calendar OAuth behind a rollout gate until Google verification is approved. Continue setup now and connect Google after approval is live.";
 
 const timeOptions = ["6:00 AM", "7:00 AM", "8:00 AM", "9:00 AM"] as const;
 
@@ -171,6 +179,7 @@ export function SetupPage({ config }: SetupPageProps) {
   const [googleConnecting, setGoogleConnecting] = useState(false);
   const [authUserId, setAuthUserId] = useState<string | null>(null);
   const [authAccessToken, setAuthAccessToken] = useState<string | null>(null);
+  const [googleWorkspaceAccessAllowed, setGoogleWorkspaceAccessAllowed] = useState(false);
   const [stepOneComplete, setStepOneComplete] = useState(false);
   const [waConnected, setWaConnected] = useState(false);
   const [waPhone, setWaPhone] = useState<string | null>(null);
@@ -193,6 +202,8 @@ export function SetupPage({ config }: SetupPageProps) {
   const gmailConnected = gmailStatus === "done";
   const calendarConnected = calendarStatus === "done";
   const waChatLink = buildWhatsAppChatLink(waPhone);
+  const googleWorkspaceEnabledForUser =
+    config.googleRollout.publicWorkspaceEnabled || googleWorkspaceAccessAllowed;
 
   function showToast(message: string) {
     setToastMessage(message);
@@ -441,6 +452,42 @@ export function SetupPage({ config }: SetupPageProps) {
   }, [authAccessToken, currentStep, isConfigured, stepTwoComplete, waConnected, waForceRefreshRequested]);
 
   useEffect(() => {
+    if (!authAccessToken) {
+      setGoogleWorkspaceAccessAllowed(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadGoogleWorkspaceAccess() {
+      try {
+        const response = await fetch("/api/auth/google/access", {
+          headers: {
+            Authorization: `Bearer ${authAccessToken}`,
+          },
+        });
+        const payload = (await response.json().catch(() => null)) as GoogleWorkspaceAccessPayload | null;
+
+        if (cancelled) {
+          return;
+        }
+
+        setGoogleWorkspaceAccessAllowed(Boolean(payload?.core?.available));
+      } catch {
+        if (!cancelled) {
+          setGoogleWorkspaceAccessAllowed(false);
+        }
+      }
+    }
+
+    void loadGoogleWorkspaceAccess();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authAccessToken]);
+
+  useEffect(() => {
     const gmailConnectedFromSearch = searchParams.get("gmail") === "connected";
     const nextStep = searchParams.get("step");
     const setupError = searchParams.get("error");
@@ -464,19 +511,19 @@ export function SetupPage({ config }: SetupPageProps) {
   }, [searchParams]);
 
   useEffect(() => {
-    if (!config.googleRollout.publicWorkspaceEnabled) {
+    if (!googleWorkspaceEnabledForUser) {
       clearGoogleTimeouts();
       setGoogleConnecting(false);
       setStepOneComplete(true);
     }
-  }, [config.googleRollout.publicWorkspaceEnabled]);
+  }, [googleWorkspaceEnabledForUser]);
 
   function handleGoToStep(step: StepNumber) {
     setCurrentStep(step);
   }
 
   function handleStartGmailConnect() {
-    if (!config.googleRollout.publicWorkspaceEnabled) {
+    if (!googleWorkspaceEnabledForUser) {
       showToast(googleWorkspaceRolloutMessage);
       return;
     }
@@ -489,7 +536,7 @@ export function SetupPage({ config }: SetupPageProps) {
   }
 
   function handleStartCalendarConnect() {
-    if (!config.googleRollout.publicWorkspaceEnabled) {
+    if (!googleWorkspaceEnabledForUser) {
       showToast(googleWorkspaceRolloutMessage);
       return;
     }
@@ -502,7 +549,7 @@ export function SetupPage({ config }: SetupPageProps) {
   }
 
   async function handleConnectGoogle() {
-    if (!config.googleRollout.publicWorkspaceEnabled) {
+    if (!googleWorkspaceEnabledForUser) {
       showToast(googleWorkspaceRolloutMessage);
       return;
     }
@@ -802,7 +849,7 @@ export function SetupPage({ config }: SetupPageProps) {
               calendarStatus={calendarStatus}
               gmailConnected={gmailConnected}
               calendarConnected={calendarConnected}
-              googleWorkspacePublicEnabled={config.googleRollout.publicWorkspaceEnabled}
+              googleWorkspacePublicEnabled={googleWorkspaceEnabledForUser}
               googleConnecting={googleConnecting}
               stepOneComplete={stepOneComplete}
               onStartGmailConnect={handleStartGmailConnect}

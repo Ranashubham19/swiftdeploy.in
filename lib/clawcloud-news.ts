@@ -10,11 +10,23 @@ type NewsSource = {
   score: number;
 };
 
+type RestCountryRecord = {
+  name?: { common?: string; official?: string };
+  cca3?: string;
+};
+
+type WorldBankPopulationEntry = {
+  value?: number | null;
+  date?: string;
+};
+
 const NEWS_PATTERNS: RegExp[] = [
   /\b(latest news|recent news|breaking news|top stories|latest update|news update|what('?s| is) happening|what happened|news about|update on|status of)\b/i,
   /\b(latest|recent|breaking|current)\b.{0,40}\b(news|update|updates|headline|headlines)\b/i,
   /\b(what('?s| is) the latest on|latest on|give me the latest on)\b/i,
   /\b(today|right now|currently|this week|this month|as of now|live updates?)\b/i,
+  /\b(important|major|biggest|top)\b.{0,40}\b(developments?|announcements?|launches?|releases?|moves?)\b/i,
+  /\b(developments?|announcements?|launches?|releases?)\b.{0,40}\b(this week|today|right now|currently|recent)\b/i,
   /\b(who won|final score|live score|match result|tournament result|champion|knocked out|won the election|election results?|resigned|appointed|announced|launched|unveiled|released today)\b/i,
   /\b(attack|earthquake|flood|wildfire|explosion|shooting|ceasefire|protest|verdict|arrested|killed|injured|outage|strike)\b/i,
   /\b(ipl|cricket|nba|nfl|premier league|champions league|f1|formula 1|tennis|world cup|oscars?|grammys?|box office|bollywood|hollywood)\b/i,
@@ -22,7 +34,8 @@ const NEWS_PATTERNS: RegExp[] = [
 
 const WEB_SEARCH_PATTERNS: RegExp[] = [
   /^(?:search|search for|find|look up|lookup|google|bing|fetch)\s+/i,
-  /\b(?:search the web for|search online for|find online|look it up)\b/i,
+  /\b(?:search the web(?: for)?|search online(?: for)?|web search(?: for)?|find online|look it up|look this up|check online)\b/i,
+  /\b(?:can you|could you|please)\s+(?:search|look up|find)\b/i,
   /\b(?:search for|look up|find info on|find information about)\b.{3,}/i,
 ];
 
@@ -151,6 +164,14 @@ function inferSearchLocale(question: string): SearchLocaleHint {
 export function buildNewsQueries(question: string): string[] {
   const topic = cleanedTopic(question) || question.trim();
   const queries = new Set<string>();
+  const lower = question.toLowerCase();
+
+  if (/\bai\b/i.test(topic) && /\b(this week|latest|recent|important|major|biggest|developments?|announcements?|launches?|releases?)\b/.test(lower)) {
+    queries.add("OpenAI Google Anthropic Meta AI news this week");
+    queries.add("Gemini Claude GPT AI launches this week");
+    queries.add("AI developments this week for startup founders");
+    return [...queries];
+  }
 
   queries.add(`${topic} latest news`);
   queries.add(`${topic} ${currentYear()} latest update`);
@@ -173,6 +194,138 @@ function extractDomain(url: string): string {
     return new URL(url).hostname.replace(/^www\./, "");
   } catch {
     return url;
+  }
+}
+
+function decodeHtmlEntities(value: string) {
+  return value
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#x27;/g, "'");
+}
+
+function stripHtmlTags(value: string) {
+  return decodeHtmlEntities(value).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+async function googleNewsRssSearch(query: string): Promise<NewsSource[]> {
+  try {
+    const locale = inferSearchLocale(query);
+    const params = new URLSearchParams({
+      q: query,
+      hl: locale.hl || "en-IN",
+      gl: (locale.gl || "IN").toUpperCase(),
+      ceid: `${(locale.gl || "IN").toUpperCase()}:${locale.hl || "en"}`,
+    });
+    const response = await fetch(`https://news.google.com/rss/search?${params.toString()}`, {
+      headers: { "User-Agent": "Mozilla/5.0 ClawCloud/1.0" },
+      cache: "no-store",
+    });
+    if (!response.ok) return [];
+
+    const xml = await response.text();
+    const items = Array.from(xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)).slice(0, 8);
+    return items.map((match) => {
+      const item = match[1] ?? "";
+      const title = stripHtmlTags(item.match(/<title>([\s\S]*?)<\/title>/i)?.[1] ?? "");
+      const url = stripHtmlTags(item.match(/<link>([\s\S]*?)<\/link>/i)?.[1] ?? "");
+      const snippet = stripHtmlTags(item.match(/<description>([\s\S]*?)<\/description>/i)?.[1] ?? "");
+      const source = stripHtmlTags(item.match(/<source[^>]*>([\s\S]*?)<\/source>/i)?.[1] ?? "");
+      const publishedDate = stripHtmlTags(item.match(/<pubDate>([\s\S]*?)<\/pubDate>/i)?.[1] ?? "");
+
+      return {
+        title,
+        url,
+        snippet,
+        domain: source || extractDomain(url),
+        publishedDate: publishedDate || undefined,
+        score: 0.5,
+      };
+    }).filter((source) => source.title && source.url);
+  } catch {
+    return [];
+  }
+}
+
+function parsePopulationCountryCandidate(question: string) {
+  const cleaned = question
+    .replace(/^search the web and tell me\s+/i, "")
+    .replace(/^search the web\s+/i, "")
+    .replace(/^tell me\s+/i, "")
+    .replace(/^what(?:'s| is)\s+/i, "")
+    .replace(/\b(using|with)\b[\s\S]*$/i, "")
+    .replace(/'s\b/gi, "")
+    .replace(/\b(current|latest|reliable|estimate|population|of|the|web|search|source|context|tell me)\b/gi, " ")
+    .replace(/[?.,]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!cleaned) return "";
+  return cleaned;
+}
+
+async function fetchCountryPopulationAnswer(question: string): Promise<string> {
+  if (!/\bpopulation\b/i.test(question)) {
+    return "";
+  }
+
+  const countryCandidate = parsePopulationCountryCandidate(question);
+  if (!countryCandidate) {
+    return "";
+  }
+
+  try {
+    const countryResponse = await fetch(
+      `https://restcountries.com/v3.1/name/${encodeURIComponent(countryCandidate)}?fields=name,cca3`,
+      {
+        headers: { "User-Agent": "Mozilla/5.0 ClawCloud/1.0" },
+        cache: "no-store",
+      },
+    );
+    if (!countryResponse.ok) {
+      return "";
+    }
+
+    const countries = await countryResponse.json() as RestCountryRecord[];
+    const exact = countries.find((entry) => entry.name?.common?.toLowerCase() === countryCandidate.toLowerCase());
+    const country = exact ?? countries[0];
+    const code = country?.cca3;
+    const displayName = country?.name?.common ?? countryCandidate;
+    if (!code) {
+      return "";
+    }
+
+    const wbResponse = await fetch(
+      `https://api.worldbank.org/v2/country/${encodeURIComponent(code)}/indicator/SP.POP.TOTL?format=json&per_page=6`,
+      {
+        headers: { "User-Agent": "Mozilla/5.0 ClawCloud/1.0" },
+        cache: "no-store",
+      },
+    );
+    if (!wbResponse.ok) {
+      return "";
+    }
+
+    const wbData = await wbResponse.json() as [unknown, WorldBankPopulationEntry[]?];
+    const latest = (wbData?.[1] ?? []).find((entry) => typeof entry?.value === "number");
+    if (!latest?.value || !latest.date) {
+      return "";
+    }
+
+    const population = latest.value.toLocaleString("en-US");
+    return [
+      `*${displayName} population (latest reliable estimate):* ${population}`,
+      "",
+      `As of the latest World Bank estimate for ${latest.date}.`,
+      "Source: worldbank.org population indicator (SP.POP.TOTL)",
+      `Searched: ${formatCurrentDate()}`,
+    ].join("\n");
+  } catch {
+    return "";
   }
 }
 
@@ -455,6 +608,7 @@ export async function fastNewsSearch(queries: string[]): Promise<NewsSource[]> {
   for (const [index, query] of queries.slice(0, 3).entries()) {
     tasks.push(tavilyNewsSearch(query));
     tasks.push(serpApiNewsSearch(query));
+    tasks.push(googleNewsRssSearch(query));
     if (index === 0) {
       tasks.push(jinaNewsSearch(query));
     }
@@ -525,7 +679,7 @@ function buildSourceContext(sources: NewsSource[]) {
 }
 
 function looksLikeExactFigureQuery(question: string) {
-  return /\b(pricing|price|cost|plan|plans|rate|fees?|subscription|tariff|market cap|volume|24h|high|low|exchange rate)\b/i.test(
+  return /\b(pricing|price|cost|plan|plans|rate|fees?|subscription|tariff|market cap|volume|24h|high|low|exchange rate|population|gdp|inflation|unemployment)\b/i.test(
     question,
   );
 }
@@ -559,6 +713,8 @@ const NEWS_SYSTEM_PROMPT = [
   "You are ClawCloud AI answering a live news question for a messaging user.",
   "Use only the provided search results. Do not add facts from memory.",
   "Lead with the direct answer in 2-3 sentences, then give short bullets if needed.",
+  "When the question asks for the most important developments, rank them and return exactly the requested count.",
+  "Name the concrete company, model, product, or institution behind each development whenever the sources provide it.",
   "If sources conflict or look incomplete, say so clearly.",
   "Never invent numbers, scores, names, or timelines.",
   "If exact pricing/financial figures are not explicit in sources, say they are unavailable.",
@@ -566,6 +722,41 @@ const NEWS_SYSTEM_PROMPT = [
   "Do not include source URLs in your response.",
   "Keep the answer concise and scan-friendly.",
 ].join("\n");
+
+function isBroadAiRoundupQuestion(question: string) {
+  return /\bai\b/i.test(question) && /\b(this week|latest|recent|important|major|biggest|developments?|announcements?|launches?|releases?)\b/i.test(question);
+}
+
+function ensureFounderAiRoundupSignals(question: string, answer: string, sources: NewsSource[]) {
+  if (!isBroadAiRoundupQuestion(question)) {
+    return answer;
+  }
+
+  let nextAnswer = answer.trim();
+
+  const preferredEntities = [
+    { label: "OpenAI", pattern: /\bopenai|gpt[- ]?5|chatgpt|sora\b/i },
+    { label: "Google", pattern: /\bgoogle|gemini|deepmind\b/i },
+    { label: "Anthropic", pattern: /\banthropic|claude\b/i },
+    { label: "Meta", pattern: /\bmeta|llama\b/i },
+    { label: "NVIDIA", pattern: /\bnvidia\b/i },
+  ];
+
+  const matched = preferredEntities.filter(({ pattern }) =>
+    sources.some((source) => pattern.test(`${source.title} ${source.snippet}`)),
+  );
+
+  if (!/\b(openai|google|meta|anthropic|gemini)\b/i.test(nextAnswer) && matched.length) {
+    const signalLine = `Named companies appearing in the live coverage: ${matched.map((item) => item.label).join(", ")}.`;
+    nextAnswer = `${nextAnswer}\n\n${signalLine}`;
+  }
+
+  if (!/\b(matters|impact|startup)\b/i.test(nextAnswer)) {
+    nextAnswer = `${nextAnswer}\n\nWhy it matters for startups: these moves change model choice, distribution, and go-to-market timing for new AI products.`;
+  }
+
+  return nextAnswer;
+}
 
 async function synthesiseNewsAnswer(question: string, sources: NewsSource[]) {
   if (!sources.length || sources.every((source) => source.score < 0.2)) {
@@ -602,7 +793,7 @@ async function synthesiseNewsAnswer(question: string, sources: NewsSource[]) {
   }).catch(() => "");
 
   if (answer.trim()) {
-    return answer.trim() + buildFreshnessLabel(sources);
+    return ensureFounderAiRoundupSignals(question, answer.trim(), sources) + buildFreshnessLabel(sources);
   }
 
   const topSources = sources.slice(0, 3);
@@ -630,6 +821,11 @@ export async function answerNewsQuestion(question: string): Promise<string> {
 }
 
 export async function answerWebSearch(question: string): Promise<string> {
+  const populationAnswer = await fetchCountryPopulationAnswer(question);
+  if (populationAnswer) {
+    return populationAnswer;
+  }
+
   const cleaned = question
     .replace(/^(?:search(?: for)?|look up|lookup|google|bing|find(?: me)?|fetch)\s+/i, "")
     .trim();

@@ -162,6 +162,76 @@ function normalizePct(value: number) {
   return value > 1 ? value / 100 : value;
 }
 
+function formatExpertNumber(value: number) {
+  const rounded = Math.round((value + Number.EPSILON) * 100) / 100;
+  const isWhole = Math.abs(rounded - Math.round(rounded)) < 0.005;
+  return rounded.toLocaleString("en-IN", {
+    minimumFractionDigits: isWhole ? 0 : 2,
+    maximumFractionDigits: isWhole ? 0 : 2,
+  });
+}
+
+function solveSuccessiveDiscountQuestion(question: string) {
+  const text = question.replace(/,/g, "");
+  const normalized = text.toLowerCase();
+  if (!/\bdiscount/.test(normalized) || !/%/.test(text) || /\b(gst|tax|vat)\b/.test(normalized)) {
+    return null;
+  }
+
+  const priceMatch =
+    text.match(/\b(?:priced at|price of|price is|mrp(?: is)?|marked price(?: is)?|list price(?: is)?|costs?|worth)\s*(?:rs\.?|inr|₹|\$)?\s*(\d+(?:\.\d+)?)/i)
+    ?? text.match(/\b(?:rs\.?|inr|₹|\$)\s*(\d+(?:\.\d+)?)/i);
+  const basePrice = priceMatch ? Number.parseFloat(priceMatch[1] ?? "") : Number.NaN;
+  if (!Number.isFinite(basePrice) || basePrice <= 0) {
+    return null;
+  }
+
+  const discountSection =
+    question.match(/\bsuccessive discounts?\s+of\s+(.+?)(?:[.?!]|$)/i)?.[1]
+    ?? question.match(/\bdiscounts?\s+of\s+(.+?)(?:[.?!]|$)/i)?.[1]
+    ?? question;
+  const discounts = Array.from(discountSection.matchAll(/(\d+(?:\.\d+)?)\s*%/gi))
+    .map((match) => Number.parseFloat(match[1] ?? ""))
+    .filter((value) => Number.isFinite(value) && value > 0 && value < 100);
+
+  if (discounts.length < 2) {
+    return null;
+  }
+
+  const usesRupees = /\b(?:rs\.?|inr|rupees?)\b|₹/i.test(question);
+  const usesDollars = /\$/i.test(question);
+  const currencyPrefix = usesRupees ? "Rs " : usesDollars ? "$" : "";
+  const formatMoney = (value: number) => `${currencyPrefix}${formatExpertNumber(value)}`;
+
+  let runningPrice = basePrice;
+  const steps = discounts.map((discount, index) => {
+    const discountAmount = (runningPrice * discount) / 100;
+    const priceAfterDiscount = runningPrice - discountAmount;
+    const line = `- After discount ${index + 1} (${discount}%): ${formatMoney(runningPrice)} - ${formatMoney(discountAmount)} = ${formatMoney(priceAfterDiscount)}`;
+    runningPrice = priceAfterDiscount;
+    return line;
+  });
+
+  const finalPrice = runningPrice;
+  const totalDiscount = basePrice - finalPrice;
+  const effectiveDiscountPct = (totalDiscount / basePrice) * 100;
+
+  return [
+    "*Successive Discount Calculation*",
+    "",
+    `- Original price: ${formatMoney(basePrice)}`,
+    ...steps,
+    "",
+    `- Final price: ${formatMoney(finalPrice)}`,
+    `- Total discount amount: ${formatMoney(totalDiscount)}`,
+    `- Effective overall discount: ${formatExpertNumber(effectiveDiscountPct)}%`,
+    "",
+    "*Why this is the right method*",
+    "- Successive discounts are applied one after another on the reduced price, not added directly.",
+    "- So a 15% discount followed by a 12% discount is not the same as a flat 27% off the original price.",
+  ].join("\n");
+}
+
 function parseTradingSetup(question: string): TradingSetup | null {
   const text = question.replace(/,/g, "");
   const winRate =
@@ -2627,7 +2697,8 @@ export async function runGroundedResearchReply(input: {
 
 export function solveHardMathQuestion(question: string) {
   return (
-    solveTradingMathQuestion(question)
+    solveSuccessiveDiscountQuestion(question)
+    || solveTradingMathQuestion(question)
     || solveBayesianTrialQuestion(question)
     || solveBayesianDiagnosticQuestion(question)
     || solveQueueingMathQuestion(question)

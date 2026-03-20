@@ -67,6 +67,7 @@ export function SettingsPage({ config }: SettingsPageProps) {
   const { upgrade, loading: upgradeLoading, error: upgradeError } = useUpgrade();
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handledSearchStateRef = useRef("");
   const [activeTab, setActiveTab] = useState<TabId>("profile");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [toast, setToast] = useState("");
@@ -89,6 +90,49 @@ export function SettingsPage({ config }: SettingsPageProps) {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    const tab = params.get("tab");
+    const driveStatus = params.get("drive");
+    const errorMessage = params.get("error");
+    const signature = `${params.toString()}::${driveStatus ?? ""}::${errorMessage ?? ""}`;
+
+    if (tab === "integrations") {
+      setActiveTab("integrations");
+    }
+
+    if (handledSearchStateRef.current === signature) {
+      return;
+    }
+
+    let handled = false;
+    if (driveStatus === "connected") {
+      showToast("Google Drive connected.");
+      refetch();
+      handled = true;
+    }
+
+    if (errorMessage) {
+      showToast(errorMessage);
+      handled = true;
+    }
+
+    if (!handled) {
+      return;
+    }
+
+    handledSearchStateRef.current = signature;
+    const nextParams = new URLSearchParams(params.toString());
+    nextParams.delete("drive");
+    nextParams.delete("error");
+    const nextQuery = nextParams.toString();
+    router.replace(nextQuery ? `/settings?${nextQuery}` : "/settings");
+  }, [refetch, router]);
 
   useEffect(() => {
     if (upgradeError) showToast(upgradeError);
@@ -357,11 +401,31 @@ export function SettingsPage({ config }: SettingsPageProps) {
                 {needsGoogleReconnect ? (
                   <div className={styles.integrationBanner}>
                     <div>
-                      <div className={styles.integrationBannerTitle}>Reconnect Google to enable Drive & Sheets</div>
-                      <div className={styles.integrationBannerText}>Gmail or Calendar is active, but the newer Drive scopes are still missing.</div>
+                      <div className={styles.integrationBannerTitle}>
+                        {featureStatus?.google_workspace_extended_connect.available
+                          ? "Reconnect Google to enable Drive & Sheets"
+                          : "Drive & Sheets verification pending"}
+                      </div>
+                      <div className={styles.integrationBannerText}>
+                        {featureStatus?.google_workspace_extended_connect.available
+                          ? "Gmail or Calendar is active, but the newer Drive scopes are still missing."
+                          : (
+                            featureStatus?.google_workspace_extended_connect.reason
+                            || "Drive and Sheets will stay hidden until the extended Google review is approved."
+                          )}
+                      </div>
                     </div>
-                    <button type="button" className={styles.secondaryButton} onClick={() => user?.id ? window.location.assign(`/api/auth/google?userId=${encodeURIComponent(user.id)}`) : showToast("User account is not loaded yet.")}>
-                      Reconnect Google
+                    <button
+                      type="button"
+                      className={styles.secondaryButton}
+                      disabled={!featureStatus?.google_workspace_extended_connect.available}
+                      onClick={() => user?.id
+                        ? window.location.assign(`/api/auth/google?userId=${encodeURIComponent(user.id)}&scopeSet=extended`)
+                        : showToast("User account is not loaded yet.")}
+                    >
+                      {featureStatus?.google_workspace_extended_connect.available
+                        ? "Reconnect Google"
+                        : "Awaiting approval"}
                     </button>
                   </div>
                 ) : null}
@@ -375,7 +439,14 @@ export function SettingsPage({ config }: SettingsPageProps) {
                     </div>
                     <div className={styles.integrationActions}>
                       <span className={(gmail || calendar || drive) ? styles.connectedBadge : styles.statusBadgeMuted}>{(gmail || calendar || drive) ? "Connected" : "Needs setup"}</span>
-                      <button type="button" className={styles.primaryButton} disabled={!featureStatus?.google_workspace_connect.available} onClick={() => user?.id ? window.location.assign(`/api/auth/google?userId=${encodeURIComponent(user.id)}`) : showToast("User account is not loaded yet.")}>
+                      <button
+                        type="button"
+                        className={styles.primaryButton}
+                        disabled={!featureStatus?.google_workspace_connect.available}
+                        onClick={() => user?.id
+                          ? window.location.assign(`/api/auth/google?userId=${encodeURIComponent(user.id)}`)
+                          : showToast("User account is not loaded yet.")}
+                      >
                         Connect Google
                       </button>
                       {(gmail || calendar || drive) ? <button type="button" className={styles.dangerButton} disabled={Boolean(saving.google)} onClick={() => void disconnect("google")}>{saving.google ? "Working..." : "Disconnect"}</button> : null}

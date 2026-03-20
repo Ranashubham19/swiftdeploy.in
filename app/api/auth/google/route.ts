@@ -1,8 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { buildClawCloudGoogleAuthUrl } from "@/lib/clawcloud-google";
-import { env } from "@/lib/env";
-import { getClawCloudErrorMessage } from "@/lib/clawcloud-supabase";
+import {
+  getGoogleWorkspaceCoreAccess,
+  getGoogleWorkspaceExtendedAccess,
+} from "@/lib/google-workspace-rollout";
+import {
+  getClawCloudErrorMessage,
+  getClawCloudSupabaseAdmin,
+} from "@/lib/clawcloud-supabase";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,14 +23,11 @@ function withNoStoreHeaders(response: NextResponse) {
 
 export async function GET(request: NextRequest) {
   const userId = request.nextUrl.searchParams.get("userId")?.trim();
-  const redirectBase = new URL("/setup", request.nextUrl.origin);
-
-  if (!env.GOOGLE_WORKSPACE_PUBLIC_ENABLED || env.GOOGLE_WORKSPACE_TEMPORARY_HOLD) {
-    redirectBase.searchParams.set(
-      "error",
-      "Google Workspace is temporarily paused while ClawCloud finishes verification. Continue setup now and connect Google later from the dashboard.",
-    );
-    return withNoStoreHeaders(NextResponse.redirect(redirectBase));
+  const requestedScopeSet = request.nextUrl.searchParams.get("scopeSet")?.trim().toLowerCase();
+  const scopeSet = requestedScopeSet === "extended" ? "extended" : "core";
+  const redirectBase = new URL(scopeSet === "extended" ? "/settings" : "/setup", request.nextUrl.origin);
+  if (scopeSet === "extended") {
+    redirectBase.searchParams.set("tab", "integrations");
   }
 
   if (!userId) {
@@ -34,7 +37,23 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const url = buildClawCloudGoogleAuthUrl(userId, request.nextUrl.origin);
+    const supabaseAdmin = getClawCloudSupabaseAdmin();
+    const userResult = await supabaseAdmin.auth.admin.getUserById(userId);
+    const userEmail = userResult?.data?.user?.email ?? null;
+    const coreAccess = getGoogleWorkspaceCoreAccess(userEmail);
+    const extendedAccess = getGoogleWorkspaceExtendedAccess(userEmail);
+
+    if (scopeSet === "core" && !coreAccess.available) {
+      redirectBase.searchParams.set("error", coreAccess.reason);
+      return withNoStoreHeaders(NextResponse.redirect(redirectBase));
+    }
+
+    if (scopeSet === "extended" && !extendedAccess.available) {
+      redirectBase.searchParams.set("error", extendedAccess.reason);
+      return withNoStoreHeaders(NextResponse.redirect(redirectBase));
+    }
+
+    const url = buildClawCloudGoogleAuthUrl(userId, request.nextUrl.origin, scopeSet);
     return withNoStoreHeaders(NextResponse.redirect(url));
   } catch (error) {
     redirectBase.searchParams.set("error", getClawCloudErrorMessage(error));

@@ -36,6 +36,12 @@ npm install
 
 2. Add environment variables in `.env.local`
 
+   For Google OAuth:
+   - Keep `GOOGLE_WORKSPACE_PUBLIC_ENABLED=false` until Google approves public Workspace access
+   - Use `GOOGLE_WORKSPACE_TEMPORARY_HOLD=true` if you need an explicit rollout brake
+   - After approval, flip the rollout flags and re-test the Google connect flows
+   - See [GOOGLE-OAUTH-PUBLIC-LAUNCH.md](c:\Users\ranas\Downloads\swiftdeploy-ai%20(2)\GOOGLE-OAUTH-PUBLIC-LAUNCH.md)
+
 3. Start the web app
 
 ```bash

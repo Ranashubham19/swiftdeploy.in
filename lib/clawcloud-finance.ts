@@ -603,7 +603,7 @@ export function formatFinanceReply(result: FinanceResult): string {
 
   lines.push(`\u{1F4E1} _Live data as of ${asOf} IST - ${result.source}_`);
   lines.push(`_Data fetched: ${fetchedTime} IST, ${fetchedDate}_`);
-  lines.push("\u26A0\uFE0F _Not financial advice. Verify on NSE/BSE or other official sources before any financial decision._");
+  lines.push("\u26A0\uFE0F _Not financial advice. Verify before trading on NSE/BSE or other official sources before any financial decision._");
   return lines.join("\n");
 }
 

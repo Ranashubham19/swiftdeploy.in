@@ -4,6 +4,7 @@ import {
   exchangeClawCloudGoogleCode,
   exchangeClawCloudGoogleLoginCode,
   fetchClawCloudGoogleProfile,
+  parseClawCloudGoogleWorkspaceState,
 } from "@/lib/clawcloud-google";
 import {
   getClawCloudErrorMessage,
@@ -21,6 +22,28 @@ function isExistingUserError(message: string) {
   return /already (exists|been registered|registered)|duplicate|unique/i.test(message);
 }
 
+function buildWorkspaceRedirectBase(origin: string, scopeSet: "core" | "extended") {
+  const redirectBase = new URL(scopeSet === "extended" ? "/settings" : "/setup", origin);
+  if (scopeSet === "extended") {
+    redirectBase.searchParams.set("tab", "integrations");
+  }
+  return redirectBase;
+}
+
+function describeGoogleWorkspaceSaveError(error: { message?: string | null; code?: string | null }) {
+  const message = String(error.message ?? "").trim();
+  const code = String(error.code ?? "").trim();
+  if (
+    code === "23514"
+    || /connected_accounts_provider_check/i.test(message)
+    || /violates check constraint/i.test(message)
+  ) {
+    return "Google Drive permission was granted, but the production database schema still rejects google_drive connections. Apply the latest connected_accounts provider migration and retry.";
+  }
+
+  return message || "Unable to save the Google Workspace connection.";
+}
+
 function withNoStoreHeaders(response: NextResponse) {
   response.headers.set("Cache-Control", "no-store, no-cache, max-age=0, must-revalidate");
   response.headers.set("Pragma", "no-cache");
@@ -33,7 +56,8 @@ export async function GET(request: NextRequest) {
   const state = request.nextUrl.searchParams.get("state")?.trim();
   const providerError = request.nextUrl.searchParams.get("error");
 
-  const redirectBase = new URL("/setup", request.nextUrl.origin);
+  const fallbackScopeSet = state?.startsWith("workspace:extended:") ? "extended" : "core";
+  const redirectBase = buildWorkspaceRedirectBase(request.nextUrl.origin, fallbackScopeSet);
   const loginRedirectBase = new URL("/auth", request.nextUrl.origin);
   const expectedLoginState = request.cookies.get(GOOGLE_LOGIN_STATE_COOKIE)?.value?.trim() ?? "";
 
@@ -132,13 +156,16 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    const workspaceState = parseClawCloudGoogleWorkspaceState(state);
+    const workspaceRedirectBase = buildWorkspaceRedirectBase(request.nextUrl.origin, workspaceState.scopeSet);
+    const userId = workspaceState.userId;
     const exchanged = await exchangeClawCloudGoogleCode(code, request.nextUrl.origin);
     const profile = await fetchClawCloudGoogleProfile(exchanged.accessToken);
     const tokenExpiry = new Date(Date.now() + exchanged.expiresIn * 1000).toISOString();
 
     const supabaseAdmin = getClawCloudSupabaseAdmin();
     const sharedRow = {
-      user_id: state,
+      user_id: userId,
       access_token: exchanged.accessToken,
       refresh_token: exchanged.refreshToken,
       token_expiry: tokenExpiry,
@@ -176,23 +203,30 @@ export async function GET(request: NextRequest) {
       throw new Error(calendarError.message);
     }
 
-    const { error: driveError } = await supabaseAdmin
-      .from("connected_accounts")
-      .upsert(
-        {
-          ...sharedRow,
-          provider: "google_drive",
-        },
-        { onConflict: "user_id,provider" },
-      );
+    if (workspaceState.scopeSet === "extended") {
+      const { error } = await supabaseAdmin
+        .from("connected_accounts")
+        .upsert(
+          {
+            ...sharedRow,
+            provider: "google_drive",
+          },
+          { onConflict: "user_id,provider" },
+        );
 
-    if (driveError) {
-      console.warn("[google/callback] Drive upsert failed:", driveError.message);
+      if (error) {
+        throw new Error(describeGoogleWorkspaceSaveError(error));
+      }
     }
 
-    redirectBase.searchParams.set("step", "2");
-    redirectBase.searchParams.set("gmail", "connected");
-    return withNoStoreHeaders(NextResponse.redirect(redirectBase));
+    if (workspaceState.scopeSet === "extended") {
+      workspaceRedirectBase.searchParams.set("drive", "connected");
+      return withNoStoreHeaders(NextResponse.redirect(workspaceRedirectBase));
+    }
+
+    workspaceRedirectBase.searchParams.set("step", "2");
+    workspaceRedirectBase.searchParams.set("gmail", "connected");
+    return withNoStoreHeaders(NextResponse.redirect(workspaceRedirectBase));
   } catch (error) {
     redirectBase.searchParams.set("error", getClawCloudErrorMessage(error));
     return withNoStoreHeaders(NextResponse.redirect(redirectBase));

@@ -12,15 +12,18 @@ export const runtime = "nodejs";
 
 export async function POST(request: NextRequest) {
   try {
+    let resolvedUserId: string | null = null;
     const body = (await request.json()) as {
       phone?: string;
+      jid?: string;
       message?: string;
+      contactName?: string;
       _internal?: boolean;
     };
 
-    if (!body.phone || !body.message) {
+    if ((!body.phone && !body.jid) || !body.message) {
       return NextResponse.json(
-        { error: "phone and message are required" },
+        { error: "phone or jid, plus message, are required" },
         { status: 400 },
       );
     }
@@ -34,9 +37,14 @@ export async function POST(request: NextRequest) {
       if (!auth.ok) {
         return NextResponse.json({ error: auth.error }, { status: auth.status });
       }
+      resolvedUserId = auth.user.id;
     }
 
-    await sendClawCloudWhatsAppToPhone(body.phone, body.message);
+    await sendClawCloudWhatsAppToPhone(body.phone ?? null, body.message, {
+      userId: resolvedUserId ?? undefined,
+      contactName: body.contactName ?? null,
+      jid: body.jid ?? null,
+    });
     return NextResponse.json({ success: true });
   } catch (error) {
     return NextResponse.json(

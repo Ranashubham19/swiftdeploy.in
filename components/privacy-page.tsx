@@ -18,8 +18,9 @@ export function PrivacyPage() {
             you register via Google OAuth or email/password.
           </li>
           <li>
-            <strong style={{ color: "#eeeef5" }}>OAuth tokens:</strong> Read-only Gmail and Google
-            Calendar tokens, stored encrypted, used only for actions you authorize.
+            <strong style={{ color: "#eeeef5" }}>OAuth tokens:</strong> Gmail, Google Calendar,
+            and optional Google Drive / Sheets tokens, stored encrypted and used only for actions
+            you authorize.
           </li>
           <li>
             <strong style={{ color: "#eeeef5" }}>WhatsApp session:</strong> Your phone number and
@@ -47,9 +48,11 @@ export function PrivacyPage() {
 
       <LegalSection title="3. Gmail and Calendar access">
         <p style={{ margin: 0 }}>
-          We use OAuth scopes you explicitly grant. Read-only access is the default; draft
-          creation requires an optional write scope. We process email content in real time only.
-          We do not store full email bodies, only metadata and AI-generated summaries.
+          We use only the OAuth scopes you explicitly grant. Gmail access can include reading
+          messages plus creating drafts and sending replies on your behalf. Calendar access is
+          read-only. Drive and Sheets access are requested separately when you choose to enable
+          those features. We process email content in real time only and do not store full email
+          bodies by default, only metadata and AI-generated summaries where needed for the product.
         </p>
         <p style={{ margin: 0 }}>
           Revoke Google access at any time from{" "}

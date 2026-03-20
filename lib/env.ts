@@ -29,6 +29,13 @@ function readBoolean(name: string, fallback = false) {
   return value === "1" || value === "true" || value === "yes" || value === "on";
 }
 
+function readStringList(name: string) {
+  return readString(name)
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
 function normalizeSecretCandidate(value: string) {
   const trimmed = value.trim();
   if (
@@ -81,11 +88,11 @@ function readNvidiaApiKey() {
 const defaultPublicGoogleEnabled = /localhost|127\.0\.0\.1/i.test(
   readFirstString(["NEXT_PUBLIC_APP_URL", "NEXTJS_URL"]),
 );
-const defaultWorkspaceGoogleEnabled = Boolean(
-  readFirstString(["GOOGLE_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_ID"])
-  && readFirstString(["GOOGLE_CLIENT_SECRET", "GOOGLE_OAUTH_CLIENT_SECRET"])
-  && readFirstString(["NEXT_PUBLIC_APP_URL", "NEXTJS_URL"]),
-);
+// Workspace OAuth requests Gmail / Calendar / Drive scopes, which can trigger
+// the raw Google "unverified app" screen if the app has not completed public
+// verification yet. Keep local dev convenient, but require an explicit public
+// enable in production instead of auto-exposing the flow when env vars exist.
+const defaultWorkspaceGoogleEnabled = defaultPublicGoogleEnabled;
 
 export const env = {
   NVIDIA_API_KEY: readNvidiaApiKey(),
@@ -186,6 +193,11 @@ export const env = {
     "GOOGLE_WORKSPACE_PUBLIC_ENABLED",
     defaultWorkspaceGoogleEnabled || defaultPublicGoogleEnabled,
   ),
+  GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED: readBoolean(
+    "GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED",
+    false,
+  ),
+  GOOGLE_WORKSPACE_TEST_USER_EMAILS: readStringList("GOOGLE_WORKSPACE_TEST_USER_EMAILS"),
   // Emergency brake for Workspace connect. Defaults off when OAuth is configured.
   GOOGLE_WORKSPACE_TEMPORARY_HOLD: readBoolean("GOOGLE_WORKSPACE_TEMPORARY_HOLD", false),
   TELEGRAM_BOT_TOKEN: readString("TELEGRAM_BOT_TOKEN"),
@@ -252,6 +264,10 @@ export function getPublicAppConfig(): PublicAppConfig {
       publicSignInEnabled: env.GOOGLE_SIGNIN_PUBLIC_ENABLED,
       publicWorkspaceEnabled:
         env.GOOGLE_WORKSPACE_PUBLIC_ENABLED && !env.GOOGLE_WORKSPACE_TEMPORARY_HOLD,
+      publicWorkspaceExtendedEnabled:
+        env.GOOGLE_WORKSPACE_PUBLIC_ENABLED
+        && env.GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED
+        && !env.GOOGLE_WORKSPACE_TEMPORARY_HOLD,
     },
     firebase: {
       apiKey: env.FIREBASE_API_KEY,

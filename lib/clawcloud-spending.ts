@@ -1,6 +1,10 @@
 import { completeClawCloudPrompt } from "@/lib/clawcloud-ai";
 import { upsertAnalyticsDaily } from "@/lib/clawcloud-analytics";
-import { getClawCloudGmailMessages } from "@/lib/clawcloud-google";
+import {
+  buildGoogleReconnectRequiredReply,
+  getClawCloudGmailMessages,
+  isClawCloudGoogleReconnectRequiredError,
+} from "@/lib/clawcloud-google";
 import {
   normalizeMerchantName,
   normalizeSpendingCategory,
@@ -27,6 +31,13 @@ type SpendSummary = {
   topMerchants: Array<{ merchant: string; total: number }>;
   averageTicket: number;
   biggestExpense: SpendEntry | null;
+};
+
+type SpendSourceFetch = {
+  emails: Awaited<ReturnType<typeof getClawCloudGmailMessages>>;
+  upiTransactions: Awaited<ReturnType<typeof getUpiTransactions>>;
+  gmailLimited: boolean;
+  reconnectRequired: boolean;
 };
 
 function buildReceiptQuery(days: number) {
@@ -254,6 +265,54 @@ function getLookbackDays(question: string) {
   return 30;
 }
 
+async function fetchSpendSources(userId: string, lookbackDays: number): Promise<SpendSourceFetch> {
+  const result: SpendSourceFetch = {
+    emails: [],
+    upiTransactions: [],
+    gmailLimited: false,
+    reconnectRequired: false,
+  };
+
+  const [emailResult, upiResult] = await Promise.allSettled([
+    getClawCloudGmailMessages(userId, {
+      query: buildReceiptQuery(lookbackDays),
+      maxResults: 60,
+    }),
+    getUpiTransactions(userId, lookbackDays).catch(() => []),
+  ]);
+
+  if (emailResult.status === "fulfilled") {
+    result.emails = emailResult.value;
+  } else {
+    result.gmailLimited = true;
+    result.reconnectRequired = isClawCloudGoogleReconnectRequiredError(emailResult.reason);
+  }
+
+  if (upiResult.status === "fulfilled") {
+    result.upiTransactions = upiResult.value;
+  }
+
+  return result;
+}
+
+function buildSpendDataUnavailableReply(periodLabel: string, gmailLimited: boolean) {
+  const lines = [
+    `I could not find enough spending data for ${periodLabel}.`,
+    "",
+    `Total spend for ${periodLabel}: INR 0.00`,
+    "Top categories: none found.",
+  ];
+
+  if (gmailLimited) {
+    lines.push("");
+    lines.push("Gmail receipt data is not connected right now, so this check can only use any other connected payment history.");
+  }
+
+  lines.push("");
+  lines.push("No transactions found in your connected data for this period.");
+  return lines.join("\n");
+}
+
 function mergeSpendEntries(emailEntries: SpendEntry[], upiEntries: SpendEntry[]) {
   return [...emailEntries, ...upiEntries].map((entry) => normalizeSpendEntry(entry));
 }
@@ -277,13 +336,21 @@ function buildWeeklySummary(entries: SpendEntry[]): SpendSummary {
 
 export async function runWeeklySpendSummary(userId: string) {
   const locale = await getUserLocale(userId);
-  const [emails, upiTransactions] = await Promise.all([
-    getClawCloudGmailMessages(userId, {
-      query: buildReceiptQuery(30),
-      maxResults: 60,
-    }),
-    getUpiTransactions(userId, 30).catch(() => []),
-  ]);
+  const sourceData = await fetchSpendSources(userId, 30);
+  const { emails, upiTransactions, gmailLimited, reconnectRequired } = sourceData;
+
+  if (!emails.length && !upiTransactions.length) {
+    const message = reconnectRequired
+      ? buildGoogleReconnectRequiredReply("Gmail")
+      : buildSpendDataUnavailableReply("the last 30 days", gmailLimited);
+    await sendClawCloudWhatsAppMessage(userId, await translateMessage(message, locale));
+    await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+    return {
+      transactions: 0,
+      total: 0,
+      currency: "USD",
+    };
+  }
 
   const entries: SpendEntry[] = [];
   for (let index = 0; index < emails.length; index += 5) {
@@ -307,7 +374,13 @@ export async function runWeeklySpendSummary(userId: string) {
   const mergedEntries = mergeSpendEntries(entries, upiEntries);
   const weeklySummary = buildWeeklySummary(mergedEntries);
   const monthlySummary = buildSpendSummary(mergedEntries, 30, "Last 30 days");
-  const translatedMessage = await translateMessage(formatSpendMessage(weeklySummary, monthlySummary), locale);
+  const spendMessage = formatSpendMessage(weeklySummary, monthlySummary);
+  const translatedMessage = await translateMessage(
+    gmailLimited && upiEntries.length
+      ? `${spendMessage}\n\n_Note: Gmail receipt data is currently unavailable, so this summary uses only other connected payment history._`
+      : spendMessage,
+    locale,
+  );
 
   await sendClawCloudWhatsAppMessage(userId, translatedMessage);
   await upsertAnalyticsDaily(userId, {
@@ -326,13 +399,13 @@ export async function runWeeklySpendSummary(userId: string) {
 export async function answerSpendingQuestion(userId: string, question: string) {
   const locale = await getUserLocale(userId);
   const lookbackDays = getLookbackDays(question);
-  const [emails, upiTransactions] = await Promise.all([
-    getClawCloudGmailMessages(userId, {
-      query: buildReceiptQuery(lookbackDays),
-      maxResults: 50,
-    }),
-    getUpiTransactions(userId, lookbackDays).catch(() => []),
-  ]);
+  const periodLabel = lookbackDays >= 60 ? "the last 30 days" : `the last ${lookbackDays} days`;
+  const {
+    emails,
+    upiTransactions,
+    gmailLimited,
+    reconnectRequired,
+  } = await fetchSpendSources(userId, lookbackDays);
 
   const entries: SpendEntry[] = [];
   for (const email of emails.slice(0, 20)) {
@@ -351,6 +424,13 @@ export async function answerSpendingQuestion(userId: string, question: string) {
   }));
 
   const allEntries = mergeSpendEntries(entries, upiEntries);
+  if (!allEntries.length) {
+    const fallback = reconnectRequired
+      ? buildGoogleReconnectRequiredReply("Gmail")
+      : buildSpendDataUnavailableReply(periodLabel, gmailLimited);
+    return translateMessage(fallback, locale);
+  }
+
   const weeklySummary = buildWeeklySummary(allEntries);
   const monthlySummary = buildSpendSummary(allEntries, 30, "Last 30 days");
   const facts = buildSpendingFacts(weeklySummary, monthlySummary);
@@ -368,5 +448,9 @@ export async function answerSpendingQuestion(userId: string, question: string) {
     fallback: "I could not find enough spending data to answer that.",
   });
 
-  return translateMessage(answer, locale);
+  const finalAnswer = gmailLimited && upiEntries.length
+    ? `${answer}\n\n_Note: Gmail receipt data is currently unavailable, so this answer uses only other connected payment history._`
+    : answer;
+
+  return translateMessage(finalAnswer, locale);
 }

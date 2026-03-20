@@ -1,4 +1,8 @@
-import { loadContacts } from "@/lib/clawcloud-contacts";
+import {
+  formatContactDisplayName,
+  loadContacts,
+  normalizeContactName,
+} from "@/lib/clawcloud-contacts";
 
 export type ContactMatch = {
   name: string;
@@ -43,8 +47,8 @@ const COMMON_NICKNAME_EXPANSIONS: Record<string, string[]> = {
   sonu: ["sonali", "sonam", "sonal"],
   tina: ["teena"],
   aman: ["amandeep", "amanjot", "amanbir"],
-  maa: ["mom", "mother", "mama"],
-  papa: ["dad", "father", "pappa", "baba"],
+  maa: ["mom", "mother", "mama", "mum", "mummy", "mommy", "ma"],
+  papa: ["dad", "father", "pappa", "baba", "daddy", "pitaji"],
   boss: ["manager", "sir"],
 };
 
@@ -82,7 +86,7 @@ function similarity(a: string, b: string): number {
 }
 
 function normalizeName(name: string): string {
-  let normalized = name.toLowerCase().trim().replace(/\s+/g, " ");
+  let normalized = normalizeContactName(name);
 
   for (const honorific of HINDI_HONORIFICS) {
     if (normalized.endsWith(` ${honorific}`)) {
@@ -91,7 +95,7 @@ function normalizeName(name: string): string {
     }
   }
 
-  return normalized.replace(/'s$/, "").trim();
+  return normalized.trim();
 }
 
 function getNameVariants(query: string): string[] {
@@ -102,20 +106,19 @@ function getNameVariants(query: string): string[] {
     variants.add(base);
   }
 
-  const firstWord = base.split(/\s+/)[0];
-  if (firstWord) {
-    variants.add(firstWord);
+  const baseWords = base.split(/\s+/).filter(Boolean);
+  for (const word of baseWords) {
+    variants.add(word);
+    for (const expansion of COMMON_NICKNAME_EXPANSIONS[word] ?? []) {
+      variants.add(expansion);
+    }
   }
 
   for (const expansion of COMMON_NICKNAME_EXPANSIONS[base] ?? []) {
     variants.add(expansion);
   }
 
-  for (const expansion of COMMON_NICKNAME_EXPANSIONS[firstWord] ?? []) {
-    variants.add(expansion);
-  }
-
-  return [...variants];
+  return [...variants].filter(Boolean);
 }
 
 function scoreContact(queryVariants: string[], storedName: string): number {
@@ -148,17 +151,9 @@ function scoreContact(queryVariants: string[], storedName: string): number {
   return best;
 }
 
-function capitalizeWords(value: string): string {
-  return value
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
 function buildAmbiguityPrompt(queryName: string, matches: ContactMatch[]): string {
   return [
-    `🤔 *I found ${matches.length} contacts matching "${queryName}":*`,
+    `I found ${matches.length} contacts matching "${queryName}":`,
     "",
     ...matches.map((match, index) => `*${index + 1}.* ${match.name}`),
     "",
@@ -184,7 +179,7 @@ export async function lookupContactFuzzy(
     const score = scoreContact(queryVariants, storedName);
     if (score >= FUZZY_THRESHOLD) {
       scored.push({
-        name: capitalizeWords(storedName),
+        name: formatContactDisplayName(storedName),
         phone,
         score,
         exact: score >= EXACT_SCORE,
@@ -197,7 +192,7 @@ export async function lookupContactFuzzy(
   if (!scored.length) {
     return {
       type: "not_found",
-      suggestions: entries.slice(0, 5).map(([name]) => capitalizeWords(name)),
+      suggestions: entries.slice(0, 5).map(([name]) => formatContactDisplayName(name)),
     };
   }
 
@@ -229,14 +224,20 @@ export async function lookupContactSimple(
 
 export function formatNotFoundReply(queryName: string, suggestions: string[]): string {
   const lines = [
-    `📵 *No contact found for "${queryName}"*`,
+    `I couldn't match "${queryName}" in your available contacts.`,
     "",
-    `Save it first: _Save contact: ${queryName} = +91XXXXXXXXXX_`,
+    "I can send from:",
+    "- saved ClawCloud contacts",
+    "- synced WhatsApp contacts from your linked session",
+    "- a direct WhatsApp number",
+    "",
+    `Save it here: _Save contact: ${queryName} = +91XXXXXXXXXX_`,
+    'Or send direct: _Send "Hello" to +91XXXXXXXXXX_',
   ];
 
   if (suggestions.length) {
     lines.push("");
-    lines.push(`*Your saved contacts:* ${suggestions.join(", ")}`);
+    lines.push(`Your saved contacts: ${suggestions.join(", ")}`);
   }
 
   return lines.join("\n");

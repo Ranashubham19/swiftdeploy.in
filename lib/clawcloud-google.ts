@@ -2,15 +2,21 @@ import { env } from "@/lib/env";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 import type { ClawCloudProvider } from "@/lib/clawcloud-types";
 
-const googleScopes = [
+export type GoogleWorkspaceScopeSet = "core" | "extended";
+type GoogleConnectedProvider = Extract<ClawCloudProvider, "gmail" | "google_calendar" | "google_drive">;
+
+const googleWorkspaceCoreScopes = [
   "https://www.googleapis.com/auth/gmail.readonly",
   "https://www.googleapis.com/auth/gmail.compose",
   "https://www.googleapis.com/auth/gmail.send",
   "https://www.googleapis.com/auth/calendar.readonly",
-  "https://www.googleapis.com/auth/drive.readonly",
-  "https://www.googleapis.com/auth/spreadsheets",
   "email",
   "profile",
+] as const;
+
+const googleWorkspaceExtendedScopes = [
+  "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/spreadsheets",
 ] as const;
 
 const googleLoginScopes = [
@@ -18,6 +24,12 @@ const googleLoginScopes = [
   "email",
   "profile",
 ] as const;
+
+const googleConnectedProviders: GoogleConnectedProvider[] = [
+  "gmail",
+  "google_calendar",
+  "google_drive",
+];
 
 type ConnectedGoogleAccount = {
   access_token: string | null;
@@ -49,6 +61,31 @@ type CalendarEvent = {
   attendees: Array<{ email?: string | null; displayName?: string | null }>;
   description: string | null;
 };
+
+export class ClawCloudGoogleReconnectRequiredError extends Error {
+  readonly providers: GoogleConnectedProvider[];
+
+  constructor(message = "Google Workspace needs to be reconnected.", providers = googleConnectedProviders) {
+    super(message);
+    this.name = "ClawCloudGoogleReconnectRequiredError";
+    this.providers = [...providers];
+  }
+}
+
+export function isClawCloudGoogleReconnectRequiredError(
+  error: unknown,
+): error is ClawCloudGoogleReconnectRequiredError {
+  return error instanceof ClawCloudGoogleReconnectRequiredError;
+}
+
+export function buildGoogleReconnectRequiredReply(serviceLabel = "Google Workspace") {
+  return [
+    `*${serviceLabel} needs to be reconnected.*`,
+    "",
+    "The saved Google connection is no longer valid for this account.",
+    "Reconnect Google at *swift-deploy.in/settings* and try again.",
+  ].join("\n");
+}
 
 function normalizeOrigin(value: string | null | undefined) {
   return String(value ?? "").trim().replace(/\/+$/, "");
@@ -117,7 +154,38 @@ function assertGoogleLoginOAuthConfigured(requestOrigin?: string) {
   }
 }
 
-export function buildClawCloudGoogleAuthUrl(userId: string, requestOrigin?: string) {
+function buildGoogleWorkspaceState(userId: string, scopeSet: GoogleWorkspaceScopeSet) {
+  return `workspace:${scopeSet}:${userId}`;
+}
+
+export function parseClawCloudGoogleWorkspaceState(state: string) {
+  const trimmed = state.trim();
+  const match = trimmed.match(/^workspace:(core|extended):(.+)$/i);
+  if (match) {
+    return {
+      userId: match[2].trim(),
+      scopeSet: match[1].toLowerCase() as GoogleWorkspaceScopeSet,
+    };
+  }
+
+  // Backward compatibility for previously-issued auth URLs that stored only the user id.
+  return {
+    userId: trimmed,
+    scopeSet: "extended" as GoogleWorkspaceScopeSet,
+  };
+}
+
+function getGoogleWorkspaceScopes(scopeSet: GoogleWorkspaceScopeSet) {
+  return scopeSet === "extended"
+    ? [...googleWorkspaceCoreScopes, ...googleWorkspaceExtendedScopes]
+    : [...googleWorkspaceCoreScopes];
+}
+
+export function buildClawCloudGoogleAuthUrl(
+  userId: string,
+  requestOrigin?: string,
+  scopeSet: GoogleWorkspaceScopeSet = "core",
+) {
   assertGoogleOAuthConfigured(requestOrigin);
   const redirectUri = getGoogleRedirectUri(requestOrigin);
 
@@ -127,8 +195,8 @@ export function buildClawCloudGoogleAuthUrl(userId: string, requestOrigin?: stri
     response_type: "code",
     access_type: "offline",
     prompt: "consent",
-    scope: googleScopes.join(" "),
-    state: userId,
+    scope: getGoogleWorkspaceScopes(scopeSet).join(" "),
+    state: buildGoogleWorkspaceState(userId, scopeSet),
   });
 
   return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
@@ -252,7 +320,7 @@ export async function fetchClawCloudGoogleProfile(accessToken: string) {
 
 async function getConnectedGoogleAccount(
   userId: string,
-  provider: Extract<ClawCloudProvider, "gmail" | "google_calendar" | "google_drive">,
+  provider: GoogleConnectedProvider,
 ) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const { data, error } = await supabaseAdmin
@@ -268,6 +336,53 @@ async function getConnectedGoogleAccount(
   }
 
   return data as ConnectedGoogleAccount;
+}
+
+function buildGoogleOauthErrorMessage(errorCode?: string, errorDescription?: string) {
+  return [errorDescription, errorCode]
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean)
+    .join(" ")
+    || "Google token refresh failed.";
+}
+
+function shouldRequireGoogleReconnect(errorCode?: string, errorDescription?: string) {
+  const normalizedCode = String(errorCode ?? "").trim().toLowerCase();
+  const normalizedDescription = String(errorDescription ?? "").trim().toLowerCase();
+  const normalizedCombined = `${normalizedCode} ${normalizedDescription}`.trim();
+
+  return [
+    /\binvalid_client\b/,
+    /\bunauthorized_client\b/,
+    /\binvalid_grant\b/,
+    /\boauth client was deleted\b/,
+    /\bdeleted\b.*\bclient\b/,
+    /\bexpired or revoked\b/,
+    /\btoken has been expired or revoked\b/,
+    /\brevoked\b/,
+    /\bmalformed auth code\b/,
+  ].some((pattern) => pattern.test(normalizedCombined));
+}
+
+async function deactivateConnectedGoogleAccounts(
+  userId: string,
+  providers: GoogleConnectedProvider[] = googleConnectedProviders,
+) {
+  const supabaseAdmin = getClawCloudSupabaseAdmin();
+  const { error } = await supabaseAdmin
+    .from("connected_accounts")
+    .update({
+      is_active: false,
+      access_token: null,
+      refresh_token: null,
+      token_expiry: null,
+    })
+    .eq("user_id", userId)
+    .in("provider", providers);
+
+  if (error) {
+    throw new Error(error.message);
+  }
 }
 
 async function refreshGoogleAccessToken(refreshToken: string) {
@@ -294,7 +409,11 @@ async function refreshGoogleAccessToken(refreshToken: string) {
   };
 
   if (!response.ok || json.error || !json.access_token) {
-    throw new Error(json.error_description || json.error || "Google token refresh failed.");
+    const googleErrorMessage = buildGoogleOauthErrorMessage(json.error, json.error_description);
+    if (shouldRequireGoogleReconnect(json.error, json.error_description)) {
+      throw new ClawCloudGoogleReconnectRequiredError(googleErrorMessage);
+    }
+    throw new Error(googleErrorMessage);
   }
 
   return {
@@ -305,7 +424,7 @@ async function refreshGoogleAccessToken(refreshToken: string) {
 
 export async function getValidGoogleAccessToken(
   userId: string,
-  provider: Extract<ClawCloudProvider, "gmail" | "google_calendar" | "google_drive">,
+  provider: GoogleConnectedProvider,
 ) {
   const account = await getConnectedGoogleAccount(userId, provider);
 
@@ -317,10 +436,19 @@ export async function getValidGoogleAccessToken(
   }
 
   if (!account.refresh_token) {
-    throw new Error(`Missing refresh token for ${provider}.`);
+    await deactivateConnectedGoogleAccounts(userId).catch(() => null);
+    throw new ClawCloudGoogleReconnectRequiredError(`Missing refresh token for ${provider}.`);
   }
 
-  const refreshed = await refreshGoogleAccessToken(account.refresh_token);
+  let refreshed;
+  try {
+    refreshed = await refreshGoogleAccessToken(account.refresh_token);
+  } catch (error) {
+    if (isClawCloudGoogleReconnectRequiredError(error)) {
+      await deactivateConnectedGoogleAccounts(userId, error.providers).catch(() => null);
+    }
+    throw error;
+  }
   const nextExpiry = new Date(Date.now() + refreshed.expiresIn * 1000).toISOString();
 
   const supabaseAdmin = getClawCloudSupabaseAdmin();

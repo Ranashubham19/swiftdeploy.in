@@ -124,15 +124,24 @@ function calculateGst(amount: number, rate: GstSlab, isInclusive: boolean): stri
   let baseAmount: number;
   let gstAmount: number;
   let totalAmount: number;
+  const explanation: string[] = [];
 
   if (isInclusive) {
     baseAmount = (amount * 100) / (100 + rate);
     gstAmount = amount - baseAmount;
     totalAmount = amount;
+    explanation.push(
+      `*Inclusive breakdown:* ${formatInr(amount)} / 1.${String(rate).padStart(2, "0")} = ${formatInr(baseAmount)}`,
+      `*GST amount:* ${formatInr(amount)} - ${formatInr(baseAmount)} = ${formatInr(gstAmount)}`,
+    );
   } else {
     baseAmount = amount;
     gstAmount = (amount * rate) / 100;
     totalAmount = amount + gstAmount;
+    explanation.push(
+      `*Taxable value:* ${formatInr(baseAmount)}`,
+      `*GST amount:* ${formatInr(baseAmount)} x ${rate}% = ${formatInr(gstAmount)}`,
+    );
   }
 
   const cgst = gstAmount / 2;
@@ -141,12 +150,14 @@ function calculateGst(amount: number, rate: GstSlab, isInclusive: boolean): stri
   return [
     `🧾 *GST Calculation @ ${rate}%*`,
     "",
-    `*Base Amount:* ${formatInr(baseAmount)}`,
+    isInclusive ? `*Taxable value (before GST):* ${formatInr(baseAmount)}` : `*Base Amount:* ${formatInr(baseAmount)}`,
     `*CGST (${rate / 2}%):* ${formatInr(cgst)}`,
     `*SGST (${rate / 2}%):* ${formatInr(sgst)}`,
     `*Total GST:* ${formatInr(gstAmount)}`,
     "",
-    `*${isInclusive ? "GST Exclusive Price" : "Total Amount (GST inclusive)"}:* ${formatInr(isInclusive ? baseAmount : totalAmount)}`,
+    ...explanation,
+    "",
+    `*${isInclusive ? "Invoice total (GST inclusive)" : "Total Amount (GST inclusive)"}:* ${formatInr(totalAmount)}`,
     "",
     "_For inter-state: IGST applies instead of CGST+SGST_",
   ].join("\n");

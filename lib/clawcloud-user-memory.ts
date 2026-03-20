@@ -8,6 +8,8 @@ export type MemoryKey =
   | "country"
   | "profession"
   | "company"
+  | "reply_language"
+  | "programming_language"
   | "language_preference"
   | "timezone"
   | "age"
@@ -41,9 +43,16 @@ type ExtractedFact = {
   confidence: number;
 };
 
+type ExplicitMemoryFact = {
+  key: MemoryKey;
+  value: string;
+};
+
 export type MemoryCommandIntent =
   | { type: "save_explicit"; key: MemoryKey; value: string }
+  | { type: "save_multiple"; facts: ExplicitMemoryFact[] }
   | { type: "forget_key"; key: MemoryKey }
+  | { type: "forget_multiple"; keys: MemoryKey[] }
   | { type: "forget_all" }
   | { type: "show_profile" }
   | { type: "show_suggestions" }
@@ -52,6 +61,7 @@ export type MemoryCommandIntent =
 const EXTRACT_TIMEOUT_MS = 5_000;
 const MAX_MEMORY_KEYS = 30;
 const MIN_CONFIDENCE_TO_SAVE = 0.75;
+const USER_PERSISTENCE_CACHE_TTL_MS = 5 * 60 * 1000;
 
 const PROFESSION_HINT_RE =
   /\b(doctor|engineer|developer|designer|teacher|student|lawyer|nurse|manager|founder|ceo|cto|freelancer|consultant|analyst|writer|journalist|architect|scientist|marketer|accountant|product manager|salesperson)\b/i;
@@ -72,6 +82,8 @@ const KEY_LABELS: Record<string, string> = {
   country: "Country",
   profession: "Profession",
   company: "Company",
+  reply_language: "Reply language",
+  programming_language: "Favorite programming language",
   language_preference: "Language preference",
   timezone: "Timezone",
   age: "Age",
@@ -89,7 +101,7 @@ const KEY_LABELS: Record<string, string> = {
 const MEMORY_GROUPS: Array<{ title: string; keys: MemoryKey[] }> = [
   {
     title: "Identity",
-    keys: ["preferred_name", "name", "age", "city", "country", "timezone", "language_preference"],
+    keys: ["preferred_name", "name", "age", "city", "country", "timezone", "reply_language"],
   },
   {
     title: "Work",
@@ -97,7 +109,7 @@ const MEMORY_GROUPS: Array<{ title: string; keys: MemoryKey[] }> = [
   },
   {
     title: "Preferences",
-    keys: ["preferred_tone", "briefing_style", "focus_areas", "interests"],
+    keys: ["preferred_tone", "briefing_style", "focus_areas", "interests", "programming_language"],
   },
   {
     title: "Goals and routines",
@@ -114,6 +126,28 @@ const PERSONALIZATION_PROMPTS: Array<{ key: MemoryKey; prompt: string }> = [
   { key: "goals", prompt: "Remember my goals are to grow revenue and stay fit" },
 ];
 
+const userPersistenceCache = new Map<string, { exists: boolean; checkedAt: number }>();
+
+async function canPersistUserScopedData(userId: string): Promise<boolean> {
+  if (!userId) return false;
+
+  const cached = userPersistenceCache.get(userId);
+  if (cached && Date.now() - cached.checkedAt < USER_PERSISTENCE_CACHE_TTL_MS) {
+    return cached.exists;
+  }
+
+  const db = getClawCloudSupabaseAdmin();
+  const { data, error } = await db
+    .from("users")
+    .select("id")
+    .eq("id", userId)
+    .maybeSingle();
+
+  const exists = !error && Boolean(data?.id);
+  userPersistenceCache.set(userId, { exists, checkedAt: Date.now() });
+  return exists;
+}
+
 export async function saveMemoryFact(
   userId: string,
   key: MemoryKey,
@@ -121,6 +155,10 @@ export async function saveMemoryFact(
   source: MemorySource = "extracted",
   confidence = 1.0,
 ): Promise<boolean> {
+  if (!(await canPersistUserScopedData(userId))) {
+    return false;
+  }
+
   const db = getClawCloudSupabaseAdmin();
   const normalizedValue = normalizeMemoryValue(key, value).slice(0, 500);
   if (!normalizedValue) return false;
@@ -138,6 +176,10 @@ export async function saveMemoryFact(
   );
 
   if (error) {
+    if (/foreign key constraint/i.test(error.message) && /user_memory_user_id_fkey/i.test(error.message)) {
+      userPersistenceCache.set(userId, { exists: false, checkedAt: Date.now() });
+      return false;
+    }
     console.error("[user-memory] saveMemoryFact error:", error.message);
     return false;
   }
@@ -159,11 +201,27 @@ export async function getAllMemoryFacts(userId: string): Promise<MemoryRow[]> {
     return [];
   }
 
-  return (data ?? []) as MemoryRow[];
+  return dedupeCanonicalMemoryFacts((data ?? []) as MemoryRow[]);
 }
 
 export async function deleteMemoryFact(userId: string, key: MemoryKey): Promise<boolean> {
   const db = getClawCloudSupabaseAdmin();
+  if (key === "programming_language") {
+    const { data, error } = await db
+      .from("user_memory")
+      .delete()
+      .eq("user_id", userId)
+      .in("key", ["programming_language", "language_preference"])
+      .select("id");
+
+    if (error) {
+      console.error("[user-memory] deleteMemoryFact error:", error.message);
+      return false;
+    }
+
+    return (data?.length ?? 0) > 0;
+  }
+
   const { data, error } = await db
     .from("user_memory")
     .delete()
@@ -216,7 +274,7 @@ async function extractFactsFromMessage(message: string): Promise<ExtractedFact[]
   const systemPrompt = [
     "Extract personal facts about the user from their message.",
     "Return ONLY a JSON array of objects with: key, value, confidence (0-1).",
-    "Keys must be one of: name, preferred_name, city, country, profession, company, age, interests, language_preference, preferred_tone, wake_time, work_hours, goals, priorities, briefing_style, focus_areas, routine.",
+    "Keys must be one of: name, preferred_name, city, country, profession, company, age, interests, reply_language, programming_language, preferred_tone, wake_time, work_hours, goals, priorities, briefing_style, focus_areas, routine.",
     "",
     "Rules:",
     "  - Only extract facts the user states about themselves, not hypotheticals or questions.",
@@ -291,6 +349,7 @@ export async function autoDetectAndSaveTimezone(
 ): Promise<void> {
   const detected = detectTimezoneFromText(message);
   if (!detected) return;
+  if (!(await canPersistUserScopedData(userId))) return;
 
   await saveMemoryFact(userId, "timezone", detected, "inferred", 0.85);
 
@@ -355,7 +414,7 @@ export function detectMemoryCommand(text: string): MemoryCommandIntent {
   const lower = trimmed.toLowerCase();
 
   if (
-    /^(what do you know about me|what do you remember about me|what have you (?:learned|remembered|saved) about me|show(?: my)? (?:profile|memory)|my profile|about me|mera profile|mujhe kya pata hai)\??$/i.test(lower)
+    /^(what do you know about me|what do you remember about me|what have you (?:learned|remembered|saved) about me|what do you remember about my preferences(?: right now)?|what are my preferences(?: right now)?|show(?: my)? (?:profile|memory|preferences)|my profile|about me|mera profile|mujhe kya pata hai)\??$/i.test(lower)
   ) {
     return { type: "show_profile" };
   }
@@ -374,9 +433,12 @@ export function detectMemoryCommand(text: string): MemoryCommandIntent {
 
   const forgetMatch = trimmed.match(/^(?:forget|delete|remove|clear)\s+my\s+(.+?)\.?\s*$/i);
   if (forgetMatch) {
-    const key = resolveKeyAlias(forgetMatch[1]);
-    if (key) {
-      return { type: "forget_key", key };
+    const keys = extractKeyAliasesFromList(forgetMatch[1]);
+    if (keys.length > 1) {
+      return { type: "forget_multiple", keys };
+    }
+    if (keys.length === 1) {
+      return { type: "forget_key", key: keys[0] };
     }
   }
 
@@ -399,7 +461,15 @@ export function detectMemoryCommand(text: string): MemoryCommandIntent {
   );
   if (rememberMatch) {
     const factText = rememberMatch[1].trim().replace(/[.!?]+$/, "");
-    const keyValueMatch = factText.match(/^(?:my\s+)?(.+?)\s+is\s+(.+)$/i);
+    const extractedFacts = extractExplicitFactsFromText(factText);
+    if (extractedFacts.length > 1) {
+      return { type: "save_multiple", facts: extractedFacts };
+    }
+    if (extractedFacts.length === 1) {
+      return { type: "save_explicit", key: extractedFacts[0].key, value: extractedFacts[0].value };
+    }
+
+    const keyValueMatch = factText.match(/^(?:my\s+)?(.+?)\s+(?:is|are)\s+(.+)$/i);
     if (keyValueMatch) {
       const key = resolveKeyAlias(keyValueMatch[1]);
       if (key) {
@@ -559,6 +629,23 @@ export function formatMemorySavedReply(key: MemoryKey, value: string): string {
   ].join("\n");
 }
 
+export function formatMemorySavedFactsReply(facts: ExplicitMemoryFact[]): string {
+  if (!facts.length) {
+    return "I could not find anything clear to save from that message.";
+  }
+
+  return [
+    "Got it. I'll remember these.",
+    "",
+    ...facts.map((fact) => {
+      const label = KEY_LABELS[fact.key] ?? humanizeKey(fact.key);
+      return `- *${label}:* ${fact.value}`;
+    }),
+    "",
+    "This will be used in future conversations. To review everything I know: _Show my memory_",
+  ].join("\n");
+}
+
 function legacyFormatMemoryForgotReply(key: MemoryKey, found: boolean): string {
   const label = KEY_LABELS[key] ?? humanizeKey(key);
   if (!found) {
@@ -586,6 +673,19 @@ export function formatMemoryForgotReply(key: MemoryKey, found: boolean): string 
     return `I did not have your ${label.toLowerCase()} saved anyway.`;
   }
   return `Done. I have forgotten your ${label.toLowerCase()}.`;
+}
+
+export function formatMemoryForgotManyReply(totalRequested: number, removed: number): string {
+  if (!removed) {
+    return "I did not have any of those saved anyway.";
+  }
+
+  return [
+    "Done. I updated your memory.",
+    "",
+    `Removed *${removed}* of *${totalRequested}* requested preference${totalRequested === 1 ? "" : "s"}.`,
+    "To review everything I know: _Show my memory_",
+  ].join("\n");
 }
 
 export function formatMemoryClearedReply(count: number): string {
@@ -667,8 +767,16 @@ function resolveKeyAlias(raw: string): MemoryKey | null {
     career: "profession",
     company: "company",
     employer: "company",
-    language: "language_preference",
-    "language preference": "language_preference",
+    language: "reply_language",
+    "reply language": "reply_language",
+    "language preference": "reply_language",
+    "preferred language": "reply_language",
+    "favorite language": "programming_language",
+    "favourite language": "programming_language",
+    "favorite programming language": "programming_language",
+    "favourite programming language": "programming_language",
+    "programming language": "programming_language",
+    "coding language": "programming_language",
     timezone: "timezone",
     age: "age",
     interests: "interests",
@@ -677,6 +785,10 @@ function resolveKeyAlias(raw: string): MemoryKey | null {
     "preferred tone": "preferred_tone",
     style: "briefing_style",
     "briefing style": "briefing_style",
+    "summary style": "briefing_style",
+    "summary preference": "briefing_style",
+    "summary style preference": "briefing_style",
+    "summary-style preference": "briefing_style",
     "wake time": "wake_time",
     "wake up time": "wake_time",
     "work hours": "work_hours",
@@ -690,6 +802,66 @@ function resolveKeyAlias(raw: string): MemoryKey | null {
   };
 
   return aliases[normalized] ?? null;
+}
+
+function normalizeCompoundMemoryText(statement: string) {
+  return statement
+    .trim()
+    .replace(/^(?:one|two|three|four|five|\d+|a few|some)\s+things?\s+about\s+me\s*[:,-]?\s*/i, "")
+    .replace(/^about\s+me\s*[:,-]?\s*/i, "")
+    .trim();
+}
+
+function splitMemoryFactClauses(statement: string) {
+  const normalized = normalizeCompoundMemoryText(statement)
+    .replace(/\s*,\s*and\s+/gi, "; ")
+    .replace(/\s+and\s+(?=(?:my|i)\b)/gi, "; ")
+    .replace(/\s*,\s*(?=(?:my|i)\b)/gi, "; ");
+
+  return normalized
+    .split(/\s*;\s*/)
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+}
+
+function extractKeyAliasesFromList(raw: string): MemoryKey[] {
+  const normalized = raw
+    .replace(/\s*,\s*and\s+/gi, "; ")
+    .replace(/\s+and\s+/gi, "; ")
+    .replace(/\s*,\s*/g, "; ");
+
+  const keys = normalized
+    .split(/\s*;\s*/)
+    .map((part) => part.replace(/^(?:my\s+)+/i, "").trim())
+    .map((part) => resolveKeyAlias(part))
+    .filter((key): key is MemoryKey => Boolean(key));
+
+  return [...new Set(keys)];
+}
+
+function extractExplicitFactsFromText(statement: string): ExplicitMemoryFact[] {
+  const clauses = splitMemoryFactClauses(statement);
+  const factMap = new Map<MemoryKey, string>();
+
+  for (const clause of clauses) {
+    const keyValueMatch = clause.match(/^(?:my\s+)?(.+?)\s+(?:is|are)\s+(.+)$/i);
+    if (keyValueMatch) {
+      const key = resolveKeyAlias(keyValueMatch[1]);
+      if (key) {
+        factMap.set(key, normalizeMemoryValue(key, keyValueMatch[2]));
+        continue;
+      }
+    }
+
+    const extracted = extractFactFromShortStatement(clause);
+    if (extracted) {
+      factMap.set(extracted.key, extracted.value);
+    }
+  }
+
+  return [...factMap.entries()]
+    .map(([key, value]) => ({ key, value }))
+    .filter((fact) => fact.value.length > 0);
 }
 
 function extractFactFromShortStatement(
@@ -708,6 +880,16 @@ function extractFactFromShortStatement(
   const nameMatch = trimmed.match(/^(?:my name is|mera naam)\s+(.{1,40})$/i);
   if (nameMatch) {
     return { key: "name", value: normalizeMemoryValue("name", nameMatch[1]) };
+  }
+
+  const favoriteLanguageMatch = trimmed.match(
+    /^(?:my\s+)?(?:favorite|favourite)\s+(?:programming\s+)?language\s+is\s+(.{1,40})$/i,
+  );
+  if (favoriteLanguageMatch) {
+    return {
+      key: "programming_language",
+      value: normalizeMemoryValue("programming_language", favoriteLanguageMatch[1]),
+    };
   }
 
   const cityMatch = trimmed.match(
@@ -740,8 +922,18 @@ function extractFactFromShortStatement(
   const languageMatch = trimmed.match(/^(?:i speak|i prefer)\s+(.{2,40})$/i);
   if (languageMatch && LANGUAGE_HINT_RE.test(languageMatch[1])) {
     return {
-      key: "language_preference",
-      value: normalizeMemoryValue("language_preference", languageMatch[1]),
+      key: "reply_language",
+      value: normalizeMemoryValue("reply_language", languageMatch[1]),
+    };
+  }
+
+  const summaryStyleMatch = trimmed.match(
+    /^(?:i\s+prefer|i\s+like|my\s+summary(?:-style)?\s+preference\s+is)\s+(.{2,80}(?:bullet\s+)?(?:summaries|summary|briefings|updates?))$/i,
+  );
+  if (summaryStyleMatch) {
+    return {
+      key: "briefing_style",
+      value: normalizeMemoryValue("briefing_style", summaryStyleMatch[1]),
     };
   }
 
@@ -845,6 +1037,8 @@ function normalizeMemoryValue(key: MemoryKey, value: string): string {
     case "preferred_name":
     case "city":
     case "country":
+    case "reply_language":
+    case "programming_language":
     case "language_preference":
       return capitalizeWords(trimmed);
     case "age":
@@ -860,6 +1054,36 @@ function normalizeMemoryValue(key: MemoryKey, value: string): string {
     default:
       return trimmed;
   }
+}
+
+function looksLikeReplyLanguageValue(value: string) {
+  return LANGUAGE_HINT_RE.test(value.trim());
+}
+
+function canonicalizeLegacyMemoryFact(fact: MemoryRow): MemoryRow {
+  if (fact.key !== "language_preference") {
+    return fact;
+  }
+
+  return {
+    ...fact,
+    key: looksLikeReplyLanguageValue(fact.value) ? "reply_language" : "programming_language",
+  };
+}
+
+function dedupeCanonicalMemoryFacts(facts: MemoryRow[]) {
+  const canonicalFacts = facts
+    .map((fact) => canonicalizeLegacyMemoryFact(fact))
+    .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
+
+  const byKey = new Map<string, MemoryRow>();
+  for (const fact of canonicalFacts) {
+    if (!byKey.has(fact.key)) {
+      byKey.set(fact.key, fact);
+    }
+  }
+
+  return [...byKey.values()].sort((a, b) => a.key.localeCompare(b.key));
 }
 
 function normalizeCommaList(value: string) {

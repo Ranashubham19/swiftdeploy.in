@@ -211,6 +211,34 @@ create index if not exists idx_task_runs_task on public.task_runs (task_id);
 create index if not exists idx_task_runs_started on public.task_runs (started_at desc);
 create index if not exists idx_task_runs_status on public.task_runs (status);
 
+-- whatsapp_contacts
+create table if not exists public.whatsapp_contacts (
+  id uuid primary key default uuid_generate_v4(),
+  user_id uuid not null references public.users(id) on delete cascade,
+  jid text not null,
+  phone_number text,
+  contact_name text,
+  notify_name text,
+  verified_name text,
+  source text not null default 'session' check (
+    source in ('session', 'history', 'message')
+  ),
+  last_seen_at timestamptz not null default now(),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, jid)
+);
+
+create index if not exists idx_whatsapp_contacts_user_seen
+  on public.whatsapp_contacts (user_id, last_seen_at desc);
+create index if not exists idx_whatsapp_contacts_user_phone
+  on public.whatsapp_contacts (user_id, phone_number);
+
+drop trigger if exists whatsapp_contacts_updated_at on public.whatsapp_contacts;
+create trigger whatsapp_contacts_updated_at
+  before update on public.whatsapp_contacts
+  for each row execute function public.set_updated_at();
+
 -- whatsapp_messages
 create table if not exists public.whatsapp_messages (
   id uuid primary key default uuid_generate_v4(),
@@ -222,6 +250,12 @@ create table if not exists public.whatsapp_messages (
   ),
   task_run_id uuid references public.task_runs(id),
   wa_message_id text,
+  remote_jid text,
+  remote_phone text,
+  contact_name text,
+  chat_type text not null default 'direct' check (
+    chat_type in ('direct', 'group', 'self', 'broadcast', 'unknown')
+  ),
   sent_at timestamptz not null default now(),
   delivered_at timestamptz,
   read_at timestamptz
@@ -229,6 +263,8 @@ create table if not exists public.whatsapp_messages (
 
 create index if not exists idx_wa_messages_user on public.whatsapp_messages (user_id);
 create index if not exists idx_wa_messages_sent on public.whatsapp_messages (sent_at desc);
+create index if not exists idx_wa_messages_user_remote_sent
+  on public.whatsapp_messages (user_id, remote_phone, sent_at desc);
 
 -- analytics_daily
 create table if not exists public.analytics_daily (
@@ -274,6 +310,7 @@ alter table public.connected_accounts enable row level security;
 alter table public.custom_commands enable row level security;
 alter table public.agent_tasks enable row level security;
 alter table public.task_runs enable row level security;
+alter table public.whatsapp_contacts enable row level security;
 alter table public.whatsapp_messages enable row level security;
 alter table public.analytics_daily enable row level security;
 alter table public.subscriptions enable row level security;
@@ -357,6 +394,11 @@ create policy "Runs: read own"
 drop policy if exists "WA: read own" on public.whatsapp_messages;
 create policy "WA: read own"
   on public.whatsapp_messages for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "WA contacts: read own" on public.whatsapp_contacts;
+create policy "WA contacts: read own"
+  on public.whatsapp_contacts for select
   using (auth.uid() = user_id);
 
 drop policy if exists "Analytics: read own" on public.analytics_daily;

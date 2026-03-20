@@ -451,18 +451,18 @@ export function detectReminderIntent(text: string): ReminderIntentResult {
   }
 
   if (
-    /\b(reminder|remind|alert)\b/u.test(t) &&
-    /\b(status|scheduled|set|check|when|show|view)\b/u.test(t)
-  ) {
-    return { intent: "status" };
-  }
-
-  if (
     /\b(remind me|set (a\s+)?reminder|alert me|notify me|mujhe .*yaad dilao|yaad kara|don't let me forget|dont let me forget)\b/u.test(t) ||
     /\bremind\b.*\b(at|in|on|by|tomorrow|tonight|next|every|kal|parso)\b/u.test(t) ||
     /\breminder\b.*\b(at|for|on|in)\b/u.test(t)
   ) {
     return { intent: "set" };
+  }
+
+  if (
+    /\b(reminder|remind|alert)\b/u.test(t) &&
+    /\b(status|scheduled|check|when|show|view|next|upcoming)\b/u.test(t)
+  ) {
+    return { intent: "status" };
   }
 
   return { intent: "unknown" };
