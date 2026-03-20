@@ -124,6 +124,13 @@ const timeFormatter = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
+const compactDateFormatter = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
 const suggestionButtons = [
   {
     value: "Draft a reply to my last email from Priya",
@@ -183,6 +190,26 @@ function formatRelativeTime(iso: string) {
   }
 
   return `${Math.floor(hours / 24)}d ago`;
+}
+
+function formatCompactDateTime(iso: string | null) {
+  if (!iso) {
+    return "Not available";
+  }
+
+  try {
+    return compactDateFormatter.format(new Date(iso));
+  } catch {
+    return iso;
+  }
+}
+
+function titleCaseWords(value: string) {
+  return value
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function activityToneForTask(taskType: string, status: string): "green" | "blue" | "amber" {
@@ -332,6 +359,31 @@ export function DashboardShell({ config }: DashboardShellProps) {
   const isLimitReached = runsRemaining <= 0;
   const isLimitWarning = !isLimitReached && runsRemaining <= 2;
   const runPercentage = dailyLimit > 0 ? Math.min((todayRuns / dailyLimit) * 100, 100) : 0;
+  const whatsappWorkspace = dashboardData?.whatsapp_workspace;
+  const whatsappSummary = whatsappWorkspace?.summary;
+  const whatsappSettings = whatsappWorkspace?.settings;
+  const whatsappApprovals = (whatsappWorkspace?.approvals ?? []).filter(
+    (approval) => approval.status === "pending",
+  );
+  const whatsappContacts = [...(whatsappWorkspace?.contacts ?? [])].sort((left, right) => {
+    const awaitingDiff = Number(right.awaiting_reply) - Number(left.awaiting_reply);
+    if (awaitingDiff !== 0) {
+      return awaitingDiff;
+    }
+
+    const priorityRank = { vip: 3, high: 2, normal: 1, low: 0 } as const;
+    const rankDiff = priorityRank[right.priority] - priorityRank[left.priority];
+    if (rankDiff !== 0) {
+      return rankDiff;
+    }
+
+    return String(right.last_message_at ?? right.last_seen_at ?? "").localeCompare(
+      String(left.last_message_at ?? left.last_seen_at ?? ""),
+    );
+  });
+  const whatsappPreviewContacts = whatsappContacts.slice(0, 4);
+  const whatsappPreviewWorkflows = (whatsappWorkspace?.workflows ?? []).slice(0, 4);
+  const whatsappPreviewHistory = (whatsappWorkspace?.history ?? []).slice(0, 4);
 
   const liveTasks = dashboardData?.tasks ?? [];
   const sortedTasks = TASK_TYPE_ORDER
@@ -349,6 +401,20 @@ export function DashboardShell({ config }: DashboardShellProps) {
       .filter((account) => account.is_active)
       .map((account) => account.provider),
   );
+  const isWhatsAppConnected = connectedProviders.has("whatsapp") || Boolean(whatsappSummary?.connected);
+  const feedMessages =
+    hasInteractiveMessages
+      ? messages
+      : whatsappPreviewHistory.length > 0
+        ? [...whatsappPreviewHistory]
+            .reverse()
+            .map((entry) => ({
+              id: `wa-${entry.id}`,
+              role: entry.direction === "outbound" ? ("user" as const) : ("bot" as const),
+              text: entry.content,
+              time: formatRelativeTime(entry.sent_at),
+            }))
+        : createSeedMessages(firstName);
 
   const accounts = [
     {
@@ -378,10 +444,10 @@ export function DashboardShell({ config }: DashboardShellProps) {
       detail:
         dashboardData?.connected_accounts.find((account) => account.provider === "whatsapp")
           ?.phone_number || "Connect in settings",
-      status: connectedProviders.has("whatsapp")
+      status: isWhatsAppConnected
         ? ("connected" as const)
         : ("upgrade" as const),
-      upgradeCopy: "Connect WhatsApp in settings",
+      upgradeCopy: isWhatsAppConnected ? "Open WhatsApp controls" : "Connect WhatsApp in settings",
     },
     {
       id: "telegram",
@@ -1062,41 +1128,194 @@ export function DashboardShell({ config }: DashboardShellProps) {
                   </button>
                 </div>
 
-                <div className={styles.accountsList}>
-                  {accounts.map((account) => (
-                    <div key={account.id} className={styles.accountRow}>
-                      <div
-                        className={`${styles.accountIcon} ${
-                          account.status === "upgrade" ? styles.accountIconMuted : ""
-                        }`}
-                      >
-                        {account.icon}
-                      </div>
-                      <div className={styles.accountInfo}>
+                <div className={styles.accountsWorkspace}>
+                  <div className={styles.accountsList}>
+                    {accounts.map((account) => (
+                      <div key={account.id} className={styles.accountRow}>
                         <div
-                          className={`${styles.accountName} ${
-                            account.status === "upgrade" ? styles.accountNameMuted : ""
+                          className={`${styles.accountIcon} ${
+                            account.status === "upgrade" ? styles.accountIconMuted : ""
                           }`}
                         >
-                          {account.name}
+                          {account.icon}
                         </div>
-                        <div className={styles.accountDetail}>{account.detail}</div>
+                        <div className={styles.accountInfo}>
+                          <div
+                            className={`${styles.accountName} ${
+                              account.status === "upgrade" ? styles.accountNameMuted : ""
+                            }`}
+                          >
+                            {account.name}
+                          </div>
+                          <div className={styles.accountDetail}>{account.detail}</div>
+                        </div>
+                        {account.status === "connected" ? (
+                          <div className={`${styles.accountStatus} ${styles.accountStatusConnected}`}>
+                            {"\u25CF Connected"}
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            className={styles.connectButton}
+                            onClick={() => showToast(account.upgradeCopy ?? "Upgrade required")}
+                          >
+                            Upgrade -&gt;
+                          </button>
+                        )}
                       </div>
-                      {account.status === "connected" ? (
-                        <div className={`${styles.accountStatus} ${styles.accountStatusConnected}`}>
-                          {"\u25CF Connected"}
+                    ))}
+                  </div>
+
+                  <div className={styles.whatsAppWorkspace}>
+                    <div className={styles.workspaceHeader}>
+                      <div>
+                        <div className={styles.workspaceEyebrow}>WhatsApp workspace</div>
+                        <div className={styles.workspaceTitle}>
+                          {ICONS.chat} Combined WhatsApp controls
                         </div>
-                      ) : (
-                        <button
-                          type="button"
-                          className={styles.connectButton}
-                          onClick={() => showToast(account.upgradeCopy ?? "Upgrade required")}
-                        >
-                          Upgrade -&gt;
-                        </button>
-                      )}
+                      </div>
+                      <Link href="/whatsapp" className={styles.workspaceLink}>
+                        Open full workspace
+                      </Link>
                     </div>
-                  ))}
+
+                    <div className={styles.workspaceStats}>
+                      <div className={styles.workspaceStat}>
+                        <span className={styles.workspaceStatLabel}>Session</span>
+                        <strong className={styles.workspaceStatValue}>
+                          {isWhatsAppConnected ? "Connected" : "Not connected"}
+                        </strong>
+                      </div>
+                      <div className={styles.workspaceStat}>
+                        <span className={styles.workspaceStatLabel}>Pending</span>
+                        <strong className={styles.workspaceStatValue}>
+                          {whatsappSummary?.pendingApprovalCount ?? 0}
+                        </strong>
+                      </div>
+                      <div className={styles.workspaceStat}>
+                        <span className={styles.workspaceStatLabel}>Awaiting</span>
+                        <strong className={styles.workspaceStatValue}>
+                          {whatsappSummary?.awaitingReplyCount ?? 0}
+                        </strong>
+                      </div>
+                      <div className={styles.workspaceStat}>
+                        <span className={styles.workspaceStatLabel}>High priority</span>
+                        <strong className={styles.workspaceStatValue}>
+                          {whatsappSummary?.highPriorityCount ?? 0}
+                        </strong>
+                      </div>
+                    </div>
+
+                    <div className={styles.workspaceGrid}>
+                      <div className={styles.workspacePanel}>
+                        <div className={styles.workspacePanelTitle}>Automation rules</div>
+                        <div className={styles.workspaceRows}>
+                          <div className={styles.workspaceRow}>
+                            <span className={styles.workspaceRowLabel}>Mode</span>
+                            <span className={styles.workspaceRowValue}>
+                              {titleCaseWords(whatsappSettings?.automationMode ?? "auto_reply")}
+                            </span>
+                          </div>
+                          <div className={styles.workspaceRow}>
+                            <span className={styles.workspaceRowLabel}>Reply tone</span>
+                            <span className={styles.workspaceRowValue}>
+                              {titleCaseWords(whatsappSettings?.replyMode ?? "balanced")}
+                            </span>
+                          </div>
+                          <div className={styles.workspaceRow}>
+                            <span className={styles.workspaceRowLabel}>Group behavior</span>
+                            <span className={styles.workspaceRowValue}>
+                              {titleCaseWords(whatsappSettings?.groupReplyMode ?? "mention_only")}
+                            </span>
+                          </div>
+                          <div className={styles.workspaceRow}>
+                            <span className={styles.workspaceRowLabel}>Sensitive approval</span>
+                            <span className={styles.workspaceRowValue}>
+                              {whatsappSettings?.requireApprovalForSensitive ? "On" : "Off"}
+                            </span>
+                          </div>
+                          <div className={styles.workspaceRow}>
+                            <span className={styles.workspaceRowLabel}>Quiet hours</span>
+                            <span className={styles.workspaceRowValue}>
+                              {whatsappSettings?.quietHoursStart && whatsappSettings?.quietHoursEnd
+                                ? `${whatsappSettings.quietHoursStart} to ${whatsappSettings.quietHoursEnd}`
+                                : "Not set"}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className={styles.workspacePanel}>
+                        <div className={styles.workspacePanelTitle}>Pending approvals</div>
+                        {whatsappApprovals.length > 0 ? (
+                          <div className={styles.workspaceStack}>
+                            {whatsappApprovals.slice(0, 2).map((approval) => (
+                              <div key={approval.id} className={styles.workspaceCard}>
+                                <div className={styles.workspaceCardTop}>
+                                  <strong>{approval.contact_name || approval.remote_phone || "Contact"}</strong>
+                                  <span className={styles.workspaceCardMeta}>{approval.sensitivity}</span>
+                                </div>
+                                <p className={styles.workspaceSnippet}>{approval.source_message}</p>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className={styles.workspaceEmpty}>
+                            No WhatsApp replies are waiting for review right now.
+                          </div>
+                        )}
+                      </div>
+
+                      <div className={styles.workspacePanel}>
+                        <div className={styles.workspacePanelTitle}>Inbox priorities</div>
+                        {whatsappPreviewContacts.length > 0 ? (
+                          <div className={styles.workspaceStack}>
+                            {whatsappPreviewContacts.map((contact) => (
+                              <div key={contact.jid} className={styles.workspaceCard}>
+                                <div className={styles.workspaceCardTop}>
+                                  <strong>{contact.display_name}</strong>
+                                  <span className={styles.workspaceCardMeta}>{contact.priority}</span>
+                                </div>
+                                <div className={styles.workspaceCardSubmeta}>
+                                  {contact.awaiting_reply ? "Awaiting reply" : "Monitoring"} |{" "}
+                                  {formatCompactDateTime(contact.last_message_at || contact.last_seen_at)}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className={styles.workspaceEmpty}>
+                            Connect WhatsApp to start building inbox priority rules.
+                          </div>
+                        )}
+                      </div>
+
+                      <div className={styles.workspacePanel}>
+                        <div className={styles.workspacePanelTitle}>Workflow studio</div>
+                        {whatsappPreviewWorkflows.length > 0 ? (
+                          <div className={styles.workspaceStack}>
+                            {whatsappPreviewWorkflows.map((workflow) => (
+                              <div key={workflow.id} className={styles.workspaceCard}>
+                                <div className={styles.workspaceCardTop}>
+                                  <strong>{workflow.title}</strong>
+                                  <span className={styles.workspaceCardMeta}>
+                                    {workflow.is_enabled ? "Enabled" : "Off"}
+                                  </span>
+                                </div>
+                                <div className={styles.workspaceCardSubmeta}>
+                                  {workflow.delay_minutes} min | {titleCaseWords(workflow.scope)}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className={styles.workspaceEmpty}>
+                            Workflow seeds will appear here after your WhatsApp workspace loads.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -1334,12 +1553,16 @@ export function DashboardShell({ config }: DashboardShellProps) {
                     <div className={styles.waAvatar}>{ICONS.robot}</div>
                     <div>
                       <div className={styles.waHeaderName}>ClawCloud AI</div>
-                      <div className={styles.waHeaderStatus}>online</div>
+                      <div className={styles.waHeaderStatus}>
+                        {isWhatsAppConnected
+                          ? `${whatsappSummary?.recentMessageCount ?? 0} messages this week`
+                          : "waiting for connection"}
+                      </div>
                     </div>
                   </div>
 
                   <div className={styles.waBody}>
-                    {messages.map((message) => (
+                    {feedMessages.map((message) => (
                       <div
                         key={message.id}
                         className={`${styles.waMessage} ${

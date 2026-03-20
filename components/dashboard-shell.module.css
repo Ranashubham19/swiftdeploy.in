@@ -600,6 +600,12 @@
   padding: 12px;
 }
 
+.accountsWorkspace {
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+  gap: 0;
+}
+
 .accountRow {
   display: flex;
   align-items: center;
@@ -686,6 +692,198 @@
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+}
+
+.whatsAppWorkspace {
+  min-width: 0;
+  padding: 16px 18px 18px;
+  border-left: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255, 77, 77, 0.03) 0%, transparent 100%);
+}
+
+.workspaceHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.workspaceEyebrow {
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.workspaceTitle {
+  margin-top: 4px;
+  color: var(--text);
+  font-family: var(--font-display), sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.workspaceLink {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  background: var(--bg3);
+  color: var(--text2);
+  font-size: 12px;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: all 0.18s;
+}
+
+.workspaceLink:hover {
+  border-color: var(--border3);
+  background: var(--card2);
+  color: var(--text);
+}
+
+.workspaceStats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.workspaceStat {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg3);
+}
+
+.workspaceStatLabel {
+  display: block;
+  color: var(--text3);
+  font-size: 10px;
+  margin-bottom: 5px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.workspaceStatValue {
+  color: var(--text);
+  font-family: var(--font-display), sans-serif;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.15;
+}
+
+.workspaceGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.workspacePanel {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg3);
+}
+
+.workspacePanelTitle {
+  margin-bottom: 10px;
+  color: var(--text);
+  font-family: var(--font-display), sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.workspaceRows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.workspaceRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.workspaceRowLabel {
+  color: var(--text3);
+  font-size: 11px;
+}
+
+.workspaceRowValue {
+  color: var(--text2);
+  font-size: 11px;
+  text-align: right;
+}
+
+.workspaceStack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.workspaceCard {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.workspaceCardTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.workspaceCardTop strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workspaceCardMeta {
+  flex-shrink: 0;
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.workspaceCardSubmeta {
+  color: var(--text3);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.workspaceSnippet {
+  color: var(--text2);
+  font-size: 11px;
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.workspaceEmpty {
+  color: var(--text3);
+  font-size: 11.5px;
+  line-height: 1.6;
 }
 
 .tasksList {
@@ -1451,6 +1649,20 @@
   .statsRow {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .accountsWorkspace {
+    grid-template-columns: 1fr;
+  }
+
+  .whatsAppWorkspace {
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+
+  .workspaceStats,
+  .workspaceGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 900px) {
@@ -1488,6 +1700,11 @@
 
   .statsRow {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .workspaceStats,
+  .workspaceGrid {
+    grid-template-columns: 1fr;
   }
 
   .upgradeBanner {

@@ -4,6 +4,15 @@ import { useCallback, useEffect, useState } from "react";
 
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 import type { PublicAppConfig } from "@/lib/types";
+import type {
+  WhatsAppHistoryEntry,
+  WhatsAppInboxContact,
+  WhatsAppInboxSummary,
+  WhatsAppReplyApproval,
+  WhatsAppSettings,
+  WhatsAppWorkflow,
+  WhatsAppWorkflowRun,
+} from "@/lib/clawcloud-whatsapp-workspace-types";
 
 export type DashboardAgentStatus = {
   is_active: boolean;
@@ -92,6 +101,15 @@ export type DashboardData = {
     cancel_at_period_end: boolean;
   } | null;
   feature_status: DashboardFeatureStatus;
+  whatsapp_workspace: {
+    settings: WhatsAppSettings;
+    summary: WhatsAppInboxSummary;
+    approvals: WhatsAppReplyApproval[];
+    contacts: WhatsAppInboxContact[];
+    workflows: WhatsAppWorkflow[];
+    workflow_runs: WhatsAppWorkflowRun[];
+    history: WhatsAppHistoryEntry[];
+  };
 };
 
 type UseDashboardDataReturn = {

@@ -1,5 +1,17 @@
 import { runClawCloudTask } from "@/lib/clawcloud-agent";
 import { upsertAnalyticsDaily } from "@/lib/clawcloud-analytics";
+import { listWhatsAppReplyApprovals } from "@/lib/clawcloud-whatsapp-approval";
+import { getWhatsAppSettings } from "@/lib/clawcloud-whatsapp-control";
+import {
+  getWhatsAppInboxSummary,
+  listWhatsAppContacts,
+  listWhatsAppHistory,
+} from "@/lib/clawcloud-whatsapp-inbox";
+import {
+  listWhatsAppWorkflowRuns,
+  listWhatsAppWorkflows,
+} from "@/lib/clawcloud-whatsapp-workflows";
+import { defaultWhatsAppSettings } from "@/lib/clawcloud-whatsapp-workspace-types";
 import { getClawCloudCalendarEvents } from "@/lib/clawcloud-google";
 import {
   parseCalendarAttendees,
@@ -251,7 +263,55 @@ export async function getClawCloudDashboardData(userId: string, userEmail?: stri
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const today = formatDateKey();
 
-  const [userProfile, userPreferences, connectedAccounts, agentTasks, recentRuns, todayAnalytics, last7Days, subscription] =
+  const whatsappWorkspacePromise = (async () => {
+    try {
+      const [settings, summary, approvals, contacts, workflows, workflowRuns, historySnapshot] =
+        await Promise.all([
+          getWhatsAppSettings(userId),
+          getWhatsAppInboxSummary(userId),
+          listWhatsAppReplyApprovals(userId, 8),
+          listWhatsAppContacts(userId),
+          listWhatsAppWorkflows(userId),
+          listWhatsAppWorkflowRuns(userId, 8),
+          listWhatsAppHistory({
+            userId,
+            limit: 8,
+          }),
+        ]);
+
+      return {
+        settings,
+        summary,
+        approvals,
+        contacts,
+        workflows,
+        workflow_runs: workflowRuns,
+        history: historySnapshot.rows,
+      };
+    } catch {
+      return {
+        settings: defaultWhatsAppSettings,
+        summary: {
+          connected: false,
+          contactCount: 0,
+          pendingApprovalCount: 0,
+          awaitingReplyCount: 0,
+          highPriorityCount: 0,
+          recentMessageCount: 0,
+          groupThreadCount: 0,
+          mediaMessageCount: 0,
+          sensitiveMessageCount: 0,
+        },
+        approvals: [],
+        contacts: [],
+        workflows: [],
+        workflow_runs: [],
+        history: [],
+      };
+    }
+  })();
+
+  const [userProfile, userPreferences, connectedAccounts, agentTasks, recentRuns, todayAnalytics, last7Days, subscription, whatsappWorkspace] =
     await Promise.all([
       supabaseAdmin
         .from("users")
@@ -295,6 +355,7 @@ export async function getClawCloudDashboardData(userId: string, userEmail?: stri
         .select("status, current_period_end, cancel_at_period_end")
         .eq("user_id", userId)
         .maybeSingle(),
+      whatsappWorkspacePromise,
     ]);
 
   const userPlan = (userProfile.data?.plan ?? "free") as ClawCloudPlan;
@@ -339,6 +400,7 @@ export async function getClawCloudDashboardData(userId: string, userEmail?: stri
     },
     subscription: subscription.data ?? null,
     feature_status: getClawCloudRuntimeFeatureStatus(userEmail ?? userProfile.data?.email ?? null),
+    whatsapp_workspace: whatsappWorkspace,
   };
 }
 
