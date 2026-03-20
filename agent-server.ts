@@ -2181,6 +2181,10 @@ async function connectSession(userId: string): Promise<SessionRecord> {
 
       if (!reconnect) {
         await markDisconnected(userId);
+        const dir = sessionDir(userId);
+        if (fs.existsSync(dir)) {
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
       }
 
       console.warn(`[agent] Closed for ${userId} (code: ${code ?? "?"}) reconnect=${reconnect}`);
