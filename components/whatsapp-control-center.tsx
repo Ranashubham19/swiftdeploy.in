@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState, useTransition, type FormEvent } from "react";
 
+import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
+import type { PublicAppConfig } from "@/lib/types";
 import {
   type WhatsAppAuditEntry,
   defaultWhatsAppSettings,
@@ -20,6 +22,10 @@ import {
 } from "@/lib/clawcloud-whatsapp-workspace-types";
 
 import styles from "./whatsapp-control-center.module.css";
+
+type WhatsAppControlCenterProps = {
+  config: PublicAppConfig;
+};
 
 type ControlResponse = { settings: WhatsAppSettings; summary: WhatsAppInboxSummary };
 type ApprovalsResponse = { approvals: WhatsAppReplyApproval[] };
@@ -76,18 +82,42 @@ function formatConfidence(value: number | null | undefined) {
   return `${Math.round(value * 100)}%`;
 }
 
-async function readJson<T>(input: string, init?: RequestInit): Promise<T> {
+async function readJson<T>(
+  input: string,
+  authClient: NonNullable<ReturnType<typeof getSupabaseBrowserClient>> | null,
+  init?: RequestInit,
+): Promise<T> {
+  const headers = new Headers(init?.headers ?? {});
+  headers.set("Content-Type", "application/json");
+
+  if (authClient) {
+    const { data: sessionData } = await authClient.auth.getSession();
+    const token = sessionData.session?.access_token;
+
+    if (token) {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
+  }
+
   const response = await fetch(input, {
     ...init,
     credentials: "same-origin",
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers,
   });
   const payload = (await response.json().catch(() => ({}))) as { error?: string };
   if (!response.ok) throw new Error(payload.error || "Request failed.");
   return payload as T;
 }
 
-export function WhatsAppControlCenter() {
+export function WhatsAppControlCenter({ config }: WhatsAppControlCenterProps) {
+  const supabase = useMemo(
+    () =>
+      getSupabaseBrowserClient({
+        supabaseUrl: config.supabaseUrl,
+        supabaseAnonKey: config.supabaseAnonKey,
+      }),
+    [config.supabaseAnonKey, config.supabaseUrl],
+  );
   const [settings, setSettings] = useState(defaultWhatsAppSettings);
   const [summary, setSummary] = useState(EMPTY_SUMMARY);
   const [approvals, setApprovals] = useState<WhatsAppReplyApproval[]>([]);
@@ -160,13 +190,13 @@ export function WhatsAppControlCenter() {
   }
 
   async function refreshControl() {
-    const control = await readJson<ControlResponse>("/api/whatsapp/control");
+    const control = await readJson<ControlResponse>("/api/whatsapp/control", supabase);
     setSettings(control.settings);
     setSummary(control.summary);
   }
 
   async function refreshApprovals() {
-    const response = await readJson<ApprovalsResponse>("/api/whatsapp/approvals");
+    const response = await readJson<ApprovalsResponse>("/api/whatsapp/approvals", supabase);
     setApprovals(response.approvals);
     setApprovalDrafts((current) => {
       const next = { ...current };
@@ -176,7 +206,7 @@ export function WhatsAppControlCenter() {
   }
 
   async function refreshContacts() {
-    const response = await readJson<ContactsResponse>("/api/whatsapp/contacts");
+    const response = await readJson<ContactsResponse>("/api/whatsapp/contacts", supabase);
     setContacts(response.contacts);
     setContactDrafts((current) => {
       const next = { ...current };
@@ -188,7 +218,7 @@ export function WhatsAppControlCenter() {
   }
 
   async function refreshWorkflows() {
-    const response = await readJson<WorkflowsResponse>("/api/whatsapp/workflows");
+    const response = await readJson<WorkflowsResponse>("/api/whatsapp/workflows", supabase);
     setWorkflows(response.workflows);
     setWorkflowRuns(response.runs);
     setWorkflowDrafts((current) => {
@@ -208,22 +238,22 @@ export function WhatsAppControlCenter() {
   }
 
   async function refreshAudit() {
-    const response = await readJson<AuditResponse>("/api/whatsapp/audit?limit=120");
+    const response = await readJson<AuditResponse>("/api/whatsapp/audit?limit=120", supabase);
     setAuditEntries(response.audit);
   }
 
   async function refreshHistory(query = historyQueryString()) {
-    applyHistory(await readJson<HistoryResponse>(`/api/whatsapp/history?${query}`));
+    applyHistory(await readJson<HistoryResponse>(`/api/whatsapp/history?${query}`, supabase));
   }
 
   async function refreshAll(query = historyQueryString()) {
     const [control, approvalsResponse, contactsResponse, historyResponse, workflowsResponse, auditResponse] = await Promise.all([
-      readJson<ControlResponse>("/api/whatsapp/control"),
-      readJson<ApprovalsResponse>("/api/whatsapp/approvals"),
-      readJson<ContactsResponse>("/api/whatsapp/contacts"),
-      readJson<HistoryResponse>(`/api/whatsapp/history?${query}`),
-      readJson<WorkflowsResponse>("/api/whatsapp/workflows"),
-      readJson<AuditResponse>("/api/whatsapp/audit?limit=120"),
+      readJson<ControlResponse>("/api/whatsapp/control", supabase),
+      readJson<ApprovalsResponse>("/api/whatsapp/approvals", supabase),
+      readJson<ContactsResponse>("/api/whatsapp/contacts", supabase),
+      readJson<HistoryResponse>(`/api/whatsapp/history?${query}`, supabase),
+      readJson<WorkflowsResponse>("/api/whatsapp/workflows", supabase),
+      readJson<AuditResponse>("/api/whatsapp/audit?limit=120", supabase),
     ]);
 
     setSettings(control.settings);
@@ -270,7 +300,7 @@ export function WhatsAppControlCenter() {
       if (!cancelled) setLoading(false);
     });
     return () => { cancelled = true; };
-  }, []);
+  }, [supabase]);
 
   async function handleSettingsSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -278,7 +308,7 @@ export function WhatsAppControlCenter() {
     setError("");
     setNotice("");
     try {
-      const response = await readJson<{ settings: WhatsAppSettings }>("/api/whatsapp/control", {
+      const response = await readJson<{ settings: WhatsAppSettings }>("/api/whatsapp/control", supabase, {
         method: "PATCH",
         body: JSON.stringify(settings),
       });
@@ -297,7 +327,7 @@ export function WhatsAppControlCenter() {
     setError("");
     setNotice("");
     try {
-      await readJson(`/api/whatsapp/approvals/${approval.id}`, {
+      await readJson(`/api/whatsapp/approvals/${approval.id}`, supabase, {
         method: "PATCH",
         body: JSON.stringify({ action, draftReply: approvalDrafts[approval.id] ?? approval.draft_reply }),
       });
@@ -316,7 +346,7 @@ export function WhatsAppControlCenter() {
     setNotice("");
     const draft = contactDrafts[contact.jid] ?? { priority: contact.priority, tags: contact.tags.join(", ") };
     try {
-      await readJson("/api/whatsapp/contacts", {
+      await readJson("/api/whatsapp/contacts", supabase, {
         method: "PATCH",
         body: JSON.stringify({
           jid: contact.jid,
@@ -343,7 +373,7 @@ export function WhatsAppControlCenter() {
     setError("");
     setNotice("");
     try {
-      await readJson("/api/whatsapp/workflows", {
+      await readJson("/api/whatsapp/workflows", supabase, {
         method: "PATCH",
         body: JSON.stringify({
           workflowType,
@@ -374,7 +404,7 @@ export function WhatsAppControlCenter() {
     setError("");
     setNotice("");
     try {
-      await readJson("/api/whatsapp/workflows/process", { method: "POST", body: JSON.stringify({}) });
+      await readJson("/api/whatsapp/workflows/process", supabase, { method: "POST", body: JSON.stringify({}) });
       await Promise.all([refreshApprovals(), refreshWorkflows(), refreshAudit(), refreshControl()]);
       setNotice("Processed due workflows.");
     } catch (processError) {
@@ -389,7 +419,7 @@ export function WhatsAppControlCenter() {
     setError("");
     setNotice("");
     try {
-      const payload = await readJson<Record<string, unknown>>("/api/whatsapp/privacy/export");
+      const payload = await readJson<Record<string, unknown>>("/api/whatsapp/privacy/export", supabase);
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
@@ -410,7 +440,7 @@ export function WhatsAppControlCenter() {
     setError("");
     setNotice("");
     try {
-      const result = await readJson<{ deleted: Record<string, number> }>("/api/whatsapp/privacy/delete", {
+      const result = await readJson<{ deleted: Record<string, number> }>("/api/whatsapp/privacy/delete", supabase, {
         method: "POST",
         body: JSON.stringify({
           mode: privacyMode,
