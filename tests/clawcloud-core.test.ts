@@ -28,6 +28,8 @@ import {
 import { buildDisclaimer } from "@/lib/clawcloud-disclaimers";
 import { detectLocalePreferenceCommand } from "@/lib/clawcloud-i18n";
 import { answerTaxQuery, detectTaxQuery } from "@/lib/clawcloud-tax";
+import { env, getPublicAppConfig } from "@/lib/env";
+import { getGoogleWorkspaceCoreAccess, getGoogleWorkspaceExtendedAccess } from "@/lib/google-workspace-rollout";
 import {
   clawCloudActiveTaskLimits,
   clawCloudRunLimits,
@@ -37,6 +39,7 @@ import {
 } from "@/lib/clawcloud-types";
 import { detectUpiSms, parseUpiSms } from "@/lib/clawcloud-upi";
 import { detectFinanceQuery } from "@/lib/clawcloud-finance";
+import { buildNewsQueries, detectNewsQuestion, fastNewsSearch } from "@/lib/clawcloud-news";
 
 test("plan limits and India day helpers stay stable", () => {
   assert.equal(clawCloudRunLimits.free, 10);
@@ -234,4 +237,114 @@ test("disclaimer matching stays domain-aware and avoids health bleed on stats qu
     answer: "General guidance only.",
   });
   assert.match(healthDisclaimer ?? "", /medical advice/i);
+});
+
+test("google workspace rollout opens globally once OAuth is configured", () => {
+  const original = {
+    GOOGLE_CLIENT_ID: env.GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET: env.GOOGLE_CLIENT_SECRET,
+    NEXT_PUBLIC_APP_URL: env.NEXT_PUBLIC_APP_URL,
+    GOOGLE_WORKSPACE_PUBLIC_ENABLED: env.GOOGLE_WORKSPACE_PUBLIC_ENABLED,
+    GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED: env.GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED,
+    GOOGLE_WORKSPACE_TEMPORARY_HOLD: env.GOOGLE_WORKSPACE_TEMPORARY_HOLD,
+  };
+
+  Object.assign(env, {
+    GOOGLE_CLIENT_ID: "test-client-id",
+    GOOGLE_CLIENT_SECRET: "test-client-secret",
+    NEXT_PUBLIC_APP_URL: "https://swift-deploy.in",
+    GOOGLE_WORKSPACE_PUBLIC_ENABLED: false,
+    GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED: false,
+    GOOGLE_WORKSPACE_TEMPORARY_HOLD: true,
+  });
+
+  try {
+    assert.equal(getGoogleWorkspaceCoreAccess(null).available, true);
+    assert.equal(getGoogleWorkspaceExtendedAccess(null).available, true);
+
+    const publicConfig = getPublicAppConfig();
+    assert.equal(publicConfig.googleRollout?.publicWorkspaceEnabled, true);
+    assert.equal(publicConfig.googleRollout?.publicWorkspaceExtendedEnabled, true);
+  } finally {
+    Object.assign(env, original);
+  }
+});
+
+test("vague live news requests build headline-focused queries", () => {
+  assert.equal(detectNewsQuestion("news of today"), true);
+
+  const queries = buildNewsQueries("news of today");
+  assert.ok(queries.some((query) => /headlines/i.test(query)));
+  assert.ok(queries.some((query) => /reuters|bbc|ap/i.test(query)));
+  assert.ok(buildNewsQueries("India news today").every((query) => /\bindia\b/i.test(query)));
+});
+
+test("fast news search filters homepage-style landing pages", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
+
+    if (url.startsWith("https://news.google.com/rss/headlines/section/topic/WORLD?")) {
+      return new Response([
+        "<rss><channel>",
+        "<item>",
+        "<title>UN weather agency confirms hottest decade on record - Reuters</title>",
+        "<link>https://www.reuters.com/world/un-weather-agency-confirms-hottest-decade-2026-03-23/</link>",
+        "<description>Reuters reports that the UN weather agency confirmed the hottest decade on record.</description>",
+        "<source>Reuters</source>",
+        "<pubDate>Mon, 23 Mar 2026 09:00:00 GMT</pubDate>",
+        "</item>",
+        "<item>",
+        "<title>Moneycontrol</title>",
+        "<link>https://www.moneycontrol.com/</link>",
+        "<description>Latest news and updates from Moneycontrol</description>",
+        "<source>Moneycontrol</source>",
+        "</item>",
+        "</channel></rss>",
+      ].join(""), {
+        status: 200,
+        headers: { "Content-Type": "application/xml" },
+      });
+    }
+
+    if (url.startsWith("https://news.google.com/rss/search?")) {
+      return new Response("<rss><channel></channel></rss>", {
+        status: 200,
+        headers: { "Content-Type": "application/xml" },
+      });
+    }
+
+    if (url.startsWith("https://api.duckduckgo.com/")) {
+      return Response.json({});
+    }
+
+    if (url === "https://api.tavily.com/search") {
+      return Response.json({ results: [] });
+    }
+
+    if (url.startsWith("https://serpapi.com/search.json")) {
+      return Response.json({ news_results: [], organic_results: [] });
+    }
+
+    if (url.startsWith("https://s.jina.ai/")) {
+      return Response.json({ data: [] });
+    }
+
+    throw new Error(`Unexpected fetch during test: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const sources = await fastNewsSearch(buildNewsQueries("news of today"));
+    assert.ok(
+      sources.some((source) => source.domain.includes("reuters.com") || /reuters/i.test(source.title)),
+    );
+    assert.ok(!sources.some((source) => source.url === "https://www.moneycontrol.com/"));
+    assert.ok(!sources.some((source) => source.domain === "Moneycontrol"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

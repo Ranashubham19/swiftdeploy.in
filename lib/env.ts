@@ -254,6 +254,22 @@ export function getProviderSnapshot(): ProviderSnapshot {
   };
 }
 
+export function isGoogleWorkspaceOauthConfigured() {
+  return Boolean(
+    env.GOOGLE_CLIENT_ID
+    && env.GOOGLE_CLIENT_SECRET
+    && env.NEXT_PUBLIC_APP_URL,
+  );
+}
+
+export function isGoogleWorkspacePublicConnectEnabled() {
+  return isGoogleWorkspaceOauthConfigured();
+}
+
+export function isGoogleWorkspaceExtendedConnectEnabled() {
+  return isGoogleWorkspaceOauthConfigured();
+}
+
 export function getPublicAppConfig(): PublicAppConfig {
   return {
     supabaseUrl: env.SUPABASE_URL,
@@ -262,12 +278,8 @@ export function getPublicAppConfig(): PublicAppConfig {
     telegramBotUsername: env.TELEGRAM_BOT_USERNAME,
     googleRollout: {
       publicSignInEnabled: env.GOOGLE_SIGNIN_PUBLIC_ENABLED,
-      publicWorkspaceEnabled:
-        env.GOOGLE_WORKSPACE_PUBLIC_ENABLED && !env.GOOGLE_WORKSPACE_TEMPORARY_HOLD,
-      publicWorkspaceExtendedEnabled:
-        env.GOOGLE_WORKSPACE_PUBLIC_ENABLED
-        && env.GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED
-        && !env.GOOGLE_WORKSPACE_TEMPORARY_HOLD,
+      publicWorkspaceEnabled: isGoogleWorkspacePublicConnectEnabled(),
+      publicWorkspaceExtendedEnabled: isGoogleWorkspaceExtendedConnectEnabled(),
     },
     firebase: {
       apiKey: env.FIREBASE_API_KEY,

@@ -23,6 +23,8 @@ type WorldBankPopulationEntry = {
 const NEWS_PATTERNS: RegExp[] = [
   /\b(latest news|recent news|breaking news|top stories|latest update|news update|what('?s| is) happening|what happened|news about|update on|status of)\b/i,
   /\b(latest|recent|breaking|current)\b.{0,40}\b(news|update|updates|headline|headlines)\b/i,
+  /\b(news|headlines?)\b.{0,20}\b(today|todays|today's|right now|current|latest)\b/i,
+  /\b(today|todays|today's|right now|current|latest)\b.{0,20}\b(news|headlines?)\b/i,
   /\b(what('?s| is) the latest on|latest on|give me the latest on)\b/i,
   /\b(today|right now|currently|this week|this month|as of now|live updates?)\b/i,
   /\b(important|major|biggest|top)\b.{0,40}\b(developments?|announcements?|launches?|releases?|moves?)\b/i,
@@ -86,6 +88,33 @@ const LOW_QUALITY_DOMAINS = [
   "tiktok.com",
   "wikipedia.org",
 ];
+
+const GENERIC_NEWS_PATH_SEGMENTS = new Set([
+  "news",
+  "latest",
+  "latest-news",
+  "breaking",
+  "breaking-news",
+  "headlines",
+  "headline",
+  "updates",
+  "update",
+  "world",
+  "india",
+  "global",
+  "international",
+  "business",
+  "technology",
+  "tech",
+  "sports",
+  "sport",
+  "markets",
+  "market",
+  "finance",
+  "politics",
+  "nation",
+  "live",
+]);
 
 export function detectNewsQuestion(question: string): boolean {
   const text = question.trim();
@@ -165,11 +194,29 @@ export function buildNewsQueries(question: string): string[] {
   const topic = cleanedTopic(question) || question.trim();
   const queries = new Set<string>();
   const lower = question.toLowerCase();
+  const isVagueUpdateRequest =
+    /\b(update|updates?|latest|news)\b/.test(lower)
+    && /\b(today|todays|today's|current|right now|as of now)\b/.test(lower)
+    && !/\b(?:about|on|for)\b\s+[a-z]/.test(lower);
 
   if (/\bai\b/i.test(topic) && /\b(this week|latest|recent|important|major|biggest|developments?|announcements?|launches?|releases?)\b/.test(lower)) {
     queries.add("OpenAI Google Anthropic Meta AI news this week");
     queries.add("Gemini Claude GPT AI launches this week");
     queries.add("AI developments this week for startup founders");
+    return [...queries];
+  }
+
+  if (isVagueUpdateRequest) {
+    if (/\b(india|indian)\b/i.test(lower)) {
+      queries.add("India top headlines today");
+      queries.add("India breaking news today");
+      queries.add(`India top news ${currentYear()}`);
+      return [...queries];
+    }
+
+    queries.add("top world headlines today Reuters AP BBC");
+    queries.add("breaking global news today");
+    queries.add(`today's biggest world headlines ${currentYear()}`);
     return [...queries];
   }
 
@@ -212,6 +259,28 @@ function stripHtmlTags(value: string) {
   return decodeHtmlEntities(value).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
 
+function parseGoogleNewsRssItems(xml: string) {
+  const items = Array.from(xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)).slice(0, 8);
+  return items.map((match) => {
+    const item = match[1] ?? "";
+    const title = stripHtmlTags(item.match(/<title>([\s\S]*?)<\/title>/i)?.[1] ?? "");
+    const url = stripHtmlTags(item.match(/<link>([\s\S]*?)<\/link>/i)?.[1] ?? "");
+    const snippet = stripHtmlTags(item.match(/<description>([\s\S]*?)<\/description>/i)?.[1] ?? "");
+    const source = stripHtmlTags(item.match(/<source[^>]*>([\s\S]*?)<\/source>/i)?.[1] ?? "");
+    const publishedDate = stripHtmlTags(item.match(/<pubDate>([\s\S]*?)<\/pubDate>/i)?.[1] ?? "");
+    const sourceDomain = /\.[a-z]{2,}$/i.test(source) ? extractDomain(source) : "";
+
+    return {
+      title,
+      url,
+      snippet,
+      domain: sourceDomain || extractDomain(url),
+      publishedDate: publishedDate || undefined,
+      score: 0.5,
+    };
+  }).filter((source) => source.title && source.url);
+}
+
 async function googleNewsRssSearch(query: string): Promise<NewsSource[]> {
   try {
     const locale = inferSearchLocale(query);
@@ -228,24 +297,36 @@ async function googleNewsRssSearch(query: string): Promise<NewsSource[]> {
     if (!response.ok) return [];
 
     const xml = await response.text();
-    const items = Array.from(xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)).slice(0, 8);
-    return items.map((match) => {
-      const item = match[1] ?? "";
-      const title = stripHtmlTags(item.match(/<title>([\s\S]*?)<\/title>/i)?.[1] ?? "");
-      const url = stripHtmlTags(item.match(/<link>([\s\S]*?)<\/link>/i)?.[1] ?? "");
-      const snippet = stripHtmlTags(item.match(/<description>([\s\S]*?)<\/description>/i)?.[1] ?? "");
-      const source = stripHtmlTags(item.match(/<source[^>]*>([\s\S]*?)<\/source>/i)?.[1] ?? "");
-      const publishedDate = stripHtmlTags(item.match(/<pubDate>([\s\S]*?)<\/pubDate>/i)?.[1] ?? "");
+    return parseGoogleNewsRssItems(xml);
+  } catch {
+    return [];
+  }
+}
 
-      return {
-        title,
-        url,
-        snippet,
-        domain: source || extractDomain(url),
-        publishedDate: publishedDate || undefined,
-        score: 0.5,
-      };
-    }).filter((source) => source.title && source.url);
+function looksLikeTopHeadlinesQuery(query: string) {
+  return /\b(top\b.{0,30}\bheadlines?|top news|biggest world headlines|breaking news today|breaking global news today)\b/i.test(query);
+}
+
+async function googleNewsTopHeadlinesSearch(query: string): Promise<NewsSource[]> {
+  try {
+    const locale = inferSearchLocale(query);
+    const lower = query.toLowerCase();
+    const params = new URLSearchParams({
+      hl: locale.hl || "en-IN",
+      gl: (locale.gl || "IN").toUpperCase(),
+      ceid: `${(locale.gl || "IN").toUpperCase()}:${locale.hl || "en"}`,
+    });
+    const feedUrl = /\b(world|global|international)\b/i.test(lower)
+      ? `https://news.google.com/rss/headlines/section/topic/WORLD?${params.toString()}`
+      : `https://news.google.com/rss?${params.toString()}`;
+    const response = await fetch(feedUrl, {
+      headers: { "User-Agent": "Mozilla/5.0 ClawCloud/1.0" },
+      cache: "no-store",
+    });
+    if (!response.ok) return [];
+
+    const xml = await response.text();
+    return parseGoogleNewsRssItems(xml);
   } catch {
     return [];
   }
@@ -574,6 +655,65 @@ function dedupeByUrl(sources: NewsSource[]) {
   });
 }
 
+function normalizeNewsSignalText(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractSourceBrand(domain: string) {
+  const parts = domain.toLowerCase().replace(/^www\./, "").split(".");
+  return parts.length >= 2 ? parts[parts.length - 2] ?? parts[0] ?? "" : (parts[0] ?? "");
+}
+
+function isHomepageLikeNewsPath(pathname: string) {
+  const trimmed = pathname.replace(/\/+$/, "");
+  if (!trimmed || trimmed === "/") {
+    return true;
+  }
+
+  const segments = trimmed.split("/").filter(Boolean).map((segment) => segment.toLowerCase());
+  if (!segments.length || segments.length > 2) {
+    return false;
+  }
+
+  return segments.every((segment) => GENERIC_NEWS_PATH_SEGMENTS.has(segment));
+}
+
+function isHomepageLikeNewsSource(source: NewsSource) {
+  let pathname = "/";
+  try {
+    pathname = new URL(source.url).pathname || "/";
+  } catch {
+    return false;
+  }
+
+  if (source.publishedDate || !isHomepageLikeNewsPath(pathname)) {
+    return false;
+  }
+
+  const normalizedTitle = normalizeNewsSignalText(source.title);
+  const normalizedSnippet = normalizeNewsSignalText(source.snippet);
+  const brand = normalizeNewsSignalText(extractSourceBrand(source.domain));
+  const titleLooksGeneric = (
+    !normalizedTitle
+    || normalizedTitle === brand
+    || normalizedTitle === `${brand} news`
+    || normalizedTitle === `${brand} latest news`
+    || /^(latest|breaking|todays|today s|top|world|india|global|international|business|technology|sports|markets|market|finance|politics)?\s*(news|headlines|updates)(?:\s+\w+){0,4}$/.test(normalizedTitle)
+  );
+  const snippetLooksGeneric = (
+    !normalizedSnippet
+    || normalizedSnippet.length < 40
+    || /^(latest|breaking|todays|today s|top|world|india|global).{0,30}(news|headlines|updates)/.test(normalizedSnippet)
+  );
+
+  return titleLooksGeneric || snippetLooksGeneric;
+}
+
 function scoreSource(source: NewsSource) {
   let score = source.score;
 
@@ -604,6 +744,11 @@ function scoreSource(source: NewsSource) {
 
 export async function fastNewsSearch(queries: string[]): Promise<NewsSource[]> {
   const tasks: Promise<NewsSource[]>[] = [];
+  const firstQuery = queries[0] ?? "";
+
+  if (looksLikeTopHeadlinesQuery(firstQuery)) {
+    tasks.push(googleNewsTopHeadlinesSearch(firstQuery));
+  }
 
   for (const [index, query] of queries.slice(0, 3).entries()) {
     tasks.push(tavilyNewsSearch(query));
@@ -620,8 +765,9 @@ export async function fastNewsSearch(queries: string[]): Promise<NewsSource[]> {
   const combined = settled
     .filter((result): result is PromiseFulfilledResult<NewsSource[]> => result.status === "fulfilled")
     .flatMap((result) => result.value);
+  const curated = dedupeByUrl(combined).filter((source) => !isHomepageLikeNewsSource(source));
 
-  return dedupeByUrl(combined)
+  return curated
     .map((source) => ({ ...source, score: scoreSource(source) }))
     .sort((left, right) => right.score - left.score)
     .slice(0, 10);
@@ -821,6 +967,10 @@ export async function answerNewsQuestion(question: string): Promise<string> {
 }
 
 export async function answerWebSearch(question: string): Promise<string> {
+  if (detectNewsQuestion(question)) {
+    return answerNewsQuestion(question);
+  }
+
   const populationAnswer = await fetchCountryPopulationAnswer(question);
   if (populationAnswer) {
     return populationAnswer;

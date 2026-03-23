@@ -4461,6 +4461,7 @@ function looksLikeDocumentContext(text: string) {
 function shouldRouteToWebSearch(text: string): boolean {
   const t = text.toLowerCase().trim();
   if (!detectWebSearchIntent(t)) return false;
+  if (detectNewsQuestion(t)) return false;
 
   // Keep first-party personal-tool queries on dedicated intents.
   if (

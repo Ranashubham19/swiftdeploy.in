@@ -1,15 +1,16 @@
-import { env } from "@/lib/env";
+import {
+  env,
+  isGoogleWorkspaceExtendedConnectEnabled,
+  isGoogleWorkspaceOauthConfigured,
+  isGoogleWorkspacePublicConnectEnabled,
+} from "@/lib/env";
 
 function normalizeEmail(value: string | null | undefined) {
   return String(value ?? "").trim().toLowerCase();
 }
 
 function isWorkspaceOauthConfigured() {
-  return Boolean(
-    env.GOOGLE_CLIENT_ID
-    && env.GOOGLE_CLIENT_SECRET
-    && env.NEXT_PUBLIC_APP_URL,
-  );
+  return isGoogleWorkspaceOauthConfigured();
 }
 
 export function isGoogleWorkspaceTestUser(email: string | null | undefined) {
@@ -26,9 +27,6 @@ export function isGoogleWorkspaceTestUser(email: string | null | undefined) {
 export function getGoogleWorkspaceCoreAccess(email: string | null | undefined) {
   const configured = isWorkspaceOauthConfigured();
   const allowlisted = isGoogleWorkspaceTestUser(email);
-  const publicEnabled = Boolean(
-    env.GOOGLE_WORKSPACE_PUBLIC_ENABLED && !env.GOOGLE_WORKSPACE_TEMPORARY_HOLD,
-  );
 
   if (!configured) {
     return {
@@ -38,47 +36,16 @@ export function getGoogleWorkspaceCoreAccess(email: string | null | undefined) {
     };
   }
 
-  if (allowlisted) {
-    return {
-      available: true,
-      allowlisted: true,
-      reason: "Google Workspace connect is enabled for approved tester accounts only.",
-    };
-  }
-
-  if (publicEnabled) {
-    return {
-      available: true,
-      allowlisted: false,
-      reason: "Google Workspace connect is available.",
-    };
-  }
-
-  if (env.GOOGLE_WORKSPACE_TEMPORARY_HOLD) {
-    return {
-      available: false,
-      allowlisted: false,
-      reason:
-        "Google Workspace connect is temporarily limited to approved tester accounts while public access is paused.",
-    };
-  }
-
   return {
-    available: false,
-    allowlisted: false,
-    reason:
-      "Google Workspace connect is currently limited to approved tester accounts while public rollout is disabled.",
+    available: true,
+    allowlisted,
+    reason: "Google Workspace connect is available.",
   };
 }
 
 export function getGoogleWorkspaceExtendedAccess(email: string | null | undefined) {
   const configured = isWorkspaceOauthConfigured();
   const allowlisted = isGoogleWorkspaceTestUser(email);
-  const publicEnabled = Boolean(
-    env.GOOGLE_WORKSPACE_PUBLIC_ENABLED
-    && env.GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED
-    && !env.GOOGLE_WORKSPACE_TEMPORARY_HOLD,
-  );
 
   if (!configured) {
     return {
@@ -88,44 +55,9 @@ export function getGoogleWorkspaceExtendedAccess(email: string | null | undefine
     };
   }
 
-  if (allowlisted && env.GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED) {
-    return {
-      available: true,
-      allowlisted: true,
-      reason: "Drive and Sheets connect is enabled for approved tester accounts only.",
-    };
-  }
-
-  if (publicEnabled) {
-    return {
-      available: true,
-      allowlisted: false,
-      reason: "Drive and Sheets connect is available.",
-    };
-  }
-
-  if (!env.GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED) {
-    return {
-      available: false,
-      allowlisted: false,
-      reason:
-        "Drive and Sheets connect stays disabled until the extended Google scope rollout is reopened.",
-    };
-  }
-
-  if (env.GOOGLE_WORKSPACE_TEMPORARY_HOLD) {
-    return {
-      available: false,
-      allowlisted: false,
-      reason:
-        "Drive and Sheets connect is temporarily limited to approved tester accounts while public access is paused.",
-    };
-  }
-
   return {
-    available: false,
-    allowlisted: false,
-    reason:
-      "Drive and Sheets connect is currently limited to approved tester accounts while public rollout is disabled.",
+    available: true,
+    allowlisted,
+    reason: "Drive and Sheets connect is available.",
   };
 }

@@ -23,7 +23,7 @@ const REALTIME_PATTERNS: RegExp[] = [
   /\b(gold price|silver price|crude oil price|oil price|gold etf|mutual fund nav|nav of)\b/i,
   /\b(bank nifty|midcap|mid cap)\b/i,
   /\b(live score|match score|today'?s?\s+score|cricket score|ipl score|football score|nba score|nfl score)\b/i,
-  /\b(breaking news|news today|today'?s?\s+news|latest news today|news right now)\b/i,
+  /\b(breaking news|news of today|news today|today news|today'?s?\s+news|latest news today|news right now)\b/i,
   /\b(what (is|happened|are) (happening|going on) (right now|today|currently))\b/i,
   /\b(weather today|weather right now|temperature today|rain today|forecast today)\b/i,
   /\b(aqi|air quality)\s*(today|right now|now)\b/i,
