@@ -618,9 +618,14 @@ export function buildClawCloudAnswerQualityProfile(input: {
     || /\bcan i take\b/i.test(question)
     || /\bhow much tax\b/i.test(question)
     || /\bwhich option is best for me\b/i.test(question);
+  // Educational questions (explain, what is, how does, describe, etc.) about health/legal topics
+  // should NOT require strict evidence/verification — they're academic, not personal advice
+  const isEducationalQuery = /^(?:explain|what (?:is|are|was|were)|how (?:does|do|did|is)|describe|define|discuss|compare|analyze|summarize|tell me about|overview of)\b/i.test(question);
   const isHighStakes = domain === "health" || domain === "mental_health" || domain === "legal" || domain === "tax" || domain === "finance";
   const requiresLiveGrounding = domain === "live" || domain === "finance";
-  const requiresEvidence = requiresLiveGrounding || domain === "health" || domain === "mental_health" || domain === "legal";
+  const requiresEvidence = requiresLiveGrounding || (
+    !isEducationalQuery && (domain === "health" || domain === "mental_health" || domain === "legal")
+  );
   const requiresVerification =
     domain === "live"
       ? false
