@@ -4,6 +4,7 @@ import { performance } from "node:perf_hooks";
 import {
   loadClawCloudEnv,
   maskUserId,
+  resolveClawCloudSharedUser,
   writeJsonReport,
 } from "./clawcloud-script-helpers";
 
@@ -650,10 +651,8 @@ function evaluateCase(test: AuditCase, answer: string) {
 async function main() {
   loadClawCloudEnv();
 
-  const sharedUserId = (process.env.WHATSAPP_AUTO_TEST_USER_ID || "").trim();
-  if (!sharedUserId) {
-    throw new Error("Missing WHATSAPP_AUTO_TEST_USER_ID in env.");
-  }
+  const sharedUser = await resolveClawCloudSharedUser({ allowCreateAuditUser: true });
+  const sharedUserId = sharedUser.userId;
 
   const [{ getProviderSnapshot }, agentModule] = await Promise.all([
     import("@/lib/env"),
@@ -770,6 +769,8 @@ async function main() {
     generatedAt: new Date().toISOString(),
     reportPath,
     sharedUserIdPrefix: maskUserId(sharedUserId),
+    sharedUserSource: sharedUser.source,
+    staleConfiguredKeys: sharedUser.staleConfiguredKeys,
     providerSnapshot,
     overall: {
       averageScore: Number((totals.score / Math.max(totals.count, 1)).toFixed(1)),

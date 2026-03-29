@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { env } from "@/lib/env";
+import {
+  env,
+  isGoogleWorkspaceOauthConfigured,
+  isGooglePublicSignInEnabled,
+} from "@/lib/env";
+import {
+  getGoogleWorkspaceCoreAccess,
+  getGoogleWorkspaceExtendedAccess,
+} from "@/lib/google-workspace-rollout";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,39 +30,23 @@ function getExpectedLoginRedirectUri(origin: string) {
 }
 
 export async function GET(request: NextRequest) {
-  const workspaceOauthConfigured = Boolean(
-    env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.NEXT_PUBLIC_APP_URL,
-  );
-  const workspacePublicEnabled = Boolean(
-    env.GOOGLE_WORKSPACE_PUBLIC_ENABLED && !env.GOOGLE_WORKSPACE_TEMPORARY_HOLD,
-  );
-  const workspaceExtendedPublicEnabled = Boolean(
-    env.GOOGLE_WORKSPACE_PUBLIC_ENABLED
-    && env.GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED
-    && !env.GOOGLE_WORKSPACE_TEMPORARY_HOLD,
-  );
+  const workspaceOauthConfigured = isGoogleWorkspaceOauthConfigured();
+  const workspaceAccess = getGoogleWorkspaceCoreAccess(null);
+  const workspaceExtendedAccess = getGoogleWorkspaceExtendedAccess(null);
+  const workspacePublicEnabled = workspaceAccess.available;
+  const workspaceExtendedPublicEnabled = workspaceExtendedAccess.available;
   const workspaceReason = !workspaceOauthConfigured
     ? "missing_google_workspace_env"
-    : env.GOOGLE_WORKSPACE_TEMPORARY_HOLD
-      ? "google_workspace_rollout_hold"
-      : !env.GOOGLE_WORKSPACE_PUBLIC_ENABLED
-        ? "google_workspace_public_disabled"
-        : "ok";
+    : workspaceAccess.reason ?? "ok";
   const workspaceExtendedReason = !workspaceOauthConfigured
     ? "missing_google_workspace_env"
-    : env.GOOGLE_WORKSPACE_TEMPORARY_HOLD
-      ? "google_workspace_rollout_hold"
-      : !env.GOOGLE_WORKSPACE_PUBLIC_ENABLED
-        ? "google_workspace_public_disabled"
-        : !env.GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED
-          ? "google_workspace_extended_public_disabled"
-          : "ok";
+    : workspaceExtendedAccess.reason ?? "ok";
 
-  if (!env.GOOGLE_SIGNIN_PUBLIC_ENABLED) {
+  if (!isGooglePublicSignInEnabled()) {
     return withNoStoreHeaders(
       NextResponse.json({
         ok: false,
-        reason: "public_google_signin_disabled",
+        reason: "public_google_signin_unavailable",
         loginFlow: "custom_google_login",
         workspace: {
           ok: workspacePublicEnabled,

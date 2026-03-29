@@ -31,6 +31,22 @@ function extractNumber(value: unknown, fallback = 0) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function chooseJsonReport<T>(
+  runResult: ReturnType<typeof runTsxJsonScript>,
+  filePath: string,
+) {
+  if (runResult.ok && runResult.json) {
+    return runResult.json as T;
+  }
+
+  const fileJson = readJsonFile<T>(filePath);
+  if (fileJson) {
+    return fileJson;
+  }
+
+  return (runResult.json as T | null) ?? null;
+}
+
 function scoreLabel(score: number) {
   if (score >= 90) return "elite";
   if (score >= 80) return "strong";
@@ -56,7 +72,13 @@ async function main() {
   const providerSnapshot = getProviderSnapshot();
 
   const replayRun = runTsxJsonScript("scripts/clawcloud-replay-eval.ts");
-  const replayJson = (readJsonFile("tmp-clawcloud-replay-report.json") ?? replayRun.json) as
+  const replayJson = chooseJsonReport<{
+    passRate?: number;
+    passed?: number;
+    failed?: number;
+    averageLatencyMs?: number;
+    results?: Array<{ id: string; ok: boolean }>;
+  }>(replayRun, "tmp-clawcloud-replay-report.json") as
     | {
       passRate?: number;
       passed?: number;
@@ -67,7 +89,10 @@ async function main() {
     | null;
 
   const benchmarkRun = runTsxJsonScript("scripts/clawcloud-hard-benchmark.ts");
-  const benchmarkJson = (readJsonFile("tmp-clawcloud-hard-benchmark.json") ?? benchmarkRun.json) as
+  const benchmarkJson = chooseJsonReport<{
+    overall?: { percentage?: number };
+    results?: Array<{ key: string; misses?: string[] }>;
+  }>(benchmarkRun, "tmp-clawcloud-hard-benchmark.json") as
     | {
       overall?: { percentage?: number };
       results?: Array<{ key: string; misses?: string[] }>;
@@ -94,7 +119,12 @@ async function main() {
 
   if (withLive) {
     liveRun = runTsxJsonScript("scripts/clawcloud-live-api-qa.ts");
-    liveJson = liveRun.json as
+    liveJson = chooseJsonReport<{
+      passed?: number;
+      failed?: number;
+      total?: number;
+      results?: Array<{ id: string; ok: boolean }>;
+    }>(liveRun, "tmp-clawcloud-live-api-qa.json") as
       | {
         passed?: number;
         failed?: number;

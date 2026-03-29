@@ -1,4 +1,5 @@
 import { formatFinanceReply, getLiveFinanceData } from "@/lib/clawcloud-finance";
+import { matchesWholeAlias } from "@/lib/clawcloud-intent-match";
 
 const FETCH_TIMEOUT_MS = 8_000;
 const IRCTC_API_HOST = "irctc1.p.rapidapi.com";
@@ -153,11 +154,24 @@ export function detectIndianStockQuery(message: string): string | null {
 
   const uppercaseTickerMatch = message.match(/\b([A-Z]{2,20})\s*(?:share|stock|price|quote)\b/);
   if (uppercaseTickerMatch) {
-    return uppercaseTickerMatch[1].toUpperCase();
+    const ticker = uppercaseTickerMatch[1].toUpperCase();
+    if (ticker === "NIFTY") {
+      return "^NSEI";
+    }
+    if (ticker === "SENSEX") {
+      return "^BSESN";
+    }
+    if (ticker === "BANKNIFTY") {
+      return "^NSEBANK";
+    }
+    return NSE_SYMBOL_MAP[ticker.toLowerCase()] ?? ticker;
   }
 
   for (const [key, symbol] of Object.entries(NSE_SYMBOL_MAP)) {
-    if (normalized.includes(key) && /\b(share|stock|price|today|live|quote|target|buy|sell|invest)\b/.test(normalized)) {
+    if (
+      matchesWholeAlias(normalized, key)
+      && /\b(share|stock|price|today|live|quote|target|buy|sell|invest)\b/.test(normalized)
+    ) {
       return symbol;
     }
   }

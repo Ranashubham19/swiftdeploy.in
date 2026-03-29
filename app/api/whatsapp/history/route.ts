@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { listWhatsAppHistory } from "@/lib/clawcloud-whatsapp-inbox";
+import { ensureClawCloudWhatsAppWorkspaceReady } from "@/lib/clawcloud-whatsapp";
 import {
   getClawCloudErrorMessage,
   requireClawCloudAuth,
@@ -26,7 +27,7 @@ export async function GET(request: NextRequest) {
   const awaitingOnly = params.get("awaitingOnly") === "true";
 
   try {
-    const snapshot = await listWhatsAppHistory({
+    let snapshot = await listWhatsAppHistory({
       userId: auth.user.id,
       query,
       contact,
@@ -38,6 +39,25 @@ export async function GET(request: NextRequest) {
       mediaOnly,
       awaitingOnly,
     });
+
+    if (snapshot.rows.length < Math.min(Math.max(limit, 1), 60)) {
+      const bootstrap = await ensureClawCloudWhatsAppWorkspaceReady(auth.user.id).catch(() => null);
+      if (bootstrap?.refreshed) {
+        snapshot = await listWhatsAppHistory({
+          userId: auth.user.id,
+          query,
+          contact,
+          limit,
+          chatType,
+          approvalState,
+          sensitivity,
+          direction,
+          mediaOnly,
+          awaitingOnly,
+        });
+      }
+    }
+
     return NextResponse.json({
       history: snapshot.rows,
       insights: snapshot.insights,

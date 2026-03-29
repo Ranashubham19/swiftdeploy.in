@@ -1,5 +1,5 @@
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
-import { getAllMemoryFacts, type MemoryRow } from "@/lib/clawcloud-user-memory";
+import { getDurableMemoryFacts, type MemoryRow } from "@/lib/clawcloud-user-memory";
 
 type CustomCommand = {
   id: string;
@@ -426,7 +426,7 @@ async function expandCommandPrompt(
     };
   }
 
-  const facts = await getAllMemoryFacts(userId).catch(() => []);
+  const facts = await getDurableMemoryFacts(userId).catch(() => []);
   const memoryVariables = buildMemoryVariableMap(facts);
   const timeZone = memoryVariables.timezone || DEFAULT_TIMEZONE;
   const systemVariables = buildSystemVariables(timeZone);

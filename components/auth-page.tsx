@@ -53,7 +53,9 @@ type GoogleBridgeSession = {
 };
 
 const googleSignInRolloutMessage =
-  "Google sign-in is temporarily paused while ClawCloud finishes Google's public verification. Sign in with email for now. We'll reopen Google sign-in for everyone once approval lands.";
+  "Google sign-in is unavailable on this deployment right now. Sign in with email for now and reconnect Google later from Settings if needed.";
+
+const GOOGLE_SIGNIN_PROVIDER_MARKER = "clawcloud-auth-provider";
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const authCodeExchangeCache = new Map<string, Promise<AuthExchangeResult>>();
@@ -149,6 +151,50 @@ function GoogleIcon() {
   );
 }
 
+function markGoogleSignInProvider() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.sessionStorage.setItem(GOOGLE_SIGNIN_PROVIDER_MARKER, "google");
+}
+
+function clearGoogleSignInProvider() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.sessionStorage.removeItem(GOOGLE_SIGNIN_PROVIDER_MARKER);
+}
+
+function buildPostAuthPath(path: string, provider?: "google") {
+  if (!provider) {
+    return path;
+  }
+
+  const url = new URL(path, window.location.origin);
+  url.searchParams.set("auth_provider", provider);
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+function appendGoogleSetupBootstrapState(
+  path: string,
+  options?: {
+    gmailConnected?: boolean;
+    driveConnected?: boolean;
+  },
+) {
+  const url = new URL(path, window.location.origin);
+  url.searchParams.set("global_connect", "bootstrap");
+  if (options?.gmailConnected) {
+    url.searchParams.set("gmail_lite", "connected");
+  }
+  if (options?.driveConnected) {
+    url.searchParams.set("drive_lite", "connected");
+  }
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
 function scorePassword(password: string) {
   let score = 0;
   if (password.length >= 8) score += 1;
@@ -178,8 +224,9 @@ export function AuthPage({ config }: AuthPageProps) {
   );
   const recoveryFlowRef = useRef(false);
   const redirectingRef = useRef(false);
+  const googleSignInEnabled = config.googleRollout.publicSignInEnabled;
 
-  const [panel, setPanel] = useState<AuthPanel>("login");
+  const [panel, setPanel] = useState<AuthPanel>("signup");
   const [globalError, setGlobalError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
   const [authTransitionLabel, setAuthTransitionLabel] = useState<string | null>(null);
@@ -227,6 +274,98 @@ export function AuthPage({ config }: AuthPageProps) {
     clearFeedback();
     setFieldErrors({});
     setPanel(nextPanel);
+  }
+
+  async function prepareGlobalConnectDefaults(session: {
+    access_token?: string | null;
+    user?: {
+      email?: string | null;
+    } | null;
+  }) {
+    const token = typeof session.access_token === "string" ? session.access_token.trim() : "";
+    const setupLiteMode = config.googleRollout.setupLiteMode !== false;
+    if (!token || (!setupLiteMode && config.googleRollout.publicWorkspaceEnabled)) {
+      return { gmailConnected: false, driveConnected: false };
+    }
+
+    const email =
+      typeof session.user?.email === "string" ? session.user.email.trim().toLowerCase() : "";
+    const prepared = {
+      gmailConnected: false,
+      driveConnected: false,
+    };
+    const requests: Promise<void>[] = [];
+
+    if (email) {
+      requests.push(
+        fetch("/api/global-lite/connections", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            provider: "gmail",
+            email,
+          }),
+        })
+          .then(async (response) => {
+            const payload = (await response.json().catch(() => null)) as {
+              connection?: unknown;
+            } | null;
+            if (response.ok && payload?.connection) {
+              prepared.gmailConnected = true;
+            }
+          })
+          .catch(() => undefined),
+      );
+    }
+
+    requests.push(
+      fetch("/api/global-lite/connections", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          provider: "google_drive",
+          label: "My ClawCloud document vault",
+        }),
+      })
+        .then(async (response) => {
+          const payload = (await response.json().catch(() => null)) as {
+            connection?: unknown;
+          } | null;
+          if (response.ok && payload?.connection) {
+            prepared.driveConnected = true;
+          }
+        })
+        .catch(() => undefined),
+    );
+
+    await Promise.all(requests);
+    return prepared;
+  }
+
+  async function resolveGooglePostAuthPath(session: {
+    access_token?: string | null;
+    user?: {
+      id?: string | null;
+      email?: string | null;
+    } | null;
+  }) {
+    const userId = typeof session.user?.id === "string" ? session.user.id : undefined;
+    const path = await resolvePostAuthRedirectPath(userId);
+    let nextPath = buildPostAuthPath(path, "google");
+
+    if (!path.startsWith("/setup")) {
+      return nextPath;
+    }
+
+    const prepared = await prepareGlobalConnectDefaults(session);
+    nextPath = appendGoogleSetupBootstrapState(nextPath, prepared);
+    return nextPath;
   }
 
   function setFieldError(name: string, message: string) {
@@ -343,9 +482,12 @@ export function AuthPage({ config }: AuthPageProps) {
           }
 
           setAuthTransitionLabel("Opening your workspace...");
-          const { data: userData } = await authClient.auth.getUser();
+          const { data: sessionData } = await authClient.auth.getSession();
+          markGoogleSignInProvider();
           redirectingRef.current = true;
-          router.replace(await resolvePostAuthRedirectPath(userData.user?.id));
+          router.replace(
+            await resolveGooglePostAuthPath(sessionData.session ?? { user: null }),
+          );
           return;
         } catch (error) {
           if (!cancelled) {
@@ -393,8 +535,11 @@ export function AuthPage({ config }: AuthPageProps) {
           return;
         } else {
           setAuthTransitionLabel("Opening your workspace...");
-          const { data: userData } = await authClient.auth.getUser();
-          router.replace(await resolvePostAuthRedirectPath(userData.user?.id));
+          const { data: sessionData } = await authClient.auth.getSession();
+          markGoogleSignInProvider();
+          router.replace(
+            await resolveGooglePostAuthPath(sessionData.session ?? { user: null }),
+          );
           return;
         }
       }
@@ -408,7 +553,16 @@ export function AuthPage({ config }: AuthPageProps) {
         if (!redirectingRef.current) {
           beginAuthTransition("Opening your workspace...");
           redirectingRef.current = true;
-          router.replace(await resolvePostAuthRedirectPath(data.session.user.id));
+          const provider =
+            window.sessionStorage.getItem(GOOGLE_SIGNIN_PROVIDER_MARKER) === "google"
+              ? "google"
+              : undefined;
+
+          if (provider === "google") {
+            router.replace(await resolveGooglePostAuthPath(data.session));
+          } else {
+            router.replace(await resolvePostAuthRedirectPath(data.session.user.id));
+          }
         }
       }
     }
@@ -435,13 +589,24 @@ export function AuthPage({ config }: AuthPageProps) {
         if (!redirectingRef.current) {
           beginAuthTransition("Opening your workspace...");
           redirectingRef.current = true;
-          void resolvePostAuthRedirectPath(session.user.id).then((path) => {
-            router.replace(path);
-          });
+          void (async () => {
+            const provider =
+              window.sessionStorage.getItem(GOOGLE_SIGNIN_PROVIDER_MARKER) === "google"
+                ? "google"
+                : undefined;
+
+            if (provider === "google") {
+              router.replace(await resolveGooglePostAuthPath(session));
+              return;
+            }
+
+            router.replace(await resolvePostAuthRedirectPath(session.user.id));
+          })();
         }
       }
 
       if (event === "SIGNED_OUT") {
+        clearGoogleSignInProvider();
         endAuthTransition();
         redirectingRef.current = false;
         recoveryFlowRef.current = false;
@@ -472,6 +637,7 @@ export function AuthPage({ config }: AuthPageProps) {
     const loadingKey = mode === "login" ? "google-login" : "google-signup";
     beginAuthTransition("Connecting to Google...");
     setLoadingAction(loadingKey);
+    markGoogleSignInProvider();
 
     const googleLoginUrl = new URL("/api/auth/google-login", window.location.origin);
     googleLoginUrl.searchParams.set("intent", mode);
@@ -483,6 +649,7 @@ export function AuthPage({ config }: AuthPageProps) {
     event.preventDefault();
     clearFeedback();
     setFieldErrors({});
+    clearGoogleSignInProvider();
 
     let valid = true;
     if (!emailPattern.test(login.email.trim())) {
@@ -530,6 +697,7 @@ export function AuthPage({ config }: AuthPageProps) {
     event.preventDefault();
     clearFeedback();
     setFieldErrors({});
+    clearGoogleSignInProvider();
 
     let valid = true;
 
@@ -758,27 +926,25 @@ export function AuthPage({ config }: AuthPageProps) {
               <h1 className={styles.title}>Welcome back 👋</h1>
               <p className={styles.subtitle}>Sign in to your ClawCloud account.</p>
 
-              {!config.googleRollout.publicSignInEnabled ? (
-                <div className={styles.configNote}>
-                  Google sign-in is in rollout hold while ClawCloud completes Google&apos;s public
-                  verification. Email sign-in is live today, and Google sign-in will be re-enabled
-                  automatically once approval is complete.
-                </div>
+              {googleSignInEnabled ? (
+                <>
+                  <button
+                    type="button"
+                    className={styles.googleButton}
+                    onClick={() => handleGoogle("login")}
+                    disabled={loadingAction !== null}
+                  >
+                    {loadingAction === "google-login" ? (
+                      <span className={styles.spinner} />
+                    ) : (
+                      <GoogleIcon />
+                    )}
+                    Continue with Google
+                  </button>
+
+                  <div className={styles.divider}>or sign in with email</div>
+                </>
               ) : null}
-
-              <button
-                type="button"
-                className={styles.googleButton}
-                onClick={() => handleGoogle("login")}
-                disabled={loadingAction !== null || !config.googleRollout.publicSignInEnabled}
-              >
-                {loadingAction === "google-login" ? <span className={styles.spinner} /> : <GoogleIcon />}
-                {config.googleRollout.publicSignInEnabled
-                  ? "Continue with Google"
-                  : "Google sign-in opening soon"}
-              </button>
-
-              <div className={styles.divider}>or sign in with email</div>
 
               <form className={styles.form} onSubmit={handleLogin}>
                 <div className={styles.field}>
@@ -874,30 +1040,25 @@ export function AuthPage({ config }: AuthPageProps) {
                 Create your ClawCloud account. No credit card required.
               </p>
 
-              {!config.googleRollout.publicSignInEnabled ? (
-                <div className={styles.configNote}>
-                  Public Google sign-up is paused until Google finishes review. New users can still
-                  create an account with email now and connect Google later after approval.
-                </div>
+              {googleSignInEnabled ? (
+                <>
+                  <button
+                    type="button"
+                    className={styles.googleButton}
+                    onClick={() => handleGoogle("signup")}
+                    disabled={loadingAction !== null}
+                  >
+                    {loadingAction === "google-signup" ? (
+                      <span className={styles.spinner} />
+                    ) : (
+                      <GoogleIcon />
+                    )}
+                    Sign up with Google
+                  </button>
+
+                  <div className={styles.divider}>or sign up with email</div>
+                </>
               ) : null}
-
-              <button
-                type="button"
-                className={styles.googleButton}
-                onClick={() => handleGoogle("signup")}
-                disabled={loadingAction !== null || !config.googleRollout.publicSignInEnabled}
-              >
-                {loadingAction === "google-signup" ? (
-                  <span className={styles.spinner} />
-                ) : (
-                  <GoogleIcon />
-                )}
-                {config.googleRollout.publicSignInEnabled
-                  ? "Sign up with Google"
-                  : "Google sign-up opening soon"}
-              </button>
-
-              <div className={styles.divider}>or sign up with email</div>
 
               <form className={styles.form} onSubmit={handleSignup}>
                 <div className={styles.nameRow}>
@@ -1060,11 +1221,11 @@ export function AuthPage({ config }: AuthPageProps) {
 
               <p className={styles.terms}>
                 By signing up you agree to our{" "}
-                <Link href="/" className={styles.inlineLink}>
+                <Link href="/terms" className={styles.inlineLink}>
                   Terms
                 </Link>{" "}
                 and{" "}
-                <Link href="/" className={styles.inlineLink}>
+                <Link href="/privacy" className={styles.inlineLink}>
                   Privacy Policy
                 </Link>
                 .

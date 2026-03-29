@@ -18,6 +18,7 @@ import { rewriteQuestionWithMemory } from "@/lib/conversation-memory";
 import { completeClawCloudPrompt } from "@/lib/clawcloud-ai";
 import { extractWebsiteContent } from "@/lib/crawl";
 import { embedTexts } from "@/lib/embeddings";
+import { inferClawCloudRegionContext, normalizeRegionalQuestion } from "@/lib/clawcloud-region-context";
 import { env, getProviderSnapshot } from "@/lib/env";
 import { startTrace } from "@/lib/langsmith";
 import {
@@ -163,31 +164,34 @@ const TOPIC_RELEVANCE_STOP_WORDS = new Set([
 ]);
 
 function isSensitiveRealtimeQuery(question: string) {
+  const normalizedQuestion = normalizeRegionalQuestion(question);
   return /\b(war|conflict|attack|missile|nuclear|strike|ceasefire|military|protest|riot|election|hostage|earthquake|outbreak|sanction)\b/i.test(
-    question,
+    normalizedQuestion,
   );
 }
 
 function isBroadRealtimeUpdateQuery(question: string) {
+  const normalizedQuestion = normalizeRegionalQuestion(question);
   return (
     /\b(latest|today|current|news|update|updates|right now|happening|status|situation|live)\b/i.test(
-      question,
+      normalizedQuestion,
     ) &&
     !/\b(price|prices|stock|stocks|weather|forecast|score|scores|traffic|lpg|cylinder|deal|deals|buy|purchase|gdp|inflation|election|war|conflict|attack|earthquake|outbreak)\b/i.test(
-      question,
+      normalizedQuestion,
     )
   );
 }
 
 function isCommercePriceComparisonQuery(question: string) {
+  const normalizedQuestion = normalizeRegionalQuestion(question);
   return (
     /\b(price|prices|cost|deal|deals|buy|buying|purchase|offer|offers|retailer|retailers|store|stores|website|websites)\b/i.test(
-      question,
+      normalizedQuestion,
     ) &&
     /\b(compare|comparison|different websites|different sites|different stores|cheapest|lowest|best price|where to buy)\b/i.test(
-      question,
+      normalizedQuestion,
     ) &&
-    !/\b(trade-?in|sell|resale|used|refurbished|cash value)\b/i.test(question)
+    !/\b(trade-?in|sell|resale|used|refurbished|cash value)\b/i.test(normalizedQuestion)
   );
 }
 
@@ -238,6 +242,22 @@ function normalizeCommerceSearchTopic(question: string) {
 
   return topic || question;
 }
+
+const COMMERCE_REGION_RETAILERS: Record<string, string[]> = {
+  IN: ["Amazon price", "Flipkart price", "Smartprix price"],
+  AE: ["Amazon UAE price", "Noon price", "Sharaf DG price"],
+  GB: ["Amazon UK price", "Currys price", "John Lewis price"],
+  AU: ["Amazon Australia price", "JB Hi-Fi price", "Harvey Norman price"],
+  CA: ["Amazon Canada price", "Best Buy Canada price", "Walmart Canada price"],
+  SG: ["Amazon Singapore price", "Courts price", "Challenger price"],
+  JP: ["Amazon Japan price", "Bic Camera price", "Yodobashi price"],
+  SA: ["Amazon Saudi price", "Noon Saudi price", "Jarir price"],
+  DE: ["Amazon Germany price", "MediaMarkt price", "Saturn price"],
+  FR: ["Amazon France price", "Fnac price", "Darty price"],
+  ES: ["Amazon Spain price", "PcComponentes price", "El Corte Ingles price"],
+  IT: ["Amazon Italy price", "MediaWorld price", "Unieuro price"],
+  US: ["Amazon price", "Best Buy price", "Walmart price"],
+};
 
 function isPhonePriceQuery(question: string) {
   return /\b(galaxy|iphone|pixel|phone|smartphone|ultra|pro max|fold|flip)\b/i.test(question);
@@ -457,24 +477,28 @@ function classifyQuery(question: string): QueryClassification {
 }
 
 function buildSearchQueries(question: string, classification: QueryClassification) {
-  const lower = question.toLowerCase();
-  const commerceTopic = normalizeCommerceSearchTopic(question);
+  const normalizedQuestion = normalizeRegionalQuestion(question);
+  const regionContext = inferClawCloudRegionContext(question);
+  const lower = normalizedQuestion.toLowerCase();
+  const commerceTopic = normalizeCommerceSearchTopic(normalizedQuestion);
   const currentYear = new Date().getFullYear();
-  const queries = new Set<string>([question]);
+  const queries = new Set<string>([question, normalizedQuestion]);
 
   if (isCommercePriceComparisonQuery(question)) {
     queries.add(`${commerceTopic} official price`);
-    if (/\b(india|inr|₹|rs\.?)\b/i.test(question)) {
-      queries.add(`${commerceTopic} Amazon price`);
-      queries.add(`${commerceTopic} Flipkart price`);
-      queries.add(`${commerceTopic} Smartprix price`);
-    } else if (isPhonePriceQuery(question)) {
-      queries.add(`${commerceTopic} Amazon price`);
-      queries.add(`${commerceTopic} AT&T retail price`);
-      queries.add(`${commerceTopic} Best Buy price`);
+    const retailerHints = regionContext.requestedRegion
+      ? COMMERCE_REGION_RETAILERS[regionContext.requestedRegion.code] ?? COMMERCE_REGION_RETAILERS.US
+      : isPhonePriceQuery(question)
+        ? ["Amazon price", "AT&T retail price", "Best Buy price"]
+        : COMMERCE_REGION_RETAILERS.US;
+
+    for (const retailerHint of retailerHints) {
+      queries.add(`${commerceTopic} ${retailerHint}`);
+    }
+
+    if (regionContext.requestedRegion?.countryName) {
+      queries.add(`${commerceTopic} price in ${regionContext.requestedRegion.countryName}`);
     } else {
-      queries.add(`${commerceTopic} Amazon price`);
-      queries.add(`${commerceTopic} Walmart price`);
       queries.add(`${commerceTopic} retailer price comparison`);
     }
 
@@ -489,17 +513,17 @@ function buildSearchQueries(question: string, classification: QueryClassificatio
       lower,
     )
   ) {
-    queries.add(`${question} price comparison`);
-    queries.add(`cheapest ${question.replace(/\b(best place to buy|where is|where can i buy)\b/gi, "").trim()}`.trim());
-    queries.add(`${question} by country`);
+    queries.add(`${normalizedQuestion} price comparison`);
+    queries.add(`cheapest ${normalizedQuestion.replace(/\b(best place to buy|where is|where can i buy)\b/gi, "").trim()}`.trim());
+    queries.add(regionContext.requestedRegion?.countryName ? `${normalizedQuestion} in ${regionContext.requestedRegion.countryName}` : `${normalizedQuestion} by country`);
   }
 
   if (
     /\b(compare|comparison|versus|vs|difference|differences|better than)\b/i.test(lower)
   ) {
-    queries.add(`${question} comparison`);
-    queries.add(`${question} differences`);
-    queries.add(`${question} pros cons`);
+    queries.add(`${normalizedQuestion} comparison`);
+    queries.add(`${normalizedQuestion} differences`);
+    queries.add(`${normalizedQuestion} pros cons`);
   }
 
   if (
@@ -507,20 +531,21 @@ function buildSearchQueries(question: string, classification: QueryClassificatio
       lower,
     )
   ) {
-    queries.add(`${question} latest update`);
-    queries.add(`${question} official statement`);
-    queries.add(`${question} live updates`);
+    queries.add(`${normalizedQuestion} latest update`);
+    queries.add(`${normalizedQuestion} official statement`);
+    queries.add(`${normalizedQuestion} live updates`);
   }
 
   if (isBroadRealtimeUpdateQuery(question)) {
-    queries.add(`India latest developments ${currentYear} Reuters`);
-    queries.add(`India latest developments ${currentYear} AP News`);
-    queries.add(`India latest developments ${currentYear} BBC`);
+    const updateScope = regionContext.requestedRegion?.countryName || "world";
+    queries.add(`${updateScope} latest developments ${currentYear} Reuters`);
+    queries.add(`${updateScope} latest developments ${currentYear} AP News`);
+    queries.add(`${updateScope} latest developments ${currentYear} BBC`);
   }
 
   if (isSensitiveRealtimeQuery(question)) {
-    queries.add(`${question} Reuters`);
-    queries.add(`${question} AP official`);
+    queries.add(`${normalizedQuestion} Reuters`);
+    queries.add(`${normalizedQuestion} AP official`);
   }
 
   if (
@@ -528,15 +553,15 @@ function buildSearchQueries(question: string, classification: QueryClassificatio
       question,
     )
   ) {
-    queries.add(`${question} latest`);
-    queries.add(`${question} ranking`);
-    queries.add(`${question} official data`);
+    queries.add(`${normalizedQuestion} latest`);
+    queries.add(`${normalizedQuestion} ranking`);
+    queries.add(`${normalizedQuestion} official data`);
   }
 
   if (classification.mode === "research" || classification.type === "research") {
-    queries.add(`${question} analysis`);
-    queries.add(`${question} report`);
-    queries.add(`${question} official data`);
+    queries.add(`${normalizedQuestion} analysis`);
+    queries.add(`${normalizedQuestion} report`);
+    queries.add(`${normalizedQuestion} official data`);
   }
 
   if (/^(who is|what is|which|when|where|how many|tell me about)\b/i.test(lower)) {
@@ -745,15 +770,15 @@ async function buildStrictCoverageAnswer(
 ): Promise<AssistantAnswer> {
   const title = mode === "research" ? "Research Answer" : "Search Answer";
   const summary =
-    "Live sources were limited for this exact query, so this answer uses best available model knowledge.";
+    "Live coverage was narrow for this exact query, so this answer uses the best available model knowledge.";
 
   const fallbackMarkdown = [
     `*${title}*`,
     "",
     `*Question:* ${question}`,
     "",
-    "I could not verify enough reliable live sources for this exact wording right now.",
-    "Try adding scope and timeframe for source-backed verification.",
+    "For a source-backed update, add the exact scope and timeframe that matter most.",
+    "I can then return a tighter live answer.",
     "",
     "Need anything else?",
   ].join("\n");

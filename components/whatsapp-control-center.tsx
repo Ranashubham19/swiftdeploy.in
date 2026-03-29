@@ -5,6 +5,10 @@ import { useEffect, useMemo, useState, useTransition, type FormEvent } from "rea
 
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 import type { PublicAppConfig } from "@/lib/types";
+import type {
+  ClawCloudWhatsAppRuntimeHealth,
+  ClawCloudWhatsAppRuntimeStatus,
+} from "@/lib/clawcloud-whatsapp-runtime";
 import {
   type WhatsAppAuditEntry,
   defaultWhatsAppSettings,
@@ -27,7 +31,11 @@ type WhatsAppControlCenterProps = {
   config: PublicAppConfig;
 };
 
-type ControlResponse = { settings: WhatsAppSettings; summary: WhatsAppInboxSummary };
+type ControlResponse = {
+  settings: WhatsAppSettings;
+  summary: WhatsAppInboxSummary;
+  runtime: ClawCloudWhatsAppRuntimeStatus | null;
+};
 type ApprovalsResponse = { approvals: WhatsAppReplyApproval[] };
 type HistoryResponse = {
   history: WhatsAppHistoryEntry[];
@@ -36,6 +44,13 @@ type HistoryResponse = {
   mediaSummary: WhatsAppMediaSummary;
 };
 type ContactsResponse = { contacts: WhatsAppInboxContact[] };
+type ContactsRefreshResponse = {
+  success: boolean;
+  refreshedCount: number;
+  previousCount: number;
+  persistedCount: number;
+  contacts: WhatsAppInboxContact[];
+};
 type WorkflowsResponse = { workflows: WhatsAppWorkflow[]; runs: WhatsAppWorkflowRun[] };
 type AuditResponse = { audit: WhatsAppAuditEntry[] };
 
@@ -77,9 +92,115 @@ function formatDateTime(value: string | null | undefined) {
   }
 }
 
+function formatCompactDateTime(value: string | null | undefined) {
+  if (!value) return "Not available";
+  try {
+    return new Intl.DateTimeFormat("en-IN", {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date(value));
+  } catch {
+    return value;
+  }
+}
+
 function formatConfidence(value: number | null | undefined) {
   if (typeof value !== "number" || Number.isNaN(value)) return "n/a";
   return `${Math.round(value * 100)}%`;
+}
+
+function titleCaseWords(value: string) {
+  return value
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatRuntimeConnectionStatus(runtime: ClawCloudWhatsAppRuntimeStatus | null) {
+  if (!runtime) {
+    return "Disconnected";
+  }
+
+  switch (runtime.connectionStatus) {
+    case "connected":
+      return "Connected";
+    case "connecting":
+      return "Connecting";
+    case "waiting":
+      return runtime.qrReady ? "Waiting for QR" : "Preparing QR";
+    case "disconnected":
+    default:
+      return "Disconnected";
+  }
+}
+
+function formatRuntimeHealthLabel(health: ClawCloudWhatsAppRuntimeHealth | null | undefined) {
+  if (!health) {
+    return "Unknown";
+  }
+
+  switch (health) {
+    case "healthy":
+      return "Healthy";
+    case "syncing":
+      return "Syncing";
+    case "degraded":
+      return "Degraded";
+    case "reauth_required":
+      return "Reauth required";
+    default:
+      return titleCaseWords(health);
+  }
+}
+
+function formatRuntimeSyncState(runtime: ClawCloudWhatsAppRuntimeStatus | null) {
+  if (!runtime) {
+    return "Idle";
+  }
+
+  if (runtime.syncState === "idle") {
+    return runtime.activeSyncJobs > 0 ? "Sync worker active" : "Idle";
+  }
+
+  return titleCaseWords(runtime.syncState);
+}
+
+function formatRuntimeSyncMeta(
+  runtime: ClawCloudWhatsAppRuntimeStatus | null,
+  connectedFallback: boolean,
+) {
+  if (!runtime) {
+    return connectedFallback
+      ? "The live session is connected, but the detailed worker snapshot is unavailable right now."
+      : "Waiting for live WhatsApp worker telemetry.";
+  }
+
+  if (runtime.requiresReauth) {
+    return "A fresh QR scan is required before ClawCloud can read or sync WhatsApp again.";
+  }
+
+  if (runtime.connectionStatus === "waiting") {
+    return runtime.qrReady
+      ? `Fresh QR ready${typeof runtime.qrAgeSeconds === "number" ? ` • ${runtime.qrAgeSeconds}s old` : ""}.`
+      : "The worker is preparing a fresh QR for this workspace.";
+  }
+
+  if (runtime.lastSyncError) {
+    return `Last sync issue: ${runtime.lastSyncError}`;
+  }
+
+  if (runtime.connected) {
+    const parts = [
+      runtime.phone ? `Linked phone ${runtime.phone}` : "Linked WhatsApp session active",
+      runtime.activeSyncJobs > 0 ? `${runtime.activeSyncJobs} live sync job${runtime.activeSyncJobs === 1 ? "" : "s"}` : null,
+    ].filter(Boolean);
+    return `${parts.join(" • ")}.`;
+  }
+
+  return "No live WhatsApp session is loaded right now.";
 }
 
 async function readJson<T>(
@@ -120,6 +241,7 @@ export function WhatsAppControlCenter({ config }: WhatsAppControlCenterProps) {
   );
   const [settings, setSettings] = useState(defaultWhatsAppSettings);
   const [summary, setSummary] = useState(EMPTY_SUMMARY);
+  const [runtime, setRuntime] = useState<ClawCloudWhatsAppRuntimeStatus | null>(null);
   const [approvals, setApprovals] = useState<WhatsAppReplyApproval[]>([]);
   const [history, setHistory] = useState<WhatsAppHistoryEntry[]>([]);
   const [insights, setInsights] = useState(EMPTY_INSIGHTS);
@@ -193,6 +315,7 @@ export function WhatsAppControlCenter({ config }: WhatsAppControlCenterProps) {
     const control = await readJson<ControlResponse>("/api/whatsapp/control", supabase);
     setSettings(control.settings);
     setSummary(control.summary);
+    setRuntime(control.runtime ?? null);
   }
 
   async function refreshApprovals() {
@@ -258,6 +381,7 @@ export function WhatsAppControlCenter({ config }: WhatsAppControlCenterProps) {
 
     setSettings(control.settings);
     setSummary(control.summary);
+    setRuntime(control.runtime ?? null);
     setApprovals(approvalsResponse.approvals);
     applyHistory(historyResponse);
     setContacts(contactsResponse.contacts);
@@ -358,6 +482,35 @@ export function WhatsAppControlCenter({ config }: WhatsAppControlCenterProps) {
       setNotice(`Updated ${contact.display_name}.`);
     } catch (contactError) {
       setError(contactError instanceof Error ? contactError.message : "Could not save contact.");
+    } finally {
+      setSavingKey("");
+    }
+  }
+
+  async function handleContactRefresh() {
+    setSavingKey("contacts-refresh");
+    setError("");
+    setNotice("");
+    try {
+      const response = await readJson<ContactsRefreshResponse>("/api/whatsapp/contacts", supabase, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      setContacts(response.contacts);
+      await refreshControl();
+      if (response.contacts.length) {
+        setNotice(
+          response.previousCount > 0
+            ? `Synced WhatsApp contacts. Session contacts moved from ${response.previousCount} to ${response.refreshedCount}.`
+            : `Synced WhatsApp contacts. ${response.refreshedCount} session contacts are now available.`,
+        );
+      } else {
+        setNotice(
+          "I refreshed your linked WhatsApp session, but it still is not exposing named contacts yet. You can still use saved contacts, recent chats, or a direct number.",
+        );
+      }
+    } catch (contactError) {
+      setError(contactError instanceof Error ? contactError.message : "Could not sync WhatsApp contacts.");
     } finally {
       setSavingKey("");
     }
@@ -489,6 +642,41 @@ export function WhatsAppControlCenter({ config }: WhatsAppControlCenterProps) {
   }
 
   const pendingApprovals = approvals.filter((approval) => approval.status === "pending");
+  const runtimeConnectionLabel = runtime
+    ? formatRuntimeConnectionStatus(runtime)
+    : summary.connected
+      ? "Connected"
+      : "Not connected";
+  const runtimeHealthLabel = runtime
+    ? formatRuntimeHealthLabel(runtime.health)
+    : summary.connected
+      ? "Runtime unavailable"
+      : "Disconnected";
+  const runtimeSyncLabel = runtime ? `${runtime.progress.overallPercent}%` : summary.connected ? "Live" : "n/a";
+  const runtimeSyncMeta = runtime
+    ? `${runtime.contactCount}/${runtime.progress.contactTarget} contacts • ${runtime.historyMessageCount}/${runtime.progress.historyTarget} messages`
+    : summary.connected
+      ? "Live sync targets will appear as soon as the worker returns a fresh runtime snapshot."
+      : "Runtime sync targets appear after a live worker snapshot arrives.";
+  const runtimeLastSyncTimestamp = runtime?.lastSuccessfulSyncAt
+    ? formatCompactDateTime(runtime.lastSuccessfulSyncAt)
+    : runtime?.lastSyncFinishedAt
+      ? formatCompactDateTime(runtime.lastSyncFinishedAt)
+      : summary.connected
+        ? "Waiting for data"
+        : "Not available";
+  const runtimeLastSyncLabel = runtime?.lastSuccessfulSyncAt
+    ? "Recent"
+    : runtime?.lastSyncFinishedAt
+      ? "Finished"
+      : summary.connected
+        ? "Pending"
+        : "Unavailable";
+  const runtimeAlert = runtime?.requiresReauth
+    ? "WhatsApp needs a fresh QR reconnect before ClawCloud can keep syncing safely."
+    : runtime?.lastSyncError
+      ? `Live sync is degraded right now: ${runtime.lastSyncError}`
+      : "";
   const filteredContacts = useMemo(() => {
     const normalized = contactSearch.trim().toLowerCase();
     return contacts.filter((contact) => {
@@ -522,11 +710,17 @@ export function WhatsAppControlCenter({ config }: WhatsAppControlCenterProps) {
       <div className={styles.notice}>
         Dashboard is now the primary WhatsApp home. This page is kept for advanced control work only.
       </div>
+      {runtimeAlert ? (
+        <div className={runtime?.requiresReauth ? styles.error : styles.notice}>{runtimeAlert}</div>
+      ) : null}
       {notice ? <div className={styles.notice}>{notice}</div> : null}
       {error ? <div className={styles.error}>{error}</div> : null}
 
       <div className={styles.summaryGrid}>
-        <article className={styles.summaryCard}><span className={styles.cardLabel}>Session</span><strong className={styles.cardValue}>{summary.connected ? "Connected" : "Not connected"}</strong><p className={styles.cardMeta}>Current WhatsApp runtime status.</p></article>
+        <article className={styles.summaryCard}><span className={styles.cardLabel}>Session</span><strong className={styles.cardValue}>{runtimeConnectionLabel}</strong><p className={styles.cardMeta}>{formatRuntimeSyncMeta(runtime, summary.connected)}</p></article>
+        <article className={styles.summaryCard}><span className={styles.cardLabel}>Runtime health</span><strong className={styles.cardValue}>{runtimeHealthLabel}</strong><p className={styles.cardMeta}>{runtime ? `${formatRuntimeSyncState(runtime)} • ${runtime.activeSyncJobs} active sync job${runtime.activeSyncJobs === 1 ? "" : "s"}` : "The worker health snapshot appears here when live telemetry is available."}</p></article>
+        <article className={styles.summaryCard}><span className={styles.cardLabel}>Sync progress</span><strong className={styles.cardValue}>{runtimeSyncLabel}</strong><p className={styles.cardMeta}>{runtimeSyncMeta}</p></article>
+        <article className={styles.summaryCard}><span className={styles.cardLabel}>Last successful sync</span><strong className={styles.cardValue}>{runtimeLastSyncLabel}</strong><p className={styles.cardMeta}>{runtime?.lastSyncReason ? `${runtimeLastSyncTimestamp} • ${titleCaseWords(runtime.lastSyncReason)}` : runtimeLastSyncTimestamp}</p></article>
         <article className={styles.summaryCard}><span className={styles.cardLabel}>Pending approvals</span><strong className={styles.cardValue}>{summary.pendingApprovalCount}</strong><p className={styles.cardMeta}>Replies waiting for review.</p></article>
         <article className={styles.summaryCard}><span className={styles.cardLabel}>Awaiting reply</span><strong className={styles.cardValue}>{summary.awaitingReplyCount}</strong><p className={styles.cardMeta}>Chats marked for follow-up.</p></article>
         <article className={styles.summaryCard}><span className={styles.cardLabel}>High priority</span><strong className={styles.cardValue}>{summary.highPriorityCount}</strong><p className={styles.cardMeta}>High and VIP contacts.</p></article>
@@ -538,10 +732,10 @@ export function WhatsAppControlCenter({ config }: WhatsAppControlCenterProps) {
         <section className={styles.panel}>
           <div className={styles.panelHeader}>
             <div><p className={styles.panelEyebrow}>Phase 1 to 3</p><h2 className={styles.panelTitle}>Automation rules</h2></div>
-            <span className={styles.panelBadge}>{loading ? "Loading" : "Live"}</span>
+            <span className={styles.panelBadge}>{loading ? "Loading" : runtimeHealthLabel}</span>
           </div>
           <form className={styles.form} onSubmit={handleSettingsSubmit}>
-            <label className={styles.field}><span>Automation mode</span><select className={styles.select} value={settings.automationMode} onChange={(event) => setSettings((current) => ({ ...current, automationMode: event.target.value as WhatsAppSettings["automationMode"] }))}><option value="read_only">Read only</option><option value="suggest_only">Suggest only</option><option value="approve_before_send">Approve before send</option><option value="auto_reply">Auto reply</option></select></label>
+            <label className={styles.field}><span>Automation mode</span><select className={styles.select} value={settings.automationMode} onChange={(event) => setSettings((current) => ({ ...current, automationMode: event.target.value as WhatsAppSettings["automationMode"] }))}><option value="read_only">Read only</option><option value="suggest_only">Suggest only</option><option value="approve_before_send">Approve before send</option></select></label>
             <label className={styles.field}><span>Reply tone</span><select className={styles.select} value={settings.replyMode} onChange={(event) => setSettings((current) => ({ ...current, replyMode: event.target.value as WhatsAppSettings["replyMode"] }))}><option value="balanced">Balanced</option><option value="professional">Professional</option><option value="friendly">Friendly</option><option value="brief">Brief</option></select></label>
             <label className={styles.field}><span>Group behavior</span><select className={styles.select} value={settings.groupReplyMode} onChange={(event) => setSettings((current) => ({ ...current, groupReplyMode: event.target.value as WhatsAppSettings["groupReplyMode"] }))}><option value="mention_only">Only when mentioned</option><option value="allow">Allow group replies</option><option value="never">Never reply in groups</option></select></label>
             <div className={styles.switchGroup}>
@@ -550,7 +744,7 @@ export function WhatsAppControlCenter({ config }: WhatsAppControlCenterProps) {
               <label className={styles.toggle}><input type="checkbox" checked={settings.allowDirectSendCommands} onChange={(event) => setSettings((current) => ({ ...current, allowDirectSendCommands: event.target.checked }))} /><span>Allow direct send commands</span></label>
               <label className={styles.toggle}><input type="checkbox" checked={settings.requireApprovalForNewContacts} onChange={(event) => setSettings((current) => ({ ...current, requireApprovalForNewContacts: event.target.checked }))} /><span>Require approval for new contacts</span></label>
               <label className={styles.toggle}><input type="checkbox" checked={settings.requireApprovalForFirstOutreach} onChange={(event) => setSettings((current) => ({ ...current, requireApprovalForFirstOutreach: event.target.checked }))} /><span>Require approval for first outreach</span></label>
-              <label className={styles.toggle}><input type="checkbox" checked={settings.allowWorkflowAutoSend} onChange={(event) => setSettings((current) => ({ ...current, allowWorkflowAutoSend: event.target.checked }))} /><span>Allow workflows to auto-send when safe</span></label>
+              <label className={styles.toggle}><input type="checkbox" checked={false} disabled /><span>Workflow auto-send is disabled by security policy</span></label>
               <label className={styles.toggle}><input type="checkbox" checked={settings.maskSensitivePreviews} onChange={(event) => setSettings((current) => ({ ...current, maskSensitivePreviews: event.target.checked }))} /><span>Mask sensitive previews in exports and workspace tools</span></label>
             </div>
             <div className={styles.inlineFields}>
@@ -659,7 +853,17 @@ export function WhatsAppControlCenter({ config }: WhatsAppControlCenterProps) {
         <section className={styles.panel}>
           <div className={styles.panelHeader}>
             <div><p className={styles.panelEyebrow}>Phase 4 and 5</p><h2 className={styles.panelTitle}>Inbox priorities</h2></div>
-            <span className={styles.panelBadge}>{filteredContacts.length} shown</span>
+            <div className={styles.actionRow}>
+              <span className={styles.panelBadge}>{filteredContacts.length} shown</span>
+              <button
+                type="button"
+                className={styles.secondaryButton}
+                disabled={savingKey === "contacts-refresh"}
+                onClick={() => void handleContactRefresh()}
+              >
+                {savingKey === "contacts-refresh" ? "Syncing..." : "Sync WhatsApp contacts"}
+              </button>
+            </div>
           </div>
           <div className={styles.toolbar}>
             <input className={styles.input} placeholder="Search contacts, aliases, or tags" value={contactSearch} onChange={(event) => setContactSearch(event.target.value)} />

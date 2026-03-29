@@ -710,6 +710,23 @@
   animation: spin 0.8s linear infinite;
 }
 
+.statusBanner {
+  margin: 0 18px 14px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 170, 51, 0.22);
+  background: rgba(255, 170, 51, 0.08);
+  color: #ffd08a;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.statusBannerError {
+  border-color: rgba(255, 77, 77, 0.22);
+  background: rgba(255, 77, 77, 0.08);
+  color: #ff9b9b;
+}
+
 .emptyState {
   flex: 1;
   display: flex;

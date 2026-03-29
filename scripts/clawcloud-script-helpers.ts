@@ -1,6 +1,32 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createClient } from "@supabase/supabase-js";
+
+const DEFAULT_CLAWCLOUD_AUDIT_EMAIL = "clawcloud-audit@swiftdeploy.test";
+const DEFAULT_CLAWCLOUD_AUDIT_NAME = "ClawCloud Audit";
+
+type ScriptUserSource =
+  | "cli"
+  | "env"
+  | "env_unverified"
+  | "audit_email"
+  | "audit_created";
+
+type ResolveSharedUserOptions = {
+  cliUserId?: string | null;
+  envKeys?: string[];
+  auditEmail?: string | null;
+  auditName?: string | null;
+  allowCreateAuditUser?: boolean;
+};
+
+export type ResolvedClawCloudSharedUser = {
+  userId: string;
+  source: ScriptUserSource;
+  staleConfiguredKeys: string[];
+  auditEmail: string | null;
+};
 
 function stripOuterQuotes(value: string) {
   if (
@@ -44,6 +70,213 @@ export function loadEnvFile(filename: string) {
 export function loadClawCloudEnv() {
   loadEnvFile(".env");
   loadEnvFile(".env.local");
+}
+
+function isUuid(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function createSupabaseAdminClient() {
+  const supabaseUrl = (process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL ?? "").trim();
+  const serviceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim();
+
+  if (!supabaseUrl || !serviceRoleKey) {
+    return null;
+  }
+
+  return createClient(supabaseUrl, serviceRoleKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  });
+}
+
+async function findPublicUserById(userId: string) {
+  const supabaseAdmin = createSupabaseAdminClient();
+  if (!supabaseAdmin || !userId) {
+    return null;
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("users")
+    .select("id")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Unable to validate shared QA user ${maskUserId(userId)}: ${error.message}`);
+  }
+
+  return data?.id ? String(data.id) : null;
+}
+
+async function findPublicUserByEmail(email: string) {
+  const supabaseAdmin = createSupabaseAdminClient();
+  if (!supabaseAdmin || !email) {
+    return null;
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("users")
+    .select("id,email")
+    .eq("email", email)
+    .limit(1);
+
+  if (error) {
+    throw new Error(`Unable to look up shared QA user by email ${email}: ${error.message}`);
+  }
+
+  return data?.[0]?.id ? String(data[0].id) : null;
+}
+
+async function createAuditUser(email: string, fullName: string) {
+  const supabaseAdmin = createSupabaseAdminClient();
+  if (!supabaseAdmin) {
+    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY.");
+  }
+
+  const created = await supabaseAdmin.auth.admin.createUser({
+    email,
+    email_confirm: true,
+    user_metadata: {
+      name: fullName,
+      full_name: fullName,
+    },
+    app_metadata: {
+      provider: "email",
+      providers: ["email"],
+      source: "clawcloud_audit",
+    },
+  });
+
+  if (created.error || !created.data.user?.id) {
+    throw new Error(created.error?.message || "Unable to create the shared QA audit user.");
+  }
+
+  const userId = String(created.data.user.id);
+  const { error: upsertError } = await supabaseAdmin
+    .from("users")
+    .upsert(
+      {
+        id: userId,
+        email,
+        full_name: fullName,
+      },
+      { onConflict: "id" },
+    );
+
+  if (upsertError) {
+    throw new Error(`Created audit auth user but could not sync public.users: ${upsertError.message}`);
+  }
+
+  return userId;
+}
+
+export async function resolveClawCloudSharedUser(
+  options: ResolveSharedUserOptions = {},
+): Promise<ResolvedClawCloudSharedUser> {
+  const envKeys = options.envKeys?.length
+    ? options.envKeys
+    : ["CLAWCLOUD_AUDIT_USER_ID", "WHATSAPP_AUTO_TEST_USER_ID"];
+  const staleConfiguredKeys: string[] = [];
+  const cliUserId = options.cliUserId?.trim() ?? "";
+  const auditEmail = (
+    options.auditEmail?.trim()
+    || process.env.CLAWCLOUD_AUDIT_USER_EMAIL?.trim()
+    || DEFAULT_CLAWCLOUD_AUDIT_EMAIL
+  ).toLowerCase();
+  const auditName = (
+    options.auditName?.trim()
+    || process.env.CLAWCLOUD_AUDIT_USER_NAME?.trim()
+    || DEFAULT_CLAWCLOUD_AUDIT_NAME
+  );
+
+  if (cliUserId) {
+    if (!isUuid(cliUserId)) {
+      throw new Error(`The provided --user value is not a valid UUID: ${cliUserId}`);
+    }
+
+    const resolvedCliUserId = await findPublicUserById(cliUserId);
+    if (!resolvedCliUserId) {
+      throw new Error(`The provided --user value does not exist in public.users: ${cliUserId}`);
+    }
+
+    return {
+      userId: resolvedCliUserId,
+      source: "cli",
+      staleConfiguredKeys,
+      auditEmail,
+    };
+  }
+
+  const supabaseAdmin = createSupabaseAdminClient();
+  if (!supabaseAdmin) {
+    const fallbackUserId = envKeys
+      .map((key) => (process.env[key] ?? "").trim())
+      .find(Boolean);
+
+    if (fallbackUserId) {
+      return {
+        userId: fallbackUserId,
+        source: "env_unverified",
+        staleConfiguredKeys,
+        auditEmail,
+      };
+    }
+
+    throw new Error(
+      "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY, and no shared QA user id was configured.",
+    );
+  }
+
+  for (const key of envKeys) {
+    const configuredId = (process.env[key] ?? "").trim();
+    if (!configuredId) {
+      continue;
+    }
+
+    if (!isUuid(configuredId)) {
+      staleConfiguredKeys.push(key);
+      continue;
+    }
+
+    const resolvedConfiguredId = await findPublicUserById(configuredId);
+    if (resolvedConfiguredId) {
+      return {
+        userId: resolvedConfiguredId,
+        source: "env",
+        staleConfiguredKeys,
+        auditEmail,
+      };
+    }
+
+    staleConfiguredKeys.push(key);
+  }
+
+  const existingAuditUserId = await findPublicUserByEmail(auditEmail);
+  if (existingAuditUserId) {
+    return {
+      userId: existingAuditUserId,
+      source: "audit_email",
+      staleConfiguredKeys,
+      auditEmail,
+    };
+  }
+
+  if (!options.allowCreateAuditUser) {
+    throw new Error(
+      `No valid shared QA user id was found in ${envKeys.join(", ")} and no audit user exists at ${auditEmail}.`,
+    );
+  }
+
+  const createdAuditUserId = await createAuditUser(auditEmail, auditName);
+  return {
+    userId: createdAuditUserId,
+    source: "audit_created",
+    staleConfiguredKeys,
+    auditEmail,
+  };
 }
 
 export function parseFlag(flag: string) {

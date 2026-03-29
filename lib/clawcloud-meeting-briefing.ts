@@ -1,6 +1,10 @@
 import { completeClawCloudPrompt } from "@/lib/clawcloud-ai";
 import { upsertAnalyticsDaily } from "@/lib/clawcloud-analytics";
-import { getClawCloudGmailMessages } from "@/lib/clawcloud-google";
+import {
+  getClawCloudGmailMessages,
+  isClawCloudGoogleNotConnectedError,
+  isClawCloudGoogleReconnectRequiredError,
+} from "@/lib/clawcloud-google";
 import { getUserLocale, translateMessage } from "@/lib/clawcloud-i18n";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 import { sendClawCloudWhatsAppMessage } from "@/lib/clawcloud-whatsapp";
@@ -91,6 +95,12 @@ async function fetchEmailContextForAttendees(
           contextMap.set(attendee.email, threads);
         }
       } catch (error) {
+        if (
+          isClawCloudGoogleReconnectRequiredError(error)
+          || isClawCloudGoogleNotConnectedError(error, "gmail")
+        ) {
+          return;
+        }
         console.warn(
           `[briefing] Failed to fetch Gmail context for ${attendee.email}:`,
           error instanceof Error ? error.message : error,

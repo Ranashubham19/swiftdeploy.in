@@ -1,9 +1,10 @@
-import crypto from "node:crypto";
-
 import { NextRequest, NextResponse } from "next/server";
 
-import { buildClawCloudGoogleLoginAuthUrl } from "@/lib/clawcloud-google";
-import { env } from "@/lib/env";
+import {
+  buildClawCloudGoogleLoginAuthUrl,
+  buildClawCloudGoogleLoginState,
+} from "@/lib/clawcloud-google";
+import { isGooglePublicSignInEnabled } from "@/lib/env";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,17 +21,20 @@ function withNoStoreHeaders(response: NextResponse) {
 
 export async function GET(request: NextRequest) {
   const redirectBase = new URL("/auth", request.nextUrl.origin);
+  const intent = request.nextUrl.searchParams.get("intent")?.trim().toLowerCase() === "signup"
+    ? "signup"
+    : "login";
 
-  if (!env.GOOGLE_SIGNIN_PUBLIC_ENABLED) {
+  if (!isGooglePublicSignInEnabled()) {
     redirectBase.searchParams.set(
       "error",
-      "Google sign-in is temporarily paused while ClawCloud finishes Google's public verification.",
+      "Google sign-in is unavailable on this deployment right now.",
     );
     return withNoStoreHeaders(NextResponse.redirect(redirectBase));
   }
 
   try {
-    const state = `login:${crypto.randomUUID()}`;
+    const state = buildClawCloudGoogleLoginState(request.nextUrl.origin, intent);
     const url = buildClawCloudGoogleLoginAuthUrl(state, request.nextUrl.origin);
     const response = withNoStoreHeaders(NextResponse.redirect(url));
 

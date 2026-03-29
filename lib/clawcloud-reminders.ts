@@ -42,10 +42,65 @@ export type ReminderIntentResult =
   | { intent: "status" }
   | { intent: "unknown" };
 
+type ReminderParseOptions = {
+  now?: Date | number | string;
+  userTimezone?: string;
+};
+
+type ReminderLocalDate = {
+  year: number;
+  month: number;
+  day: number;
+};
+
+type ReminderLocalDateTime = ReminderLocalDate & {
+  hour: number;
+  minute: number;
+  second?: number;
+  weekday: number;
+};
+
+type ReminderTimeParts = {
+  hour: number;
+  minute: number;
+};
+
+const WEEKDAY_INDEX: Record<string, number> = {
+  sunday: 0,
+  monday: 1,
+  tuesday: 2,
+  wednesday: 3,
+  thursday: 4,
+  friday: 5,
+  saturday: 6,
+};
+
+const RECUR_DAILY_PATTERN = /\b(every day|daily|har roz|roz)\b/u;
+const RECUR_WEEKDAYS_PATTERN = /\b(every weekday|weekdays|mon.?fri|working day)\b/u;
+const RECUR_WEEKENDS_PATTERN = /\b(every weekend|weekends|sat.?sun)\b/u;
+const RECUR_WEEKLY_PATTERN = /\bevery (week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/u;
+const RECUR_MONTHLY_PATTERN = /\b(every month|monthly)\b/u;
+const RELATIVE_TIME_PATTERN = /\b(?:in|after)\s+(\d+)\s*(minute|min|hour|hr|hours|minutes|ghanta|ghante)\b/i;
+const MONTHLY_DAY_PATTERN = /\b(?:on\s+)?(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?(?:\s+day)?\s+of\s+every\s+month\b/i;
+const EXPLICIT_TIME_WITH_PREFIX_PATTERN = /\b(?:at|by|around|@)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm|baje)?\b/i;
+const EXPLICIT_CLOCK_PATTERN = /\b(\d{1,2}):(\d{2})\s*(am|pm)?\b/i;
+const EXPLICIT_MERIDIEM_PATTERN = /\b(\d{1,2})\s*(am|pm|baje)\b/i;
+const SCHEDULE_CUE_PATTERN =
+  /\b(in\s+\d+\s*(?:minute|min|hour|hr|hours|minutes|ghanta|ghante)|after\s+\d+\s*(?:minute|min|hour|hr|hours|minutes|ghanta|ghante)|today|aaj|tomorrow|tonight|day after tomorrow|next week|every day|daily|every weekday|weekdays|every weekend|weekends|every week|every month|monthly|monday|tuesday|wednesday|thursday|friday|saturday|sunday|morning|afternoon|evening|night|subah|dopahar|shaam|sham|raat|at\s+\d|by\s+\d|around\s+\d|@\d|\d{1,2}:\d{2}|\d{1,2}\s*(?:am|pm|baje)|\d{1,2}(?:st|nd|rd|th)?\s+of\s+every\s+month)\b/i;
+
 export async function parseReminderAI(
   rawText: string,
   userTimezone = DEFAULT_TIMEZONE,
 ): Promise<ReminderParseResult> {
+  const deterministic = parseReminderRegex(rawText, { userTimezone });
+  if (deterministic) {
+    return deterministic;
+  }
+
+  if (!looksLikeReminderScheduleCue(rawText)) {
+    return null;
+  }
+
   const nowIso = new Date().toISOString();
   const system = [
     "You extract reminder data from the user's message.",
@@ -99,41 +154,38 @@ export async function parseReminderAI(
     };
 
     if (parsed.error === "cannot_parse") {
-      return parseReminderRegex(rawText);
+      return parseReminderRegex(rawText, { userTimezone });
     }
 
     const fireAtMs = Date.parse(parsed.fireAt ?? "");
     const reminderText = sanitizeReminderText(parsed.reminderText);
 
     if (!Number.isFinite(fireAtMs) || !reminderText) {
-      return parseReminderRegex(rawText);
+      return parseReminderRegex(rawText, { userTimezone });
     }
 
     const recurRule = isRecurRule(parsed.recurRule) ? parsed.recurRule : null;
     return {
-      fireAt: normalizeReminderFireAt(new Date(fireAtMs).toISOString(), recurRule),
+      fireAt: normalizeReminderFireAt(new Date(fireAtMs).toISOString(), recurRule, Date.now()),
       reminderText,
       recurRule,
     };
   } catch {
-    return parseReminderRegex(rawText);
+    return parseReminderRegex(rawText, { userTimezone });
   }
 }
 
-export function parseReminderRegex(text: string): ReminderParseResult {
-  const now = new Date();
+export function parseReminderRegex(
+  text: string,
+  options: ReminderParseOptions = {},
+): ReminderParseResult {
+  const userTimezone = options.userTimezone ?? DEFAULT_TIMEZONE;
+  const now = resolveReminderBaseDate(options.now);
+  const localNow = getReminderLocalDateTime(now, userTimezone);
   const lower = text.toLowerCase();
   let fireAt: Date | null = null;
-  let recurRule: RecurRule = null;
-
-  if (/\b(every day|daily|har roz|roz)\b/u.test(lower)) recurRule = "daily";
-  else if (/\b(every weekday|weekdays|mon.?fri|working day)\b/u.test(lower)) recurRule = "weekdays";
-  else if (/\b(every weekend|weekends|sat.?sun)\b/u.test(lower)) recurRule = "weekends";
-  else if (/\bevery (week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/u.test(lower))
-    recurRule = "weekly";
-  else if (/\bevery month\b/u.test(lower)) recurRule = "monthly";
-
-  const relativeMatch = text.match(/\bin\s+(\d+)\s*(minute|min|hour|hr|hours|minutes|ghanta|ghante)\b/i);
+  const recurRule = detectReminderRecurRule(lower);
+  const relativeMatch = text.match(RELATIVE_TIME_PATTERN);
   if (relativeMatch) {
     const amount = parseInt(relativeMatch[1], 10);
     const unit = relativeMatch[2].toLowerCase();
@@ -141,6 +193,8 @@ export function parseReminderRegex(text: string): ReminderParseResult {
     fireAt = new Date(now.getTime() + amount * multiplier);
   }
 
+  const monthlyDay = extractMonthlyReminderDay(lower);
+  const explicitToday = /\b(today|aaj)\b/u.test(lower);
   const dayOffset =
     /\b(day after tomorrow|parso)\b/u.test(lower)
       ? 2
@@ -150,52 +204,91 @@ export function parseReminderRegex(text: string): ReminderParseResult {
           ? 7
           : 0;
 
+  const explicitTime = extractReminderExplicitTime(text, lower, dayOffset > 0 || !!recurRule || monthlyDay !== null);
+  if (!fireAt && monthlyDay !== null) {
+    const monthlyDate = buildMonthlyReminderDate(localNow, monthlyDay);
+    fireAt = buildReminderDateTimeInTimezone(
+      monthlyDate,
+      explicitTime ?? { hour: 9, minute: 0 },
+      userTimezone,
+    );
+  }
+
   if (!fireAt) {
-    const timeMatch = text.match(/\b(?:at|for|by|@)?\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm|baje)?\b/i);
-    if (timeMatch) {
-      let hour = parseInt(timeMatch[1], 10);
-      const minute = parseInt(timeMatch[2] ?? "0", 10);
-      const meridiem = timeMatch[3]?.toLowerCase();
-
-      if (meridiem === "pm" && hour < 12) hour += 12;
-      if (meridiem === "am" && hour === 12) hour = 0;
-
-      fireAt = new Date(now);
-      fireAt.setDate(fireAt.getDate() + dayOffset);
-      fireAt.setHours(hour, minute, 0, 0);
-
-      if (fireAt <= now && dayOffset === 0 && !recurRule) {
-        fireAt.setDate(fireAt.getDate() + 1);
-      }
+    if (explicitTime) {
+      const targetDate = shiftReminderLocalDate(localNow, dayOffset);
+      fireAt = buildReminderDateTimeInTimezone(targetDate, explicitTime, userTimezone);
     }
   }
 
   if (!fireAt) {
     if (/\b(subah|morning)\b/u.test(lower)) {
-      fireAt = buildRelativeDate(now, dayOffset || 0, 8, 0);
+      fireAt = buildReminderDateTimeInTimezone(
+        shiftReminderLocalDate(localNow, dayOffset || 0),
+        { hour: 8, minute: 0 },
+        userTimezone,
+      );
     } else if (/\b(dopahar|afternoon|lunch)\b/u.test(lower)) {
-      fireAt = buildRelativeDate(now, dayOffset || 0, 13, 0);
+      fireAt = buildReminderDateTimeInTimezone(
+        shiftReminderLocalDate(localNow, dayOffset || 0),
+        { hour: 13, minute: 0 },
+        userTimezone,
+      );
     } else if (/\b(shaam|sham|evening)\b/u.test(lower)) {
-      fireAt = buildRelativeDate(now, dayOffset || 0, 18, 0);
+      fireAt = buildReminderDateTimeInTimezone(
+        shiftReminderLocalDate(localNow, dayOffset || 0),
+        { hour: 18, minute: 0 },
+        userTimezone,
+      );
     } else if (/\b(raat|night|tonight)\b/u.test(lower)) {
-      fireAt = buildRelativeDate(now, dayOffset || 0, 21, 0);
+      fireAt = buildReminderDateTimeInTimezone(
+        shiftReminderLocalDate(localNow, dayOffset || 0),
+        { hour: 21, minute: 0 },
+        userTimezone,
+      );
     }
   }
 
   if (!fireAt && dayOffset > 0) {
-    fireAt = buildRelativeDate(now, dayOffset, 9, 0);
+    fireAt = buildReminderDateTimeInTimezone(
+      shiftReminderLocalDate(localNow, dayOffset),
+      { hour: 9, minute: 0 },
+      userTimezone,
+    );
+  }
+
+  if (!fireAt && explicitToday) {
+    fireAt = buildReminderDateTimeInTimezone(
+      shiftReminderLocalDate(localNow, 0),
+      explicitTime ?? { hour: 9, minute: 0 },
+      userTimezone,
+    );
   }
 
   if (!fireAt) {
     const weekdayMatch = lower.match(/\b(next\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/u);
     if (weekdayMatch) {
-      const weekdayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-      const targetDay = weekdayNames.indexOf(weekdayMatch[2]);
+      const targetDay = WEEKDAY_INDEX[weekdayMatch[2]];
       if (targetDay >= 0) {
-        const offset = (targetDay - now.getDay() + 7) % 7 || 7;
-        fireAt = buildRelativeDate(now, offset, 9, 0);
+        let offset = (targetDay - localNow.weekday + 7) % 7;
+        if (weekdayMatch[1] || offset === 0) {
+          offset = offset || 7;
+        }
+        fireAt = buildReminderDateTimeInTimezone(
+          shiftReminderLocalDate(localNow, offset),
+          explicitTime ?? { hour: 9, minute: 0 },
+          userTimezone,
+        );
       }
     }
+  }
+
+  if (!fireAt && recurRule) {
+    fireAt = buildReminderDateTimeInTimezone(
+      buildRecurringReminderStartDate(localNow, recurRule),
+      explicitTime ?? { hour: 9, minute: 0 },
+      userTimezone,
+    );
   }
 
   if (!fireAt) {
@@ -203,7 +296,7 @@ export function parseReminderRegex(text: string): ReminderParseResult {
   }
 
   return {
-    fireAt: normalizeReminderFireAt(fireAt.toISOString(), recurRule),
+    fireAt: normalizeReminderFireAt(fireAt.toISOString(), recurRule, now.getTime()),
     reminderText: extractReminderText(text),
     recurRule,
   };
@@ -650,22 +743,265 @@ function buildRelativeDate(base: Date, dayOffset: number, hour: number, minute: 
   return value;
 }
 
-function normalizeReminderFireAt(fireAt: string, recurRule: RecurRule) {
+function resolveReminderBaseDate(input?: Date | number | string) {
+  if (input instanceof Date) {
+    return new Date(input.getTime());
+  }
+
+  if (typeof input === "number") {
+    return new Date(input);
+  }
+
+  if (typeof input === "string") {
+    return new Date(input);
+  }
+
+  return new Date();
+}
+
+function getReminderLocalDateTime(date: Date, timeZone: string): ReminderLocalDateTime {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    weekday: "short",
+    hourCycle: "h23",
+  });
+
+  const parts = dtf.formatToParts(date);
+  const lookup = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
+  const weekdayToken = lookup("weekday").toLowerCase();
+
+  return {
+    year: Number(lookup("year")),
+    month: Number(lookup("month")),
+    day: Number(lookup("day")),
+    hour: Number(lookup("hour")),
+    minute: Number(lookup("minute")),
+    second: Number(lookup("second")),
+    weekday: WEEKDAY_INDEX[expandReminderWeekdayToken(weekdayToken)] ?? 0,
+  };
+}
+
+function expandReminderWeekdayToken(token: string) {
+  if (token.startsWith("mon")) return "monday";
+  if (token.startsWith("tue")) return "tuesday";
+  if (token.startsWith("wed")) return "wednesday";
+  if (token.startsWith("thu")) return "thursday";
+  if (token.startsWith("fri")) return "friday";
+  if (token.startsWith("sat")) return "saturday";
+  return "sunday";
+}
+
+function getReminderTimeZoneOffsetMs(timeZone: string, date: Date) {
+  const localParts = getReminderLocalDateTime(date, timeZone);
+  const projectedUtc = Date.UTC(
+    localParts.year,
+    localParts.month - 1,
+    localParts.day,
+    localParts.hour,
+    localParts.minute,
+    localParts.second,
+  );
+  return projectedUtc - date.getTime();
+}
+
+function buildReminderDateTimeInTimezone(
+  date: ReminderLocalDate,
+  time: ReminderTimeParts,
+  timeZone: string,
+) {
+  let utcGuess = Date.UTC(date.year, date.month - 1, date.day, time.hour, time.minute, 0);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const offset = getReminderTimeZoneOffsetMs(timeZone, new Date(utcGuess));
+    const corrected = Date.UTC(date.year, date.month - 1, date.day, time.hour, time.minute, 0) - offset;
+    if (corrected === utcGuess) {
+      break;
+    }
+    utcGuess = corrected;
+  }
+
+  return new Date(utcGuess);
+}
+
+function shiftReminderLocalDate(base: ReminderLocalDate, dayOffset: number): ReminderLocalDate {
+  const shifted = new Date(Date.UTC(base.year, base.month - 1, base.day + dayOffset, 12, 0, 0));
+  return {
+    year: shifted.getUTCFullYear(),
+    month: shifted.getUTCMonth() + 1,
+    day: shifted.getUTCDate(),
+  };
+}
+
+function buildMonthlyReminderDate(base: ReminderLocalDateTime, targetDay: number) {
+  const thisMonth = clampReminderDayOfMonth(base.year, base.month, targetDay);
+  const useNextMonth = base.day > thisMonth;
+  const shifted = shiftReminderMonth(
+    base.year,
+    base.month,
+    useNextMonth ? 1 : 0,
+    targetDay,
+  );
+  return {
+    year: shifted.year,
+    month: shifted.month,
+    day: shifted.day,
+  };
+}
+
+function shiftReminderMonth(year: number, month: number, monthOffset: number, targetDay: number) {
+  const shifted = new Date(Date.UTC(year, month - 1 + monthOffset, 1, 12, 0, 0));
+  const shiftedYear = shifted.getUTCFullYear();
+  const shiftedMonth = shifted.getUTCMonth() + 1;
+  return {
+    year: shiftedYear,
+    month: shiftedMonth,
+    day: clampReminderDayOfMonth(shiftedYear, shiftedMonth, targetDay),
+  };
+}
+
+function buildRecurringReminderStartDate(base: ReminderLocalDateTime, recurRule: Exclude<RecurRule, null>) {
+  switch (recurRule) {
+    case "daily":
+    case "weekly":
+    case "monthly":
+      return { year: base.year, month: base.month, day: base.day };
+    case "weekdays":
+      if (base.weekday >= 1 && base.weekday <= 5) {
+        return { year: base.year, month: base.month, day: base.day };
+      }
+      return shiftReminderLocalDate(base, base.weekday === 6 ? 2 : 1);
+    case "weekends":
+      if (base.weekday === 0 || base.weekday === 6) {
+        return { year: base.year, month: base.month, day: base.day };
+      }
+      return shiftReminderLocalDate(base, 6 - base.weekday);
+  }
+}
+
+function clampReminderDayOfMonth(year: number, month: number, targetDay: number) {
+  const lastDay = new Date(Date.UTC(year, month, 0, 12, 0, 0)).getUTCDate();
+  return Math.max(1, Math.min(targetDay, lastDay));
+}
+
+function detectReminderRecurRule(lower: string): RecurRule {
+  if (RECUR_DAILY_PATTERN.test(lower)) return "daily";
+  if (RECUR_WEEKDAYS_PATTERN.test(lower)) return "weekdays";
+  if (RECUR_WEEKENDS_PATTERN.test(lower)) return "weekends";
+  if (RECUR_WEEKLY_PATTERN.test(lower)) return "weekly";
+  if (RECUR_MONTHLY_PATTERN.test(lower) || MONTHLY_DAY_PATTERN.test(lower)) return "monthly";
+  return null;
+}
+
+function extractMonthlyReminderDay(lower: string) {
+  const match = lower.match(MONTHLY_DAY_PATTERN);
+  if (!match) {
+    return null;
+  }
+
+  const day = parseInt(match[1] ?? "", 10);
+  return Number.isFinite(day) && day >= 1 && day <= 31 ? day : null;
+}
+
+function extractReminderExplicitTime(text: string, lower: string, allowClockWithoutPrefix: boolean) {
+  const prefixed = text.match(EXPLICIT_TIME_WITH_PREFIX_PATTERN);
+  if (prefixed) {
+    return normalizeReminderTimeParts(prefixed[1], prefixed[2], prefixed[3]);
+  }
+
+  if (allowClockWithoutPrefix) {
+    const clock = text.match(EXPLICIT_CLOCK_PATTERN);
+    if (clock) {
+      return normalizeReminderTimeParts(clock[1], clock[2], clock[3]);
+    }
+  }
+
+  const meridiem = text.match(EXPLICIT_MERIDIEM_PATTERN);
+  if (meridiem) {
+    return normalizeReminderTimeParts(meridiem[1], undefined, meridiem[2]);
+  }
+
+  if (/\b(subah|morning)\b/u.test(lower)) {
+    return { hour: 8, minute: 0 };
+  }
+  if (/\b(dopahar|afternoon|lunch)\b/u.test(lower)) {
+    return { hour: 13, minute: 0 };
+  }
+  if (/\b(shaam|sham|evening)\b/u.test(lower)) {
+    return { hour: 18, minute: 0 };
+  }
+  if (/\b(raat|night|tonight)\b/u.test(lower)) {
+    return { hour: 21, minute: 0 };
+  }
+
+  return null;
+}
+
+function normalizeReminderTimeParts(
+  hourToken?: string,
+  minuteToken?: string,
+  meridiemToken?: string,
+): ReminderTimeParts | null {
+  if (!hourToken) {
+    return null;
+  }
+
+  let hour = parseInt(hourToken, 10);
+  const minute = parseInt(minuteToken ?? "0", 10);
+  const meridiem = meridiemToken?.toLowerCase();
+
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || minute < 0 || minute > 59) {
+    return null;
+  }
+
+  if (meridiem === "pm" && hour < 12) hour += 12;
+  if (meridiem === "am" && hour === 12) hour = 0;
+  if (meridiem === "baje" && (hour < 0 || hour > 23)) {
+    return null;
+  }
+
+  if (!meridiem && !minuteToken) {
+    return null;
+  }
+
+  if (hour < 0 || hour > 23) {
+    return null;
+  }
+
+  return { hour, minute };
+}
+
+function looksLikeReminderScheduleCue(text: string) {
+  return SCHEDULE_CUE_PATTERN.test(text.toLowerCase());
+}
+
+function normalizeReminderFireAt(
+  fireAt: string,
+  recurRule: RecurRule,
+  referenceNowMs = Date.now(),
+) {
   const fireAtMs = Date.parse(fireAt);
   if (!Number.isFinite(fireAtMs)) {
     return fireAt;
   }
 
-  if (fireAtMs > Date.now() || !recurRule) {
+  if (fireAtMs > referenceNowMs || !recurRule) {
     return new Date(fireAtMs).toISOString();
   }
 
-  return computeNextFireAt(new Date(fireAtMs).toISOString(), recurRule);
+  return computeNextFireAt(new Date(fireAtMs).toISOString(), recurRule, referenceNowMs);
 }
 
-function computeNextFireAt(currentFireAt: string, rule: Exclude<RecurRule, null>) {
+function computeNextFireAt(
+  currentFireAt: string,
+  rule: Exclude<RecurRule, null>,
+  referenceNowMs = Date.now(),
+) {
   const next = new Date(currentFireAt);
-  const nowMs = Date.now();
 
   do {
     switch (rule) {
@@ -691,7 +1027,7 @@ function computeNextFireAt(currentFireAt: string, rule: Exclude<RecurRule, null>
         next.setMonth(next.getMonth() + 1);
         break;
     }
-  } while (next.getTime() <= nowMs);
+  } while (next.getTime() <= referenceNowMs);
 
   return next.toISOString();
 }
@@ -743,10 +1079,15 @@ function extractReminderText(text: string) {
 
   const cleaned = candidate
     .replace(/\b(remind me|set (a\s+)?reminder|alert me|notify me|mujhe .*yaad dilao)\b/giu, "")
-    .replace(/\b(in\s+\d+\s*(minute|min|hour|hr|hours|minutes|ghanta|ghante))\b/giu, "")
-    .replace(/\b(tomorrow|today|tonight|kal|parso|next week)\b/giu, "")
-    .replace(/\b(every\s+(day|weekday|weekdays|weekend|weekends|week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/giu, "")
-    .replace(/\b(at|for|by|on)\s+\d{1,2}(?::\d{2})?\s*(am|pm|baje)?\b/giu, "")
+    .replace(/\b((?:in|after)\s+\d+\s*(minute|min|hour|hr|hours|minutes|ghanta|ghante))\b/giu, "")
+    .replace(/\b(day after tomorrow|tomorrow|today|tonight|kal|parso|next week|aaj)\b/giu, "")
+    .replace(/\b(every\s+(day|weekday|weekdays|weekend|weekends|week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|daily|monthly)\b/giu, "")
+    .replace(/\b(next\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/giu, "")
+    .replace(/\b(?:on\s+)?(?:the\s+)?\d{1,2}(?:st|nd|rd|th)?(?:\s+day)?\s+of\s+every\s+month\b/giu, "")
+    .replace(/\b(at|by|around|on)\s+\d{1,2}(?::\d{2})?\s*(am|pm|baje)?\b/giu, "")
+    .replace(/\b\d{1,2}:\d{2}\s*(am|pm)?\b/giu, "")
+    .replace(/\b\d{1,2}\s*(am|pm|baje)\b/giu, "")
+    .replace(/\b(subah|morning|dopahar|afternoon|lunch|shaam|sham|evening|raat|night)\b/giu, "")
     .replace(/\s{2,}/g, " ")
     .trim();
 

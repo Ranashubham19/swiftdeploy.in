@@ -370,6 +370,8 @@ if (!supabaseUrl || !supabaseKey) {
     "connected_accounts",
     "agent_tasks",
     "task_runs",
+    "dashboard_journal_threads",
+    "global_lite_connections",
     "whatsapp_messages",
     "analytics_daily",
     "subscriptions",
@@ -436,6 +438,74 @@ if (!supabaseUrl || !supabaseKey) {
   }
 
   console.log(`\n${INFO} Tables found: ${tablesPassed} / ${tables.length}`);
+
+  section("5b. Checking Supabase critical columns");
+
+  const criticalColumns = [
+    {
+      table: "research_runs",
+      column: "user_id",
+      hint: "Apply the secure research/thread migration so privacy export and account deletion can match research runs to the signed-in user.",
+    },
+    {
+      table: "research_runs",
+      column: "search_diagnostics",
+      hint: "Apply the latest research schema migration so diagnostic capture and legacy compatibility stay aligned.",
+    },
+    {
+      table: "dashboard_journal_threads",
+      column: "user_id",
+      hint: "Apply the dashboard journal migration so cross-device journal sync is fully enabled.",
+    },
+    {
+      table: "global_lite_connections",
+      column: "user_id",
+      hint: "Apply the Global Lite Connect migration so the public-safe Gmail, Calendar, and Drive fallback stores cleanly in its own table.",
+    },
+  ];
+
+  for (const item of criticalColumns) {
+    try {
+      const { response, json, text } = await fetchJson(
+        `${supabaseUrl}/rest/v1/${item.table}?select=${encodeURIComponent(item.column)}&limit=1`,
+        {
+          headers: {
+            apikey: supabaseKey,
+            Authorization: `Bearer ${supabaseKey}`,
+          },
+        },
+      );
+
+      if (response.ok) {
+        record(PASS, `Column: ${item.table}.${item.column}`);
+        continue;
+      }
+
+      const message = typeof json?.message === "string" ? json.message.toLowerCase() : "";
+      const missingColumn =
+        response.status === 400
+        && (
+          message.includes("could not find the column")
+          || message.includes("does not have the column")
+          || (message.includes("column") && message.includes("does not exist"))
+          || message.includes("schema cache")
+        );
+
+      if ((response.status === 401 || response.status === 403) && !serviceRoleKey) {
+        record(WARN, `Column: ${item.table}.${item.column}`, "Blocked by RLS with anon key. Re-run after adding SUPABASE_SERVICE_ROLE_KEY.");
+        continue;
+      }
+
+      if (missingColumn) {
+        record(FAIL, `Column: ${item.table}.${item.column}`, item.hint);
+        continue;
+      }
+
+      record(WARN, `Column: ${item.table}.${item.column}`, formatHttpError(response, text));
+    } catch (error) {
+      record(FAIL, `Column: ${item.table}.${item.column}`, getErrorMessage(error));
+    }
+  }
 }
 
 section("6. Checking /api/search");

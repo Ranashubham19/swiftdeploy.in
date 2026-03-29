@@ -19,6 +19,7 @@ import remarkGfm from "remark-gfm";
 
 import { buildConversationMemory } from "@/lib/conversation-memory";
 import { getFirebaseAuth } from "@/lib/firebase-client";
+import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 import type {
   AuthenticatedUser,
   ConversationMessage,
@@ -296,6 +297,10 @@ function providerLabels(config: PublicAppConfig) {
 type ThemeMode = "light" | "dark";
 
 export function ResearchConsole({ config }: { config: PublicAppConfig }) {
+  const supabase = getSupabaseBrowserClient({
+    supabaseUrl: config.supabaseUrl,
+    supabaseAnonKey: config.supabaseAnonKey,
+  });
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [progress, setProgress] = useState<ResearchProgressStep[]>([]);
@@ -313,6 +318,37 @@ export function ResearchConsole({ config }: { config: PublicAppConfig }) {
   });
   const [isHydrated, setIsHydrated] = useState(false);
   const chatScrollerRef = useRef<HTMLDivElement | null>(null);
+
+  async function fetchHosted(path: string, init: RequestInit = {}) {
+    if (!supabase) {
+      throw new Error("Hosted research is unavailable because Supabase is not configured.");
+    }
+
+    const { data: sessionData } = await supabase.auth.getSession();
+    const accessToken = sessionData.session?.access_token ?? null;
+    if (!accessToken) {
+      throw new Error("Sign in through the hosted app to use cloud research and sync.");
+    }
+
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", `Bearer ${accessToken}`);
+
+    if (init.body && !headers.has("Content-Type")) {
+      headers.set("Content-Type", "application/json");
+    }
+
+    const response = await fetch(path, {
+      ...init,
+      headers,
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(payload?.error || `Request failed with ${response.status}`);
+    }
+
+    return response;
+  }
 
   useEffect(() => {
     const savedTheme = window.localStorage.getItem(LOCAL_THEME_KEY);
@@ -398,10 +434,7 @@ export function ResearchConsole({ config }: { config: PublicAppConfig }) {
 
     async function loadRemoteThreads() {
       try {
-        const query = currentUser?.uid
-          ? `?userId=${encodeURIComponent(currentUser.uid)}`
-          : "";
-        const response = await fetch(`/api/threads${query}`, {
+        const response = await fetchHosted("/api/threads", {
           cache: "no-store",
         });
         const payload = (await response.json().catch(() => null)) as
@@ -436,7 +469,7 @@ export function ResearchConsole({ config }: { config: PublicAppConfig }) {
         setSyncState({
           mode: "local",
           synced: false,
-          reason: "Thread sync is unavailable. Using local history.",
+          reason: "Thread sync requires a signed-in hosted session. Using local history.",
         });
       }
     }
@@ -496,11 +529,8 @@ export function ResearchConsole({ config }: { config: PublicAppConfig }) {
 
     const handle = window.setTimeout(async () => {
       try {
-        const response = await fetch("/api/threads", {
+        const response = await fetchHosted("/api/threads", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
           body: JSON.stringify(thread),
         });
         const payload = (await response.json().catch(() => null)) as
@@ -524,7 +554,7 @@ export function ResearchConsole({ config }: { config: PublicAppConfig }) {
         setSyncState({
           mode: "local",
           synced: false,
-          reason: "Thread sync is unavailable. Using local history.",
+          reason: "Thread sync requires a signed-in hosted session. Using local history.",
         });
       }
     }, 700);
@@ -797,11 +827,8 @@ export function ResearchConsole({ config }: { config: PublicAppConfig }) {
     ]);
 
     try {
-      const response = await fetch("/api/research", {
+      const response = await fetchHosted("/api/research", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
         body: JSON.stringify({
           question: rawQuestion,
           threadId,
@@ -816,10 +843,6 @@ export function ResearchConsole({ config }: { config: PublicAppConfig }) {
             : null,
         }),
       });
-
-      if (!response.ok) {
-        throw new Error(`Research request failed with ${response.status}`);
-      }
 
       await consumeResearchStream(response, assistantMessageId);
     } catch (error) {

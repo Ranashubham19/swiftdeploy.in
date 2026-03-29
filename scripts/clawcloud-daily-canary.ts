@@ -1,6 +1,13 @@
 import { performance } from "node:perf_hooks";
 
-import { maskUserId, loadClawCloudEnv, parseFlag, parseOption, writeJsonReport } from "./clawcloud-script-helpers";
+import {
+  maskUserId,
+  loadClawCloudEnv,
+  parseFlag,
+  parseOption,
+  resolveClawCloudSharedUser,
+  writeJsonReport,
+} from "./clawcloud-script-helpers";
 
 type CanaryCase = {
   id: string;
@@ -32,7 +39,7 @@ const cases: CanaryCase[] = [
   },
   {
     id: "followup_email",
-    prompt: "Draft a professional follow-up email to a client who missed a meeting.",
+    prompt: "Write a professional follow-up note to a client who missed a meeting. Include a subject line and a polite closing.",
     mustMatch: [/(subject:|best regards|follow-up)/i],
   },
   {
@@ -86,13 +93,26 @@ async function main() {
   const reportPath = parseOption("--report") ?? DEFAULT_REPORT_PATH;
   const baseUrl = (parseOption("--base-url") ?? process.env.NEXT_PUBLIC_APP_URL ?? process.env.NEXTJS_URL ?? "").trim().replace(/\/+$/, "");
   const bearer = (process.env.CRON_SECRET ?? process.env.AGENT_SECRET ?? "").trim();
-  const userId = (parseOption("--user") ?? process.env.WHATSAPP_AUTO_TEST_USER_ID ?? "").trim();
   const dryRun = parseFlag("--dry-run");
+  let sharedUser:
+    | Awaited<ReturnType<typeof resolveClawCloudSharedUser>>
+    | null = null;
+  let userId = (parseOption("--user") ?? process.env.CLAWCLOUD_AUDIT_USER_ID ?? process.env.WHATSAPP_AUTO_TEST_USER_ID ?? "").trim();
+
+  if (!dryRun) {
+    sharedUser = await resolveClawCloudSharedUser({
+      cliUserId: parseOption("--user"),
+      allowCreateAuditUser: true,
+    });
+    userId = sharedUser.userId;
+  }
 
   const reportBase = {
     checkedAt: new Date().toISOString(),
     baseUrl,
     userIdPrefix: maskUserId(userId),
+    sharedUserSource: sharedUser?.source ?? null,
+    staleConfiguredKeys: sharedUser?.staleConfiguredKeys ?? [],
     cases: cases.map((item) => item.id),
   };
 
@@ -103,7 +123,8 @@ async function main() {
       dryRun: true,
       notes: [
         "Dry-run mode skipped network calls.",
-        "Set NEXT_PUBLIC_APP_URL, CRON_SECRET or AGENT_SECRET, and WHATSAPP_AUTO_TEST_USER_ID to run the live canary.",
+        "Set NEXT_PUBLIC_APP_URL and CRON_SECRET or AGENT_SECRET to run the live canary.",
+        "The script auto-resolves a valid shared QA user from CLAWCLOUD_AUDIT_USER_ID, WHATSAPP_AUTO_TEST_USER_ID, or the dedicated audit user.",
       ],
     };
     writeJsonReport(reportPath, report);
@@ -116,9 +137,6 @@ async function main() {
   }
   if (!bearer) {
     throw new Error("Missing CRON_SECRET or AGENT_SECRET.");
-  }
-  if (!userId) {
-    throw new Error("Missing WHATSAPP_AUTO_TEST_USER_ID.");
   }
 
   const healthResponse = await fetch(`${baseUrl}/api/health`);

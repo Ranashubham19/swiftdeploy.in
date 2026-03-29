@@ -1,9 +1,7 @@
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
-import { queueWhatsAppReplyApproval } from "@/lib/clawcloud-whatsapp-approval";
-import { getWhatsAppSettings, writeWhatsAppAuditLog } from "@/lib/clawcloud-whatsapp-control";
-import { sendClawCloudWhatsAppToPhone } from "@/lib/clawcloud-whatsapp";
+import { matchesWholeAlias } from "@/lib/clawcloud-intent-match";
+import { writeWhatsAppAuditLog } from "@/lib/clawcloud-whatsapp-control";
 import type {
-  WhatsAppApprovalState,
   WhatsAppContactPriority,
   WhatsAppWorkflow,
   WhatsAppWorkflowRun,
@@ -143,7 +141,7 @@ function buildWorkflowReply(template: string | null, input: ScheduleWorkflowInpu
 function workflowMatches(input: ScheduleWorkflowInput, workflow: WhatsAppWorkflow) {
   const lower = input.text.toLowerCase();
   const tagText = input.tags.join(" ").toLowerCase();
-  const keywordMatch = workflow.trigger_keywords.some((keyword) => lower.includes(keyword));
+  const keywordMatch = workflow.trigger_keywords.some((keyword) => matchesWholeAlias(lower, keyword));
 
   switch (workflow.workflow_type) {
     case "group_digest":
@@ -318,6 +316,11 @@ async function existingOpenRun(
 }
 
 export async function scheduleWhatsAppWorkflowRunsFromInbound(input: ScheduleWorkflowInput) {
+  // Security mode: ClawCloud must never schedule cross-contact WhatsApp actions on its own.
+  // Workflows can still be configured and inspected, but inbound chats do not create runs automatically.
+  void input;
+  return [] as WhatsAppWorkflowRun[];
+
   if (!input.remoteJid && !input.remotePhone) {
     return [];
   }
@@ -411,74 +414,29 @@ export async function processDueWhatsAppWorkflowRuns(options?: { userId?: string
   const processed: WhatsAppWorkflowRun[] = [];
 
   for (const run of runs) {
-    const settings = await getWhatsAppSettings(run.user_id).catch(() => null);
-    const approvalRequired = Boolean(run.metadata?.approval_required) || !(settings?.allowWorkflowAutoSend ?? false);
-
-    if (approvalRequired) {
-      await queueWhatsAppReplyApproval({
-        userId: run.user_id,
-        remoteJid: run.remote_jid,
-        remotePhone: run.remote_phone,
-        contactName: run.contact_name,
-        sourceMessage: run.source_message || `Workflow: ${run.workflow_type}`,
-        draftReply: run.suggested_reply || "",
-        sensitivity: "normal",
-        confidence: 0.74,
-        reason: `Workflow: ${String(run.metadata?.workflow_title ?? run.workflow_type)}`,
-        priority: "normal",
-        auditPayload: {
-          workflow_run_id: run.id,
-          workflow_type: run.workflow_type,
-        },
-      }).catch(() => null);
-
-      const { data: updated } = await supabaseAdmin
-        .from("whatsapp_workflow_runs")
-        .update({
-          status: "pending_approval",
-          approval_state: "pending",
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", run.id)
-        .select("*")
-        .single()
-        .catch(() => ({ data: run }));
-      processed.push((updated ?? run) as WhatsAppWorkflowRun);
-      continue;
-    }
-
-    await sendClawCloudWhatsAppToPhone(run.remote_phone, run.suggested_reply || "", {
-      userId: run.user_id,
-      contactName: run.contact_name,
-      jid: run.remote_jid,
-    });
-
-    const { data: updated, error: updateError } = await supabaseAdmin
+    const { data: updated } = await supabaseAdmin
       .from("whatsapp_workflow_runs")
       .update({
-        status: "sent",
-        approval_state: "not_required" as WhatsAppApprovalState,
-        sent_at: new Date().toISOString(),
+        status: "cancelled",
+        approval_state: "blocked",
         updated_at: new Date().toISOString(),
       })
       .eq("id", run.id)
       .select("*")
-      .single();
+      .single()
+      .catch(() => ({ data: run }));
 
-    if (updateError) {
-      throw new Error(updateError.message);
-    }
+    processed.push((updated ?? run) as WhatsAppWorkflowRun);
 
-    processed.push(updated as WhatsAppWorkflowRun);
     await writeWhatsAppAuditLog(run.user_id, {
-      eventType: "workflow_sent",
+      eventType: "workflow_blocked",
       actor: "system",
       targetType: "workflow",
       targetValue: run.workflow_type,
-      summary: `Sent workflow message for ${run.contact_name || run.remote_phone || "contact"}.`,
+      summary: `Blocked autonomous WhatsApp workflow for ${run.contact_name || run.remote_phone || "contact"}.`,
       metadata: {
         workflow_run_id: run.id,
-        remote_jid: run.remote_jid,
+        reason: "Explicit user command is required before ClawCloud can act in other WhatsApp chats.",
       },
     }).catch(() => null);
   }

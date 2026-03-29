@@ -33,38 +33,58 @@ create table if not exists public.research_runs (
   question text not null,
   plan jsonb not null,
   progress jsonb not null default '[]'::jsonb,
+  search_diagnostics jsonb,
   sources jsonb not null default '[]'::jsonb,
   retrieved_context jsonb not null default '[]'::jsonb,
   report jsonb,
+  user_id uuid references auth.users(id) on delete set null,
   firebase_uid text,
   user_email text,
   user_name text,
   created_at timestamptz not null default timezone('utc', now())
 );
 
+create index if not exists research_runs_user_id_created_at_idx
+  on public.research_runs (user_id, created_at desc);
+
 alter table public.chat_threads enable row level security;
 alter table public.research_runs enable row level security;
 
 drop policy if exists "Allow anon read chat threads" on public.chat_threads;
-create policy "Allow anon read chat threads"
-  on public.chat_threads for select
-  using (true);
-
 drop policy if exists "Allow anon upsert chat threads" on public.chat_threads;
-create policy "Allow anon upsert chat threads"
-  on public.chat_threads for insert
-  with check (true);
-
 drop policy if exists "Allow anon update chat threads" on public.chat_threads;
-create policy "Allow anon update chat threads"
-  on public.chat_threads for update
-  using (true)
-  with check (true);
-
 drop policy if exists "Allow anon insert research runs" on public.research_runs;
-create policy "Allow anon insert research runs"
+
+drop policy if exists "Users can read own chat threads" on public.chat_threads;
+create policy "Users can read own chat threads"
+  on public.chat_threads for select
+  to authenticated
+  using (auth.uid()::text = user_id);
+
+drop policy if exists "Users can insert own chat threads" on public.chat_threads;
+create policy "Users can insert own chat threads"
+  on public.chat_threads for insert
+  to authenticated
+  with check (auth.uid()::text = user_id);
+
+drop policy if exists "Users can update own chat threads" on public.chat_threads;
+create policy "Users can update own chat threads"
+  on public.chat_threads for update
+  to authenticated
+  using (auth.uid()::text = user_id)
+  with check (auth.uid()::text = user_id);
+
+drop policy if exists "Users can read own research runs" on public.research_runs;
+create policy "Users can read own research runs"
+  on public.research_runs for select
+  to authenticated
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can insert own research runs" on public.research_runs;
+create policy "Users can insert own research runs"
   on public.research_runs for insert
-  with check (true);
+  to authenticated
+  with check (auth.uid() = user_id);
 
 -- users
 create table if not exists public.users (
@@ -304,6 +324,50 @@ create trigger subscriptions_updated_at
   before update on public.subscriptions
   for each row execute function public.set_updated_at();
 
+-- dashboard_journal_threads
+create table if not exists public.dashboard_journal_threads (
+  id uuid primary key default uuid_generate_v4(),
+  user_id uuid not null references public.users(id) on delete cascade,
+  thread_key text not null,
+  date_key date not null,
+  title text not null,
+  messages jsonb not null default '[]'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, thread_key)
+);
+
+create index if not exists idx_dashboard_journal_threads_user_date
+  on public.dashboard_journal_threads (user_id, date_key desc);
+
+drop trigger if exists dashboard_journal_threads_updated_at on public.dashboard_journal_threads;
+create trigger dashboard_journal_threads_updated_at
+  before update on public.dashboard_journal_threads
+  for each row execute function public.set_updated_at();
+
+-- global_lite_connections
+create table if not exists public.global_lite_connections (
+  id uuid primary key default uuid_generate_v4(),
+  user_id uuid not null references public.users(id) on delete cascade,
+  provider text not null check (provider in ('gmail', 'google_calendar', 'google_drive')),
+  mode text not null check (mode in ('gmail_capture', 'calendar_ics', 'drive_uploads')),
+  label text,
+  config jsonb not null default '{}'::jsonb,
+  is_active boolean not null default true,
+  connected_at timestamptz not null default now(),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, provider)
+);
+
+create index if not exists idx_global_lite_connections_user_provider
+  on public.global_lite_connections (user_id, provider);
+
+drop trigger if exists global_lite_connections_updated_at on public.global_lite_connections;
+create trigger global_lite_connections_updated_at
+  before update on public.global_lite_connections
+  for each row execute function public.set_updated_at();
+
 -- RLS
 alter table public.users enable row level security;
 alter table public.connected_accounts enable row level security;
@@ -314,6 +378,8 @@ alter table public.whatsapp_contacts enable row level security;
 alter table public.whatsapp_messages enable row level security;
 alter table public.analytics_daily enable row level security;
 alter table public.subscriptions enable row level security;
+alter table public.dashboard_journal_threads enable row level security;
+alter table public.global_lite_connections enable row level security;
 
 drop policy if exists "Users: read own" on public.users;
 create policy "Users: read own"
@@ -414,6 +480,48 @@ create policy "Subs: read own"
 drop policy if exists "Subs: update own" on public.subscriptions;
 create policy "Subs: update own"
   on public.subscriptions for update
+  using (auth.uid() = user_id);
+
+drop policy if exists "Dashboard journal: read own" on public.dashboard_journal_threads;
+create policy "Dashboard journal: read own"
+  on public.dashboard_journal_threads for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Dashboard journal: insert own" on public.dashboard_journal_threads;
+create policy "Dashboard journal: insert own"
+  on public.dashboard_journal_threads for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Dashboard journal: update own" on public.dashboard_journal_threads;
+create policy "Dashboard journal: update own"
+  on public.dashboard_journal_threads for update
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Dashboard journal: delete own" on public.dashboard_journal_threads;
+create policy "Dashboard journal: delete own"
+  on public.dashboard_journal_threads for delete
+  using (auth.uid() = user_id);
+
+drop policy if exists "Global Lite: read own" on public.global_lite_connections;
+create policy "Global Lite: read own"
+  on public.global_lite_connections for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Global Lite: insert own" on public.global_lite_connections;
+create policy "Global Lite: insert own"
+  on public.global_lite_connections for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Global Lite: update own" on public.global_lite_connections;
+create policy "Global Lite: update own"
+  on public.global_lite_connections for update
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Global Lite: delete own" on public.global_lite_connections;
+create policy "Global Lite: delete own"
+  on public.global_lite_connections for delete
   using (auth.uid() = user_id);
 
 -- Helper functions

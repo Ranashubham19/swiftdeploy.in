@@ -1,0 +1,12 @@
+.git
+.next
+.vercel/output
+node_modules
+tests
+scripts
+supabase
+.github
+.codex-*/
+.codex-*
+tmp-*.json
+CLOWDCLOUD_*.md

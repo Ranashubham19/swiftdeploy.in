@@ -19,8 +19,8 @@ export function PrivacyPage() {
           </li>
           <li>
             <strong style={{ color: "#eeeef5" }}>OAuth tokens:</strong> Gmail, Google Calendar,
-            and optional Google Drive / Sheets tokens, stored encrypted and used only for actions
-            you authorize.
+            and optional Google Drive / Sheets tokens, stored in our database with access controls
+            and used only for actions you authorize.
           </li>
           <li>
             <strong style={{ color: "#eeeef5" }}>WhatsApp session:</strong> Your phone number and
@@ -49,10 +49,13 @@ export function PrivacyPage() {
       <LegalSection title="3. Gmail and Calendar access">
         <p style={{ margin: 0 }}>
           We use only the OAuth scopes you explicitly grant. Gmail access can include reading
-          messages plus creating drafts and sending replies on your behalf. Calendar access is
-          read-only. Drive and Sheets access are requested separately when you choose to enable
-          those features. We process email content in real time only and do not store full email
-          bodies by default, only metadata and AI-generated summaries where needed for the product.
+          messages, creating drafts, sending replies, and inbox actions such as marking messages
+          read, starring, or archiving on your behalf when you ask. Calendar access can include
+          reading your schedule plus creating, updating, or cancelling events you explicitly
+          request. Drive and Sheets access can be enabled separately when you choose those
+          features. We process email and calendar content in real time and do not store full inbox
+          copies by default, only metadata and AI-generated summaries where needed for the
+          product.
         </p>
         <p style={{ margin: 0 }}>
           Revoke Google access at any time from{" "}
@@ -87,9 +90,9 @@ export function PrivacyPage() {
 
       <LegalSection title="6. Security">
         <p style={{ margin: 0 }}>
-          All data is encrypted in transit via TLS 1.3. OAuth tokens are encrypted at rest.
-          Supabase row-level security ensures your data is accessible only to your account. Payment
-          data is handled by PCI-compliant processors only.
+          All data is encrypted in transit via TLS 1.3. Supabase row-level security and server-side
+          access controls restrict which systems can reach your account data and connected account
+          tokens. Payment data is handled by PCI-compliant processors only.
         </p>
       </LegalSection>
 
@@ -97,8 +100,8 @@ export function PrivacyPage() {
         <p style={{ margin: 0 }}>
           You may access, export, or delete your data at any time from Settings - Danger Zone.
           Contact{" "}
-          <a href="mailto:privacy@clawcloud.ai" style={{ color: "#ff4d4d" }}>
-            privacy@clawcloud.ai
+          <a href="mailto:ranashubu8988@gmail.com" style={{ color: "#ff4d4d" }}>
+            ranashubu8988@gmail.com
           </a>{" "}
           for any data requests.
         </p>
@@ -128,8 +131,8 @@ export function PrivacyPage() {
       <LegalSection title="11. Contact">
         <p style={{ margin: 0 }}>
           Questions?{" "}
-          <a href="mailto:privacy@clawcloud.ai" style={{ color: "#ff4d4d" }}>
-            privacy@clawcloud.ai
+          <a href="mailto:ranashubu8988@gmail.com" style={{ color: "#ff4d4d" }}>
+            ranashubu8988@gmail.com
           </a>{" "}
           - ClawCloud Technologies, Bengaluru, Karnataka, India.
         </p>

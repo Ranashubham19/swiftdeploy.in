@@ -15,6 +15,7 @@ export type RuntimeFeatureState = {
 };
 
 export type ClawCloudRuntimeFeatureStatus = {
+  global_lite_connect: RuntimeFeatureState;
   google_workspace_connect: RuntimeFeatureState;
   google_workspace_extended_connect: RuntimeFeatureState;
   whatsapp_agent: RuntimeFeatureState;
@@ -50,8 +51,21 @@ export function getClawCloudRuntimeFeatureStatus(userEmail?: string | null): Cla
   const imageGeneration = getImageGenerationStatus();
   const googleWorkspaceAccess = getGoogleWorkspaceCoreAccess(userEmail);
   const googleWorkspaceExtendedAccess = getGoogleWorkspaceExtendedAccess(userEmail);
+  const supabaseReady = Boolean(
+    env.SUPABASE_URL && env.SUPABASE_ANON_KEY && env.SUPABASE_SERVICE_ROLE_KEY,
+  );
+  const globalLiteAvailable =
+    supabaseReady
+    && !googleWorkspaceAccess.available
+    && !googleWorkspaceExtendedAccess.available;
 
   return {
+    global_lite_connect: buildState(
+      globalLiteAvailable,
+      !supabaseReady
+        ? "Global Lite Connect needs Supabase to save per-user fallback connections."
+        : "Global Lite Connect stays hidden while full Google Workspace connect is live.",
+    ),
     google_workspace_connect: buildState(
       googleWorkspaceAccess.available,
       googleWorkspaceAccess.reason,

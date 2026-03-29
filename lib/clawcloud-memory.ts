@@ -2,6 +2,10 @@ import {
   extractDocumentContextSnippet,
   looksLikeDocumentPrompt,
 } from "@/lib/clawcloud-docs";
+import {
+  inferClawCloudCasualTalkProfile,
+  inferClawCloudEmotionalContext,
+} from "@/lib/clawcloud-casual-talk";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 
 export type MemoryTurn = {
@@ -16,12 +20,15 @@ export type ConversationMemory = {
   isFollowUp: boolean;
   resolvedQuestion: string;
   recentDocumentContext: string | null;
+  userToneProfile: string;
+  userEmotionalContext: string;
+  continuityHint: string | null;
 };
 
-const RAW_RECENT_TURNS = 20;
-const SUMMARY_LOOK_BACK = 40;
-const MAX_CONTENT_CHARS = 800;
-const MAX_DOCUMENT_CONTENT_CHARS = 3_200;
+const RAW_RECENT_TURNS = 30;
+const SUMMARY_LOOK_BACK = 60;
+const MAX_CONTENT_CHARS = 1_200;
+const MAX_DOCUMENT_CONTENT_CHARS = 4_800;
 
 const FOLLOW_UP_SIGNALS = [
   /\b(it|this|that|those|these|they|he|she|him|her|its|their)\b/i,
@@ -32,6 +39,8 @@ const FOLLOW_UP_SIGNALS = [
 ];
 
 const PRONOUN_START = /^(it|this|that|those|they|he|she)\s/i;
+const DIRECT_STANDALONE_QUESTION_START =
+  /^(?:what(?:'s| is| are| was| were)|who(?:'s| is| are| was| were)|when(?:'s| is| are| was| were| did)|where(?:'s| is| are| was| were)|why(?:'s| is| are| does| do| did)|how(?:'s| is| are| does| do| did)|explain|describe|define|summari[sz]e|story of|plot of|summary of|tell me about|compare|difference between)\b/i;
 const DOCUMENT_FOLLOW_UP_SIGNAL =
   /\b(document|file|pdf|sheet|page|row|table|section|clause|invoice|statement|receipt|contract|resume|cv)\b/i;
 const DOCUMENT_DECISION_SIGNAL =
@@ -60,15 +69,29 @@ function extractTopics(text: string): string[] {
     .slice(0, 5);
 }
 
+function looksLikeStandaloneQuestion(msg: string, wordCount: number) {
+  if (!msg) {
+    return false;
+  }
+
+  if (DIRECT_STANDALONE_QUESTION_START.test(msg)) {
+    return true;
+  }
+
+  return /[\uac00-\ud7af\u3040-\u30ff\u4e00-\u9fff]/u.test(msg) && wordCount >= 4 && !PRONOUN_START.test(msg);
+}
+
 function isFollowUpQuestion(currentMessage: string, recentTurns: MemoryTurn[]): boolean {
   if (!recentTurns.length) return false;
 
   const msg = currentMessage.trim();
   const words = msg.split(/\s+/).filter(Boolean);
+  const wordCount = words.length;
 
   if (!msg) return false;
-  if (words.length <= 4) return true;
   if (PRONOUN_START.test(msg)) return true;
+  if (looksLikeStandaloneQuestion(msg, wordCount)) return false;
+  if (wordCount <= 3) return true;
 
   const hits = FOLLOW_UP_SIGNALS.reduce((count, re) => count + (re.test(msg) ? 1 : 0), 0);
   return hits >= 2;
@@ -80,17 +103,30 @@ function resolveFollowUp(currentMessage: string, recentTurns: MemoryTurn[], acti
 
   const lastUserTurn = [...recentTurns].reverse().find((turn) => turn.role === "user");
   const lastAssistantTurn = [...recentTurns].reverse().find((turn) => turn.role === "assistant");
-  const lastUserContext = lastUserTurn?.content?.slice(0, 180) ?? "";
-  const lastAssistantContext = lastAssistantTurn?.content?.slice(0, 180) ?? "";
-  const context = lastUserContext || lastAssistantContext;
+  const lastUserContext = lastUserTurn?.content?.slice(0, 300) ?? "";
+  const lastAssistantContext = lastAssistantTurn?.content?.slice(0, 300) ?? "";
 
-  if (PRONOUN_START.test(msg) && context) {
-    return `${msg} (context: ${context})`;
+  // For pronoun references, inject both user and assistant context
+  if (PRONOUN_START.test(msg)) {
+    const contextParts: string[] = [];
+    if (lastUserContext) contextParts.push(`user asked: ${lastUserContext}`);
+    if (lastAssistantContext) contextParts.push(`you answered: ${lastAssistantContext}`);
+    const context = contextParts.join("; ");
+    return context ? `${msg} (context: ${context})` : msg;
   }
 
   const words = msg.split(/\s+/).filter(Boolean).length;
-  if (words <= 6 && activeTopics.length > 0) {
-    return `${msg} (topic: ${activeTopics.join(", ")})`;
+
+  // For short messages, inject topic and recent context
+  if (words <= 8 && activeTopics.length > 0) {
+    const topicHint = `topic: ${activeTopics.join(", ")}`;
+    const contextHint = lastAssistantContext ? `; recent answer: ${lastAssistantContext.slice(0, 160)}` : "";
+    return `${msg} (${topicHint}${contextHint})`;
+  }
+
+  // For medium messages that look like follow-ups, add topic hint
+  if (words <= 15 && activeTopics.length > 0) {
+    return `${msg} (ongoing topic: ${activeTopics.join(", ")})`;
   }
 
   return msg;
@@ -167,18 +203,28 @@ function buildOlderSummary(olderTurns: MemoryTurn[]): string {
 
   const userMessages = olderTurns
     .filter((turn) => turn.role === "user")
-    .map((turn) => turn.content.slice(0, 120))
-    .slice(-6);
+    .map((turn) => turn.content.slice(0, 180))
+    .slice(-10);
 
   if (!userMessages.length) return "";
 
   const topicList = extractTopics(userMessages.join(" "));
-  const preview = userMessages.slice(-2).join("; ").slice(0, 220);
-  const topicLine = topicList.length ? `Topics: ${topicList.join(", ")}.` : "";
+  const recentPreview = userMessages.slice(-3).join("; ").slice(0, 360);
+  const topicLine = topicList.length ? `Topics discussed: ${topicList.join(", ")}.` : "";
+
+  // Also capture assistant context for better continuity
+  const assistantMessages = olderTurns
+    .filter((turn) => turn.role === "assistant")
+    .map((turn) => turn.content.slice(0, 100))
+    .slice(-3);
+  const assistantPreview = assistantMessages.length
+    ? `You previously answered about: ${assistantMessages.join("; ").slice(0, 240)}.`
+    : "";
 
   return [
-    `Earlier, the user discussed: ${preview}.`,
+    `Earlier conversation: ${recentPreview}.`,
     topicLine,
+    assistantPreview,
   ].filter(Boolean).join(" ");
 }
 
@@ -193,6 +239,8 @@ export async function buildConversationMemory(
   const topicSummary = buildOlderSummary(olderTurns);
   const isFollowUp = isFollowUpQuestion(currentMessage, recentTurns);
   const recentDocumentContext = findRecentDocumentContext(recentTurns);
+  const casualTalkProfile = inferClawCloudCasualTalkProfile(currentMessage, recentTurns);
+  const emotionalContext = inferClawCloudEmotionalContext(currentMessage, recentTurns);
   const resolvedQuestionBase = isFollowUp
     ? resolveFollowUp(currentMessage, recentTurns, activeTopics)
     : currentMessage.trim();
@@ -209,6 +257,9 @@ export async function buildConversationMemory(
     isFollowUp,
     recentDocumentContext,
     resolvedQuestion: resolvedQuestion || currentMessage.trim(),
+    userToneProfile: casualTalkProfile.summary,
+    userEmotionalContext: emotionalContext.summary,
+    continuityHint: casualTalkProfile.continuityHint,
   };
 }
 
@@ -224,13 +275,23 @@ export function buildMemorySystemSnippet(
   if (memory.activeTopics.length) {
     lines.push(`Active topics: ${memory.activeTopics.join(", ")}`);
   }
+  if (memory.userToneProfile) {
+    lines.push(`User tone profile: ${memory.userToneProfile}`);
+  }
+  if (memory.userEmotionalContext) {
+    lines.push(`User emotional context: ${memory.userEmotionalContext}`);
+  }
+  if (memory.continuityHint) {
+    lines.push(`Recent conversation anchor: ${memory.continuityHint}`);
+  }
   if (memory.isFollowUp) {
-    lines.push("Current message is a follow-up. Use prior context.");
+    lines.push("⚡ Current message is a follow-up to the prior conversation. Use full context for continuity.");
     if (looksLikeDocumentPrompt(memory.resolvedQuestion)) {
       lines.push("Resolved question includes the recent uploaded document context.");
     } else {
-      lines.push(`Resolved question: ${memory.resolvedQuestion}`);
+      lines.push(`Resolved question with context: ${memory.resolvedQuestion}`);
     }
+    lines.push("IMPORTANT: Answer in the context of the ongoing conversation. Do not treat this as a standalone question.");
   }
   if (memory.recentDocumentContext && !looksLikeDocumentPrompt(memory.resolvedQuestion)) {
     lines.push("Recent document context is available from the previous uploaded file. Use it when the user refers back to the document.");
@@ -248,6 +309,6 @@ export async function getSmartHistory(
   userId: string,
   mode: "fast" | "deep" = "fast",
 ): Promise<MemoryTurn[]> {
-  const limit = mode === "deep" ? 30 : 20;
+  const limit = mode === "deep" ? 50 : 30;
   return loadRawHistory(userId, limit);
 }

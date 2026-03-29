@@ -3,6 +3,7 @@ import {
   formatHolidayStateSuffix,
   holidayMatchesState,
 } from "@/lib/clawcloud-india-normalization";
+import { matchesWholeAlias } from "@/lib/clawcloud-intent-match";
 
 type HolidayEntry = {
   name: string;
@@ -75,6 +76,12 @@ const ALL_HOLIDAYS = [...HOLIDAYS_2025, ...HOLIDAYS_2026];
 
 export function detectHolidayQuery(message: string): boolean {
   const normalized = message.toLowerCase();
+  if (
+    /\b(case|incident|murder|rape|assault|attack|stabbing|shooting|arrest|investigation|verdict|trial|court|fir|bail|accused|victim)\b/.test(normalized)
+  ) {
+    return false;
+  }
+
   return (
     /\b(holiday|festival|diwali|holi|eid|christmas|dussehra|navratri|janmashtami|ganesh|onam|pongal|ugadi|baisakhi|lohri|makar|republic day|independence day|gandhi jayanti|ambedkar|durga puja|gudi padwa)\b/.test(normalized)
     || (/\b(when is|when's|date of|next)\b/.test(normalized) && /\b(holiday|festival|celebration)\b/.test(normalized))
@@ -194,14 +201,14 @@ export function answerHolidayQuery(message: string): string | null {
   };
 
   for (const [keyword, names] of Object.entries(festivalKeywords)) {
-    if (!normalized.includes(keyword)) {
+    if (!matchesWholeAlias(normalized, keyword)) {
       continue;
     }
 
     const matches = scopedHolidays
       .filter((holiday) =>
-        names.some((name) => holiday.name.toLowerCase().includes(name.toLowerCase()))
-        || holiday.name.toLowerCase().includes(keyword),
+        names.some((name) => matchesWholeAlias(holiday.name, name))
+        || matchesWholeAlias(holiday.name, keyword),
       )
       .sort((a, b) => a.date.localeCompare(b.date));
 

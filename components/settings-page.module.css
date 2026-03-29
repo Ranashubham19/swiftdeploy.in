@@ -638,6 +638,24 @@
   flex-shrink: 0;
 }
 
+.liteBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 0;
+}
+
+.liteBlock + .liteBlock {
+  border-top: 1px solid var(--border);
+}
+
+.liteHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
 .connectedBadge {
   display: inline-flex;
   align-items: center;
@@ -906,6 +924,7 @@
   .notificationRow,
   .integrationRow,
   .integrationBanner,
+  .liteHeader,
   .toggleField,
   .dangerRow,
   .planHeader,

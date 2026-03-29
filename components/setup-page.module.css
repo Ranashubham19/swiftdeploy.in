@@ -524,6 +524,329 @@
   color: var(--green);
 }
 
+.workspaceStepBody {
+  padding-top: 22px;
+}
+
+.workspaceCardStack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.workspaceConnectCard {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 18px 18px 16px;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.workspaceConnectCardConnected {
+  border-color: rgba(0, 230, 118, 0.2);
+  background: rgba(0, 230, 118, 0.04);
+}
+
+.workspaceConnectCardIcon {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  color: rgba(255, 255, 255, 0.86);
+}
+
+.workspaceConnectCardIcon svg {
+  display: block;
+}
+
+.workspaceConnectCardBody {
+  min-width: 0;
+  flex: 1;
+}
+
+.workspaceConnectCardTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.workspaceConnectCardTitleRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.workspaceConnectCardTitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.workspaceConnectOptional {
+  font-size: 10px;
+  line-height: 1;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.workspaceConnectCardState {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 116px;
+  font-size: 11px;
+  line-height: 1;
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.workspaceConnectCardStateIdle {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  color: var(--text3);
+}
+
+.workspaceConnectCardStateConnecting {
+  background: var(--amberBg);
+  border: 1px solid var(--amberBorder);
+  color: var(--amber);
+}
+
+.workspaceConnectCardStateDone {
+  background: var(--greenBg);
+  border: 1px solid var(--greenBorder);
+  color: var(--green);
+}
+
+.workspaceConnectCardDesc {
+  margin-top: 8px;
+  max-width: 460px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text2);
+}
+
+.workspaceConnectCardTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.workspaceConnectCardTag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  line-height: 1;
+  padding: 6px 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  color: var(--text3);
+}
+
+.workspacePrimaryButton {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 14px 18px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  background: #fff;
+  color: #1a1a20;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.workspacePrimaryButton:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.18);
+  background: #f7f7fa;
+}
+
+.workspacePrimaryButtonDone {
+  background: #eefcf4;
+  border-color: rgba(0, 230, 118, 0.35);
+  color: #10643c;
+}
+
+.workspacePrimaryGoogleIcon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.workspacePrimaryGoogleIcon svg {
+  display: block;
+}
+
+.workspacePrimarySpinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(0, 0, 0, 0.18);
+  border-top-color: rgba(0, 0, 0, 0.72);
+  border-radius: 999px;
+  animation: spin 0.7s linear infinite;
+}
+
+.workspacePrivacyCard {
+  margin-top: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px 16px 12px;
+}
+
+.workspacePrivacyHeader {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.workspacePrivacyIcon {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  color: var(--text2);
+}
+
+.workspacePrivacyTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.workspacePrivacyText {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text2);
+}
+
+.workspacePrivacyChecks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.workspacePrivacyCheck {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--text2);
+}
+
+.workspacePrivacyDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--green);
+  box-shadow: 0 0 0 3px rgba(0, 230, 118, 0.14);
+}
+
+.workspaceGuideLink {
+  font: inherit;
+  font-size: 12px;
+  color: var(--text3);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+
+.workspaceGuideLink:hover {
+  color: var(--text2);
+}
+
+.workspaceFooterActions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.workspaceSkipButton,
+.workspaceContinueButton {
+  font-family: var(--font-sans), sans-serif;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 40px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.2s ease, background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.workspaceSkipButton {
+  padding: 0 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  color: var(--text2);
+}
+
+.workspaceSkipButton:hover {
+  border-color: var(--border3);
+  color: var(--text);
+}
+
+.workspaceContinueButton {
+  padding: 0 18px;
+  background: linear-gradient(180deg, #ff7c57 0%, #ff5e3a 100%);
+  border: 1px solid rgba(255, 127, 95, 0.65);
+  color: #fff;
+  box-shadow: 0 12px 24px rgba(255, 94, 58, 0.22);
+}
+
+.workspaceContinueButton:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 16px 32px rgba(255, 94, 58, 0.28);
+}
+
+.workspaceContinueButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
 .googleIcon {
   width: 18px;
   height: 18px;
@@ -887,6 +1210,171 @@
   font-size: 13px;
   color: var(--text2);
   line-height: 1.6;
+}
+
+.starterPanel {
+  width: min(100%, 520px);
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(10, 18, 25, 0.72);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  text-align: left;
+}
+
+.starterPanelHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.starterPanelEyebrow {
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.starterPanelTitle {
+  margin-top: 5px;
+  color: var(--text);
+  font-family: var(--font-display), sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.starterPanelMeta {
+  flex-shrink: 0;
+  padding: 5px 9px;
+  border: 1px solid rgba(0, 230, 118, 0.18);
+  border-radius: 999px;
+  background: rgba(0, 230, 118, 0.08);
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.starterPanelText {
+  font-size: 12.5px;
+  color: var(--text2);
+  line-height: 1.65;
+}
+
+.starterGrid {
+  display: grid;
+  gap: 10px;
+}
+
+.starterCard {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg3);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.starterCardActive {
+  border-color: var(--greenBorder);
+  background: rgba(0, 230, 118, 0.04);
+}
+
+.starterCardMuted {
+  background: rgba(19, 19, 28, 0.82);
+}
+
+.starterCardHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.starterCardLabel {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.starterCardDescription {
+  margin-top: 4px;
+  color: var(--text3);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.starterCardNote {
+  color: var(--text2);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.starterCardStatus {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.starterCardStatusActive {
+  background: rgba(0, 230, 118, 0.08);
+  color: var(--green);
+}
+
+.starterCardStatusMuted {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text3);
+}
+
+.starterExamples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.starterExampleLink,
+.starterExampleButton {
+  padding: 5px 10px;
+  border: 1px solid var(--border2);
+  border-radius: 999px;
+  font-family: var(--font-sans), sans-serif;
+  font-size: 11.5px;
+  transition: all 0.18s ease;
+}
+
+.starterExampleLink {
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text2);
+  text-decoration: none;
+}
+
+.starterExampleLink:hover,
+.starterExampleLink:focus-visible {
+  border-color: var(--border3);
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
+  outline: none;
+}
+
+.starterExampleButton {
+  background: transparent;
+  color: var(--text3);
+  cursor: not-allowed;
+}
+
+.starterExampleButton:disabled {
+  opacity: 0.5;
 }
 
 .openChatButton {
@@ -1275,6 +1763,36 @@
   .stepLine {
     margin-top: 18px;
   }
+
+  .starterPanelHead,
+  .starterCardHead {
+    flex-direction: column;
+  }
+
+  .workspaceConnectCard,
+  .workspacePrivacyCard {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .workspaceConnectCardTop {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .workspaceConnectCardState {
+    min-width: 0;
+  }
+
+  .workspacePrivacyChecks,
+  .workspaceFooterActions {
+    width: 100%;
+  }
+
+  .workspaceFooterActions {
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
 }
 
 @media (max-width: 480px) {
@@ -1288,6 +1806,23 @@
 
   .successScreen {
     padding: 48px 24px;
+  }
+
+  .workspacePrimaryButton {
+    font-size: 13px;
+    line-height: 1.5;
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .workspaceGuideLink {
+    width: 100%;
+    text-align: left;
+  }
+
+  .workspaceSkipButton,
+  .workspaceContinueButton {
+    flex: 1 1 auto;
   }
 }
 

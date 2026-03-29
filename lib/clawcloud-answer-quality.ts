@@ -1,5 +1,25 @@
 import { completeClawCloudPrompt, type IntentType } from "@/lib/clawcloud-ai";
-import { shouldUseLiveSearch } from "@/lib/clawcloud-live-search";
+import {
+  isCompleteIndiaConsumerPriceAnswer,
+  looksLikeConsumerStaplePriceQuestion,
+} from "@/lib/clawcloud-india-consumer-prices";
+import {
+  detectRetailFuelPriceQuestion,
+  isCompleteRetailFuelAnswer,
+} from "@/lib/clawcloud-retail-prices";
+import {
+  detectWorldBankCountryMetricQuestion,
+  extractRichestRankingScope,
+  isCompleteCountryMetricAnswer,
+  shouldUseLiveSearch,
+} from "@/lib/clawcloud-live-search";
+import {
+  buildClawCloudReplyLanguageInstruction,
+  inferClawCloudMessageLocale,
+  localeNames,
+  resolveClawCloudReplyLanguage,
+  translateMessage,
+} from "@/lib/clawcloud-i18n";
 import { detectTaxQuery } from "@/lib/clawcloud-tax";
 
 export type ClawCloudAnswerDomain =
@@ -57,11 +77,11 @@ const FINANCE_ADVICE_PATTERNS = [
 
 const LIVE_EVIDENCE_PATTERNS = [
   /\blive data as of\b/i,
-  /\bdata fetched:\b/i,
-  /\bsource note:\b/i,
-  /\bsearched:\b/i,
-  /\bsources?:\b/i,
-  /\bpublished:\b/i,
+  /\bdata fetched:\s*/i,
+  /\bsource note:\s*/i,
+  /\bsearched:\s*/i,
+  /\bsources?:\s*/i,
+  /\bpublished:\s*/i,
   /\baccording to\b/i,
   /\bofficial\b/i,
   /\bas of\b/i,
@@ -92,7 +112,19 @@ const LOW_CONFIDENCE_PATTERNS = [
   /\bi could not verify\b/i,
   /\bcannot verify\b/i,
   /\bnot enough reliable\b/i,
+  /\bwithout better grounding\b/i,
+  /\b(?:the )?(?:answer|response) path took too long to complete reliably\b/i,
   /\buncertain\b/i,
+];
+
+const LIVE_REFUSAL_PATTERNS = [
+  /\bno strong live sources found\b/i,
+  /\bcould(?: not|n't) verify one precise current figure\b/i,
+  /\bclosest reliable signals\b/i,
+  /\bbest next step\b/i,
+  /\blive search unavailable\b/i,
+  /\bhaving trouble fetching live sources right now\b/i,
+  /\bcould not verify enough reliable live sources\b/i,
 ];
 
 const UNSAFE_HEALTH_PATTERNS = [
@@ -127,8 +159,428 @@ const SUPPORTIVE_MENTAL_HEALTH_PATTERNS = [
   /\byou are not alone\b/i,
 ];
 
+const TOPIC_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "answer",
+  "book",
+  "detail",
+  "detailed",
+  "drama",
+  "english",
+  "explain",
+  "explained",
+  "explanation",
+  "film",
+  "full",
+  "give",
+  "in",
+  "korean",
+  "me",
+  "movie",
+  "of",
+  "please",
+  "plot",
+  "season",
+  "series",
+  "show",
+  "story",
+  "summary",
+  "tell",
+  "the",
+  "to",
+  "what",
+]);
+
+const IRRELEVANT_ASSISTANT_LEAK_PATTERNS = [
+  /\bclawcloud ai\b/i,
+  /\bhelp with math, code, health, and legal questions\b/i,
+  /\bprofessional and reliable service\b/i,
+  /\bfeatures and benefits\b/i,
+  /\bexplore its features\b/i,
+  /\bget started with the service\b/i,
+  /\bi can help you with\b/i,
+  /\bask me anything\b/i,
+  /\bwhat can i help you with\b/i,
+  /\bpick one angle\b/i,
+  /\b(beginner version|advanced technical version)\b/i,
+  /\bwhat's your question\b/i,
+];
+
+const WRONG_MODE_TRANSLATION_PATTERNS = [
+  /\bhere(?:'s| is) the translation\b/i,
+  /\bdirect translation\b/i,
+  /\bthe (?:provided|source) text is already in\b/i,
+  /\byou(?:'ve| have) already provided the text in\b/i,
+  /\balready in (?:korean|english|hindi|japanese|chinese|spanish|french|arabic)\b/i,
+  /\bthere is no need for translation\b/i,
+  /\bthe text remains as is\b/i,
+  /\bif you'd like, i can help\b/i,
+  /\bprovide more context\b/i,
+  /\bplease let me know how i can assist\b/i,
+];
+
+const WRONG_MODE_STORY_CLARIFICATION_PATTERNS = [
+  /\bshare the topic, tone, and target length\b/i,
+  /\bwrite the complete piece directly\b/i,
+  /\bwhat tone\b/i,
+  /\btarget length\b/i,
+  /\bcreative writing\b/i,
+];
+
 function matchesAny(value: string, patterns: RegExp[]) {
   return patterns.some((pattern) => pattern.test(value));
+}
+
+function looksLikeHelpOrCapabilityQuestion(question: string) {
+  return (
+    /\b(help|what can you do|capabilities|features|how can you help|who are you|what are you)\b/i.test(question)
+    || /\bclawcloud\b/i.test(question)
+  );
+}
+
+function looksLikeStoryOrCultureQuestion(question: string) {
+  return (
+    /[\uac00-\ud7af\u3040-\u30ff\u4e00-\u9fff]/u.test(question)
+    || /\b(story|plot|storyline|summary|synopsis|ending|season|episode|character|drama|movie|film|series|show|anime|novel|book|tell me about|story of|plot of|summary of)\b/i.test(question)
+  );
+}
+
+function normalizeExistingStoryWorkCandidate(candidate: string) {
+  return candidate
+    .replace(
+      /\s+(?:and|&|plus|as)\s+(?:is|was|does|did|can|could|will|would|should|what|who|when|where|why|how)\b[\s\S]*$/i,
+      "",
+    )
+    .replace(/\b(?:is|was)\s+it\s+based\s+on\s+true\s+events?\b[\s\S]*$/i, "")
+    .replace(/\b(?:is|was)\s+it\s+(?:a\s+)?true\s+story\b[\s\S]*$/i, "")
+    .replace(/\b(?:is|was)\s+it\s+real\b[\s\S]*$/i, "")
+    .replace(/\b(?:did|does)\s+it\s+really\s+happen\b[\s\S]*$/i, "")
+    .replace(/\b(?:ending|plot|summary|synopsis)\s+explained\b[\s\S]*$/i, "")
+    .replace(/[,:-]\s*$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractExistingStoryWorkCandidate(question: string) {
+  const normalized = question
+    .replace(/\b(?:in|into)\s+(?:english|korean|hindi|spanish|french|arabic|japanese|chinese|russian|portuguese|german|turkish|indonesian|malay|swahili|dutch|polish|punjabi|tamil|telugu|kannada|bengali|marathi|gujarati)\b[.!?]*$/i, "")
+    .trim();
+
+  const patterns = [
+    /(?:tell me (?:the )?(?:story|plot|summary|synopsis|ending) of|story of|plot of|summary of|synopsis of|ending of)\s+(.+?)(?:\?|$)/i,
+    /(?:what(?:'s| is) the (?:story|plot|summary|synopsis|ending) of)\s+(.+?)(?:\?|$)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const candidate = normalizeExistingStoryWorkCandidate(normalized.match(pattern)?.[1]?.trim() ?? "");
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  return "";
+}
+
+function looksLikeExistingStorySummaryQuestion(question: string) {
+  const normalized = question.toLowerCase().trim();
+  if (!normalized || /^(?:write|create|compose|generate|draft)\b/.test(normalized)) {
+    return false;
+  }
+
+  if (!looksLikeStoryOrCultureQuestion(question)) {
+    return false;
+  }
+
+  return (
+    Boolean(extractExistingStoryWorkCandidate(question))
+    || /\b(drama|movie|film|series|show|anime|novel|book|webtoon)\b/i.test(question)
+  );
+}
+
+function normalizeTopicToken(token: string) {
+  return token
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "")
+    .trim();
+}
+
+function isGenericTopicToken(token: string) {
+  if (!token) {
+    return true;
+  }
+
+  if (TOPIC_STOP_WORDS.has(token)) {
+    return true;
+  }
+
+  const genericKoreanToken = /^(?:\uc904\uac70\ub9ac|\uc2a4\ud1a0\ub9ac|\ub0b4\uc6a9|\uacb0\ub9d0|\uc694\uc57d|\uc124\uba85|\uc124\uba85\ud574\uc918|\uc790\uc138\ud788|\ud55c\uad6d\uc5b4|\uc2dc\uc98c|\uc5d0\ud53c\uc18c\ub4dc)$/u;
+  if (genericKoreanToken.test(token)) {
+    return true;
+  }
+
+  return (
+    /^(story|plot|summary|ending|explain|korean|english|detailed|detail|answer|please)$/i.test(token)
+    || /^(줄거리|스토리|내용|결말|요약|설명|설명해줘|자세히|한국어|시즌|에피소드)$/u.test(token)
+  );
+}
+
+function extractTopicSignals(text: string) {
+  const rawTokens = text.match(/[\p{L}\p{M}][\p{L}\p{M}\p{N}'’-]{1,}/gu) ?? [];
+  const unique = new Set<string>();
+  for (const token of rawTokens) {
+    const normalized = normalizeTopicToken(token);
+    if (!normalized || isGenericTopicToken(normalized)) {
+      continue;
+    }
+    unique.add(normalized);
+  }
+  return [...unique].slice(0, 8);
+}
+
+function looksLikeTopicAnchoredQuestion(question: string) {
+  return (
+    /[\uac00-\ud7af\u3040-\u30ff\u4e00-\u9fff]/u.test(question)
+    || /\b(story|plot|summary|synopsis|ending|season|episode|character|drama|movie|film|series|show|anime|novel|book|tell me about|explain)\b/i.test(question)
+  );
+}
+
+function looksLikeIrrelevantAssistantLeak(question: string, answer: string) {
+  if (looksLikeHelpOrCapabilityQuestion(question)) {
+    return false;
+  }
+
+  return matchesAny(answer, IRRELEVANT_ASSISTANT_LEAK_PATTERNS);
+}
+
+function looksLikeExplicitScopeBleed(question: string, answer: string) {
+  const rankingScope = extractRichestRankingScope(question);
+  if (!rankingScope || rankingScope === "mixed") {
+    return false;
+  }
+
+  const hasPeopleSection = /\btop richest people by live net worth\b/i.test(answer);
+  const hasCitiesSection = /\btop wealthiest cities by resident millionaires\b/i.test(answer);
+
+  if (rankingScope === "cities" && hasPeopleSection) {
+    return true;
+  }
+
+  if (rankingScope === "people" && hasCitiesSection) {
+    return true;
+  }
+
+  return false;
+}
+
+export function looksLikeQuestionTopicMismatch(question: string, answer: string) {
+  const trimmedAnswer = answer.trim();
+  if (!trimmedAnswer) {
+    return true;
+  }
+
+  if (matchesAny(trimmedAnswer, LOW_CONFIDENCE_PATTERNS) || matchesAny(trimmedAnswer, LIVE_REFUSAL_PATTERNS)) {
+    return false;
+  }
+
+  if (looksLikeIrrelevantAssistantLeak(question, trimmedAnswer)) {
+    return true;
+  }
+
+  if (looksLikeExplicitScopeBleed(question, trimmedAnswer)) {
+    return true;
+  }
+
+  const topicSignals = extractTopicSignals(question);
+  if (!topicSignals.length || !looksLikeTopicAnchoredQuestion(question)) {
+    return false;
+  }
+
+  const normalizedAnswer = trimmedAnswer.normalize("NFKC").toLowerCase();
+  const hitCount = topicSignals.filter((signal) => normalizedAnswer.includes(signal)).length;
+  if (/[\uac00-\ud7af\u3040-\u30ff\u4e00-\u9fff]/u.test(question)) {
+    return hitCount === 0;
+  }
+
+  return hitCount === 0 && trimmedAnswer.length > 120;
+}
+
+export function looksLikeWrongModeAnswer(question: string, answer: string) {
+  const trimmedAnswer = answer.trim();
+  if (!trimmedAnswer) {
+    return false;
+  }
+
+  if (!looksLikeStoryOrCultureQuestion(question)) {
+    return false;
+  }
+
+  return (
+    matchesAny(trimmedAnswer, WRONG_MODE_TRANSLATION_PATTERNS)
+    || (
+      looksLikeExistingStorySummaryQuestion(question)
+      && matchesAny(trimmedAnswer, WRONG_MODE_STORY_CLARIFICATION_PATTERNS)
+    )
+  );
+}
+
+function looksLikeClearDirectQuestion(question: string) {
+  const normalized = question.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  const detectedLocale = inferClawCloudMessageLocale(question);
+  if (detectedLocale && detectedLocale !== "en") {
+    return question.trim().split(/\s+/).filter(Boolean).length >= 4;
+  }
+
+  if (looksLikeExistingStorySummaryQuestion(question)) {
+    return true;
+  }
+
+  if (
+    /\b(compare|difference between|vs\.?|versus|translate|translation|summarize|summary of|story of|plot of|solve|calculate|design)\b/i.test(question)
+  ) {
+    return true;
+  }
+
+  if (
+    /^(?:what(?:'s| is| are)?|why|how|who|when|where|which|define|explain|describe|tell me|give me|write|draft|create|design|solve|calculate|summarize)\b/i.test(normalized)
+    && !/^(?:what about|how about|why that|why it|and|also)\b/i.test(normalized)
+  ) {
+    return normalized.split(/\s+/).filter(Boolean).length >= 4;
+  }
+
+  return false;
+}
+
+export function shouldAttemptDirectAnswerRecovery(
+  question: string,
+  profile: ClawCloudAnswerQualityProfile,
+) {
+  if (!looksLikeClearDirectQuestion(question)) {
+    return false;
+  }
+
+  if (profile.requiresLiveGrounding || profile.isHighStakes || profile.isDocumentBound) {
+    return false;
+  }
+
+  return /^(?:coding|math|creative|explain|culture|language|technology|science|research|general)$/i.test(profile.intent);
+}
+
+export async function recoverDirectAnswer(input: {
+  question: string;
+  answer: string;
+  intent: IntentType;
+  failureReason?: string;
+  history?: Array<{ role: "user" | "assistant"; content: string }>;
+  extraInstruction?: string;
+}) {
+  const replyLanguageResolution = resolveClawCloudReplyLanguage({
+    message: input.question,
+    preferredLocale: "en",
+  });
+  const questionLocale = inferClawCloudMessageLocale(input.question);
+  const englishGloss =
+    questionLocale && questionLocale !== "en"
+      ? (await translateMessage(input.question, "en", { force: true }).catch(() => "")).trim()
+      : "";
+  const normalizedQuestion = (
+    englishGloss
+    && englishGloss.toLowerCase() !== input.question.trim().toLowerCase()
+    && inferClawCloudMessageLocale(englishGloss) === "en"
+  )
+    ? englishGloss
+    : input.question;
+  const localeAwareInstruction =
+    questionLocale && questionLocale !== "en"
+      ? [
+        `The original user question is in ${localeNames[questionLocale]}.`,
+        buildClawCloudReplyLanguageInstruction(replyLanguageResolution),
+        "Understand the original question in that language and answer it directly instead of falling back to a clarification prompt.",
+      ].join("\n")
+      : buildClawCloudReplyLanguageInstruction(replyLanguageResolution);
+  const modeHint = looksLikeExistingStorySummaryQuestion(normalizedQuestion)
+    ? "This is a request for the story or plot of an existing work. Summarize the actual story directly, not a new original piece."
+    : /\b(?:translate|translation)\b/i.test(normalizedQuestion)
+      ? "This is a translation request. Return the translation directly in the requested target language."
+      : /\b(?:explain|what is|what are|why|how|difference between|compare|vs\.?|versus)\b/i.test(normalizedQuestion)
+        ? "This is a direct explanation request. Answer clearly and concretely instead of offering a menu or asking for extra framing."
+        : "Answer the user's request directly in the most likely intended mode.";
+
+  const repaired = await completeClawCloudPrompt({
+    system: [
+      "You are the direct-answer recovery layer for ClawCloud AI — the world's most capable AI assistant.",
+      "The first draft did not produce a reliable final answer. Your job is to deliver the correct, authoritative answer.",
+      "Recover by answering the user's original request directly, completely, and accurately.",
+      "Do not mention the failed draft, the pipeline, or internal limitations.",
+      "Do not ask for clarification unless the question is still genuinely ambiguous even after using the provided chat history.",
+      "If the likely interpretation is clear, answer that interpretation with full confidence and specificity.",
+      "Lead with the direct answer in the first sentence. No preamble, no filler.",
+      "Be precise: use real names, numbers, dates, specific facts — not vague references.",
+      "Self-verify: check your answer for internal consistency before responding.",
+      "Preserve any requested output language or format.",
+      localeAwareInstruction,
+      modeHint,
+      input.failureReason ? `Recovery context: ${input.failureReason}` : "",
+      input.extraInstruction ?? "",
+      "Return only the final answer — complete, accurate, and professional.",
+    ].filter(Boolean).join("\n"),
+    user: [
+      "Original question:",
+      input.question,
+      englishGloss && englishGloss !== input.question.trim()
+        ? `\nEnglish comprehension gloss:\n${englishGloss}`
+        : "",
+      "",
+      "Draft that failed or used the wrong mode:",
+      input.answer || "(empty draft)",
+    ].join("\n"),
+    history: input.history ?? [],
+    intent: input.intent,
+    responseMode: "deep",
+    maxTokens: 1_800,
+    fallback: "",
+    skipCache: true,
+    temperature: 0.1,
+  }).catch(() => "");
+
+  return repaired.trim();
+}
+
+export async function repairAnswerTopicMismatch(input: {
+  question: string;
+  answer: string;
+  intent: IntentType;
+}) {
+  const repaired = await completeClawCloudPrompt({
+    system: [
+      "You are the final topical-relevance repair layer for ClawCloud AI.",
+      "The previous answer drifted off-topic. Your job is to answer ONLY the user's exact question with precision.",
+      "Stay strictly on the same topic, entity, work, event, or subject named in the question.",
+      "Do not mention ClawCloud, its capabilities, pricing, setup, features, or benefits unless the question is explicitly about them.",
+      "Do not add follow-up questions, extra suggestions, or calls to action.",
+      "If the question asks for a story, plot, summary, or explanation of a drama/movie/book/series, answer only with that content.",
+      "Lead with the direct answer. Be specific: use real names, numbers, dates.",
+      "If some detail is still missing, answer with the safest topic-specific explanation you can support and name the single missing detail.",
+      "Self-verify: does your answer actually address the specific question asked?",
+      "Return only the final answer — accurate, specific, and on-topic.",
+    ].join("\n"),
+    user: `Question:\n${input.question}\n\nCandidate answer that drifted off-topic:\n${input.answer}`,
+    history: [],
+    intent: input.intent,
+    responseMode: "deep",
+    maxTokens: 1_600,
+    fallback: "",
+    skipCache: true,
+    temperature: 0.1,
+  }).catch(() => "");
+
+  return repaired.trim();
 }
 
 function clampConfidenceLevel(value: string | null | undefined): ClawCloudAnswerConfidence {
@@ -197,16 +649,18 @@ export function buildClawCloudEvidenceInstruction(profile: ClawCloudAnswerQualit
   }
 
   const lines = [
-    "Quality mode:",
-    "- Lead with what is established first.",
-    "- Separate verified/general information from assumptions or uncertainty.",
-    "- If confidence is below medium, say exactly: I'm not confident enough to answer that safely without verified sources.",
-    "- Never bluff, invent citations, or present uncertainty as certainty.",
+    "Quality mode — ZERO TOLERANCE FOR FABRICATION:",
+    "- Lead with established facts first. Answer, then context, then caveats.",
+    "- Separate verified information from assumptions or uncertainty. Label each clearly.",
+    "- If confidence is below medium, do not bluff; give the safest supportable answer and name the most important missing detail.",
+    "- Never bluff, invent citations, fabricate statistics, or present uncertainty as certainty.",
+    "- Self-verify all factual claims before including them. If two facts contradict, resolve before responding.",
+    "- Calibrate confidence: state HIGH/MEDIUM/LOW confidence and the specific evidence supporting it.",
   ];
 
   if (profile.requiresLiveGrounding) {
     lines.push("- For current or fast-changing facts, only answer if the reply is grounded in live evidence.");
-    lines.push("- If live evidence is weak, say you are not confident enough right now.");
+    lines.push("- If live evidence is weak, give only the safest general guidance and ask for the exact scope/timeframe needed for a source-backed update.");
   }
 
   if (profile.domain === "health") {
@@ -254,6 +708,76 @@ export function clawCloudAnswerHasEvidenceSignals(
   return false;
 }
 
+function looksWeakGenericLiveAnswer(
+  answer: string,
+  question?: string,
+): boolean {
+  const normalized = answer.toLowerCase();
+  const genericChoiceCount = (normalized.match(/\bmay be a good choice\b/g) ?? []).length;
+  const rankingOrCompareQuestion = question
+    ? /\b(top\s*\d+|best|most advanced|ranking|leaderboard|compare|comparison|difference between|vs\.?|versus)\b/i.test(question)
+    : false;
+
+  return (
+    normalized.includes("some key points to consider")
+    || /(^|\n)\d+\.\s*(strengths|trade-offs|when to choose each):\s*$/im.test(answer)
+    || genericChoiceCount >= 2
+    || (rankingOrCompareQuestion && normalized.includes("not explicitly ranked"))
+    || (rankingOrCompareQuestion && normalized.includes("do not provide a clear ranking"))
+    || (rankingOrCompareQuestion && normalized.includes("top ai certifications"))
+    || (rankingOrCompareQuestion && normalized.includes("top ai companies"))
+    || (rankingOrCompareQuestion && normalized.includes("top ai apps"))
+  );
+}
+
+function looksUnsafeUngroundedLiveNumber(answer: string): boolean {
+  const normalized = answer.toLowerCase();
+  const hasNumbers = /\d+(?:\.\d+)?/.test(answer);
+  const hasRiskLanguage = /unavailable|not found|could not|cannot|may shift|verify|subject to change/.test(normalized);
+  return hasNumbers && !matchesAny(answer, LIVE_EVIDENCE_PATTERNS) && !hasRiskLanguage;
+}
+
+export function isClawCloudGroundedLiveAnswer(input: {
+  question?: string;
+  answer: string | null | undefined;
+}): boolean {
+  const answer = input.answer?.trim() ?? "";
+  if (!answer) return false;
+  if (matchesAny(answer, LOW_CONFIDENCE_PATTERNS) || matchesAny(answer, LIVE_REFUSAL_PATTERNS)) {
+    return false;
+  }
+  if (looksWeakGenericLiveAnswer(answer, input.question)) {
+    return false;
+  }
+  if (!matchesAny(answer, LIVE_EVIDENCE_PATTERNS)) {
+    return false;
+  }
+  if (looksUnsafeUngroundedLiveNumber(answer)) {
+    return false;
+  }
+  if (input.question) {
+    if (
+      detectWorldBankCountryMetricQuestion(input.question)
+      && !isCompleteCountryMetricAnswer(input.question, answer)
+    ) {
+      return false;
+    }
+    if (
+      looksLikeConsumerStaplePriceQuestion(input.question)
+      && !isCompleteIndiaConsumerPriceAnswer(input.question, answer)
+    ) {
+      return false;
+    }
+    if (
+      detectRetailFuelPriceQuestion(input.question)
+      && !isCompleteRetailFuelAnswer(input.question, answer)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function hasUnsafeAdviceSignals(answer: string, profile: ClawCloudAnswerQualityProfile) {
   if (profile.domain === "health") {
     return matchesAny(answer, UNSAFE_HEALTH_PATTERNS);
@@ -294,17 +818,42 @@ export function scoreClawCloudAnswerConfidence(input: {
 
   let score = 0;
 
-  if (answer.length >= 120) score += 1;
-  if (answer.length >= 280) score += 1;
+  // Length signals — longer, more detailed answers are usually higher quality
+  if (answer.length >= 100) score += 1;
+  if (answer.length >= 250) score += 1;
+  if (answer.length >= 500) score += 1;
+
+  // Evidence and grounding signals
   if (clawCloudAnswerHasEvidenceSignals(answer, input.profile)) score += 2;
   if (input.profile.requiresEvidence && !clawCloudAnswerHasEvidenceSignals(answer, input.profile)) score -= 2;
+
+  // Structured response signals (sections, headers, numbered steps)
+  if (/\n.*\n/.test(answer)) score += 1; // Multi-paragraph
+  if (/(^|\n)(?:•|-|\d+\.)\s/m.test(answer)) score += 1; // Has structure
+  if (/\*[^*]+\*/m.test(answer)) score += 1; // Has bold formatting
+
+  // Domain-specific quality signals
+  if ((input.profile.intent === "coding") && /```/.test(answer)) score += 2; // Has code blocks
+  if ((input.profile.intent === "math") && /final answer/i.test(answer)) score += 2; // Has final answer
+  if ((input.profile.intent === "law") && /section\s+\d+/i.test(answer)) score += 1; // Cites law
+  if ((input.profile.intent === "health") && /consult.*(?:doctor|physician|medical)/i.test(answer)) score += 1;
+
+  // Appropriate hedging signals (shows calibrated confidence)
   if (/\bdepends on\b/i.test(answer) || /\bmay vary\b/i.test(answer) || /\bverify\b/i.test(answer)) score += 1;
   if (/\bconsult\b/i.test(answer) || /\bofficial source\b/i.test(answer)) score += 1;
-  if (hasUnsafeAdviceSignals(answer, input.profile)) score -= 3;
-  if (input.profile.isAdvice && !/\bconsult\b/i.test(answer) && input.profile.isHighStakes) score -= 1;
 
-  if (score >= 4) return "high";
-  if (score >= 1) return "medium";
+  // Safety penalty signals
+  if (hasUnsafeAdviceSignals(answer, input.profile)) score -= 4;
+  if (input.profile.isAdvice && !/\bconsult\b/i.test(answer) && input.profile.isHighStakes) score -= 2;
+
+  // Generic/lazy response penalties
+  if (/\bas an ai\b/i.test(answer)) score -= 3;
+  if (/\bi can't|i cannot|i'm unable\b/i.test(answer)) score -= 2;
+  if (/\bsend.*your.*exact.*question\b/i.test(answer)) score -= 3;
+  if (/\b(great question|certainly|of course)\b/i.test(answer.slice(0, 60))) score -= 1;
+
+  if (score >= 5) return "high";
+  if (score >= 2) return "medium";
   return "low";
 }
 
@@ -353,16 +902,32 @@ export async function verifyClawCloudAnswer(input: {
   }
 
   const verifierPrompt = [
-    "You are the final answer verifier for ClawCloud.",
-    "Review the candidate answer for factual safety, completeness, and overconfidence.",
-    "Reject answers that bluff, invent current facts, or give personalized medical, legal, mental-health, financial, or tax advice as certainty.",
-    "If the answer is mostly good but needs caveats or safer wording, revise it.",
-    "If the answer is acceptable, approve it.",
+    "You are the final answer quality verifier for ClawCloud AI — the world's most advanced AI assistant.",
+    "Your job is to catch errors, fabrications, and quality issues BEFORE the answer reaches the user.",
+    "You must be STRICTER than any human reviewer. Zero tolerance for mediocrity.",
+    "",
+    "VERIFICATION CHECKLIST (check ALL):",
+    "1. FACTUAL ACCURACY: Does every fact, date, name, number, and statistic check out? Cross-verify internally.",
+    "2. COMPLETENESS: Does it fully and thoroughly answer the question? Any critical aspect missing?",
+    "3. SAFETY: Does it avoid giving dangerous medical, legal, or financial advice as certainty? Are disclaimers present for high-stakes domains?",
+    "4. SPECIFICITY: Does it use specific names, numbers, dates, citations — or does it hide behind vague language (many, several, various)?",
+    "5. STRUCTURE: Is it well-organized with headers, bullets, and logical flow?",
+    "6. DIRECTNESS: Does it lead with the answer in the first sentence? Or waste space with filler/preamble?",
+    "7. CONSISTENCY: Do all claims in the answer agree with each other? No internal contradictions?",
+    "8. CODE QUALITY (if applicable): Is code complete, runnable, with all imports? No TODO/placeholder comments?",
+    "9. MATH ACCURACY (if applicable): Are all calculations correct? Does the final answer have correct units?",
+    "10. SOURCE QUALITY: Are any cited sources plausible and real? Fabricated citations are a REJECT.",
+    "",
+    "VERDICT CRITERIA:",
+    "- REJECT if: fabricated facts/citations, factually wrong answer, empty/generic response, dangerous unqualified advice, incomplete code with placeholders, math with wrong result.",
+    "- REVISE if: mostly correct but needs safety caveats, minor factual correction, missing key detail, or needs structure improvement. You MUST provide a full corrected replacement.",
+    "- APPROVE if: accurate, complete, specific, well-structured, safe, and directly answers the question.",
+    "",
     "Return exactly this structure:",
     "VERDICT: APPROVE | REVISE | REJECT",
     "CONFIDENCE: HIGH | MEDIUM | LOW",
-    "RATIONALE: one short paragraph",
-    "REVISION: only include a full replacement answer when verdict is REVISE; otherwise leave blank",
+    "RATIONALE: one short paragraph explaining your assessment — cite the specific issue found",
+    "REVISION: only include a COMPLETE replacement answer when verdict is REVISE; otherwise leave blank",
   ].join("\n");
 
   const answer = await completeClawCloudPrompt({
@@ -379,7 +944,7 @@ export async function verifyClawCloudAnswer(input: {
     history: [],
     intent: verifierIntentForProfile(input.profile),
     responseMode: "fast",
-    maxTokens: 700,
+    maxTokens: 1_200,
     fallback: "",
     skipCache: true,
     temperature: 0.05,
@@ -388,67 +953,150 @@ export async function verifyClawCloudAnswer(input: {
   return parseVerificationBlock(answer);
 }
 
+function buildClawCloudRecoveryDetailHint(
+  question: string,
+  profile: ClawCloudAnswerQualityProfile,
+): string {
+  const normalizedQuestion = question.toLowerCase();
+
+  if (profile.requiresLiveGrounding) {
+    return "Share the exact topic plus date, location, company, person, or ticker so I can return a source-backed answer.";
+  }
+
+  if (
+    profile.intent === "coding"
+    || /\b(code|program|script|function|api|bug|error|exception|stack trace|traceback|algorithm)\b/i.test(question)
+  ) {
+    return "Share the exact code, error message, expected behavior, and language/runtime so I can fix it precisely.";
+  }
+
+  if (
+    profile.intent === "math"
+    || /\b(equation|integral|derivative|probability|calculate|solve|find x|simplify|table of)\b/i.test(question)
+  ) {
+    return "Share the full equation or all given values and what you want solved, and I will work it through step by step.";
+  }
+
+  if (profile.domain === "health") {
+    return "Share age, main symptoms, duration, current medicines, and any known conditions for a more precise health answer.";
+  }
+
+  if (profile.domain === "mental_health") {
+    return "Share what is happening, how long it has been going on, and whether there is any immediate safety risk so I can give focused next steps.";
+  }
+
+  if (profile.domain === "legal") {
+    return "Share the country or state, what happened, any notice or contract involved, and the timeline so I can explain the safest general legal position clearly.";
+  }
+
+  if (profile.domain === "tax" || profile.domain === "finance") {
+    return "Share the country, tax year or date, amount, and any assumptions that matter so I can break the answer down clearly.";
+  }
+
+  if (/\b(compare|difference between|vs\.?|versus)\b/i.test(question)) {
+    return "Share the exact options you want compared and the criterion that matters most, and I will give a direct comparison.";
+  }
+
+  if (profile.intent === "language" || /\b(?:translate|translation)\b/i.test(question)) {
+    return "Share the exact text plus the source and target language, and I will translate it directly.";
+  }
+
+  if (looksLikeExistingStorySummaryQuestion(question)) {
+    const workCandidate = extractExistingStoryWorkCandidate(question);
+    if (workCandidate) {
+      return `If there are multiple works with the title "${workCandidate}", name the exact one. Otherwise I should answer the story directly.`;
+    }
+    return "Share the exact drama, movie, series, anime, or book title, and I will summarize the story directly.";
+  }
+
+  if (profile.intent === "email" || /\b(?:email|reply|mail|message draft)\b/i.test(question)) {
+    return "Share the recipient, purpose, tone, and any deadline or call-to-action, and I will draft it cleanly.";
+  }
+
+  if (profile.intent === "creative" || /\b(article|essay|story|poem|speech|caption|post)\b/i.test(question)) {
+    return "Share the topic, tone, and target length, and I will write the complete piece directly.";
+  }
+
+  if (/^(?:what(?:'s| is| are)|define|explain|describe|meaning of)\b/.test(normalizedQuestion)) {
+    return "Share the exact term plus the domain, version, timeframe, or use case that matters, and I will explain it directly.";
+  }
+
+  if (/\b(?:who|what|when|where|which)\b/.test(normalizedQuestion)) {
+    return "Share the exact name, date, version, or location that matters, and I will answer directly.";
+  }
+
+  return "Share the exact topic or full problem statement, and I will answer directly and professionally.";
+}
+
 export function buildClawCloudLowConfidenceReply(
   question: string,
   profile: ClawCloudAnswerQualityProfile,
   rationale?: string,
 ): string {
-  const reason = rationale?.trim();
+  const detailHint = buildClawCloudRecoveryDetailHint(question, profile);
+  const safeRationale = rationale?.trim() ?? "";
+  const publicGap =
+    safeRationale
+    && !/(timeout|too long|verify safely|complete reliably|retry|fallback|generic|drifted away|wrong mode|could not verify|cannot verify|live coverage|source batch|grounded support|safe answer)/i.test(safeRationale)
+      ? `What is still unclear: ${safeRationale}`
+      : "";
 
   if (profile.domain === "health") {
     return [
-      "I'm not confident enough to answer that safely without verified medical sources.",
-      "",
-      "If this is about symptoms, diagnosis, dosage, or medication safety, please check with a qualified doctor.",
-      "If you want, I can still give general background information or help you phrase the question more clearly.",
-      reason ? `\nReason: ${reason}` : "",
+      "I can give general medical guidance, but personal treatment or dosage advice depends on details I do not have yet.",
+      detailHint,
+      "If symptoms are severe, rapidly worsening, or urgent, contact a qualified doctor promptly.",
+      publicGap,
     ].filter(Boolean).join("\n");
   }
 
   if (profile.domain === "mental_health") {
     return [
-      "I want to be careful here because mental-health questions can be personal and high-stakes.",
-      "",
-      "I'm not confident enough to answer this as personal guidance without better context and, where needed, support from a licensed mental-health professional.",
-      "If you want, I can still offer general coping ideas, help you phrase what you're feeling, or help you decide what kind of support to seek next.",
-      reason ? `\nReason: ${reason}` : "",
+      "I want to handle this carefully and keep the guidance practical.",
+      detailHint,
+      "If you may harm yourself or feel unsafe, contact local emergency services or a trusted person right now.",
+      publicGap,
     ].filter(Boolean).join("\n");
   }
 
   if (profile.domain === "legal") {
     return [
-      "I'm not confident enough to answer that safely without verified legal context.",
-      "",
-      "Laws vary by jurisdiction and facts, so please verify this with a qualified lawyer before acting on it.",
-      "If you want, I can help with a general explanation or help narrow the question by country/state.",
-      reason ? `\nReason: ${reason}` : "",
+      "The general legal answer depends on jurisdiction and the exact facts.",
+      detailHint,
+      "Before acting on a real case, verify the position with a qualified lawyer.",
+      publicGap,
     ].filter(Boolean).join("\n");
   }
 
   if (profile.domain === "tax" || profile.domain === "finance") {
     return [
-      "I'm not confident enough to answer that safely without verified current facts and assumptions.",
-      "",
-      "Please verify the exact tax or financial details with official sources or a qualified CA/advisor before making a decision.",
-      "If you want, I can help break the problem into smaller verified parts.",
-      reason ? `\nReason: ${reason}` : "",
+      "The right answer depends on the exact assumptions, dates, and current figures involved.",
+      detailHint,
+      "Before acting on it, verify the final numbers with official sources or a qualified CA/advisor.",
+      publicGap,
     ].filter(Boolean).join("\n");
   }
 
   if (profile.requiresLiveGrounding) {
     return [
-      "I'm not confident enough to answer that accurately right now from verified live sources.",
-      "",
-      "Try a narrower query with the exact person, company, date, or event, and I will check again.",
-      reason ? `\nReason: ${reason}` : "",
+      "This is a time-sensitive question, so a precise answer depends on the exact live scope.",
+      detailHint,
+      publicGap,
+    ].filter(Boolean).join("\n");
+  }
+
+  if (shouldAttemptDirectAnswerRecovery(question, profile)) {
+    return [
+      "I could not complete a reliable direct answer from the current answer path.",
+      detailHint,
+      publicGap,
     ].filter(Boolean).join("\n");
   }
 
   return [
-    "I'm not confident enough to answer that safely without better grounding.",
-    "",
-    "If you want, ask it in a narrower way and I will try again.",
-    reason ? `\nReason: ${reason}` : "",
+    "I want to give you a precise answer, but the question still needs one key detail or clearer scope.",
+    detailHint,
+    publicGap,
   ].filter(Boolean).join("\n");
 }
 

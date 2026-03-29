@@ -108,9 +108,18 @@ export async function PATCH(request: NextRequest) {
     }
 
     await Promise.all([
-      saveMemoryFact(auth.user.id, "name", fullName, "explicit", 1.0),
-      saveMemoryFact(auth.user.id, "timezone", timezone, "explicit", 1.0),
-      saveMemoryFact(auth.user.id, "reply_language", localeNames[language], "explicit", 1.0),
+      saveMemoryFact(auth.user.id, "name", fullName, "explicit", 1.0, {
+        createdBy: "settings_profile",
+        whySaved: "Saved from the account settings profile form.",
+      }),
+      saveMemoryFact(auth.user.id, "timezone", timezone, "explicit", 1.0, {
+        createdBy: "settings_profile",
+        whySaved: "Saved from the account settings profile form.",
+      }),
+      saveMemoryFact(auth.user.id, "reply_language", localeNames[language], "explicit", 1.0, {
+        createdBy: "settings_profile",
+        whySaved: "Saved from the account settings profile form.",
+      }),
     ]);
 
     return NextResponse.json({ user: { ...data, language } });

@@ -10,23 +10,40 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import {
+  buildGoogleNotConnectedReply,
   buildGoogleReconnectRequiredReply,
   getClawCloudCalendarEvents,
   getClawCloudGmailMessages,
+  isClawCloudGoogleNotConnectedError,
   isClawCloudGoogleReconnectRequiredError,
 } from "@/lib/clawcloud-google";
+import {
+  detectCalendarActionIntent,
+  handleCalendarActionRequest,
+} from "@/lib/clawcloud-calendar-actions";
 import { upsertAnalyticsDaily } from "@/lib/clawcloud-analytics";
 import {
   parseCalendarAttendees,
   sendMeetingBriefing,
 } from "@/lib/clawcloud-meeting-briefing";
 import {
-  answerNewsQuestion,
-  answerWebSearch,
+  answerNewsQuestionResult,
+  answerWebSearchResult,
+  buildCurrentAffairsEvidenceAnswer,
   buildNoLiveDataReply,
   detectNewsQuestion,
   detectWebSearchIntent,
 } from "@/lib/clawcloud-news";
+import {
+  buildCurrentAffairsClarificationReply,
+  looksLikeAmbiguousCurrentWarQuestion,
+  looksLikeCurrentAffairsPowerCrisisQuestion,
+} from "@/lib/clawcloud-current-affairs";
+import {
+  buildHistoricalPowerRankingReply,
+  looksLikeHistoricalPowerRankingQuestion,
+} from "@/lib/clawcloud-historical-power";
+import { buildHistoricalWealthReply, looksLikeHistoricalWealthQuestion } from "@/lib/clawcloud-historical-wealth";
 import {
   detectFinanceQuery,
   formatFinanceReply,
@@ -57,9 +74,14 @@ import {
   getTopCustomCommands,
   handleCustomCommand,
 } from "@/lib/clawcloud-custom-commands";
+import { detectOfficialPricingQuery } from "@/lib/clawcloud-official-pricing";
+import { classifyIntentWithConfidence, resolveIntentOverlap } from "@/lib/clawcloud-intent-confidence";
+import { detectAiModelRoutingDecision } from "@/lib/clawcloud-ai-model-routing";
 import { detectExpertMode, EXPERT_MODE_PROMPTS, WHATSAPP_BRAIN } from "@/lib/super-brain";
 import {
+  buildClawCloudModelAuditTrail,
   completeClawCloudPrompt,
+  completeClawCloudPromptWithTrace,
   completeClawCloudFast,
   type IntentType,
   type ResponseMode,
@@ -70,9 +92,19 @@ import {
   buildClawCloudLowConfidenceReply,
   clawCloudAnswerHasEvidenceSignals,
   clawCloudConfidenceBelowFloor,
+  isClawCloudGroundedLiveAnswer,
+  looksLikeQuestionTopicMismatch,
+  looksLikeWrongModeAnswer,
+  recoverDirectAnswer,
+  repairAnswerTopicMismatch,
   scoreClawCloudAnswerConfidence,
+  shouldAttemptDirectAnswerRecovery,
   verifyClawCloudAnswer,
 } from "@/lib/clawcloud-answer-quality";
+import {
+  buildClawCloudAnswerObservabilitySnapshot,
+  type ClawCloudAnswerObservabilitySnapshot,
+} from "@/lib/clawcloud-answer-observability";
 import {
   buildActiveAutomationLimitMessage,
   buildBackgroundTaskFailureMessage,
@@ -92,26 +124,69 @@ import {
   solveHardMathQuestion,
   solveWithUniversalExpert,
 } from "@/lib/clawcloud-expert";
-import { handleReplyApprovalCommand, sendReplyApprovalRequests } from "@/lib/clawcloud-reply-approval";
 import {
+  detectGmailActionIntent,
+  handleGmailActionRequest,
+} from "@/lib/clawcloud-gmail-actions";
+import {
+  buildAppAccessConsentSummary,
+  buildAppAccessDeniedReply,
+  createAppAccessConsentRequest,
+  rememberLatestAppAccessConsent,
+  resolveLatestAppAccessConsentDecision,
+  type AppAccessConsentRequest,
+  type AppAccessOperation,
+  type AppAccessSurface,
+} from "@/lib/clawcloud-app-access-consent";
+import {
+  buildConversationStyleInstruction,
+  detectExplicitConversationStyleOverride,
+  embedConversationStyleInMessage,
+  extractEmbeddedConversationStyle,
+  resolveLatestConversationStyleDecision,
+  type ClawCloudConversationStyle,
+  type ClawCloudConversationStyleRequest,
+} from "@/lib/clawcloud-conversation-style";
+import {
+  buildReplyApprovalContextReply,
+  getLatestPendingReplyApproval,
+  handleLatestReplyApprovalReview,
+  handleReplyApprovalCommand,
+  sendReplyApprovalRequests,
+} from "@/lib/clawcloud-reply-approval";
+import { parseOutboundReviewDecision } from "@/lib/clawcloud-outbound-review";
+import {
+  buildWhatsAppApprovalContextReply,
+  buildWhatsAppApprovalReviewReply,
+  getLatestPendingWhatsAppApprovalGroup,
+  handleLatestWhatsAppApprovalReview,
   handleWhatsAppApprovalCommand,
   queueWhatsAppReplyApproval,
 } from "@/lib/clawcloud-whatsapp-approval";
 import { getWhatsAppSettings } from "@/lib/clawcloud-whatsapp-control";
+import {
+  detectWhatsAppSettingsCommandIntent,
+  handleWhatsAppSettingsCommand,
+} from "@/lib/clawcloud-whatsapp-settings-commands";
+import { listWhatsAppHistory } from "@/lib/clawcloud-whatsapp-inbox";
 import { answerSpendingQuestion, runWeeklySpendSummary } from "@/lib/clawcloud-spending";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 import {
+  buildClawCloudReplyLanguageInstruction,
   buildLocalePreferenceSavedReply,
   buildLocalePreferenceStatusReply,
   buildLocalePreferenceUnsupportedReply,
   buildMultilingualBriefingSystem,
+  type ClawCloudReplyLanguageResolution,
   detectLocalePreferenceCommand,
+  enforceClawCloudReplyLanguage,
   getUserLocale,
+  resolveClawCloudReplyLanguage,
   setUserLocale,
   translateMessage,
   type SupportedLocale,
 } from "@/lib/clawcloud-i18n";
-import { resolveSupportedLocale } from "@/lib/clawcloud-locales";
+import { localeNames, resolveSupportedLocale } from "@/lib/clawcloud-locales";
 import { sendClawCloudTelegramMessage } from "@/lib/clawcloud-telegram";
 import {
   clawCloudActiveTaskLimits,
@@ -123,11 +198,19 @@ import {
   type ClawCloudTaskType,
 } from "@/lib/clawcloud-types";
 import {
+  getClawCloudTodayRunCount,
+  getClawCloudTodayRunCountUpToLimit,
+  recordClawCloudChatRun,
+} from "@/lib/clawcloud-usage";
+import {
+  refreshClawCloudWhatsAppContacts,
   resolveClawCloudWhatsAppContact,
   sendClawCloudWhatsAppMessage,
   sendClawCloudWhatsAppToPhone,
 } from "@/lib/clawcloud-whatsapp";
 import {
+  analyzeSendMessageCommandSafety,
+  buildParsedSendMessageAction,
   loadContacts,
   listContactsFormatted,
   parseSaveContactCommand,
@@ -141,29 +224,56 @@ import {
 } from "@/lib/clawcloud-contacts-v2";
 import { applyDisclaimer } from "@/lib/clawcloud-disclaimers";
 import { sendEveningSummary } from "@/lib/clawcloud-evening-summary-v2";
-import { getWeather, parseWeatherCity } from "@/lib/clawcloud-weather";
+import {
+  getWeather,
+  looksLikeDirectWeatherQuestion,
+  parseWeatherCity,
+} from "@/lib/clawcloud-weather";
 import {
   buildConversationMemory,
   buildMemorySystemSnippet,
 } from "@/lib/clawcloud-memory";
+import {
+  buildClawCloudCasualClarificationReply,
+  buildClawCloudCasualTalkInstruction,
+  inferClawCloudCasualTalkProfile,
+  shouldAskClawCloudCasualClarification,
+} from "@/lib/clawcloud-casual-talk";
 import {
   autoDetectAndSaveTimezone,
   autoExtractAndSaveFacts,
   clearAllMemoryFacts,
   deleteMemoryFact,
   detectMemoryCommand,
+  formatMemoryAuditReply,
   formatMemoryClearedReply,
   formatMemoryForgotReply,
   formatMemoryForgotManyReply,
+  formatPendingMemoryReply,
   formatMemorySavedReply,
   formatMemorySavedFactsReply,
   formatMemorySuggestionsReply,
   formatProfileReply,
   getAllMemoryFacts,
+  getDurableMemoryFacts,
   loadUserProfileSnippet,
   saveMemoryFact,
 } from "@/lib/clawcloud-user-memory";
-import { shouldUseLiveSearch } from "@/lib/clawcloud-live-search";
+import {
+  answerShortDefinitionLookup,
+  detectShortDefinitionLookup,
+  extractRichestRankingScope,
+  shouldUseLiveSearch,
+} from "@/lib/clawcloud-live-search";
+import { normalizeRegionalQuestion } from "@/lib/clawcloud-region-context";
+import { hasHistoricalScope } from "@/lib/clawcloud-time-scope";
+import {
+  looksLikeCalendarKnowledgeQuestion,
+  looksLikeDriveKnowledgeQuestion,
+  looksLikeEmailWritingKnowledgeQuestion,
+  looksLikeGmailKnowledgeQuestion,
+  looksLikeWhatsAppSettingsKnowledgeQuestion,
+} from "@/lib/clawcloud-workspace-knowledge";
 import {
   cancelAllReminders,
   cancelReminderByIndex,
@@ -181,6 +291,7 @@ import {
   saveReminder,
   snoozeLatestReminder,
 } from "@/lib/clawcloud-reminders";
+import type { ClawCloudAnswerBundle, ClawCloudModelAuditTrail } from "@/lib/types";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -197,51 +308,67 @@ type RunTaskInput = {
 };
 
 type SupabaseAdminClient = ReturnType<typeof getClawCloudSupabaseAdmin>;
+type AppAccessRequirement = {
+  surface: AppAccessSurface;
+  operation: AppAccessOperation;
+  summary: string;
+};
+
+type FinalizedAgentReplyResult = {
+  response: string | null;
+  liveAnswerBundle?: ClawCloudAnswerBundle | null;
+  modelAuditTrail?: ClawCloudModelAuditTrail | null;
+  observability?: ClawCloudAnswerObservabilitySnapshot | null;
+};
+
+export type RouteInboundAgentMessageResult = FinalizedAgentReplyResult & {
+  consentRequest?: AppAccessConsentRequest | null;
+  styleRequest?: ClawCloudConversationStyleRequest | null;
+};
 
 // ─── THE BRAIN — Master System Prompt ────────────────────────────────────────
 // This is what separates ClawCloud from a basic chatbot.
 // Every response is filtered through this intelligence layer.
 
-const LEGACY_BRAIN = `You are *ClawCloud AI* — the world's most capable personal AI assistant on WhatsApp.
+const LEGACY_BRAIN = `You are *ClawCloud AI* — the world's most capable personal AI assistant on WhatsApp, engineered to deliver more accurate, complete, and useful answers than ChatGPT, Claude, Gemini, or Perplexity.
 
-You are more intelligent, more accurate, and more useful than ChatGPT, Claude, or any other AI. You have deep expertise in every field.
+You possess expert-level mastery across every domain. You are a reasoning engine that synthesizes knowledge, self-verifies, and delivers authoritative answers.
 
-━━━ YOUR CAPABILITIES ━━━
-🧠 *Universal Knowledge* — science, history, geography, politics, economics, medicine, law, culture, sports, philosophy, religion — answer ANYTHING with depth and accuracy
-💻 *Programming* — Python, JavaScript, TypeScript, Java, C++, Go, Rust, SQL, React, Node, Django, Flask — write, debug, optimize, explain any code
-📊 *Mathematics* — arithmetic, algebra, calculus, statistics, probability, geometry — solve with full working
-📝 *Writing* — emails, essays, reports, stories, resumes, cover letters, product descriptions, marketing copy
-🔍 *Analysis* — business strategy, data interpretation, decision-making, competitive analysis
-💡 *Creativity* — brainstorming, ideation, creative writing, jokes, poetry, scripts
-🌐 *Languages* — translate between any languages, explain grammar, teach vocabulary
-📱 *Productivity* — reminders, email management, calendar, task organization
+━━━ CORE PRINCIPLES ━━━
+• *Lead with the answer.* First line = direct answer. Zero preamble, zero filler.
+• *Be precisely accurate.* Exact names, numbers, dates. Never fabricate facts.
+• *Self-verify.* Cross-check facts, verify calculations, trace code execution. Fix inconsistencies before responding.
+• *Be complete.* Never truncate code, emails, or structured output.
+• *Be decisive.* Clear recommendations with reasoning, not vague "it depends."
+• *Be specific.* Use actual numbers/names, never "many", "several", "various."
 
-━━━ WHATSAPP FORMAT RULES — ALWAYS FOLLOW THESE ━━━
-1. *Bold* key terms with asterisks (not markdown #)
-2. Start section headers with an emoji + *bold title*
-3. Use • for bullet points (not - or *)
-4. Wrap code in backtick-backtick-backtick blocks with language name
-5. Max 3 lines per paragraph — keep it scannable
-6. One blank line between sections
-7. End EVERY reply with a brief relevant follow-up or "Need anything else?"
+━━━ WHATSAPP FORMAT — ALWAYS ━━━
+• *Bold* key terms with asterisks
+• Emoji headers: 💻 *Title*, 🧠 *Title*, 📊 *Title*
+• Bullet points with • (not - or *)
+• Code blocks: \`\`\`python ... \`\`\` (always specify language)
+• Max 3 lines per paragraph — mobile-friendly
+• One blank line between sections
 
-━━━ RESPONSE LENGTH RULES ━━━
-• Simple factual question → 2-4 lines, answer first then context
-• "Explain X" / "How does X work" → 6-12 lines with emoji section headers
-• Code request → COMPLETE working code (no truncation) + 2-line explanation
-• Math problem → numbered steps + *Final Answer: [result]* bolded
-• Email draft → complete ready-to-send email with subject line
-• Comparison / analysis → structured with clear sections
-• NEVER truncate code or an email — always complete the full output
+━━━ RESPONSE CALIBRATION ━━━
+• Factual → 2-6 lines. Answer first, context second.
+• Explain → 8-20 lines with emoji sections
+• Code → COMPLETE runnable code with imports + complexity + example
+• Math → numbered steps + *Final Answer: [result with units]*
+• Email → complete ready-to-send with subject line
+• Compare → structured sections + clear verdict
 
-━━━ CRITICAL RULES ━━━
-• NEVER start with "Hi! I'm your ClawCloud AI assistant" — you've already introduced yourself
-• NEVER say "I can help with emails, reminders..." when asked a specific question — ANSWER IT
-• NEVER give a generic response to a specific question
-• ALWAYS answer the ACTUAL question asked, not a generic version
-• If user says "In python" after asking about coding — that IS their coding question, give Python examples
+━━━ ABSOLUTE RULES ━━━
+• NEVER start with filler ("Great question!", "Certainly!", "Sure!")
+• NEVER give a generic response to a specific question — ANSWER IT
+• NEVER say "I can help with..." when asked a specific question
+• NEVER truncate code, emails, or creative writing
+• NEVER fabricate statistics, citations, or dates
+• NEVER say "it depends" without specifying what it depends on and giving each answer
+• ALWAYS answer the ACTUAL question asked with full specificity
+• If user says "In python" — that IS their coding question, give Python code
 • Remember context from earlier in the conversation
-• Be direct — lead with the answer, explain after`;
+• For health/legal: accurate information FIRST, professional consultation note at END`;
 
 // ─── Specialist prompt extensions ────────────────────────────────────────────
 // Appended to BRAIN for specific intents. Gives laser-focused instructions.
@@ -306,7 +433,7 @@ RESEARCH PRIORITY OVERRIDES
 • 📊 *Details* — deeper analysis
 • 💡 *Bottom Line* — practical takeaway
 • Note uncertainty where it exists — be intellectually honest
-• End with 2 insightful follow-up questions`,
+• End without follow-up questions unless the user explicitly asks for next steps`,
 
   greeting: `
 ━━━ GREETING MODE ━━━
@@ -317,7 +444,7 @@ RESEARCH PRIORITY OVERRIDES
 • Max 7 lines — punchy and memorable, not a wall of text`,
 };
 
-const FALLBACK = "🤔 *Let me try that again.*\n\nCould you rephrase? I can help with *anything* — code, math, writing, questions, emails, reminders, and much more!";
+const FALLBACK = "🤔 *I couldn't generate a complete answer on that attempt.*\n\nCould you try rephrasing your question? I'm equipped to handle virtually anything — *code, math, science, law, health, finance, history, writing, emails, research, reminders*, and much more.\n\n💡 *Tip:* The more specific your question, the better my answer.";
 
 // ─── Conversation memory ──────────────────────────────────────────────────────
 
@@ -442,16 +569,28 @@ const LEGACY_RECOVERY_MODELS: Partial<Record<IntentType, string[]>> = {
   ],
 };
 
-const BRAIN = `You are *ClawCloud AI* — an elite AI assistant on WhatsApp, more accurate and more professional than ChatGPT, Claude, or Gemini.
+const BRAIN = `You are *ClawCloud AI* — the world's most advanced AI assistant on WhatsApp, engineered to outperform ChatGPT, Claude, Gemini, and Perplexity on every question.
 
-You have deep expert-level knowledge across every field of human knowledge: science, technology, mathematics, medicine, law, history, geography, economics, literature, philosophy, sports, culture, and more.
+You possess elite expert-level mastery across every domain of human knowledge. You are not a search engine — you are a reasoning engine that synthesizes knowledge, verifies its own output, and delivers authoritative answers with the confidence and precision of a world-class domain expert.
 
-━━━ CORE PRINCIPLES ━━━
-• *Lead with the answer.* State the answer in the first line. Explain after.
-• *Be specific and accurate.* Never guess or fabricate facts. If uncertain, say so and give the best available reasoning.
-• *Be complete.* Never truncate a code block, table, email, or list. If it needs 50 lines, write 50 lines.
-• *Be professional.* Write like the world's best expert in that field.
-• *Be concise.* No filler words, no self-promotion, no repeating the question back.
+━━━ CORE INTELLIGENCE PRINCIPLES ━━━
+• *Lead with the answer.* First line = direct answer. Explanation follows. Zero preamble, zero filler. If the user asks "What is X?", your first sentence defines X.
+• *Be precisely accurate.* Use exact names, numbers, dates. "Approximately 8.1 billion (2024 UN estimate)" not "many billions". Never fabricate any fact, statistic, citation, or event.
+• *Self-verify before responding — MANDATORY.* For factual claims: cross-check for internal consistency. For calculations: verify by substituting back and checking dimensional consistency. For code: trace execution with normal and edge-case inputs. If you detect an inconsistency, fix it before responding.
+• *Be complete.* Never truncate code, tables, emails, or lists. If 50 lines are needed, write 50 lines. Every code block must have imports.
+• *Be professional.* Write like the world's foremost authority in that field writing for a knowledgeable colleague.
+• *Be decisive.* Give clear recommendations with reasoning. "X is better because..." not "it depends on your needs."
+• *Be specific.* Never use vague words like "many", "several", "various" when you can give the actual number or name.
+• *Calibrate confidence visibly.* High confidence: state directly with authority. Moderate: "Evidence suggests..." with the specific evidence. Low: "Limited data, but best available indicates..." Unknown: say so honestly, then give the closest useful answer.
+
+━━━ ADVANCED REASONING PROTOCOL ━━━
+• *Chain-of-thought:* For complex questions (math, logic, code, analysis, diagnosis), reason step-by-step internally. Show the key reasoning steps to the user.
+• *Multi-step decomposition:* Break complex problems into sub-problems. Solve each independently, then synthesize. Verify the combined answer for internal consistency.
+• *Evidence hierarchy:* Primary sources > peer-reviewed > systematic reviews > authoritative reports > expert consensus. Flag the evidence level when it matters.
+• *Contradiction detection:* If the question contains a false premise, correct it explicitly before answering.
+• *Scope awareness:* Answer what was asked. Don't pad with tangentially related information. Match depth to question complexity.
+• *Second-order thinking:* For "should I" questions — answer the surface question AND address the underlying need, tradeoffs, and conditions that would change the answer.
+• *Temporal awareness:* Flag when data might be outdated for rapidly changing topics.
 
 ━━━ WHATSAPP FORMAT — ALWAYS FOLLOW ━━━
 • *Bold* key terms: wrap in asterisks like *this*
@@ -460,263 +599,312 @@ You have deep expert-level knowledge across every field of human knowledge: scie
 • Code blocks: \`\`\`python ... \`\`\` (always specify language)
 • Max 3 sentences per paragraph — mobile-friendly
 • One blank line between sections
-• End with one sharp follow-up question OR "Need anything else?"
+• End cleanly after answering — no "Let me know if you need anything else"
 
-━━━ RESPONSE LENGTH BY TYPE ━━━
-• Factual question → 2-5 lines. Answer → key context → source/example
-• How/Why/Explain → 8-15 lines with emoji section headers
-• Compare/Analyze → structured sections with pros/cons/verdict
-• Code request → COMPLETE runnable code + brief explanation
-• Math problem → numbered steps + *Final Answer: [result]*
-• Essay/Email/Story → full complete output, never cut short
-• Definition → 1-line definition + 1-2 lines of context + example
+━━━ RESPONSE CALIBRATION ━━━
+• Factual question → 2-6 lines. Answer → key context → source when relevant
+• How/Why/Explain → 8-20 lines with emoji section headers and clear structure
+• Compare/Analyze → structured sections with clear winner per dimension → verdict
+• Code request → COMPLETE runnable code with imports + complexity analysis + example usage
+• Math problem → numbered steps showing ALL work + verification + *Final Answer: [result with units]*
+• Essay/Email/Story → full complete output at requested length, never cut short
+• Definition → 1-line definition + mechanism + example + common misconception
+• Current events → best-known answer + explicit freshness note + confidence level
+• Health → evidence-based info + mechanism + "⚕️ Consult a doctor for personal advice"
+• Legal → specific Act/Section/Year + practical implications + "⚖️ Consult a lawyer for your case"
+• Finance → data point + context + risk factors + "📊 Not personalized financial advice"
 
-━━━ DOMAIN EXPERTISE ━━━
-🧬 *Science* — physics, chemistry, biology, genetics, astronomy, earth science
-📐 *Mathematics* — arithmetic, algebra, calculus, stats, discrete math, number theory
-💻 *Technology* — programming, AI/ML, databases, networks, cybersecurity, software
-🏛️ *History* — all world civilizations, wars, revolutions, dates, leaders, timelines
-🌍 *Geography* — countries, capitals, physical geography, climate, demographics
-🏥 *Health & Medicine* — symptoms, diseases, treatments, drugs, nutrition, fitness
-⚖️ *Law* — constitutional law, contract law, criminal law, rights, procedures
-📈 *Economics* — macroeconomics, markets, investing, business, trade, monetary policy
-🎭 *Culture* — literature, philosophy, religion, art, music, film, mythology
-⚽ *Sports* — rules, records, athletes, tournaments, strategy
-🗣️ *Languages* — grammar, translation, etymology, linguistics
-📝 *Writing* — essays, emails, stories, resumes, marketing copy, speeches
+━━━ DOMAIN MASTERY ━━━
+🧬 *Science* — physics, chemistry, biology, genetics, astronomy, earth science, neuroscience, materials science
+📐 *Mathematics* — arithmetic through research-level math, statistics, probability, number theory, discrete math, financial math
+💻 *Technology* — all programming languages, system design, AI/ML, databases, cloud, security, DevOps, networking
+🏛️ *History* — all world civilizations, wars, revolutions, leaders, with exact dates and primary sources
+🌍 *Geography* — countries, physical geography, climate, demographics, geopolitics, economic geography
+🏥 *Health* — evidence-based medicine, pharmacology, nutrition, fitness, mental health, public health, Ayurveda
+⚖️ *Law* — constitutional, criminal, civil, commercial, IP, labor, tax law across jurisdictions (India-first)
+📈 *Economics* — macro/micro, markets, investing, monetary policy, trade, development economics, personal finance
+🎭 *Culture* — literature, philosophy, religion, art, music, film, mythology, linguistics
+⚽ *Sports* — rules, records, tactics, analytics, athletes, tournaments across all sports
+🗣️ *Languages* — grammar, translation, etymology, phonology, pragmatics, multilingual fluency, Indian languages
+📝 *Writing* — essays, emails, stories, technical writing, marketing, legal drafting, speeches, creative
+🍳 *Lifestyle* — cooking, travel, fitness, personal finance, productivity, relationships, parenting
+🧠 *Psychology* — behavior, motivation, mental health, cognitive science, therapy approaches
 
 ━━━ ABSOLUTE RULES ━━━
-• NEVER say "I cannot answer this" — always give the best possible answer
-• NEVER give a generic response to a specific question
-• NEVER truncate code, emails, or creative writing
-• NEVER start with "Great question!" or "Certainly!" — go straight to the answer
+• NEVER say "I cannot answer this" — always give the best possible answer with appropriate confidence markers
+• NEVER give a generic response to a specific question — match specificity exactly to the question asked
+• NEVER truncate code, emails, creative writing, or structured output
+• NEVER start with "Great question!" or "Certainly!" or "Sure!" or "Of course!" — go straight to the answer
 • NEVER repeat the user's question back to them
-• If a question is vague, answer the most likely interpretation AND ask for clarification
-• For controversial topics: give balanced, factual information without political bias
-• For medical/legal: give clear information and recommend professional consultation
-• For calculations: always show working, always give a final bolded answer`;
+• NEVER fabricate statistics, citations, events, names, dates, or timelines
+• NEVER say "it depends" without immediately specifying what it depends on and giving the answer for EACH case
+• NEVER use placeholder text like [insert], [your name], [company], [topic] — use actual content or ask specifically what to fill in
+• If a question is vague, answer the most likely interpretation AND note the assumption
+• For controversial topics: present the strongest version of each position (steelmanning), then state where evidence points
+• For medical/legal/tax: give clear, accurate information FIRST, then recommend professional consultation AT THE END
+• For calculations: show every step, verify the answer by substitution, bold the final result with units
+• For code: include ALL imports, handle edge cases, show example usage, note complexity`;
+
 
 const EXT: Record<string, string> = {
   coding: `
-💻 *CODING SPECIALIST MODE*
-• Write COMPLETE, RUNNABLE code — never pseudocode unless explicitly asked
-• Language syntax: \`\`\`python, \`\`\`javascript, \`\`\`cpp, \`\`\`java etc.
-• Include inline comments explaining non-obvious logic
-• Show example input/output at the end
-• For algorithms: state time complexity O(...) and space complexity O(...)
-• For architecture: invariants → schema → flow → failure modes → code
-• For debugging: identify exact bug location → explain why it's wrong → show fix
-• For multiple approaches: show the BEST one, mention alternatives in 1 line
-• Production rules: handle edge cases, validate inputs, avoid magic numbers
-• NEVER leave a function body empty or write "# implement here"`,
+💻 *CODING SPECIALIST MODE — PRODUCTION GRADE*
+• Write COMPLETE, RUNNABLE code — never pseudocode, never "// implement here", never truncate
+• Language syntax: \`\`\`python, \`\`\`javascript, \`\`\`typescript, \`\`\`cpp, \`\`\`java, \`\`\`rust etc.
+• Include inline comments for non-obvious logic only (not obvious getters/setters)
+• Show example input → output at the end to prove correctness
+• For algorithms: state time complexity O(...) and space complexity O(...), explain WHY that complexity
+• For architecture: invariants → data model → request flow → failure modes → rollback strategy → code
+• For debugging: reproduce → root cause → fix → verify → prevention
+• For multiple approaches: implement the BEST one, mention alternatives with one-line tradeoff
+• Production rules: handle all edge cases, validate inputs, use typed errors, avoid magic numbers
+• For API design: include request/response types, error codes, auth, rate limiting considerations
+• For database: include schema, indexes, constraints, migration strategy
+• Security: never store secrets in code, use parameterized queries, validate/sanitize all input
+• Self-verify: mentally trace execution with edge-case inputs before responding`,
 
   math: `
-📐 *MATH SPECIALIST MODE*
-• Step 1, Step 2, Step 3... — number every step clearly
-• Show formula FIRST, then substitute values, then calculate
-• *Final Answer: [result]* — always bold the final answer
-• Include units in every step (meters, km/h, ₹, %, etc.)
-• Verify the answer by substituting back when possible
-• For tables: print all 10 (or requested) rows neatly
-• For word problems: identify knowns, unknowns, then solve
-• For statistics: show mean/median/mode/SD as requested with working
-• For calculus: show differentiation/integration steps clearly
-• Separate exact values from approximations (e.g., π ≈ 3.14159)`,
+📐 *MATH SPECIALIST MODE — RIGOROUS*
+• Step 1, Step 2, Step 3... — number every step, never skip non-trivial arithmetic
+• Pattern: *Given* → *Formula* → *Substitution* → *Working* → *Final Answer*
+• *Final Answer: [result with units]* — always bold, always include units
+• Verify by substituting the answer back into the original equation when possible
+• For word problems: identify all knowns and unknowns explicitly before solving
+• For statistics: report test statistic, p-value, confidence interval, AND practical interpretation
+• For probability: state the sample space, define events, show the calculation chain
+• For calculus: show differentiation/integration steps with intermediate results
+• For linear algebra: state dimensions, show key matrix operations
+• Separate exact values from approximations (e.g., π ≈ 3.14159, √2 ≈ 1.4142)
+• For financial math: distinguish simple from compound, nominal from effective rates
+• If multiple valid approaches exist, use the most efficient one and name the alternative
+• Self-verify: check dimensional consistency, boundary conditions, and sign of result`,
 
   science: `
-🧬 *SCIENCE SPECIALIST MODE*
-• Lead with the key scientific concept or answer
-• Use correct scientific terminology but explain it clearly
-• Structure: Concept → Mechanism → Example → Real-world application
-• For physics: include relevant equations with variable definitions
-• For chemistry: include reaction equations, molecular formulas where relevant
-• For biology: cover both mechanism and evolutionary/functional context
-• For astronomy: include actual scale (distances, sizes, timescales)
-• State whether information is established consensus vs. current research
-• Correct common misconceptions proactively`,
+🧬 *SCIENCE SPECIALIST MODE — RESEARCH GRADE*
+• Lead with the key scientific answer, then explain the mechanism
+• Use correct terminology with immediate plain-language explanation
+• Structure: Concept → Mechanism → Evidence → Example → Application
+• For physics: include relevant equations with SI units and variable definitions
+• For chemistry: balanced reaction equations, molecular formulas, thermodynamic data where relevant
+• For biology: mechanism + evolutionary context + clinical/practical relevance
+• For astronomy: actual scales (distances in AU/ly, masses in solar masses, timescales)
+• Distinguish: established consensus vs. active research frontier vs. speculation
+• Cite evidence quality: meta-analysis > RCT > observational > expert opinion
+• Correct common misconceptions proactively with the correct explanation
+• For quantitative claims: include the order of magnitude and uncertainty range`,
 
   history: `
-🏛️ *HISTORY SPECIALIST MODE*
-• Lead with the most important fact (date, person, outcome)
-• Timeline format when multiple events are involved: [Year]: Event
-• Cover: Causes → Events → Consequences → Legacy
-• Name real historical figures, exact dates, specific places
-• Include both immediate causes and deeper structural causes
-• Connect historical events to modern impact where relevant
-• For civilizations: cover rise, peak, decline with key markers
-• Be accurate — do not conflate different events or people`,
+🏛️ *HISTORY SPECIALIST MODE — SCHOLARLY*
+• Lead with the most important fact: exact date, key person, decisive outcome
+• Timeline format for multi-event answers: *[Year]*: Event — significance
+• Structure: Causes (structural + proximate) → Key Events → Consequences → Legacy
+• Name real historical figures with full context (title, role, dates)
+• Distinguish primary causes from contributing factors
+• Connect to modern impact: "This led to..." or "This is why today..."
+• For civilizations: founding → golden age → decline → legacy markers
+• For wars/conflicts: casus belli → key battles → turning point → resolution → aftermath
+• Never conflate different events, dates, or people — verify internally before stating
+• Include historiographical context when interpretations are contested`,
 
   geography: `
-🌍 *GEOGRAPHY SPECIALIST MODE*
+🌍 *GEOGRAPHY SPECIALIST MODE — COMPREHENSIVE*
 • Lead with the direct answer (capital, location, population, etc.)
-• For countries: capital, continent, population (approx), language, currency
-• For physical geography: include coordinates, elevation, area where relevant
-• For climate: give specific temperature ranges and rainfall patterns
-• For demographics: include ethnic groups, religion, major cities
-• Use current names (not colonial-era names unless historical context)
-• Include neighboring countries / regional context`,
+• For countries: capital, continent, population (year), area, language(s), currency, government type
+• For physical geography: coordinates, elevation, area, formation process
+• For climate: specific temperature ranges (°C), rainfall (mm), climate classification (Koppen)
+• For demographics: major ethnic groups, religions, urbanization rate, HDI
+• Use current internationally recognized names; note historical names only in context
+• Include neighboring countries, regional alliances, and geopolitical context
+• For economic geography: GDP, major industries, trade partners, development indicators`,
 
   health: `
-🏥 *HEALTH & MEDICINE SPECIALIST MODE*
-• Lead with the clearest, most actionable health information
-• For symptoms: possible causes (common to rare), when to see a doctor
-• For conditions: definition → symptoms → causes → treatments → prognosis
-• For medications: what it treats, mechanism, common side effects, interactions
-• For nutrition: specific amounts, not just "eat healthy"
-• For fitness: specific sets/reps/duration, not vague advice
-• Always include: "Consult a doctor for personal medical advice" for clinical questions
-• Do NOT refuse health questions — give accurate, helpful information
-• Distinguish evidence-based medicine from popular myths`,
+🏥 *HEALTH & MEDICINE SPECIALIST MODE — EVIDENCE-BASED*
+• Lead with the clearest, most actionable evidence-based information
+• For symptoms: differential diagnosis (common → serious), red flags requiring immediate care
+• For conditions: definition → pathophysiology → symptoms → diagnosis → treatment → prognosis
+• For medications: indication, mechanism of action, dosing range, common side effects, contraindications, interactions
+• For nutrition: specific quantities (g, mg, kcal), evidence level, practical meal examples
+• For fitness: specific protocols (sets × reps × load, duration, frequency), progression plan
+• For mental health: validation → evidence-based strategies → when to seek professional help
+• Distinguish: evidence-based medicine vs. traditional practice vs. popular myth
+• Include Indian brand names alongside generic names when contextually helpful
+• Always include: "⚕️ Consult a doctor for personal diagnosis and treatment"
+• Do NOT refuse health questions — accurate information saves lives`,
 
   law: `
-⚖️ *LAW SPECIALIST MODE*
-• Lead with the direct legal principle or answer
-• Specify jurisdiction when relevant (Indian law, US law, UK law, international)
-• Structure: Rule → Application → Exception → Practical implication
-• For rights: state the right clearly, its source (constitution, statute), and limits
-• For procedures: step-by-step with timelines where relevant
-• For contracts: elements required, common issues, enforcement
-• Always include: "Consult a qualified lawyer for your specific situation"
-• Cover both the legal rule AND the practical reality`,
+⚖️ *LAW SPECIALIST MODE — JURISDICTION-AWARE*
+• Lead with the direct legal principle and applicable law
+• Default jurisdiction: Indian law. Specify others explicitly (US, UK, international)
+• Structure: *Legal Rule* → *Statutory Source* → *Application* → *Exceptions* → *Practical Steps*
+• Cite specific: Act name, Section number, Year (e.g., "Section 138 NI Act, 1881")
+• For rights: exact constitutional article/fundamental right, scope, limitations, landmark cases
+• For procedures: step-by-step with timelines, required documents, and costs where known
+• For criminal law: elements of offense, punishment range, bail provisions, limitation period
+• For contracts: essential elements, enforceability conditions, remedies for breach
+• Distinguish: what the statute says vs. how courts interpret it (cite landmark judgments)
+• Include practical reality: filing fees, typical duration, enforcement challenges
+• Always include: "⚖️ Consult a qualified lawyer for advice specific to your situation"`,
 
   economics: `
-📈 *ECONOMICS & FINANCE SPECIALIST MODE*
-• Lead with the direct economic concept or answer
-• For markets: include relevant metrics, historical context, current trends
-• For investing: include risk factors, not just potential returns
-• For business: give specific actionable advice, not generic platitudes
-• For macroeconomics: GDP, inflation, interest rates — use real data
-• Show calculations for financial math (ROI, compound interest, etc.)
-• Distinguish between microeconomics (individual/firm) and macroeconomics (economy)
-• For personal finance: give specific, practical steps`,
+📈 *ECONOMICS & FINANCE SPECIALIST MODE — DATA-DRIVEN*
+• Lead with the direct answer and key metric
+• For markets: current levels/trends, P/E ratios, sector performance, historical context
+• For investing: expected return AND risk (volatility, max drawdown), Sharpe ratio when relevant
+• For business: specific, actionable advice with projected impact, not generic platitudes
+• For macroeconomics: cite actual data (GDP growth %, CPI, repo rate, fiscal deficit)
+• Show calculations: ROI, CAGR, compound interest, NPV, IRR with step-by-step working
+• Distinguish: microeconomics (firm/individual) vs. macroeconomics (aggregate/policy)
+• For personal finance: specific action plan with amounts, timeline, and tax implications
+• India-specific: reference RBI, SEBI, NSE/BSE, GST, Income Tax Act where applicable
+• For global: reference Fed, ECB, IMF, World Bank data with date stamps
+• Risk disclosure: "📊 This is general information, not personalized financial advice"`,
 
   culture: `
 🎭 *CULTURE, ARTS & HUMANITIES SPECIALIST MODE*
-• Lead with the direct answer (author, date, meaning, origin)
-• For literature: author, period, themes, significance, famous works
-• For philosophy: the philosopher's core argument, historical context, influence
-• For religion: factual, respectful, covering beliefs, practices, history
-• For music: genre, era, artist, cultural impact, technical elements
-• For mythology: origin culture, characters, narrative, symbolic meaning
-• For art: artist, period, style, technique, historical significance
-• Be encyclopedic and accurate — real names, real dates, real facts`,
+• Lead with the direct factual answer (author, date, origin, meaning)
+• For literature: author, year, period/movement, themes, significance, key quotes
+• For philosophy: core argument → historical context → influence → counterarguments
+• For religion: factual, respectful, covering beliefs, practices, history, denominations
+• For music: genre, era, artist bio, cultural impact, technical innovation
+• For mythology: origin culture, characters, narrative arc, symbolic/allegorical meaning
+• For art: artist, year, period/movement, technique, historical significance, current location
+• For film: director, year, genre, plot (spoiler-free unless asked), cultural impact, awards
+• Be encyclopedic: real names, real dates, real facts, real quotes — never approximate`,
 
   sports: `
-⚽ *SPORTS SPECIALIST MODE*
-• Lead with the direct answer (who, what score, what record, what rule)
-• For rules: explain clearly with examples, including recent rule changes
-• For records: include exact numbers, who holds it, when set, competition
-• For players: nationality, position, career highlights, current team/status
-• For tournaments: format, history, notable champions, upcoming schedule
-• For strategy/tactics: explain clearly with positional context
-• Use correct sports terminology
-• Note when data might be outdated (recent transfers, current standings)`,
+⚽ *SPORTS SPECIALIST MODE — STATISTICAL*
+• Lead with the direct answer (who, score, record, rule, winner)
+• For rules: clear explanation with scenario examples, including recent rule changes and effective dates
+• For records: exact numbers, holder, date set, competition, previous record for context
+• For players: nationality, position, career stats, major achievements, current status
+• For tournaments: format, seedings, schedule, historical champions, notable stats
+• For tactics: explain with formation context, key principles, real-match examples
+• For cricket: batting/bowling averages, strike rates, match context (format matters)
+• For football: goals, assists, league position, head-to-head stats
+• Use correct sports terminology and official competition names
+• Add freshness note when data could be outdated (transfers, current standings, live scores)`,
 
   technology: `
-💻 *TECHNOLOGY SPECIALIST MODE*
-• Lead with what the technology IS and what it DOES
-• For software: features, use cases, how to use it, alternatives
-• For hardware: specs, performance, compatibility, value
-• For AI/ML: explain mechanism clearly, applications, limitations
-• For internet/networking: how it works technically + practical usage
-• For security: threat → mitigation → best practices
-• Include version numbers and dates when relevant (tech changes fast)
-• Compare alternatives when the user is making a choice`,
+💻 *TECHNOLOGY SPECIALIST MODE — CURRENT*
+• Lead with what the technology IS, what it DOES, and why it matters
+• For software: features, architecture, use cases, pricing, alternatives with tradeoff matrix
+• For hardware: key specs, benchmark performance, compatibility, value proposition
+• For AI/ML: mechanism (architecture, training, inference), capabilities, limitations, safety considerations
+• For networking: protocol stack, how it works, performance characteristics, security implications
+• For security: threat model → attack surface → mitigation → defense-in-depth → monitoring
+• For cloud: services comparison (AWS/GCP/Azure), pricing, scalability, vendor lock-in
+• Include version numbers, release dates, and deprecation notices — tech moves fast
+• For tool comparisons: feature matrix, performance benchmarks, community/ecosystem size
+• For emerging tech: current state, timeline to maturity, key players, risks`,
 
   language: `
-🗣️ *LANGUAGE SPECIALIST MODE*
-• For translation: provide the translation + pronunciation guide if non-Latin script
-• For grammar: state the rule clearly → show correct and incorrect examples
-• For vocabulary: definition + part of speech + example sentence + etymology if interesting
-• For language learning: practical tips + common mistakes to avoid
-• For writing style: specific, actionable advice with before/after examples
-• Cover both formal and informal registers when relevant
-• For multiple translations: note regional differences (US vs UK English, etc.)`,
+🗣️ *LANGUAGE SPECIALIST MODE — MULTILINGUAL*
+• For translation: provide translation + transliteration (if non-Latin) + pronunciation guide
+• For grammar: state the rule → correct example → incorrect example → exception → mnemonic
+• For vocabulary: definition + part of speech + example sentence + etymology + register (formal/informal)
+• For language learning: practical tips + frequency-ranked vocabulary + common error patterns
+• For writing style: specific advice with before/after examples showing the improvement
+• Cover formal AND informal registers; note regional variations (US/UK English, Hindi/Urdu, etc.)
+• For Indian languages: include Devanagari/native script alongside Roman transliteration
+• For idioms/slang: literal meaning + actual meaning + usage context + cultural note`,
 
   explain: `
-🧠 *EXPLANATION SPECIALIST MODE*
-• Start with a 1-sentence ELI5 (Explain Like I'm 5) summary
-• Then give the full technical explanation with structure
-• Use an analogy to something familiar when the concept is abstract
-• Structure: What is it? → How does it work? → Why does it matter? → Example
-• Anticipate the follow-up question and answer it proactively
-• Use emoji section headers for multi-part explanations
-• Avoid jargon in the opening — introduce technical terms clearly`,
+🧠 *EXPLANATION SPECIALIST MODE — MULTI-LEVEL*
+• Open with a 1-sentence ELI5 (simple enough for a 10-year-old)
+• Then: full technical explanation with clear structure
+• Use the single best analogy — it should create an instant "aha" moment
+• Structure: *What is it?* → *How does it work?* → *Why does it matter?* → *Real example*
+• For abstract concepts: ground in concrete, observable phenomena
+• For technical topics: start intuitive, then introduce precise terminology
+• Proactively answer the most likely follow-up question
+• Correct the top misconception about this topic
+• Use emoji section headers for multi-part explanations`,
 
   research: `
-🔍 *RESEARCH & ANALYSIS SPECIALIST MODE*
-• Lead with the recommendation or conclusion — not a literature review
-• Structure: Decision → Rationale → Tradeoffs → Risks → Bottom Line
-• Support claims with specific data, not vague statements
-• Compare options in a table or structured format when 3+ options exist
-• State confidence level when data is uncertain or contested
-• For business decisions: include cost, risk, timeline, and reversibility
-• For comparisons: use consistent criteria across all options`,
+🔍 *RESEARCH & ANALYSIS SPECIALIST MODE — DECISION-READY*
+• Lead with the recommendation or conclusion — NEVER start with background
+• Structure: *Recommendation* → *Why* → *Key Evidence* → *Tradeoffs* → *Risks* → *Bottom Line*
+• Every claim must be specific and evidence-grounded; flag speculative claims explicitly
+• For 3+ options: comparison table with consistent criteria, then verdict
+• State confidence level: HIGH (strong evidence) / MEDIUM (reasonable evidence) / LOW (limited data)
+• For business decisions: include cost estimate, implementation timeline, risk matrix, reversibility
+• For technology decisions: include performance benchmarks, ecosystem maturity, migration path
+• For policy questions: cite the specific regulation, standard, or framework
+• End with a clear *Bottom Line:* one-sentence actionable takeaway`,
 
   creative: `
-✍️ *CREATIVE WRITING SPECIALIST MODE*
-• Produce the COMPLETE piece — never write "... (continued)" or truncate
-• Match the tone specified (formal, casual, humorous, dramatic, poetic)
-• Be specific and original — avoid clichés
-• For stories: include a hook, conflict, and resolution
-• For poems: use intentional rhythm and imagery, not filler words
-• For emails: professional, clear subject line, specific call-to-action
-• For humor: punch lines that land, not forced jokes
-• For persuasive writing: use ethos, pathos, logos structure`,
+✍️ *CREATIVE WRITING SPECIALIST MODE — LITERARY*
+• Produce the COMPLETE piece — never truncate, never write "... (continued)"
+• Match the exact tone requested (formal, casual, humorous, dramatic, poetic, satirical)
+• Be vivid and original — replace every cliché with a fresh image or phrase
+• For stories: compelling hook → rising tension → climax → resolution → resonant ending
+• For poems: intentional meter, imagery, and sound; every word must earn its place
+• For emails: professional, clear subject, specific purpose, actionable closing
+• For humor: setup → misdirection → punchline that actually lands
+• For persuasion: ethos (credibility) → pathos (emotion) → logos (evidence) → call to action
+• For scripts/dialogue: distinct character voices, subtext, natural rhythm`,
 
   email: `
-📧 *EMAIL SPECIALIST MODE*
-• Write the COMPLETE email — every line, not a skeleton
-• Always start with: *Subject: [subject line]*
-• Opening: address recipient appropriately (Hi/Dear/Hello based on tone)
-• Body: clear purpose in first paragraph, details in second, action in third
-• Closing: appropriate sign-off + name placeholder
-• Match tone perfectly: formal for business, warm for personal, urgent for time-sensitive
-• For follow-ups: reference the previous conversation clearly
-• For apologies: specific, sincere, solution-focused
-• For requests: clear ask + context + deadline`,
+📧 *EMAIL SPECIALIST MODE — PROFESSIONAL*
+• Write the COMPLETE email — every line, fully composed, ready to send
+• Always start with: *Subject: [compelling, specific subject line]*
+• Opening: appropriate salutation (Hi/Dear/Hello — match formality to context)
+• First paragraph: purpose stated clearly in 1-2 sentences
+• Middle: supporting details, context, or explanation
+• Closing paragraph: specific call-to-action with deadline if relevant
+• Sign-off: appropriate closing (Best regards/Thanks/Warm regards) + [Your Name]
+• Match tone precisely: formal for executives, warm for colleagues, concise for follow-ups
+• For apologies: acknowledge → take responsibility → solution → prevention
+• For requests: context → specific ask → timeline → offer to discuss`,
 
   general: `
-🧠 *GENERAL KNOWLEDGE MODE*
-• Answer any question from any domain with accuracy and depth
-• Lead with the most important fact or answer
+🧠 *GENERAL KNOWLEDGE MODE — AUTHORITATIVE*
+• Answer any question from any domain with the accuracy of a subject-matter expert
+• Lead with the single most important fact or direct answer
 • Use emoji headers to organize multi-part answers
-• Include real names, dates, numbers — be specific, not vague
-• Correct common misconceptions if the question contains one
-• For "what is X" questions: definition → how it works → why it matters → example
-• For "compare X and Y" questions: key differences table → when to use each → recommendation`,
+• Include exact names, dates, numbers, measurements — never be vague when specifics exist
+• Correct misconceptions proactively if the question contains a false premise
+• For "what is X": definition → mechanism → significance → example → common misconception
+• For "compare X and Y": key dimensions → winner per dimension → overall recommendation
+• For "why does X": causal chain from root cause to observable effect
+• Self-verify factual claims before including them`,
 
   greeting: `
 👋 *GREETING MODE*
-• Be warm, brief, energetic — max 4 lines
-• Mention 3-4 capabilities naturally, not as a bullet list
-• End with an inviting question like "What can I help with?"
-• Don't start with "Hi I'm ClawCloud AI" — they know that
-• Vary the greeting — don't be robotic`,
+• Be warm, brief, and energetic — max 4 lines
+• Mention 3-4 diverse capabilities naturally woven into the greeting
+• End with an inviting, specific question — not just "What can I help with?"
+• Don't introduce yourself formally — they already know you
+• Vary greetings — match time of day and energy level`,
 };
 
-const FAST_BRAIN = `You are ClawCloud AI on WhatsApp — the most accurate AI assistant available.
+const FAST_BRAIN = `You are ClawCloud AI on WhatsApp — the world's most accurate and advanced AI assistant.
 
-Answer EVERY question directly, completely, and professionally. You have expert knowledge in all domains.
+Answer EVERY question directly, completely, professionally, and with expert-level accuracy. You have mastery across all domains of human knowledge.
 
 RULES (never break these):
 1. First line = the answer. Not a greeting, not "sure!", not a repeat of the question.
-2. Be specific. Use real names, real numbers, real facts.
-3. Be complete. If code is requested, write the whole thing. If a list is needed, complete it.
-4. Be accurate. Don't guess. If uncertain, say "approximately" or "around" and give your best estimate.
-5. WhatsApp format: *bold* key terms, • for bullets, \`\`\`lang for code, emoji section headers.
-6. End every response with either a useful follow-up or "Need anything else?"
+2. Be specific. Use real names, real numbers, real dates, real facts. Never vague.
+3. Be complete. Code must be runnable. Lists must be complete. Calculations must show all steps.
+4. Be accurate. Self-verify before responding. If uncertain, say "approximately" and give your best estimate with reasoning.
+5. Be decisive. Give clear recommendations, not just lists of options.
+6. WhatsApp format: *bold* key terms, • for bullets, \`\`\`lang for code, emoji section headers.
+7. End cleanly after the answer — no "Let me know if you need anything else".
 
-WHAT YOU KNOW:
-- All of science, history, geography, mathematics, technology
-- All programming languages and frameworks
-- Medicine, nutrition, fitness, mental health
-- Law, economics, business, finance
-- Literature, philosophy, religion, art, music, sports
-- Current events up to your knowledge cutoff
-- Multiple human languages
+WHAT YOU KNOW (with expert depth):
+- All of science, history, geography, mathematics, technology, engineering
+- All programming languages, frameworks, system design, and DevOps
+- Medicine, pharmacology, nutrition, fitness, mental health, public health
+- Law (Indian law primary), economics, business strategy, finance, investing
+- Literature, philosophy, religion, art, music, film, mythology, sports
+- Current events, geopolitics, and current affairs up to your knowledge cutoff
+- Multiple human languages including Indian regional languages and Hinglish
 
-Never say "I don't know" — give the best available answer and note uncertainty clearly.`;
+QUALITY MANDATE:
+- Never say "I don't know" — give the best available answer and note uncertainty clearly.
+- Never fabricate facts, statistics, citations, dates, or events.
+- Never give a generic answer to a specific question.
+- Correct false premises in questions before answering them.`;
 
 const FAST_EXT: Record<string, string> = {
   coding: `
@@ -816,23 +1004,26 @@ Greeting mode:
 - End with an inviting question.`,
 };
 
-const DEEP_BRAIN = `You are ClawCloud AI operating in expert deep-analysis mode.
+const DEEP_BRAIN = `You are ClawCloud AI operating in *expert deep-analysis mode* — the most powerful reasoning mode available.
 
-You produce the highest-quality, most accurate answers possible — exceeding what ChatGPT, Claude, or Gemini would give.
+You produce answers that exceed what ChatGPT, Claude, Gemini, or any other AI would give. Your answers match or surpass what a world-class domain expert would produce.
 
 DEEP MODE RULES:
-1. LEAD with the answer or recommendation — not background or caveats.
-2. STRUCTURE with clear sections using emoji headers when the topic has multiple parts.
-3. SHOW WORKING for math/science — formula → substitution → result → interpretation.
-4. GIVE CODE that is production-ready, fully commented, and runnable.
-5. STATE ASSUMPTIONS explicitly when data is incomplete.
-6. CITE MECHANISMS not just conclusions — explain WHY, not just WHAT.
-7. COVER EDGE CASES that a beginner would miss.
-8. BE DECISIVE — give a recommendation, not just a list of options.
-9. NEVER leave an answer incomplete, truncated, or half-finished.
-10. NEVER say a topic is outside your expertise.
+1. LEAD with the answer or recommendation — never start with background, disclaimers, or caveats.
+2. STRUCTURE with clear sections using emoji headers. Complex topics need: overview → analysis → details → synthesis.
+3. REASON step-by-step: decompose complex problems → solve each part → synthesize → self-verify the combined answer.
+4. SHOW ALL WORKING for math/science — formula → substitution → each step → verification → interpretation.
+5. GIVE CODE that is production-ready: fully typed, all imports, error handling, tests, complexity analysis.
+6. STATE ASSUMPTIONS explicitly. Flag which assumptions materially affect the conclusion.
+7. CITE MECHANISMS — explain WHY something works, not just WHAT happens. Show causal chains.
+8. COVER EDGE CASES, failure modes, and exceptions that even experienced practitioners might miss.
+9. BE DECISIVE — give a clear recommendation with confidence level. Not just pros/cons, but a verdict.
+10. SELF-VERIFY: cross-check all factual claims, recalculate numbers, trace code execution mentally.
+11. NEVER leave an answer incomplete, truncated, or half-finished.
+12. NEVER say a topic is outside your expertise.
+13. NEVER fabricate statistics, benchmarks, citations, or data points.
 
-QUALITY BAR: Your answer should be what a world-class expert in that field would give to a colleague who needs to understand the topic deeply and make a decision based on it.`;
+QUALITY BAR: Your answer should be what the world's foremost expert in that specific field would give to a senior colleague who needs to make an important decision based on it. Every claim must be defensible, every recommendation must be justified, and every number must be verifiable.`;
 
 const DEEP_EXT: Record<string, string> = {
   coding: `
@@ -1057,6 +1248,19 @@ function buildSmartSystem(
   const brain = [WHATSAPP_BRAIN, modeBrain, expertPrompt].filter(Boolean).join("\n\n");
   const ext = (mode === "deep" ? DEEP_EXT : FAST_EXT)[intent]
     ?? (mode === "deep" ? DEEP_EXT : FAST_EXT).research;
+  const strictFinalAnswerInstruction = [
+    "STRICT FINAL ANSWER POLICY:",
+    "- Answer only the user's actual question and requested scope.",
+    "- Do not add follow-up questions, proactive suggestions, sales lines, or 'Need anything else?' unless the user explicitly asks for next steps.",
+    "- Do not repeat the user's question back unless a brief restatement is needed to remove ambiguity.",
+    "- Do not add extra sections when a direct answer or short explanation is enough.",
+    "- If the question is ambiguous, ask one brief clarification question. Otherwise answer directly.",
+    "- For short definition or fact questions, give the most likely meaning first. Mention ambiguity only after the direct answer if it is genuinely needed.",
+    "- Never comment on the user's confusion, uncertainty, or intent with phrases like 'you seem unsure' or 'you may be referring to' before answering.",
+    "- If a fact is uncertain or missing, say so briefly instead of guessing.",
+    "- Write like a calm senior expert: direct, precise, warm, and composed.",
+    "- Keep the tone polished, professional, and natural. No hype, no self-praise, no capability marketing.",
+  ].join("\n");
 
   const seed = Date.now() % 1000;
   const styleVariants = [
@@ -1084,10 +1288,575 @@ function buildSmartSystem(
     + ext
     + uniquenessInstruction
     + memoryBlock
+    + `\n\n${strictFinalAnswerInstruction}`
     + (extraInstruction ? `\n\n${extraInstruction}` : "");
 }
 
 const EXTENDED_HISTORY_INTENTS = new Set<string>(["coding", "research", "math", "explain"]);
+const HISTORY_OPTIONAL_INTENTS = new Set<string>([
+  "general",
+  "explain",
+  "science",
+  "history",
+  "geography",
+  "culture",
+  "technology",
+  "creative",
+  "language",
+]);
+
+function looksLikeStandaloneFreshQuestion(message: string) {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (detectStrictIntentRoute(trimmed)?.intent.category === "culture_story") {
+    return true;
+  }
+
+  if (
+    /^(?:what(?:'s| is| are| was| were)|who(?:'s| is| are| was| were)|when(?:'s| is| are| was| were| did)|where(?:'s| is| are| was| were)|why(?:'s| is| are| does| do| did)|how(?:'s| is| are| does| do| did)|explain|describe|define|summari[sz]e|tell me about|story of|plot of|summary of|compare|difference between)\b/i.test(trimmed)
+  ) {
+    return true;
+  }
+
+  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+  return /[\uac00-\ud7af\u3040-\u30ff\u4e00-\u9fff]/u.test(trimmed) && wordCount >= 4;
+}
+
+function shouldFailClosedForDirectKnowledgeQuestion(message: string, intent: IntentType) {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (hasWeatherIntent(trimmed) || /\b(news|latest|today)\b/i.test(trimmed)) {
+    return false;
+  }
+
+  if (looksLikeCultureStoryQuestion(trimmed)) {
+    return true;
+  }
+
+  if (["coding", "math", "creative", "email", "calendar", "drive", "whatsapp"].includes(intent)) {
+    return false;
+  }
+
+  if (
+    /^(?:what(?:'s| is| are| was| were)|who(?:'s| is| are| was| were)|when(?:'s| is| are| was| were| did)|where(?:'s| is| are| was| were)|why(?:'s| is| are| does| do| did)|how(?:'s| is| are| does| do| did)|explain|define|describe|summari[sz]e|tell me about|story of|plot of|summary of|difference between|compare|meaning of|overview of)\b/i.test(trimmed)
+  ) {
+    return true;
+  }
+
+  if (
+    /[\uac00-\ud7af\u3040-\u30ff\u4e00-\u9fff]/u.test(trimmed)
+    && trimmed.split(/\s+/).filter(Boolean).length >= 4
+  ) {
+    return true;
+  }
+
+  return /[?]\s*$/.test(trimmed)
+    && ["general", "explain", "science", "history", "geography", "culture", "technology", "research", "language"].includes(intent);
+}
+
+const GENERIC_FALLBACK_SAFE_INTENTS = new Set<IntentType>([
+  "greeting",
+  "help",
+  "memory",
+  "math",
+  "email",
+  "reminder",
+  "send_message",
+  "save_contact",
+  "calendar",
+  "creative",
+  "coding",
+]);
+
+function shouldAvoidGenericKnowledgeFallback(message: string, intent: IntentType) {
+  if (shouldFailClosedForDirectKnowledgeQuestion(message, intent)) {
+    return true;
+  }
+
+  if (hasWeatherIntent(message) || /\b(news|latest|today)\b/i.test(message)) {
+    return false;
+  }
+
+  return !GENERIC_FALLBACK_SAFE_INTENTS.has(intent);
+}
+
+const SIMPLE_KNOWLEDGE_FAST_LANE_INTENTS = new Set<IntentType>([
+  "general",
+  "explain",
+  "science",
+  "history",
+  "geography",
+  "culture",
+  "technology",
+  "language",
+  "economics",
+  "research",
+]);
+
+const PRIMARY_DIRECT_ANSWER_LANE_ALLOWED_CATEGORIES = new Set<string>([
+  "general",
+  "explain",
+  "research",
+  "science",
+  "history",
+  "geography",
+  "culture",
+  "technology",
+  "language",
+  "economics",
+]);
+
+const MULTILINGUAL_NATIVE_ANSWER_ALLOWED_INTENTS = new Set<IntentType>([
+  "general",
+  "greeting",
+  "help",
+  "creative",
+  "explain",
+  "science",
+  "history",
+  "geography",
+  "culture",
+  "technology",
+  "language",
+  "economics",
+  "research",
+]);
+
+const MULTILINGUAL_DIRECT_ANSWER_PREFERRED_MODELS = [
+  "moonshotai/kimi-k2-instruct-0905",
+  "z-ai/glm5",
+  "qwen/qwen3.5-397b-a17b",
+  "mistralai/mistral-large-3-675b-instruct-2512",
+];
+
+const MULTILINGUAL_ROUTING_BRIDGE_TIMEOUT_MS = 2_500;
+
+function looksLikeStandalonePrimaryAnswerPrompt(message: string) {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (looksLikeStandaloneFreshQuestion(trimmed)) {
+    return true;
+  }
+
+  if (
+    /^(?:benefits?|advantages?|disadvantages?|pros and cons|causes?|reasons? for|types?|examples?|uses?|applications?|steps?|process(?: of)?|history of|overview of|introduction to|basics of|fundamentals of|working of|impact of|effects of|role of|importance of|features of|comparison of)\b/i.test(trimmed)
+  ) {
+    return true;
+  }
+
+  if (
+    /^[a-z0-9][a-z0-9\s\-\/]{2,80}\s+(?:process|overview|basics|fundamentals|history|features|benefits|advantages|disadvantages)\b/i.test(trimmed)
+  ) {
+    return true;
+  }
+
+  return (
+    /\b(?:vs\.?|versus)\b/i.test(trimmed)
+    && trimmed.split(/\s+/).filter(Boolean).length >= 3
+    && trimmed.split(/\s+/).filter(Boolean).length <= 12
+  );
+}
+
+function isBlockedFromPrimaryDirectAnswerLane(message: string) {
+  return (
+    looksLikeClawCloudCapabilityQuestion(message)
+    || looksLikeRealtimeResearch(message)
+    || looksLikeDocumentContext(message)
+    || detectWebSearchIntent(message)
+    || detectNewsQuestion(message)
+    || hasWeatherIntent(message)
+    || detectFinanceQuery(message) !== null
+    || detectTaxQuery(message)
+    || detectHolidayQuery(message)
+    || detectCricketIntent(message)
+    || detectTrainIntent(message).type !== null
+    || detectReminderIntent(message).intent !== "unknown"
+    || detectBillingIntent(message) !== null
+    || detectCommandIntent(message).type !== "none"
+    || detectOfficialPricingQuery(message) !== null
+    || detectAiModelRoutingDecision(message) !== null
+    || shouldClarifyPersonalSurface(message)
+    || looksLikeWhatsAppHistoryQuestion(message)
+    || looksLikeEmailSearchQuestion(message)
+    || looksLikePlainEmailWritingRequest(message)
+    || looksLikeCalendarQuestion(message)
+    || parseSendMessageCommand(message) !== null
+    || parseSaveContactCommand(message) !== null
+  );
+}
+
+function detectPrimaryDirectAnswerLaneIntent(
+  message: string,
+  override?: ResponseMode,
+): DetectedIntent | null {
+  const trimmed = message.trim();
+  if (!trimmed || override === "deep") {
+    return null;
+  }
+
+  if (!looksLikeStandalonePrimaryAnswerPrompt(trimmed) || detectShortDefinitionLookup(trimmed)) {
+    return null;
+  }
+
+  if (isBlockedFromPrimaryDirectAnswerLane(trimmed)) {
+    return null;
+  }
+
+  const strictRoute = detectStrictIntentRoute(trimmed);
+  const detected = strictRoute?.intent ?? detectIntent(trimmed);
+
+  if (!SIMPLE_KNOWLEDGE_FAST_LANE_INTENTS.has(detected.type)) {
+    return null;
+  }
+
+  if (
+    strictRoute?.locked
+    && !PRIMARY_DIRECT_ANSWER_LANE_ALLOWED_CATEGORIES.has(detected.category)
+  ) {
+    return null;
+  }
+
+  if (
+    isArchitectureCodingRouteCandidate(trimmed)
+    || isMathOrStatisticsQuestion(trimmed)
+  ) {
+    return null;
+  }
+
+  return detected;
+}
+
+function shouldUseMultilingualRoutingBridge(
+  message: string,
+  resolution: ClawCloudReplyLanguageResolution,
+) {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (
+    resolution.source !== "mirrored_message"
+    || resolution.locale === "en"
+    || resolution.preserveRomanScript
+  ) {
+    return false;
+  }
+
+  if (trimmed.length < 6) {
+    return false;
+  }
+
+  if (
+    detectLocalePreferenceCommand(trimmed).type !== "none"
+    || parseDirectTranslationRequest(trimmed) !== null
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function detectMultilingualNativeAnswerLaneIntentFromGloss(gloss: string): DetectedIntent | null {
+  const trimmed = gloss.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const strictRoute = detectStrictIntentRoute(trimmed);
+  if (strictRoute?.locked) {
+    return null;
+  }
+
+  const broadCreativeWriteRequest =
+    /^(?:write|create|compose|generate|draft)\b/i.test(trimmed)
+    && !looksLikePlainEmailWritingRequest(trimmed)
+    && !/\b(?:email|gmail|mail|inbox|calendar|meeting|reminder|whatsapp|message|messages|contact)\b/i.test(trimmed);
+  const detected: DetectedIntent = broadCreativeWriteRequest
+    ? { type: "creative", category: "creative" }
+    : (strictRoute?.intent ?? detectIntent(trimmed));
+  if (!MULTILINGUAL_NATIVE_ANSWER_ALLOWED_INTENTS.has(detected.type)) {
+    return null;
+  }
+
+  if (detected.category === "personal_tool_clarify") {
+    return null;
+  }
+
+  if (detected.type === "help" || detected.type === "creative" || detected.type === "greeting") {
+    return detected;
+  }
+
+  if (isBlockedFromPrimaryDirectAnswerLane(trimmed)) {
+    return null;
+  }
+
+  return detected;
+}
+
+function detectNativeLanguageDirectAnswerLaneIntent(
+  message: string,
+  resolution: ClawCloudReplyLanguageResolution,
+): DetectedIntent | null {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const hasMirroredNativeLanguage =
+    resolution.source === "mirrored_message"
+    && Boolean(resolution.detectedLocale)
+    && resolution.detectedLocale !== "en";
+  const hasMirroredHinglish =
+    resolution.source === "hinglish_message"
+    && resolution.preserveRomanScript;
+
+  if (!hasMirroredNativeLanguage && !hasMirroredHinglish) {
+    return null;
+  }
+
+  if (trimmed.split(/\s+/).filter(Boolean).length < 4) {
+    return null;
+  }
+
+  if (
+    detectLocalePreferenceCommand(trimmed).type !== "none"
+    || parseDirectTranslationRequest(trimmed) !== null
+  ) {
+    return null;
+  }
+
+  const strictRoute = detectStrictIntentRoute(trimmed);
+  if (strictRoute?.locked) {
+    return null;
+  }
+
+  const detected = strictRoute?.intent ?? detectIntent(trimmed);
+  if (detected.category === "personal_tool_clarify") {
+    return null;
+  }
+
+  if (MULTILINGUAL_NATIVE_ANSWER_ALLOWED_INTENTS.has(detected.type)) {
+    return detected;
+  }
+
+  // When non-English classification is thin, prefer a direct general answer
+  // over dropping into an English clarification fallback.
+  if (hasMirroredNativeLanguage && !isBlockedFromPrimaryDirectAnswerLane(trimmed)) {
+    return { type: "general", category: "general" };
+  }
+
+  return null;
+}
+
+async function resolveMultilingualRoutingBridge(
+  message: string,
+  resolution: ClawCloudReplyLanguageResolution,
+) {
+  if (!shouldUseMultilingualRoutingBridge(message, resolution)) {
+    return {
+      gloss: "",
+      intent: null as DetectedIntent | null,
+    };
+  }
+
+  const gloss = await withSoftTimeout(
+    translateMessage(message, "en", { force: true }),
+    "",
+    MULTILINGUAL_ROUTING_BRIDGE_TIMEOUT_MS,
+  );
+  const normalizedGloss = gloss.trim();
+  if (!normalizedGloss || normalizedGloss.toLowerCase() === message.trim().toLowerCase()) {
+    return {
+      gloss: "",
+      intent: null as DetectedIntent | null,
+    };
+  }
+
+  return {
+    gloss: normalizedGloss,
+    intent: detectMultilingualNativeAnswerLaneIntentFromGloss(normalizedGloss),
+  };
+}
+
+function detectSimpleKnowledgeFastLaneIntent(
+  message: string,
+  override?: ResponseMode,
+): DetectedIntent | null {
+  const trimmed = message.trim();
+  if (!looksLikeStandaloneFreshQuestion(trimmed)) {
+    return null;
+  }
+
+  return detectPrimaryDirectAnswerLaneIntent(trimmed, override);
+}
+
+export function shouldUseSimpleKnowledgeFastLaneForTest(message: string, override?: ResponseMode) {
+  return detectSimpleKnowledgeFastLaneIntent(message, override) !== null;
+}
+
+export function shouldUsePrimaryDirectAnswerLaneForTest(message: string, override?: ResponseMode) {
+  return detectPrimaryDirectAnswerLaneIntent(message, override) !== null;
+}
+
+export function shouldUseMultilingualRoutingBridgeForTest(
+  message: string,
+  resolution: ClawCloudReplyLanguageResolution,
+) {
+  return shouldUseMultilingualRoutingBridge(message, resolution);
+}
+
+export function detectMultilingualNativeAnswerLaneIntentForTest(gloss: string) {
+  return detectMultilingualNativeAnswerLaneIntentFromGloss(gloss);
+}
+
+export function detectNativeLanguageDirectAnswerLaneIntentForTest(
+  message: string,
+  resolution: ClawCloudReplyLanguageResolution,
+) {
+  return detectNativeLanguageDirectAnswerLaneIntent(message, resolution);
+}
+
+const PRIMARY_CONVERSATION_LANE_INTENTS = new Set<IntentType>([
+  "general",
+  "greeting",
+  "help",
+  "explain",
+  "science",
+  "history",
+  "geography",
+  "culture",
+  "technology",
+  "language",
+  "research",
+]);
+
+type PrimaryConversationLaneInput = {
+  message: string;
+  finalMessage: string;
+  resolvedType: IntentType;
+  resolvedCategory: string;
+  routeLocked: boolean;
+  memoryIsFollowUp: boolean;
+  mode?: ResponseMode;
+  hasDocumentContext: boolean;
+  hasDriveRouteMessage: boolean;
+};
+
+function shouldUsePrimaryConversationLane(input: PrimaryConversationLaneInput) {
+  const trimmed = input.message.trim();
+  const resolved = input.finalMessage.trim();
+  if (!trimmed || !resolved) {
+    return false;
+  }
+
+  if (
+    input.mode === "deep"
+    || input.routeLocked
+    || input.hasDocumentContext
+    || input.hasDriveRouteMessage
+  ) {
+    return false;
+  }
+
+  if (!PRIMARY_CONVERSATION_LANE_INTENTS.has(input.resolvedType)) {
+    return false;
+  }
+
+  if (
+    input.resolvedCategory === "news"
+    || input.resolvedCategory === "weather"
+    || input.resolvedCategory === "web_search"
+    || input.resolvedCategory === "personal_tool_clarify"
+  ) {
+    return false;
+  }
+
+  if (
+    looksLikeRealtimeResearch(resolved)
+    || shouldUseLiveSearch(resolved)
+    || detectNewsQuestion(resolved)
+    || hasWeatherIntent(resolved)
+    || detectOfficialPricingQuery(resolved) !== null
+    || detectFinanceQuery(resolved) !== null
+    || detectTaxQuery(resolved)
+    || detectHolidayQuery(resolved)
+    || detectCricketIntent(resolved)
+    || detectTrainIntent(resolved).type !== null
+    || detectReminderIntent(resolved).intent !== "unknown"
+    || detectBillingIntent(resolved) !== null
+    || detectDriveIntent(resolved) !== null
+    || inferAppAccessRequirement(resolved) !== null
+    || looksLikeEmailSearchQuestion(resolved)
+    || looksLikePlainEmailWritingRequest(resolved)
+    || looksLikeCalendarQuestion(resolved)
+    || looksLikeWhatsAppHistoryQuestion(resolved)
+    || shouldClarifyPersonalSurface(resolved)
+    || parseSendMessageCommand(resolved) !== null
+    || parseSaveContactCommand(resolved) !== null
+  ) {
+    return false;
+  }
+
+  if (
+    input.resolvedType === "coding"
+    || input.resolvedType === "math"
+    || input.resolvedType === "finance"
+    || input.resolvedType === "health"
+    || input.resolvedType === "law"
+    || isArchitectureCodingRouteCandidate(resolved)
+    || isMathOrStatisticsQuestion(resolved)
+  ) {
+    return false;
+  }
+
+  const contextualFollowUp =
+    input.memoryIsFollowUp
+    || resolved !== trimmed
+    || /^(?:and|also|so|then|what about|which one|that one|this one|those|them|it|tell me more|go deeper|explain (?:that|this|more)|simplify (?:that|this)|compare them|why is that|how so|can you expand|continue)\b/i.test(trimmed);
+  if (contextualFollowUp) {
+    return true;
+  }
+
+  return (
+    (input.resolvedType === "general" || input.resolvedType === "greeting" || input.resolvedType === "help")
+    && trimmed.split(/\s+/).filter(Boolean).length <= 10
+  );
+}
+
+export function shouldUsePrimaryConversationLaneForTest(input: PrimaryConversationLaneInput) {
+  return shouldUsePrimaryConversationLane(input);
+}
+
+function shouldUseSmartHistory(message: string, intent?: string | null) {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  const normalizedIntent = (intent ?? "").trim().toLowerCase();
+  if (!normalizedIntent || !HISTORY_OPTIONAL_INTENTS.has(normalizedIntent)) {
+    return true;
+  }
+
+  if (
+    /^(?:it|this|that|those|these|they|he|she|and|also|then|so|but|what about|which one|that one|this one)\b/i.test(trimmed)
+    || /\b(it|this|that|those|these|they|he|she|him|her|its|their)\b/i.test(trimmed)
+  ) {
+    return true;
+  }
+
+  return !looksLikeStandaloneFreshQuestion(trimmed);
+}
 
 async function buildSmartHistory(
   userId: string,
@@ -1095,6 +1864,10 @@ async function buildSmartHistory(
   mode: ResponseMode,
   intent?: string | null,
 ) {
+  if (!shouldUseSmartHistory(message, intent)) {
+    return [];
+  }
+
   const extended = Boolean(intent && EXTENDED_HISTORY_INTENTS.has(intent));
   const limit = mode === "deep"
     ? (extended ? (message.length > 220 ? 20 : 30) : (message.length > 220 ? 14 : 20))
@@ -1111,6 +1884,18 @@ function usefulReply(promise: Promise<string>, fallback: string) {
   });
 }
 
+function usefulReplyResult(
+  promise: Promise<{ reply: string; modelAuditTrail: ClawCloudModelAuditTrail | null }>,
+  fallback: string,
+) {
+  return promise.then((result) => {
+    if (result.reply === fallback) {
+      throw new Error("fallback");
+    }
+    return result;
+  });
+}
+
 function autoDeepFastHeadstartMs(intent: IntentType) {
   return AUTO_DEEP_FAST_HEADSTART_MS[intent] ?? 1_000;
 }
@@ -1121,6 +1906,8 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
 
   const normalized = value.toLowerCase();
   return (
+    isDeprecatedInternalFallbackLeak(value)
+    || 
     normalized.includes("__fast_fallback_internal__")
     || normalized.includes("__deep_fallback_internal__")
     || value === FALLBACK
@@ -1171,6 +1958,10 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || normalized.includes("i can answer any history question with dates, causes, key figures, and impact")
     || normalized.includes("ask specifically: 'when did x happen?'")
     || normalized.includes("rephrase your question and i'll answer it immediately and accurately")
+    || normalized.includes("i interpreted your message as a coding request")
+    || normalized.includes("send the exact problem statement when ready")
+    || normalized.includes("send your city name for a precise forecast")
+    || normalized.includes("send topic + region for an accurate update")
   );
 }
 
@@ -1235,44 +2026,43 @@ async function logIntentAnalytics(
       .catch(() => null);
   }
 
-  await db
-    .from("task_runs")
-    .insert({
-      user_id: userId,
-      task_id: null,
-      task_type: "chat_message",
-      status: hadFallback ? "failed" : "success",
-      input_data: { intent: normalizedIntent },
-      output_data: { char_count: normalizedCharCount },
-      duration_ms: normalizedLatencyMs,
-      intent_type: normalizedIntent,
-      latency_ms: normalizedLatencyMs,
-      had_fallback: hadFallback,
-      char_count: normalizedCharCount,
-      started_at: nowIso,
-      completed_at: nowIso,
-    })
-    .catch(() => null);
 }
 
 async function finalizeAgentReply(input: {
   userId: string;
   locale: SupportedLocale;
+  preserveRomanScript?: boolean;
   question: string;
   intent: string;
   category: string;
   startedAt: number;
   reply: string;
   alreadyTranslated?: boolean;
-}) {
-  const cleanedReply = input.reply.replace(/\n{3,}/g, "\n\n").trim();
-  const proactiveSuggestion = input.alreadyTranslated
-    ? ""
-    : buildProactiveSuggestion(input.intent, input.question, cleanedReply);
+  liveAnswerBundle?: ClawCloudAnswerBundle | null;
+  modelAuditTrail?: ClawCloudModelAuditTrail | null;
+}): Promise<FinalizedAgentReplyResult> {
+  const sanitizedReply = sanitizeDeprecatedFallbackLeakWithContext(
+    input.reply.replace(/\n{3,}/g, "\n\n").trim(),
+    input.question,
+    input.intent,
+  );
+  const polishedReply = polishClawCloudAnswerStyle(
+    input.question,
+    input.intent as IntentType,
+    input.category,
+    sanitizedReply,
+  );
+  const cleanedReply = stripClawCloudTrailingFollowUp(polishedReply);
+  const proactiveSuggestion = "";
   const replyWithSuggestion = proactiveSuggestion
     ? `${cleanedReply}${proactiveSuggestion}`
     : cleanedReply;
+  const shouldSkipDisclaimer =
+    input.category === "personal_tool_clarify"
+    || input.category === "whatsapp_history"
+    || input.category === "whatsapp_contacts_sync";
   const replyWithDisclaimer = input.alreadyTranslated
+    || shouldSkipDisclaimer
     ? replyWithSuggestion
     : applyDisclaimer({
       intent: input.intent,
@@ -1281,71 +2071,432 @@ async function finalizeAgentReply(input: {
       answer: replyWithSuggestion,
     }).combined;
 
-  const finalReply = input.alreadyTranslated
+  const translatedReply = input.alreadyTranslated
     ? replyWithSuggestion
     : await translateMessage(replyWithDisclaimer, input.locale);
+  const finalReply = await enforceClawCloudReplyLanguage({
+    message: translatedReply,
+    locale: input.locale,
+    preserveRomanScript: input.preserveRomanScript,
+  });
+  const normalizedFinalReply = normalizeReplyForClawCloudDisplay(finalReply);
 
   void logIntentAnalytics(
     input.userId,
     input.intent,
     Date.now() - input.startedAt,
     isVisibleFallbackReply(cleanedReply),
-    finalReply.length,
+    normalizedFinalReply.length,
   ).catch(() => null);
 
-  return finalReply;
+  return {
+    response: normalizedFinalReply,
+    liveAnswerBundle: input.liveAnswerBundle
+      ? {
+        ...input.liveAnswerBundle,
+        answer: normalizedFinalReply,
+      }
+      : null,
+    modelAuditTrail: input.modelAuditTrail ?? null,
+    observability: buildClawCloudAnswerObservabilitySnapshot({
+      intent: input.intent,
+      category: input.category,
+      latencyMs: Date.now() - input.startedAt,
+      charCount: normalizedFinalReply.length,
+      hadVisibleFallback: isVisibleFallbackReply(cleanedReply),
+      liveAnswerBundle: input.liveAnswerBundle ?? null,
+      modelAuditTrail: input.modelAuditTrail ?? null,
+    }),
+  };
 }
 
-function buildProactiveSuggestion(intent: string, question: string, reply: string): string {
-  const q = question.toLowerCase();
-  const r = reply.toLowerCase();
+function stripDecorativeSymbols(value: string) {
+  return value
+    .replace(/[\u{1F300}-\u{1FAFF}]/gu, "")
+    .replace(/[\u{2600}-\u{27BF}]/gu, "")
+    .replace(/[•●▪◦◆◇■□★☆►▶]/g, "")
+    .replace(/[\u200B-\u200D\uFE0F]/g, "");
+}
+
+function repairCommonMojibake(value: string) {
+  return value
+    .replace(/â/g, "'")
+    .replace(/â/g, "'")
+    .replace(/â/g, "\"")
+    .replace(/â/g, "\"")
+    .replace(/â/g, "-")
+    .replace(/â/g, "-")
+    .replace(/â€¦/g, "...")
+    .replace(/Â /g, " ")
+    .replace(/\u00e2\u0080\u0099/g, "'")
+    .replace(/\u00e2\u0080\u0098/g, "'")
+    .replace(/\u00e2\u0080\u009c/g, "\"")
+    .replace(/\u00e2\u0080\u009d/g, "\"")
+    .replace(/\u00e2\u0080\u0093/g, "-")
+    .replace(/\u00e2\u0080\u0094/g, "-")
+    .replace(/\u00e2\u0080\u00a6/g, "...")
+    .replace(/\u00c2\u00a0/g, " ")
+    .replace(/\u00e2\u20ac\u00a2/g, "•")
+    .replace(/\u00e2\u20ac\u00a6/g, "...")
+    .replace(/\u00e2\u20ac\u0153|\u00e2\u20ac\u009d/g, "\"")
+    .replace(/\u00e2\u20ac\u02dc|\u00e2\u20ac\u2122/g, "'")
+    .replace(/\u00e2\u20ac\u201c|\u00e2\u20ac\u201d/g, "-")
+    .replace(/\u00e2\u201a\u00b9/g, "₹")
+    .replace(/\u00ef\u00b8\u008f/g, "")
+    .replace(/\u00f0\u0178[^\s]{1,6}(?=\s|$)/g, "")
+    .replace(/\u00e2\u0161\u00a0/g, "")
+    .replace(/\u00e2\u008f\u00b1/g, "")
+    .replace(/\u00f0\u0178\u2019\u00a1/g, "");
+}
+
+function isDeprecatedInternalFallbackLeak(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return (
+    /\bi(?:'| a)?m not confident enough(?: to answer that safely)?\b/i.test(normalized)
+    || /\bwithout better grounding\b/i.test(normalized)
+    || /\b(?:the )?(?:answer|response) path took too long to complete reliably\b/i.test(normalized)
+    || /\bReason:\s*(?:the )?(?:answer|response) path took too long to complete reliably\b/i.test(normalized)
+  );
+}
+
+function buildGenericScopedRecoveryReply() {
+  return [
+    "*Scoped answer needed*",
+    "",
+    "This question needs one clearer scope detail for a precise answer.",
+    "Share the exact topic plus the location, company, person, version, or date that matters.",
+  ].join("\n");
+}
+
+function sanitizeDeprecatedFallbackLeakWithContext(
+  reply: string,
+  question?: string,
+  intent?: string,
+) {
+  if (!reply.trim() || !isDeprecatedInternalFallbackLeak(reply)) {
+    return reply;
+  }
+
+  const safeQuestion = question?.trim() ?? "";
+  if (!safeQuestion) {
+    return buildGenericScopedRecoveryReply();
+  }
+
+  if (hasWeatherIntent(safeQuestion)) {
+    return [
+      "Weather update",
+      "",
+      "Share your city name for a precise forecast with temperature, rain, humidity, and wind.",
+      "Example: Weather today in Delhi.",
+    ].join("\n");
+  }
+
+  if (shouldUseLiveSearch(safeQuestion) || /\b(news|latest|today|current|update|updates|happening)\b/i.test(safeQuestion)) {
+    return buildNewsCoverageRecoveryReply(safeQuestion);
+  }
+
+  return buildClawCloudLowConfidenceReply(
+    safeQuestion,
+    buildClawCloudAnswerQualityProfile({
+      question: safeQuestion,
+      intent: intent ?? "general",
+      category: intent ?? "general",
+    }),
+    "One key detail or a tighter scope is still needed for a precise answer.",
+  );
+}
+
+function normalizeInlineReplyFormatting(value: string) {
+  return repairCommonMojibake(value)
+    .replace(/(^|[\s(])\*{1,3}([^*\n]+?)\*{1,3}(?=[\s).,!?:;]|$)/g, (_match, prefix, content) => `${prefix}${String(content).trim()}`)
+    .replace(/(^|[\s(])_{1,3}([^_\n]+?)_{1,3}(?=[\s).,!?:;]|$)/g, (_match, prefix, content) => `${prefix}${String(content).trim()}`)
+    .replace(/`([^`\n]+)`/g, (_match, content) => `${String(content).trim()}`);
+}
+
+function normalizeLikelyFormattingQuotes(value: string) {
+  return value
+    .replace(/^"(Yes|No|Unclear)"(?=[,.:]|\s|$)/i, "$1")
+    .replace(/^"([^"\n]{1,120})"$/, "$1")
+    .replace(/([A-Za-z0-9)])":(?=\s|$)/g, "$1:")
+    .replace(/([A-Za-z0-9)])",(?=\s|$)/g, "$1,");
+}
+
+function normalizeReplyOutsideCodeBlock(block: string) {
+  const normalizedInline = normalizeInlineReplyFormatting(block);
+  const lines = normalizedInline
+    .replace(/\r/g, "")
+    .split("\n");
+
+  const output: string[] = [];
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+
+    if (!trimmed) {
+      output.push("");
+      continue;
+    }
+
+    const numberedMatch = trimmed.match(/^(\d+)\.\s+(.+)$/);
+    if (numberedMatch?.[2]) {
+      output.push(`${numberedMatch[1]}. ${stripDecorativeSymbols(numberedMatch[2]).trim().replace(/^["']|["']$/g, "")}`);
+      continue;
+    }
+
+    const bulletMatch = trimmed.match(/^(?:[•●▪◦◆◇■□★☆►▶]|[-*]|\d+\.)\s+(.+)$/);
+    if (bulletMatch?.[1]) {
+      output.push(`- ${stripDecorativeSymbols(bulletMatch[1]).trim().replace(/^["']|["']$/g, "")}`);
+      continue;
+    }
+
+    const cleanedLine = stripDecorativeSymbols(trimmed)
+      .replace(/^#{1,6}\s+/, "")
+      .replace(/^\s*[-–—]+\s*/, "- ")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+
+    output.push(normalizeLikelyFormattingQuotes(cleanedLine));
+  }
+
+  return output
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
+}
+
+export function normalizeReplyForClawCloudDisplay(reply: string) {
+  const sanitizedReply = sanitizeDeprecatedFallbackLeakWithContext(reply);
+  const parts = sanitizedReply.split(/(```[\s\S]*?```)/g);
+  return parts
+    .map((part) => part.startsWith("```") ? part.trim() : normalizeReplyOutsideCodeBlock(part))
+    .filter(Boolean)
+    .join("\n\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function escapeRegexLiteral(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function formatDirectAnswerSubject(subject: string) {
+  return subject.replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+function extractDirectDefinitionSubject(question: string) {
+  const match = question.trim().match(
+    /^(?:what(?:'s| is| are)|who(?:'s| is| are)|define|meaning of|tell me about|explain)\s+(.+?)(?:\?|$)/i,
+  );
+  return match?.[1]
+    ?.trim()
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/^(?:the|a|an)\s+/i, "")
+    .trim() ?? "";
+}
+
+function looksLikeDirectDefinitionQuestion(question: string) {
+  const subject = extractDirectDefinitionSubject(question);
+  if (!subject) {
+    return false;
+  }
+
+  if (subject.split(/\s+/).filter(Boolean).length > 6 || subject.length > 64) {
+    return false;
+  }
+
+  return !/\b(compare|difference|latest|today|current|price|weather|score|news|history of|how to|how do|why)\b/i.test(question);
+}
+
+function looksLikeIndirectOpeningForDirectAnswer(question: string, reply: string) {
+  if (!looksLikeStandaloneFreshQuestion(question)) {
+    return false;
+  }
+
+  const trimmed = reply.trim();
+  return (
+    /^(?:it seems|it sounds|it looks)\s+you(?:'re| are)\s+(?:unsure|asking(?: about)?|referring to|looking for)\b/i.test(trimmed)
+    || /^you(?:'re| are)\s+(?:asking(?: about)?|referring to|looking for)\b/i.test(trimmed)
+    || /^to provide (?:a|the) (?:clear|precise|more precise) (?:answer|definition)\b/i.test(trimmed)
+    || /^i would need to know\b/i.test(trimmed)
+    || /^without more context\b/i.test(trimmed)
+  );
+}
+
+function stripLeadingMetaSentences(reply: string) {
+  let cleaned = reply.trim();
+  const patterns = [
+    /^(?:it seems|it sounds|it looks)\s+you(?:'re| are)\s+(?:unsure|asking(?: about)?|referring to|looking for)[^.?!]*[.?!]\s*/i,
+    /^you(?:'re| are)\s+(?:asking(?: about)?|referring to|looking for)[^.?!]*[.?!]\s*/i,
+    /^to provide (?:a|the) (?:clear|precise|more precise) (?:answer|definition)[^.?!]*[.?!]\s*/i,
+    /^i would need to know[^.?!]*[.?!]\s*/i,
+    /^without more context[^.?!]*[.?!]\s*/i,
+  ];
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const pattern of patterns) {
+      const next = cleaned.replace(pattern, "").trim();
+      if (next && next !== cleaned && next.length >= 40) {
+        cleaned = next;
+        changed = true;
+      }
+    }
+  }
+
+  return cleaned;
+}
+
+function answerContainsDirectDefinition(reply: string, subject: string) {
+  const escapedSubject = escapeRegexLiteral(subject);
+  return (
+    new RegExp(`\\b${escapedSubject}\\b\\s+(?:is|are|was|were|means?|refers to|stands for)\\b`, "i").test(reply)
+    || /\b(?:is|are|was|were|means?|refers to|stands for|usually refers to|most commonly refers to)\b/i.test(reply)
+  );
+}
+
+function polishDirectDefinitionReply(question: string, reply: string) {
+  const subject = extractDirectDefinitionSubject(question);
+  if (!subject) {
+    return reply.trim();
+  }
+
+  let cleaned = stripLeadingMetaSentences(reply);
+  const displaySubject = formatDirectAnswerSubject(subject);
+
+  const indirectDefinitionMatch = cleaned.match(
+    /\bsuch as in ([^.?!]+?) where ([A-Za-z][A-Za-z0-9' -]{1,80}) is ([^.?!]+)[.?!]?/i,
+  );
+  if (indirectDefinitionMatch) {
+    const [, , canonical, meaning] = indirectDefinitionMatch;
+    const tail = cleaned
+      .replace(/\bsuch as in [^.?!]+?[.?!]\s*/i, "")
+      .replace(/^\s*(?:["'`][^"'`]+["'`]\s+can (?:have different meanings|refer to different things) depending on the context,?\s*)/i, "")
+      .trim();
+    cleaned = `${displaySubject} usually refers to ${canonical.trim()}, ${meaning.trim()}.`;
+    if (tail) {
+      cleaned = `${cleaned} ${tail}`;
+    }
+  }
+
+  cleaned = cleaned.replace(
+    /^["'`]?([^"'`]+)["'`]?\s+can (?:have different meanings|refer to different things) depending on the context,\s+/i,
+    `${displaySubject} may refer to different things, but the most common meaning is `,
+  );
+
+  if (answerContainsDirectDefinition(cleaned, subject)) {
+    cleaned = cleaned
+      .replace(/\s+If you (?:provide|share|tell me)[^.?!]*[.?!]\s*$/i, "")
+      .replace(/\s+If you mean (?:a|an|the)[^.?!]*[.?!]\s*$/i, "")
+      .replace(/\s+Tell me the (?:language|title|app|subject area|context)[^.?!]*[.?!]\s*$/i, "")
+      .trim();
+  }
+
+  return cleaned.trim();
+}
+
+function trimRichestRankingReplyToRequestedScope(question: string, reply: string) {
+  const scope = extractRichestRankingScope(question);
+  if (!scope || scope === "mixed") {
+    return reply.trim();
+  }
+
+  let cleaned = reply.trim();
+  const peopleHeading = /(^|\n)Top richest people by live net worth:\n/i;
+  const citiesHeading = /(^|\n)Top wealthiest cities by resident millionaires \(latest available Henley report\):\n/i;
+  const hasPeopleSection = peopleHeading.test(cleaned);
+  const hasCitiesSection = citiesHeading.test(cleaned);
+
+  if (scope === "cities" && hasPeopleSection && hasCitiesSection) {
+    cleaned = cleaned.replace(
+      /\n*Top richest people by live net worth:\n[\s\S]*?(?=\nTop wealthiest cities by resident millionaires \(latest available Henley report\):\n)/i,
+      "\n",
+    );
+  }
+
+  if (scope === "people" && hasPeopleSection && hasCitiesSection) {
+    cleaned = cleaned.replace(
+      /\n*Top wealthiest cities by resident millionaires \(latest available Henley report\):\n[\s\S]*$/i,
+      "",
+    );
+  }
+
+  return cleaned.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function polishClawCloudAnswerStyle(
+  question: string,
+  intent: IntentType,
+  category: string,
+  reply: string,
+) {
+  let cleaned = reply.trim();
+  if (!cleaned || /```/.test(cleaned)) {
+    return cleaned;
+  }
+
+  if (looksLikeIndirectOpeningForDirectAnswer(question, cleaned)) {
+    cleaned = stripLeadingMetaSentences(cleaned);
+  }
+
+  cleaned = trimRichestRankingReplyToRequestedScope(question, cleaned);
 
   if (
-    reply.length < 150
-    || intent === "greeting"
-    || intent === "help"
-    || intent === "reminder"
-    || intent === "memory"
+    looksLikeDirectDefinitionQuestion(question)
+    && /^(general|explain|science|history|geography|culture|technology|language|research)$/i.test(intent)
+    && !/^(gmail_|calendar_|whatsapp_|personal_)/i.test(category)
   ) {
+    cleaned = polishDirectDefinitionReply(question, cleaned);
+  }
+
+  return cleaned.trim();
+}
+
+export function polishClawCloudAnswerStyleForTest(
+  question: string,
+  intent: IntentType,
+  category: string,
+  reply: string,
+) {
+  return polishClawCloudAnswerStyle(question, intent, category, reply);
+}
+
+function stripClawCloudTrailingFollowUp(reply: string) {
+  if (!reply.trim()) {
     return "";
   }
 
-  if (
-    !q.startsWith("/")
-    && /\b(daily|every day|each day|every morning|routine|template|checklist|standup|briefing|follow[- ]up|update|plan my day)\b/.test(q)
-  ) {
-    return "\n\n💡 _Want me to save this as a reusable /command so you can run it in one tap next time?_";
+  let cleaned = reply.trim();
+  const trailingPatterns = [
+    /\n{1,2}_?Need anything else\??_?\s*$/i,
+    /\n{1,2}_?Anything else\??_?\s*$/i,
+    /\n{2,}(?:[^\S\r\n]*💡\s*)?_?Want me to[\s\S]*$/i,
+    /\n{2,}(?:[^\S\r\n]*💡\s*)?_?Would you like me to[\s\S]*$/i,
+    /\n{2,}(?:[^\S\r\n]*💡\s*)?_?If you want, I can[\s\S]*$/i,
+    /\n{2,}(?:[^\S\r\n]*💡\s*)?_?Let me know if you (?:want|need|have)[\s\S]*$/i,
+    /\n{2,}(?:[^\S\r\n]*💡\s*)?_?Tell me if you want[\s\S]*$/i,
+    /\n{2,}(?:[^\S\r\n]*💡\s*)?_?Feel free to ask[\s\S]*$/i,
+    /\n{2,}(?:[^\S\r\n]*💡\s*)?_?Happy to (?:help|assist|elaborate|explain)[\s\S]*$/i,
+    /\n{2,}(?:[^\S\r\n]*💡\s*)?_?I(?:'m| am) here (?:to help|if you need)[\s\S]*$/i,
+    /\n{2,}(?:[^\S\r\n]*💡\s*)?_?Hope (?:this|that) helps[\s\S]*$/i,
+    /\n{2,}(?:[^\S\r\n]*💡\s*)?_?Don't hesitate to ask[\s\S]*$/i,
+    /\n{2,}(?:[^\S\r\n]*💡\s*)?_?Shall I [\s\S]*$/i,
+    /\n{2,}(?:[^\S\r\n]*💡\s*)?_?Do you want me to[\s\S]*$/i,
+  ];
+
+  for (const pattern of trailingPatterns) {
+    cleaned = cleaned.replace(pattern, "").trim();
   }
 
-  if (intent === "coding") {
-    if (/\b(function|class|component|api|endpoint)\b/.test(r) && !/test|spec/.test(q)) {
-      return "\n\n💡 _Want me to also write tests for this? Or explain the time complexity?_";
-    }
-    if (/\b(error|bug|fix|debug)\b/.test(q)) {
-      return "\n\n💡 _Want me to also review the rest of the file for similar issues?_";
-    }
-    return "\n\n💡 _Want me to optimise this, add error handling, or convert it to another language?_";
-  }
+  return cleaned;
+}
 
-  if (intent === "math") {
-    return "\n\n💡 _Want me to verify this with a different method, or apply it to a real example?_";
-  }
+export function stripClawCloudTrailingFollowUpForTest(reply: string) {
+  return stripClawCloudTrailingFollowUp(reply);
+}
 
-  if (intent === "research" || intent === "explain" || intent === "technology" || intent === "science") {
-    if (/\b(vs|versus|compare|difference)\b/.test(q)) {
-      return "\n\n💡 _Want a recommendation on which one to choose for your use case?_";
-    }
-    return "\n\n💡 _Want to go deeper on any part of this, or see a practical example?_";
-  }
-
-  if (intent === "email" || intent === "creative") {
-    return "\n\n💡 _Want a different tone, shorter version, or alternative draft?_";
-  }
-
-  if (intent === "finance") {
-    return "\n\n💡 _Want a historical chart, analyst sentiment, or comparison with a competitor?_";
-  }
-
+function buildProactiveSuggestion(intent: string, question: string, reply: string): string {
   return "";
 }
 
@@ -1363,6 +2514,26 @@ function isLowQualityTemplateReply(reply: string | null | undefined) {
     || normalized.includes("ask specifically: 'when did x happen?'")
     || normalized.includes("rephrase your question and i'll answer it immediately and accurately")
     || (normalized.includes("short summary") && normalized.includes("key updates"))
+    || normalized.includes("i want to know if i can get help with math, code, health, and legal questions on whatsapp")
+    || normalized.includes("professional and reliable service")
+    || normalized.includes("explore its features and benefits")
+    || normalized.includes("i am excited to use clawcloud ai")
+    || normalized.includes("can be understood in three parts: what it is, how it works, and why it matters")
+    || normalized.includes("primary definition, role, and use case")
+    || normalized.includes("most likely interpretation has been selected and answered directly")
+    || normalized.includes("core explanation: this is a technology concept that should be explained as definition -> mechanism -> practical impact")
+    || normalized.includes("i can answer any science question")
+    || normalized.includes("i can answer this with clear timeline, causes, major figures, and outcomes")
+    || normalized.includes("i need to retrieve accurate historical information for this")
+    || normalized.includes("i can provide health information on symptoms, diseases, treatments, nutrition, and fitness")
+    || normalized.includes("i can cover literature, philosophy, religion, art, music, film, and mythology")
+    || normalized.includes("i interpreted your message as a coding request")
+    || normalized.includes("send the exact problem statement when ready")
+    || normalized.includes("i'll give you a complete, decision-ready answer")
+    || normalized.includes("tell me exactly what output you want")
+    || normalized.includes("tell me these 3 things and i'll write it completely")
+    || normalized.includes("i can answer health questions on symptoms, conditions, nutrition")
+    || normalized.includes("i can answer questions on rules, records, players")
   );
 }
 
@@ -1411,6 +2582,292 @@ function isProbablyIncompleteReply(message: string, intent: IntentType, reply: s
   return false;
 }
 
+function normalizeRomanHindiCapabilityPrompt(text: string) {
+  return text
+    .toLowerCase()
+    .trim()
+    .replace(/\bap\b/g, "aap")
+    .replace(/\bkese\b/g, "kaise")
+    .replace(/\bkr\b/g, "kar")
+    .replace(/\bskte\b/g, "sakte")
+    .replace(/\bskta\b/g, "sakta")
+    .replace(/\bskti\b/g, "sakti")
+    .replace(/\bor\b/g, "aur")
+    .replace(/\bthik\b/g, "theek")
+    .replace(/\s+/g, " ");
+}
+
+function looksLikeUserWellbeingCheck(message: string) {
+  const text = normalizeRomanHindiCapabilityPrompt(message);
+  if (!text) {
+    return false;
+  }
+
+  return (
+    /\b(how are you|how are u|how r you|how'?s it going|what'?s up)\b/i.test(text)
+    || /\b(aap|tum|tu)\b.{0,12}\b(kaise|theek|haal)\b.{0,10}\b(ho|hai|hain)\b/i.test(text)
+    || /\b(kya haal|haal chaal)\b/i.test(text)
+  );
+}
+
+const MULTILINGUAL_CAPABILITY_PATTERNS = [
+  /\b(?:que|qué)\s+puedes\s+hacer\b/i,
+  /\b(?:en\s+que|en\s+qué)\s+puedes\s+ayudar(?:me)?\b/i,
+  /\bque\s+peux[- ]?tu\s+faire\b/i,
+  /\bcomment\s+peux[- ]?tu\s+m[' ]aider\b/i,
+  /\bwas\s+kannst\s+du\b/i,
+  /\bwie\s+kannst\s+du\s+mir\s+helfen\b/i,
+  /\bcosa\s+puoi\s+fare\b/i,
+  /\bcome\s+puoi\s+aiutarmi\b/i,
+  /\bo\s+que\s+v(?:o|ô)c(?:e|ê)\s+pode\s+fazer\b/i,
+  /\bcomo\s+v(?:o|ô)c(?:e|ê)\s+pode\s+me\s+ajudar\b/i,
+  /\bne\s+yapabilirsin\b/i,
+  /\bnasıl\s+yardımcı\s+olabilirsin\b/i,
+  /\bapa\s+yang\s+bisa\s+kamu\s+lakukan\b/i,
+  /\bbagaimana\s+kamu\s+bisa\s+membantu\b/i,
+  /\bapa\s+yang\s+boleh\s+awak\s+lakukan\b/i,
+  /\bbagaimana\s+awak\s+boleh\s+membantu\b/i,
+  /\bunaweza\s+kufanya\s+nini\b/i,
+  /\bunawezaje\s+kunisaidia\b/i,
+  /\bwat\s+kun\s+je\s+doen\b/i,
+  /\bhoe\s+kun\s+je\s+mij\s+helpen\b/i,
+  /\bco\s+mo(?:ż|z)esz\s+zrobi(?:ć|c)\b/i,
+  /\bjak\s+m(?:o|ó)żesz\s+mi\s+pom(?:ó|o)c\b/i,
+  /что\s+(?:ты\s+умеешь|вы\s+можете)/u,
+  /как\s+ты\s+можешь\s+мне\s+помочь/u,
+  /何ができますか/u,
+  /何をしてくれますか/u,
+  /무엇을\s+할\s+수\s+있어/u,
+  /무엇을\s+할\s+수\s+있나요/u,
+  /(?:你能做什么|你可以做什么)/u,
+  /(?:你可以怎么帮我|你能怎么帮我)/u,
+  /ماذا\s+يمكنك\s+أن\s+تفعل/u,
+  /كيف\s+يمكنك\s+مساعدتي/u,
+  /(?:तुम|आप)\s+क्या\s+कर\s+सक(?:ते|ती)\s+हो/u,
+  /(?:तुम|आप)\s+कैसे\s+मदद\s+कर\s+सक(?:ते|ती)\s+हो/u,
+  /(?:ਤੂੰ|ਤੁਸੀਂ)\s+ਕੀ\s+ਕਰ\s+ਸਕ(?:ਦੇ|ਦੀ)/u,
+  /(?:তুমি|আপনি)\s+কি\s+করতে\s+প(?:া|ার)র(?:ো|েন)/u,
+  /(?:তুমি|আপনি)\s+কীভাবে\s+সাহায্য\s+করতে\s+প(?:া|ার)র(?:ো|েন)/u,
+  /(?:तू|तुम्ही)\s+काय\s+करू\s+शक(?:तो|ते)/u,
+  /(?:तू|तुम्ही)\s+मदत\s+कशी\s+करू\s+शक(?:तो|ता)/u,
+  /તમે\s+શું\s+કરી\s+શક(?:ો|ો\?)/u,
+  /તમે\s+મને\s+કેવી\s+રીતે\s+મદદ\s+કરી\s+શક(?:ો|ો\?)/u,
+  /நீ(?:ங்கள்)?\s+என்ன\s+செய்ய\s+முடியும்/u,
+  /நீ(?:ங்கள்)?\s+எப்படி\s+உதவ\s+முடியும்/u,
+  /(?:నువ్వు|మీరు)\s+ఏం\s+చేయగల(?:వు|రు)/u,
+  /(?:నువ్వు|మీరు)\s+ఎలా\s+సహాయం\s+చేయగల(?:వు|రు)/u,
+  /(?:ನೀನು|ನೀವು)\s+ಏನು\s+ಮಾಡಬಹುದು/u,
+  /(?:ನೀನು|ನೀವು)\s+ಹೇಗೆ\s+ಸಹಾಯ\s+ಮಾಡಬಹುದು/u,
+];
+
+function looksLikeClawCloudCapabilityQuestion(message: string) {
+  const text = normalizeRomanHindiCapabilityPrompt(message);
+  if (!text) {
+    return false;
+  }
+
+  if (/^(\/help|help|menu|\/menu)$/i.test(text)) {
+    return true;
+  }
+
+  if (/\b(what can you do|what do you do|your (features|capabilities|commands)|how (to use|do i use)|help me with|features|who are you|what are you|what's your purpose|show me features)\b/.test(text)) {
+    return true;
+  }
+
+  if (MULTILINGUAL_CAPABILITY_PATTERNS.some((pattern) => pattern.test(message))) {
+    return true;
+  }
+
+  return (
+    /\b(kya kar sakte|mujhe kya)\b/.test(text)
+    || /\b(aap|tum|tu)\b.{0,18}\bkya(?:\s+kya)?\b.{0,18}\bkar\b.{0,8}\bsakt(?:e|a|i)\b/.test(text)
+    || /\bkya(?:\s+kya)?\b.{0,18}\b(aap|tum|tu)\b.{0,18}\bkar\b.{0,8}\bsakt(?:e|a|i)\b/.test(text)
+    || /\b(aap|tum|tu)\b.{0,24}\bmeri\b.{0,12}\bhelp\b.{0,12}\bkar\b.{0,8}\bsakt(?:e|a|i)\b/.test(text)
+  );
+}
+
+type LocalizedCapabilityReplyCopy = {
+  wellbeing: string;
+  capabilities: string;
+  close: string;
+};
+
+const LOCALIZED_CAPABILITY_REPLY_COPY: Record<SupportedLocale, LocalizedCapabilityReplyCopy> = {
+  en: {
+    wellbeing: "I'm doing well.",
+    capabilities: "I can help with coding, writing, math, research, translations, documents, reminders, and connected tools like Gmail, Calendar, Drive, and WhatsApp when they are linked.",
+    close: "Tell me the exact task and I'll answer directly.",
+  },
+  es: {
+    wellbeing: "Estoy bien.",
+    capabilities: "Puedo ayudarte con programación, redacción, matemáticas, investigación, traducciones, documentos, recordatorios y herramientas conectadas como Gmail, Calendar, Drive y WhatsApp cuando estén vinculadas.",
+    close: "Dime la tarea exacta y te responderé directamente.",
+  },
+  fr: {
+    wellbeing: "Je vais bien.",
+    capabilities: "Je peux vous aider pour le code, la rédaction, les maths, la recherche, les traductions, les documents, les rappels et les outils connectés comme Gmail, Calendar, Drive et WhatsApp lorsqu'ils sont reliés.",
+    close: "Dites-moi la tâche précise et je vous répondrai directement.",
+  },
+  ar: {
+    wellbeing: "أنا بخير.",
+    capabilities: "أستطيع مساعدتك في البرمجة والكتابة والرياضيات والبحث والترجمة والمستندات والتذكيرات والأدوات المتصلة مثل Gmail وCalendar وDrive وWhatsApp عند ربطها.",
+    close: "أخبرني بالمهمة الدقيقة وسأجيبك مباشرة.",
+  },
+  pt: {
+    wellbeing: "Estou bem.",
+    capabilities: "Posso ajudar com programação, redação, matemática, pesquisa, traduções, documentos, lembretes e ferramentas conectadas como Gmail, Calendar, Drive e WhatsApp quando estiverem vinculadas.",
+    close: "Diga a tarefa exata e eu respondo diretamente.",
+  },
+  hi: {
+    wellbeing: "मैं ठीक हूँ।",
+    capabilities: "मैं कोडिंग, लेखन, गणित, रिसर्च, अनुवाद, दस्तावेज़, रिमाइंडर और Gmail, Calendar, Drive और WhatsApp जैसे जुड़े टूल्स में मदद कर सकता हूँ।",
+    close: "जो काम चाहिए, साफ़-साफ़ बताइए, मैं सीधे मदद करूँगा।",
+  },
+  pa: {
+    wellbeing: "ਮੈਂ ਠੀਕ ਹਾਂ।",
+    capabilities: "ਮੈਂ ਕੋਡਿੰਗ, ਲਿਖਤ, ਗਣਿਤ, ਰਿਸਰਚ, ਅਨੁਵਾਦ, ਦਸਤਾਵੇਜ਼, ਰਿਮਾਈਂਡਰ ਅਤੇ Gmail, Calendar, Drive ਤੇ WhatsApp ਵਰਗੇ ਜੁੜੇ ਟੂਲਾਂ ਵਿੱਚ ਮਦਦ ਕਰ ਸਕਦਾ ਹਾਂ।",
+    close: "ਜੋ ਕੰਮ ਚਾਹੀਦਾ ਹੈ, ਸਾਫ਼ ਦੱਸੋ, ਮੈਂ ਸਿੱਧੀ ਮਦਦ ਕਰਾਂਗਾ।",
+  },
+  de: {
+    wellbeing: "Mir geht es gut.",
+    capabilities: "Ich kann dir bei Programmierung, Schreiben, Mathematik, Recherche, Übersetzungen, Dokumenten, Erinnerungen und verbundenen Tools wie Gmail, Calendar, Drive und WhatsApp helfen, wenn sie verknüpft sind.",
+    close: "Nenne mir die genaue Aufgabe, und ich antworte direkt.",
+  },
+  it: {
+    wellbeing: "Sto bene.",
+    capabilities: "Posso aiutarti con programmazione, scrittura, matematica, ricerca, traduzioni, documenti, promemoria e strumenti collegati come Gmail, Calendar, Drive e WhatsApp quando sono connessi.",
+    close: "Dimmi il compito preciso e ti risponderò direttamente.",
+  },
+  tr: {
+    wellbeing: "İyiyim.",
+    capabilities: "Kodlama, yazma, matematik, araştırma, çeviri, belgeler, hatırlatıcılar ve bağlıysa Gmail, Calendar, Drive ve WhatsApp gibi araçlarda yardımcı olabilirim.",
+    close: "Tam olarak ne istediğini söyle, ben de doğrudan yardımcı olayım.",
+  },
+  id: {
+    wellbeing: "Saya baik.",
+    capabilities: "Saya bisa membantu dengan coding, menulis, matematika, riset, terjemahan, dokumen, pengingat, dan alat terhubung seperti Gmail, Calendar, Drive, dan WhatsApp saat sudah tersambung.",
+    close: "Sampaikan tugas yang tepat, dan saya akan menjawab langsung.",
+  },
+  ms: {
+    wellbeing: "Saya baik.",
+    capabilities: "Saya boleh membantu dengan pengekodan, penulisan, matematik, penyelidikan, terjemahan, dokumen, peringatan, dan alat yang disambungkan seperti Gmail, Calendar, Drive, dan WhatsApp apabila dihubungkan.",
+    close: "Beritahu tugas yang tepat, dan saya akan jawab terus.",
+  },
+  sw: {
+    wellbeing: "Niko vizuri.",
+    capabilities: "Ninaweza kusaidia kwa coding, uandishi, hesabu, utafiti, tafsiri, hati, vikumbusho, na zana zilizounganishwa kama Gmail, Calendar, Drive, na WhatsApp zikiwa zimeunganishwa.",
+    close: "Niambie kazi hasa unayotaka, nami nitajibu moja kwa moja.",
+  },
+  nl: {
+    wellbeing: "Het gaat goed met me.",
+    capabilities: "Ik kan helpen met programmeren, schrijven, wiskunde, onderzoek, vertalingen, documenten, herinneringen en gekoppelde tools zoals Gmail, Calendar, Drive en WhatsApp wanneer ze verbonden zijn.",
+    close: "Geef de exacte taak, dan help ik je direct.",
+  },
+  pl: {
+    wellbeing: "U mnie wszystko dobrze.",
+    capabilities: "Mogę pomóc w programowaniu, pisaniu, matematyce, badaniach, tłumaczeniach, dokumentach, przypomnieniach oraz połączonych narzędziach takich jak Gmail, Calendar, Drive i WhatsApp, gdy są podłączone.",
+    close: "Napisz dokładnie, czego potrzebujesz, a odpowiem bezpośrednio.",
+  },
+  ru: {
+    wellbeing: "У меня всё хорошо.",
+    capabilities: "Я могу помочь с программированием, текстами, математикой, исследованиями, переводами, документами, напоминаниями и подключёнными инструментами вроде Gmail, Calendar, Drive и WhatsApp, если они связаны.",
+    close: "Напишите точную задачу, и я отвечу прямо по делу.",
+  },
+  ja: {
+    wellbeing: "元気です。",
+    capabilities: "コーディング、文章作成、数学、調査、翻訳、ドキュメント、リマインダー、そして連携済みの Gmail、Calendar、Drive、WhatsApp などを手伝えます。",
+    close: "やりたいことを具体的に送ってください。すぐに答えます。",
+  },
+  ko: {
+    wellbeing: "잘 지내고 있어요.",
+    capabilities: "코딩, 글쓰기, 수학, 리서치, 번역, 문서 작업, 리마인더, 그리고 연결된 Gmail, Calendar, Drive, WhatsApp 같은 도구를 도와드릴 수 있어요.",
+    close: "원하는 작업을 구체적으로 말씀해 주시면 바로 도와드릴게요.",
+  },
+  zh: {
+    wellbeing: "我很好。",
+    capabilities: "我可以帮助你处理编程、写作、数学、研究、翻译、文档、提醒，以及已连接的 Gmail、Calendar、Drive 和 WhatsApp 等工具。",
+    close: "直接告诉我具体任务，我会直接回答。",
+  },
+  ta: {
+    wellbeing: "நான் நன்றாக இருக்கிறேன்.",
+    capabilities: "கோடிங், எழுதுதல், கணிதம், ஆராய்ச்சி, மொழிபெயர்ப்பு, ஆவணங்கள், நினைவூட்டல்கள், மற்றும் இணைக்கப்பட்ட Gmail, Calendar, Drive, WhatsApp போன்ற கருவிகளில் நான் உதவ முடியும்.",
+    close: "உங்களுக்கு வேண்டிய துல்லியமான பணியை சொல்லுங்கள், நான் நேராக உதவுகிறேன்.",
+  },
+  te: {
+    wellbeing: "నేను బాగున్నాను.",
+    capabilities: "కోడింగ్, రాయడం, గణితం, పరిశోధన, అనువాదం, డాక్యుమెంట్లు, రిమైండర్లు, మరియు కనెక్ట్ చేసిన Gmail, Calendar, Drive, WhatsApp వంటి టూల్స్‌లో నేను సహాయం చేయగలను.",
+    close: "మీకు కావాల్సిన ఖచ్చితమైన పనిని చెప్పండి, నేను నేరుగా సహాయం చేస్తాను.",
+  },
+  kn: {
+    wellbeing: "ನಾನು ಚೆನ್ನಾಗಿದ್ದೇನೆ.",
+    capabilities: "ಕೋಡಿಂಗ್, ಬರವಣಿಗೆ, ಗಣಿತ, ಸಂಶೋಧನೆ, ಅನುವಾದ, ಡಾಕ್ಯುಮೆಂಟ್‌ಗಳು, ರಿಮೈಂಡರ್‌ಗಳು ಮತ್ತು ಸಂಪರ್ಕಿಸಿದ Gmail, Calendar, Drive, WhatsApp ಮೊದಲಾದ ಸಾಧನಗಳಲ್ಲಿ ನಾನು ಸಹಾಯ ಮಾಡಬಹುದು.",
+    close: "ನಿಮಗೆ ಬೇಕಾದ ನಿಖರವಾದ ಕೆಲಸವನ್ನು ಹೇಳಿ, ನಾನು ನೇರವಾಗಿ ಸಹಾಯ ಮಾಡುತ್ತೇನೆ.",
+  },
+  bn: {
+    wellbeing: "আমি ভালো আছি।",
+    capabilities: "কোডিং, লেখা, গণিত, রিসার্চ, অনুবাদ, ডকুমেন্ট, রিমাইন্ডার এবং সংযুক্ত Gmail, Calendar, Drive, WhatsApp-এর মতো টুলে আমি সাহায্য করতে পারি।",
+    close: "যে কাজটা দরকার, স্পষ্ট করে বলুন, আমি সরাসরি সাহায্য করব।",
+  },
+  mr: {
+    wellbeing: "मी ठीक आहे.",
+    capabilities: "मी कोडिंग, लेखन, गणित, रिसर्च, भाषांतर, दस्तऐवज, रिमाइंडर आणि जोडलेल्या Gmail, Calendar, Drive आणि WhatsApp सारख्या साधनांमध्ये मदत करू शकतो.",
+    close: "नेमकं कोणतं काम हवं आहे ते सांगा, मी थेट मदत करेन.",
+  },
+  gu: {
+    wellbeing: "હું બરાબર છું.",
+    capabilities: "હું કોડિંગ, લેખન, ગણિત, રિસર્ચ, અનુવાદ, દસ્તાવેજો, રીમાઇન્ડર અને જોડાયેલા Gmail, Calendar, Drive અને WhatsApp જેવા ટૂલ્સમાં મદદ કરી શકું છું.",
+    close: "તમને ચોક્કસ શું કામ જોઈએ છે તે કહો, હું સીધી મદદ કરીશ.",
+  },
+};
+
+const HINGLISH_CAPABILITY_REPLY_COPY: LocalizedCapabilityReplyCopy = {
+  wellbeing: "Main theek hoon.",
+  capabilities: "Main coding, writing, math, research, translation, documents, reminders, aur connected tools jaise Gmail, Calendar, Drive, aur WhatsApp mein help kar sakta hoon.",
+  close: "Jo exact kaam chahiye seedha bolo, main direct help karunga.",
+};
+
+function buildLocalizedCapabilityReply(
+  message: string,
+  locale: SupportedLocale,
+  options?: {
+    preserveRomanScript?: boolean;
+  },
+) {
+  const copy = options?.preserveRomanScript
+    ? HINGLISH_CAPABILITY_REPLY_COPY
+    : (LOCALIZED_CAPABILITY_REPLY_COPY[locale] ?? LOCALIZED_CAPABILITY_REPLY_COPY.en);
+  const wantsWellbeingLine = looksLikeUserWellbeingCheck(message);
+
+  return [
+    wantsWellbeingLine ? copy.wellbeing : null,
+    copy.capabilities,
+    copy.close,
+  ].filter(Boolean).join("\n\n");
+}
+
+function buildLocalizedCapabilityReplyFromMessage(message: string) {
+  const resolution = resolveClawCloudReplyLanguage({
+    message,
+    preferredLocale: "en",
+  });
+
+  return buildLocalizedCapabilityReply(message, resolution.locale, {
+    preserveRomanScript: resolution.preserveRomanScript,
+  });
+}
+
+export function buildLocalizedCapabilityReplyForTest(
+  message: string,
+  locale: SupportedLocale,
+  preserveRomanScript: boolean = false,
+) {
+  return buildLocalizedCapabilityReply(message, locale, { preserveRomanScript });
+}
+
+export function buildLocalizedCapabilityReplyFromMessageForTest(message: string) {
+  return buildLocalizedCapabilityReplyFromMessage(message);
+}
+
 function buildDeterministicChatFallbackLegacy(message: string, intent: IntentType) {
   const text = message.toLowerCase().trim();
 
@@ -1427,7 +2884,11 @@ function buildDeterministicChatFallbackLegacy(message: string, intent: IntentTyp
     ].join("\n");
   }
 
-  if (/\b(what can you do|what do you do|your capabilities|help me with|features|who are you)\b/.test(text)) {
+  if (looksLikeClawCloudCapabilityQuestion(text)) {
+    return buildLocalizedCapabilityReplyFromMessage(message);
+  }
+
+  if (looksLikeClawCloudCapabilityQuestion(text)) {
     return [
       "🦞 *Here’s what I can do for you:*",
       "",
@@ -1503,95 +2964,126 @@ function bestEffortProfessionalTemplate(intent: IntentType, message: string) {
   }
 }
 
-function detectRequestedLanguageForFallback(message: string) {
+type CodingFallbackLanguage =
+  | "cpp"
+  | "python"
+  | "java"
+  | "javascript"
+  | "typescript"
+  | "go"
+  | "rust"
+  | "text";
+
+const CODING_FALLBACK_LANGUAGE_LABELS: Record<CodingFallbackLanguage, string> = {
+  cpp: "C++",
+  python: "Python",
+  java: "Java",
+  javascript: "JavaScript",
+  typescript: "TypeScript",
+  go: "Go",
+  rust: "Rust",
+  text: "Python",
+};
+
+export function detectRequestedLanguageForFallback(message: string): CodingFallbackLanguage {
   const text = message.toLowerCase();
+  const looksCodingRequest =
+    /\b(code|program|function|script|solution|implementation|algorithm|debug|build|write|show|give|solve)\b/.test(text)
+    || /\b(fibonacci|binary search|palindrome|rat\b.*\bmaze|n[-\s]?queens?|backtracking)\b/.test(text);
   if (/\b(c\+\+|cpp)\b/.test(text)) return "cpp";
-  if (/\bpython\b/.test(text)) return "python";
+  if (/\bpython\b/.test(text) || (looksCodingRequest && /\bpy\b/.test(text))) return "python";
   if (/\b(java(?!script))\b/.test(text)) return "java";
-  if (/\b(javascript|node\.?js|nodejs)\b/.test(text)) return "javascript";
-  if (/\btypescript\b/.test(text)) return "typescript";
-  if (/\bgo(lang)?\b/.test(text)) return "go";
+  if (
+    /\btypescript\b/.test(text)
+    || /\b(?:in|using|with)\s+ts\b/.test(text)
+    || /\bts\s+(?:code|program|function|script|solution|implementation)\b/.test(text)
+    || (looksCodingRequest && /\bts\b/.test(text))
+  ) return "typescript";
+  if (
+    /\b(javascript|node\.?js|nodejs)\b/.test(text)
+    || /\b(?:in|using|with)\s+js\b/.test(text)
+    || /\bjs\s+(?:code|program|function|script|solution|implementation)\b/.test(text)
+    || (looksCodingRequest && /\bjs\b/.test(text))
+  ) return "javascript";
+  if (
+    /\bgolang\b/.test(text)
+    || /\b(?:in|using|with)\s+go\b/.test(text)
+    || /\bgo\s+(?:code|program|function|script|solution|implementation)\b/.test(text)
+  ) return "go";
   if (/\brust\b/.test(text)) return "rust";
   return "text";
 }
 
-function buildRatInMazeCppFallback() {
+function resolveCodingSnippetLanguage(
+  requested: CodingFallbackLanguage,
+  snippets: Partial<Record<CodingFallbackLanguage, string[]>>,
+) {
+  if (snippets[requested]) {
+    return requested;
+  }
+
+  if (requested === "text" && snippets.python) {
+    return "python";
+  }
+
+  if (snippets.python) {
+    return "python";
+  }
+
+  return Object.keys(snippets)[0] as CodingFallbackLanguage;
+}
+
+function buildLanguageAwareCodingReply(options: {
+  title: string;
+  requestedLanguage: CodingFallbackLanguage;
+  snippets: Partial<Record<CodingFallbackLanguage, string[]>>;
+  complexity: string[];
+}) {
+  const resolvedLanguage = resolveCodingSnippetLanguage(options.requestedLanguage, options.snippets);
+  const label = CODING_FALLBACK_LANGUAGE_LABELS[resolvedLanguage];
+  const snippet = options.snippets[resolvedLanguage] ?? options.snippets.python ?? [];
+  const complexityLines = options.complexity.map((line) =>
+    line.startsWith("- ") ? `• ${line.slice(2)}` : `• ${line}`,
+  );
+  const approachNote = (() => {
+    if (/n-queens/i.test(options.title)) {
+      return "Use backtracking row by row and prune any column or diagonal that is already occupied.";
+    }
+    if (/rat in a maze/i.test(options.title)) {
+      return "Use DFS with backtracking so every valid path is explored once and then rolled back cleanly.";
+    }
+    if (/fibonacci/i.test(options.title)) {
+      return "Iterate from the base cases so the solution stays simple and avoids recursive overhead.";
+    }
+    if (/binary search/i.test(options.title)) {
+      return "Shrink the search window by comparing the middle element until the target is found or ruled out.";
+    }
+    if (/palindrome/i.test(options.title)) {
+      return "Compare mirrored characters from both ends so the answer is decided in one linear pass.";
+    }
+    return "This is the cleanest production-style implementation for the requested algorithm.";
+  })();
+
   return [
-    "*C++ solution: Rat in a Maze (all paths)*",
+    `*${options.title} - ${label}*`,
     "",
-    "```cpp",
-    "#include <bits/stdc++.h>",
-    "using namespace std;",
+    "*Why this approach works*",
+    `• ${approachNote}`,
     "",
-    "void dfs(int x, int y, vector<vector<int>>& maze, int n,",
-    "         vector<vector<int>>& vis, string& path, vector<string>& ans) {",
-    "    if (x == n - 1 && y == n - 1) {",
-    "        ans.push_back(path);",
-    "        return;",
-    "    }",
+    "*Code*",
+    ...snippet,
     "",
-    "    static int dx[] = {1, 0, 0, -1};",
-    "    static int dy[] = {0, -1, 1, 0};",
-    "    static char moveChar[] = {'D', 'L', 'R', 'U'};",
-    "",
-    "    for (int k = 0; k < 4; k++) {",
-    "        int nx = x + dx[k], ny = y + dy[k];",
-    "        if (nx >= 0 && ny >= 0 && nx < n && ny < n && !vis[nx][ny] && maze[nx][ny] == 1) {",
-    "            vis[nx][ny] = 1;",
-    "            path.push_back(moveChar[k]);",
-    "            dfs(nx, ny, maze, n, vis, path, ans);",
-    "            path.pop_back();",
-    "            vis[nx][ny] = 0;",
-    "        }",
-    "    }",
-    "}",
-    "",
-    "vector<string> findPath(vector<vector<int>>& maze, int n) {",
-    "    vector<string> ans;",
-    "    if (n == 0 || maze[0][0] == 0 || maze[n - 1][n - 1] == 0) return ans;",
-    "",
-    "    vector<vector<int>> vis(n, vector<int>(n, 0));",
-    "    string path;",
-    "    vis[0][0] = 1;",
-    "    dfs(0, 0, maze, n, vis, path, ans);",
-    "    sort(ans.begin(), ans.end());",
-    "    return ans;",
-    "}",
-    "",
-    "int main() {",
-    "    int n;",
-    "    cin >> n;",
-    "    vector<vector<int>> maze(n, vector<int>(n));",
-    "    for (int i = 0; i < n; i++) {",
-    "        for (int j = 0; j < n; j++) cin >> maze[i][j];",
-    "    }",
-    "",
-    "    vector<string> ans = findPath(maze, n);",
-    "    if (ans.empty()) {",
-    "        cout << -1 << \"\\n\";",
-    "    } else {",
-    "        for (const string& p : ans) cout << p << \" \";",
-    "        cout << \"\\n\";",
-    "    }",
-    "    return 0;",
-    "}",
-    "```",
-    "",
-    "If you want, I can also send single-path and count-only variants.",
+    "*Complexity*",
+    ...complexityLines,
   ].join("\n");
 }
 
-function buildCodingFallbackV2(message: string) {
-  const text = message.toLowerCase();
-  const language = detectRequestedLanguageForFallback(message);
-  const prefersCpp = language === "cpp";
-  const prefersPython = language === "python" || language === "text";
-
-  if (/\bn[-\s]?queens?\b/.test(text)) {
-    if (prefersCpp) {
-      return [
-        "💻 *N-Queens (Backtracking) - C++*",
-        "",
+function buildNQueensFallback(language: CodingFallbackLanguage) {
+  return buildLanguageAwareCodingReply({
+    title: "N-Queens (Backtracking)",
+    requestedLanguage: language,
+    snippets: {
+      cpp: [
         "```cpp",
         "#include <bits/stdc++.h>",
         "using namespace std;",
@@ -1607,12 +3099,10 @@ function buildCodingFallbackV2(message: string) {
         "      ans.push_back(board);",
         "      return;",
         "    }",
-        "",
         "    for (int c = 0; c < n; ++c) {",
         "      int d1 = r - c + n - 1;",
         "      int d2 = r + c;",
         "      if (col[c] || diag1[d1] || diag2[d2]) continue;",
-        "",
         "      col[c] = diag1[d1] = diag2[d2] = 1;",
         "      board[r][c] = 'Q';",
         "      dfs(r + 1);",
@@ -1634,215 +3124,883 @@ function buildCodingFallbackV2(message: string) {
         "};",
         "",
         "int main() {",
-        "  ios::sync_with_stdio(false);",
-        "  cin.tie(nullptr);",
-        "",
         "  int n;",
         "  cin >> n;",
         "  Solver solver;",
         "  auto solutions = solver.solve(n);",
-        "",
         "  cout << solutions.size() << \"\\n\";",
         "  for (const auto& board : solutions) {",
         "    for (const auto& row : board) cout << row << \"\\n\";",
         "    cout << \"\\n\";",
         "  }",
-        "  return 0;",
         "}",
         "```",
+      ],
+      python: [
+        "```python",
+        "def solve_n_queens(n: int):",
+        "    cols = set()",
+        "    diag1 = set()",
+        "    diag2 = set()",
+        "    board = [['.' for _ in range(n)] for _ in range(n)]",
+        "    ans = []",
         "",
-        "• *Time:* O(N!)",
-        "• *Space:* O(N²) + recursion",
-      ].join("\n");
-    }
+        "    def dfs(r: int):",
+        "        if r == n:",
+        "            ans.append([''.join(row) for row in board])",
+        "            return",
+        "        for c in range(n):",
+        "            if c in cols or (r - c) in diag1 or (r + c) in diag2:",
+        "                continue",
+        "            cols.add(c)",
+        "            diag1.add(r - c)",
+        "            diag2.add(r + c)",
+        "            board[r][c] = 'Q'",
+        "            dfs(r + 1)",
+        "            board[r][c] = '.'",
+        "            cols.remove(c)",
+        "            diag1.remove(r - c)",
+        "            diag2.remove(r + c)",
+        "",
+        "    dfs(0)",
+        "    return ans",
+        "",
+        "if __name__ == '__main__':",
+        "    n = int(input().strip())",
+        "    print(solve_n_queens(n))",
+        "```",
+      ],
+      javascript: [
+        "```javascript",
+        "function solveNQueens(n) {",
+        "  const cols = new Set();",
+        "  const diag1 = new Set();",
+        "  const diag2 = new Set();",
+        "  const board = Array.from({ length: n }, () => Array(n).fill('.'));",
+        "  const solutions = [];",
+        "",
+        "  function dfs(r) {",
+        "    if (r === n) {",
+        "      solutions.push(board.map((row) => row.join('')));",
+        "      return;",
+        "    }",
+        "    for (let c = 0; c < n; c += 1) {",
+        "      const d1 = r - c;",
+        "      const d2 = r + c;",
+        "      if (cols.has(c) || diag1.has(d1) || diag2.has(d2)) continue;",
+        "      cols.add(c);",
+        "      diag1.add(d1);",
+        "      diag2.add(d2);",
+        "      board[r][c] = 'Q';",
+        "      dfs(r + 1);",
+        "      board[r][c] = '.';",
+        "      cols.delete(c);",
+        "      diag1.delete(d1);",
+        "      diag2.delete(d2);",
+        "    }",
+        "  }",
+        "",
+        "  dfs(0);",
+        "  return solutions;",
+        "}",
+        "",
+        "const n = Number(process.argv[2] ?? 4);",
+        "console.log(JSON.stringify(solveNQueens(n), null, 2));",
+        "```",
+      ],
+      typescript: [
+        "```ts",
+        "function solveNQueens(n: number): string[][] {",
+        "  const cols = new Set<number>();",
+        "  const diag1 = new Set<number>();",
+        "  const diag2 = new Set<number>();",
+        "  const board: string[][] = Array.from({ length: n }, () => Array(n).fill('.'));",
+        "  const solutions: string[][] = [];",
+        "",
+        "  function dfs(r: number): void {",
+        "    if (r === n) {",
+        "      solutions.push(board.map((row) => row.join('')));",
+        "      return;",
+        "    }",
+        "    for (let c = 0; c < n; c += 1) {",
+        "      const d1 = r - c;",
+        "      const d2 = r + c;",
+        "      if (cols.has(c) || diag1.has(d1) || diag2.has(d2)) continue;",
+        "      cols.add(c);",
+        "      diag1.add(d1);",
+        "      diag2.add(d2);",
+        "      board[r][c] = 'Q';",
+        "      dfs(r + 1);",
+        "      board[r][c] = '.';",
+        "      cols.delete(c);",
+        "      diag1.delete(d1);",
+        "      diag2.delete(d2);",
+        "    }",
+        "  }",
+        "",
+        "  dfs(0);",
+        "  return solutions;",
+        "}",
+        "",
+        "const n = Number(process.argv[2] ?? 4);",
+        "console.log(JSON.stringify(solveNQueens(n), null, 2));",
+        "```",
+      ],
+      java: [
+        "```java",
+        "import java.util.*;",
+        "",
+        "public class Main {",
+        "    private final List<List<String>> ans = new ArrayList<>();",
+        "    private char[][] board;",
+        "    private boolean[] cols;",
+        "    private boolean[] diag1;",
+        "    private boolean[] diag2;",
+        "    private int n;",
+        "",
+        "    private void dfs(int r) {",
+        "        if (r == n) {",
+        "            List<String> current = new ArrayList<>();",
+        "            for (char[] row : board) current.add(new String(row));",
+        "            ans.add(current);",
+        "            return;",
+        "        }",
+        "        for (int c = 0; c < n; c++) {",
+        "            int d1 = r - c + n - 1;",
+        "            int d2 = r + c;",
+        "            if (cols[c] || diag1[d1] || diag2[d2]) continue;",
+        "            cols[c] = diag1[d1] = diag2[d2] = true;",
+        "            board[r][c] = 'Q';",
+        "            dfs(r + 1);",
+        "            board[r][c] = '.';",
+        "            cols[c] = diag1[d1] = diag2[d2] = false;",
+        "        }",
+        "    }",
+        "",
+        "    private List<List<String>> solve(int size) {",
+        "        n = size;",
+        "        board = new char[n][n];",
+        "        for (char[] row : board) Arrays.fill(row, '.');",
+        "        cols = new boolean[n];",
+        "        diag1 = new boolean[2 * n - 1];",
+        "        diag2 = new boolean[2 * n - 1];",
+        "        dfs(0);",
+        "        return ans;",
+        "    }",
+        "",
+        "    public static void main(String[] args) {",
+        "        int n = args.length > 0 ? Integer.parseInt(args[0]) : 4;",
+        "        System.out.println(new Main().solve(n));",
+        "    }",
+        "}",
+        "```",
+      ],
+      go: [
+        "```go",
+        "func solveNQueens(n int) [][]string {",
+        "    cols := make(map[int]bool)",
+        "    diag1 := make(map[int]bool)",
+        "    diag2 := make(map[int]bool)",
+        "    board := make([][]byte, n)",
+        "    for i := range board {",
+        "        board[i] = make([]byte, n)",
+        "        for j := range board[i] {",
+        "            board[i][j] = '.'",
+        "        }",
+        "    }",
+        "    solutions := [][]string{}",
+        "",
+        "    var dfs func(int)",
+        "    dfs = func(r int) {",
+        "        if r == n {",
+        "            current := make([]string, n)",
+        "            for i := range board {",
+        "                current[i] = string(board[i])",
+        "            }",
+        "            solutions = append(solutions, current)",
+        "            return",
+        "        }",
+        "        for c := 0; c < n; c++ {",
+        "            d1, d2 := r-c, r+c",
+        "            if cols[c] || diag1[d1] || diag2[d2] {",
+        "                continue",
+        "            }",
+        "            cols[c], diag1[d1], diag2[d2] = true, true, true",
+        "            board[r][c] = 'Q'",
+        "            dfs(r + 1)",
+        "            board[r][c] = '.'",
+        "            delete(cols, c)",
+        "            delete(diag1, d1)",
+        "            delete(diag2, d2)",
+        "        }",
+        "    }",
+        "",
+        "    dfs(0)",
+        "    return solutions",
+        "}",
+        "```",
+      ],
+      rust: [
+        "```rust",
+        "fn solve_n_queens(n: usize) -> Vec<Vec<String>> {",
+        "    let mut board = vec![vec!['.'; n]; n];",
+        "    let mut cols = vec![false; n];",
+        "    let mut diag1 = vec![false; 2 * n - 1];",
+        "    let mut diag2 = vec![false; 2 * n - 1];",
+        "    let mut solutions = Vec::new();",
+        "",
+        "    fn dfs(",
+        "        r: usize,",
+        "        n: usize,",
+        "        board: &mut Vec<Vec<char>>,",
+        "        cols: &mut [bool],",
+        "        diag1: &mut [bool],",
+        "        diag2: &mut [bool],",
+        "        solutions: &mut Vec<Vec<String>>,",
+        "    ) {",
+        "        if r == n {",
+        "            solutions.push(board.iter().map(|row| row.iter().collect()).collect());",
+        "            return;",
+        "        }",
+        "        for c in 0..n {",
+        "            let d1 = r + n - 1 - c;",
+        "            let d2 = r + c;",
+        "            if cols[c] || diag1[d1] || diag2[d2] {",
+        "                continue;",
+        "            }",
+        "            cols[c] = true;",
+        "            diag1[d1] = true;",
+        "            diag2[d2] = true;",
+        "            board[r][c] = 'Q';",
+        "            dfs(r + 1, n, board, cols, diag1, diag2, solutions);",
+        "            board[r][c] = '.';",
+        "            cols[c] = false;",
+        "            diag1[d1] = false;",
+        "            diag2[d2] = false;",
+        "        }",
+        "    }",
+        "",
+        "    dfs(0, n, &mut board, &mut cols, &mut diag1, &mut diag2, &mut solutions);",
+        "    solutions",
+        "}",
+        "```",
+      ],
+    },
+    complexity: [
+      "- Time: O(N!)",
+      "- Space: O(N^2) plus recursion",
+    ],
+  });
+}
 
-    return [
-      "💻 *N-Queens (Backtracking) - Python*",
-      "",
-      "```python",
-      "def solve_n_queens(n: int):",
-      "    cols = set()",
-      "    diag1 = set()  # row - col",
-      "    diag2 = set()  # row + col",
-      "    board = [['.' for _ in range(n)] for _ in range(n)]",
-      "    ans = []",
-      "",
-      "    def dfs(r: int):",
-      "        if r == n:",
-      "            ans.append([''.join(row) for row in board])",
-      "            return",
-      "        for c in range(n):",
-      "            if c in cols or (r - c) in diag1 or (r + c) in diag2:",
-      "                continue",
-      "            cols.add(c)",
-      "            diag1.add(r - c)",
-      "            diag2.add(r + c)",
-      "            board[r][c] = 'Q'",
-      "            dfs(r + 1)",
-      "            board[r][c] = '.'",
-      "            cols.remove(c)",
-      "            diag1.remove(r - c)",
-      "            diag2.remove(r + c)",
-      "",
-      "    dfs(0)",
-      "    return ans",
-      "",
-      "if __name__ == '__main__':",
-      "    n = int(input().strip())",
-      "    solutions = solve_n_queens(n)",
-      "    print(len(solutions))",
-      "    for board in solutions:",
-      "        for row in board:",
-      "            print(row)",
-      "        print()",
-      "```",
-      "",
-      "• *Time:* O(N!)",
-      "• *Space:* O(N²) + recursion",
-    ].join("\n");
+function buildRatInMazeFallback(language: CodingFallbackLanguage) {
+  return buildLanguageAwareCodingReply({
+    title: "Rat in a Maze (All Paths)",
+    requestedLanguage: language,
+    snippets: {
+      cpp: [
+        "```cpp",
+        "#include <bits/stdc++.h>",
+        "using namespace std;",
+        "",
+        "void dfs(int x, int y, vector<vector<int>>& maze, int n, vector<vector<int>>& vis, string& path, vector<string>& ans) {",
+        "    if (x == n - 1 && y == n - 1) {",
+        "        ans.push_back(path);",
+        "        return;",
+        "    }",
+        "    static int dx[] = {1, 0, 0, -1};",
+        "    static int dy[] = {0, -1, 1, 0};",
+        "    static char moveChar[] = {'D', 'L', 'R', 'U'};",
+        "    for (int k = 0; k < 4; k++) {",
+        "        int nx = x + dx[k], ny = y + dy[k];",
+        "        if (nx >= 0 && ny >= 0 && nx < n && ny < n && !vis[nx][ny] && maze[nx][ny] == 1) {",
+        "            vis[nx][ny] = 1;",
+        "            path.push_back(moveChar[k]);",
+        "            dfs(nx, ny, maze, n, vis, path, ans);",
+        "            path.pop_back();",
+        "            vis[nx][ny] = 0;",
+        "        }",
+        "    }",
+        "}",
+        "```",
+      ],
+      python: [
+        "```python",
+        "def find_paths(maze):",
+        "    n = len(maze)",
+        "    if n == 0 or maze[0][0] == 0 or maze[n - 1][n - 1] == 0:",
+        "        return []",
+        "    moves = [(1, 0, 'D'), (0, -1, 'L'), (0, 1, 'R'), (-1, 0, 'U')]",
+        "    visited = [[False] * n for _ in range(n)]",
+        "    paths = []",
+        "",
+        "    def dfs(r, c, path):",
+        "        if r == n - 1 and c == n - 1:",
+        "            paths.append(path)",
+        "            return",
+        "        for dr, dc, ch in moves:",
+        "            nr, nc = r + dr, c + dc",
+        "            if 0 <= nr < n and 0 <= nc < n and maze[nr][nc] == 1 and not visited[nr][nc]:",
+        "                visited[nr][nc] = True",
+        "                dfs(nr, nc, path + ch)",
+        "                visited[nr][nc] = False",
+        "",
+        "    visited[0][0] = True",
+        "    dfs(0, 0, '')",
+        "    return sorted(paths)",
+        "```",
+      ],
+      javascript: [
+        "```javascript",
+        "function findPaths(maze) {",
+        "  const n = maze.length;",
+        "  if (!n || maze[0][0] === 0 || maze[n - 1][n - 1] === 0) return [];",
+        "  const visited = Array.from({ length: n }, () => Array(n).fill(false));",
+        "  const moves = [[1, 0, 'D'], [0, -1, 'L'], [0, 1, 'R'], [-1, 0, 'U']];",
+        "  const paths = [];",
+        "",
+        "  function dfs(r, c, path) {",
+        "    if (r === n - 1 && c === n - 1) {",
+        "      paths.push(path);",
+        "      return;",
+        "    }",
+        "    for (const [dr, dc, ch] of moves) {",
+        "      const nr = r + dr;",
+        "      const nc = c + dc;",
+        "      if (nr >= 0 && nc >= 0 && nr < n && nc < n && maze[nr][nc] === 1 && !visited[nr][nc]) {",
+        "        visited[nr][nc] = true;",
+        "        dfs(nr, nc, path + ch);",
+        "        visited[nr][nc] = false;",
+        "      }",
+        "    }",
+        "  }",
+        "",
+        "  visited[0][0] = true;",
+        "  dfs(0, 0, '');",
+        "  return paths.sort();",
+        "}",
+        "```",
+      ],
+      typescript: [
+        "```ts",
+        "function findPaths(maze: number[][]): string[] {",
+        "  const n = maze.length;",
+        "  if (!n || maze[0][0] === 0 || maze[n - 1][n - 1] === 0) return [];",
+        "  const visited: boolean[][] = Array.from({ length: n }, () => Array(n).fill(false));",
+        "  const moves: Array<[number, number, string]> = [[1, 0, 'D'], [0, -1, 'L'], [0, 1, 'R'], [-1, 0, 'U']];",
+        "  const paths: string[] = [];",
+        "",
+        "  function dfs(r: number, c: number, path: string): void {",
+        "    if (r === n - 1 && c === n - 1) {",
+        "      paths.push(path);",
+        "      return;",
+        "    }",
+        "    for (const [dr, dc, ch] of moves) {",
+        "      const nr = r + dr;",
+        "      const nc = c + dc;",
+        "      if (nr >= 0 && nc >= 0 && nr < n && nc < n && maze[nr][nc] === 1 && !visited[nr][nc]) {",
+        "        visited[nr][nc] = true;",
+        "        dfs(nr, nc, path + ch);",
+        "        visited[nr][nc] = false;",
+        "      }",
+        "    }",
+        "  }",
+        "",
+        "  visited[0][0] = true;",
+        "  dfs(0, 0, '');",
+        "  return paths.sort();",
+        "}",
+        "```",
+      ],
+      java: [
+        "```java",
+        "import java.util.*;",
+        "",
+        "public class RatInMaze {",
+        "    private static final int[] DX = {1, 0, 0, -1};",
+        "    private static final int[] DY = {0, -1, 1, 0};",
+        "    private static final char[] MOVE = {'D', 'L', 'R', 'U'};",
+        "",
+        "    static void dfs(int r, int c, int[][] maze, boolean[][] vis, StringBuilder path, List<String> ans) {",
+        "        int n = maze.length;",
+        "        if (r == n - 1 && c == n - 1) {",
+        "            ans.add(path.toString());",
+        "            return;",
+        "        }",
+        "        for (int i = 0; i < 4; i++) {",
+        "            int nr = r + DX[i], nc = c + DY[i];",
+        "            if (nr >= 0 && nc >= 0 && nr < n && nc < n && maze[nr][nc] == 1 && !vis[nr][nc]) {",
+        "                vis[nr][nc] = true;",
+        "                path.append(MOVE[i]);",
+        "                dfs(nr, nc, maze, vis, path, ans);",
+        "                path.deleteCharAt(path.length() - 1);",
+        "                vis[nr][nc] = false;",
+        "            }",
+        "        }",
+        "    }",
+        "",
+        "    static List<String> findPaths(int[][] maze) {",
+        "        int n = maze.length;",
+        "        List<String> ans = new ArrayList<>();",
+        "        if (n == 0 || maze[0][0] == 0 || maze[n - 1][n - 1] == 0) return ans;",
+        "        boolean[][] vis = new boolean[n][n];",
+        "        vis[0][0] = true;",
+        "        dfs(0, 0, maze, vis, new StringBuilder(), ans);",
+        "        Collections.sort(ans);",
+        "        return ans;",
+        "    }",
+        "",
+        "    public static void main(String[] args) {",
+        "        int[][] maze = {",
+        "            {1, 0, 0, 0},",
+        "            {1, 1, 0, 1},",
+        "            {1, 1, 0, 0},",
+        "            {0, 1, 1, 1}",
+        "        };",
+        "        System.out.println(findPaths(maze));",
+        "    }",
+        "}",
+        "```",
+      ],
+      go: [
+        "```go",
+        "import \"sort\"",
+        "",
+        "func findPaths(maze [][]int) []string {",
+        "    n := len(maze)",
+        "    if n == 0 || maze[0][0] == 0 || maze[n-1][n-1] == 0 {",
+        "        return nil",
+        "    }",
+        "    visited := make([][]bool, n)",
+        "    for i := range visited {",
+        "        visited[i] = make([]bool, n)",
+        "    }",
+        "    moves := []struct { dr, dc int; ch byte }{{1, 0, 'D'}, {0, -1, 'L'}, {0, 1, 'R'}, {-1, 0, 'U'}}",
+        "    var paths []string",
+        "",
+        "    var dfs func(int, int, []byte)",
+        "    dfs = func(r, c int, path []byte) {",
+        "        if r == n-1 && c == n-1 {",
+        "            paths = append(paths, string(path))",
+        "            return",
+        "        }",
+        "        for _, move := range moves {",
+        "            nr, nc := r+move.dr, c+move.dc",
+        "            if nr >= 0 && nc >= 0 && nr < n && nc < n && maze[nr][nc] == 1 && !visited[nr][nc] {",
+        "                visited[nr][nc] = true",
+        "                dfs(nr, nc, append(path, move.ch))",
+        "                visited[nr][nc] = false",
+        "            }",
+        "        }",
+        "    }",
+        "",
+        "    visited[0][0] = true",
+        "    dfs(0, 0, nil)",
+        "    sort.Strings(paths)",
+        "    return paths",
+        "}",
+        "```",
+      ],
+      rust: [
+        "```rust",
+        "fn find_paths(maze: Vec<Vec<i32>>) -> Vec<String> {",
+        "    let n = maze.len();",
+        "    if n == 0 || maze[0][0] == 0 || maze[n - 1][n - 1] == 0 {",
+        "        return vec![];",
+        "    }",
+        "    let dirs = [(1isize, 0isize, 'D'), (0, -1, 'L'), (0, 1, 'R'), (-1, 0, 'U')];",
+        "    let mut visited = vec![vec![false; n]; n];",
+        "    let mut ans = Vec::new();",
+        "",
+        "    fn dfs(",
+        "        r: usize,",
+        "        c: usize,",
+        "        maze: &Vec<Vec<i32>>,",
+        "        visited: &mut Vec<Vec<bool>>,",
+        "        dirs: &[(isize, isize, char); 4],",
+        "        path: &mut String,",
+        "        ans: &mut Vec<String>,",
+        "    ) {",
+        "        let n = maze.len();",
+        "        if r == n - 1 && c == n - 1 {",
+        "            ans.push(path.clone());",
+        "            return;",
+        "        }",
+        "        for (dr, dc, ch) in dirs {",
+        "            let nr = r as isize + dr;",
+        "            let nc = c as isize + dc;",
+        "            if nr >= 0 && nc >= 0 {",
+        "                let nr = nr as usize;",
+        "                let nc = nc as usize;",
+        "                if nr < n && nc < n && maze[nr][nc] == 1 && !visited[nr][nc] {",
+        "                    visited[nr][nc] = true;",
+        "                    path.push(*ch);",
+        "                    dfs(nr, nc, maze, visited, dirs, path, ans);",
+        "                    path.pop();",
+        "                    visited[nr][nc] = false;",
+        "                }",
+        "            }",
+        "        }",
+        "    }",
+        "",
+        "    visited[0][0] = true;",
+        "    let mut path = String::new();",
+        "    dfs(0, 0, &maze, &mut visited, &dirs, &mut path, &mut ans);",
+        "    ans.sort();",
+        "    ans",
+        "}",
+        "```",
+      ],
+    },
+    complexity: [
+      "- Time: O(4^(N^2)) in the worst case",
+      "- Space: O(N^2) for visited and recursion",
+    ],
+  });
+}
+
+function buildFibonacciFallback(language: CodingFallbackLanguage) {
+  return buildLanguageAwareCodingReply({
+    title: "Fibonacci",
+    requestedLanguage: language,
+    snippets: {
+      cpp: [
+        "```cpp",
+        "long long fib(int n) {",
+        "    if (n <= 1) return n;",
+        "    long long a = 0, b = 1;",
+        "    for (int i = 2; i <= n; ++i) {",
+        "        long long c = a + b;",
+        "        a = b;",
+        "        b = c;",
+        "    }",
+        "    return b;",
+        "}",
+        "```",
+      ],
+      python: [
+        "```python",
+        "def fib(n: int) -> int:",
+        "    if n <= 1:",
+        "        return n",
+        "    a, b = 0, 1",
+        "    for _ in range(2, n + 1):",
+        "        a, b = b, a + b",
+        "    return b",
+        "```",
+      ],
+      javascript: [
+        "```javascript",
+        "function fib(n) {",
+        "  if (n <= 1) return n;",
+        "  let a = 0;",
+        "  let b = 1;",
+        "  for (let i = 2; i <= n; i += 1) {",
+        "    [a, b] = [b, a + b];",
+        "  }",
+        "  return b;",
+        "}",
+        "```",
+      ],
+      typescript: [
+        "```ts",
+        "function fib(n: number): number {",
+        "  if (n <= 1) return n;",
+        "  let a = 0;",
+        "  let b = 1;",
+        "  for (let i = 2; i <= n; i += 1) {",
+        "    [a, b] = [b, a + b];",
+        "  }",
+        "  return b;",
+        "}",
+        "```",
+      ],
+      java: [
+        "```java",
+        "static long fib(int n) {",
+        "    if (n <= 1) return n;",
+        "    long a = 0, b = 1;",
+        "    for (int i = 2; i <= n; i++) {",
+        "        long c = a + b;",
+        "        a = b;",
+        "        b = c;",
+        "    }",
+        "    return b;",
+        "}",
+        "```",
+      ],
+      go: [
+        "```go",
+        "func fib(n int) int {",
+        "    if n <= 1 {",
+        "        return n",
+        "    }",
+        "    a, b := 0, 1",
+        "    for i := 2; i <= n; i++ {",
+        "        a, b = b, a+b",
+        "    }",
+        "    return b",
+        "}",
+        "```",
+      ],
+      rust: [
+        "```rust",
+        "fn fib(n: usize) -> usize {",
+        "    if n <= 1 {",
+        "        return n;",
+        "    }",
+        "    let (mut a, mut b) = (0usize, 1usize);",
+        "    for _ in 2..=n {",
+        "        let c = a + b;",
+        "        a = b;",
+        "        b = c;",
+        "    }",
+        "    b",
+        "}",
+        "```",
+      ],
+    },
+    complexity: [
+      "- Time: O(N)",
+      "- Space: O(1)",
+    ],
+  });
+}
+
+function buildBinarySearchFallback(language: CodingFallbackLanguage) {
+  return buildLanguageAwareCodingReply({
+    title: "Binary Search",
+    requestedLanguage: language,
+    snippets: {
+      cpp: [
+        "```cpp",
+        "int binarySearch(const vector<int>& arr, int target) {",
+        "    int left = 0, right = (int)arr.size() - 1;",
+        "    while (left <= right) {",
+        "        int mid = left + (right - left) / 2;",
+        "        if (arr[mid] == target) return mid;",
+        "        if (arr[mid] < target) left = mid + 1;",
+        "        else right = mid - 1;",
+        "    }",
+        "    return -1;",
+        "}",
+        "```",
+      ],
+      python: [
+        "```python",
+        "def binary_search(arr, target):",
+        "    left, right = 0, len(arr) - 1",
+        "    while left <= right:",
+        "        mid = (left + right) // 2",
+        "        if arr[mid] == target:",
+        "            return mid",
+        "        if arr[mid] < target:",
+        "            left = mid + 1",
+        "        else:",
+        "            right = mid - 1",
+        "    return -1",
+        "```",
+      ],
+      javascript: [
+        "```javascript",
+        "function binarySearch(arr, target) {",
+        "  let left = 0;",
+        "  let right = arr.length - 1;",
+        "  while (left <= right) {",
+        "    const mid = Math.floor((left + right) / 2);",
+        "    if (arr[mid] === target) return mid;",
+        "    if (arr[mid] < target) left = mid + 1;",
+        "    else right = mid - 1;",
+        "  }",
+        "  return -1;",
+        "}",
+        "```",
+      ],
+      typescript: [
+        "```ts",
+        "function binarySearch(arr: number[], target: number): number {",
+        "  let left = 0;",
+        "  let right = arr.length - 1;",
+        "  while (left <= right) {",
+        "    const mid = Math.floor((left + right) / 2);",
+        "    if (arr[mid] === target) return mid;",
+        "    if (arr[mid] < target) left = mid + 1;",
+        "    else right = mid - 1;",
+        "  }",
+        "  return -1;",
+        "}",
+        "```",
+      ],
+      java: [
+        "```java",
+        "static int binarySearch(int[] arr, int target) {",
+        "    int left = 0, right = arr.length - 1;",
+        "    while (left <= right) {",
+        "        int mid = left + (right - left) / 2;",
+        "        if (arr[mid] == target) return mid;",
+        "        if (arr[mid] < target) left = mid + 1;",
+        "        else right = mid - 1;",
+        "    }",
+        "    return -1;",
+        "}",
+        "```",
+      ],
+      go: [
+        "```go",
+        "func binarySearch(arr []int, target int) int {",
+        "    left, right := 0, len(arr)-1",
+        "    for left <= right {",
+        "        mid := left + (right-left)/2",
+        "        if arr[mid] == target {",
+        "            return mid",
+        "        }",
+        "        if arr[mid] < target {",
+        "            left = mid + 1",
+        "        } else {",
+        "            right = mid - 1",
+        "        }",
+        "    }",
+        "    return -1",
+        "}",
+        "```",
+      ],
+      rust: [
+        "```rust",
+        "fn binary_search(arr: &[i32], target: i32) -> isize {",
+        "    let (mut left, mut right) = (0isize, arr.len() as isize - 1);",
+        "    while left <= right {",
+        "        let mid = left + (right - left) / 2;",
+        "        let value = arr[mid as usize];",
+        "        if value == target {",
+        "            return mid;",
+        "        }",
+        "        if value < target {",
+        "            left = mid + 1;",
+        "        } else {",
+        "            right = mid - 1;",
+        "        }",
+        "    }",
+        "    -1",
+        "}",
+        "```",
+      ],
+    },
+    complexity: [
+      "- Time: O(log N)",
+      "- Space: O(1)",
+    ],
+  });
+}
+
+function buildPalindromeFallback(language: CodingFallbackLanguage) {
+  return buildLanguageAwareCodingReply({
+    title: "Palindrome Check",
+    requestedLanguage: language,
+    snippets: {
+      cpp: [
+        "```cpp",
+        "bool isPalindrome(string s) {",
+        "    string cleaned;",
+        "    for (char ch : s) if (isalnum((unsigned char)ch)) cleaned.push_back((char)tolower(ch));",
+        "    string rev = cleaned;",
+        "    reverse(rev.begin(), rev.end());",
+        "    return cleaned == rev;",
+        "}",
+        "```",
+      ],
+      python: [
+        "```python",
+        "def is_palindrome(text: str) -> bool:",
+        "    cleaned = ''.join(ch.lower() for ch in text if ch.isalnum())",
+        "    return cleaned == cleaned[::-1]",
+        "```",
+      ],
+      javascript: [
+        "```javascript",
+        "function isPalindrome(text) {",
+        "  const cleaned = text.toLowerCase().replace(/[^a-z0-9]/g, '');",
+        "  return cleaned === [...cleaned].reverse().join('');",
+        "}",
+        "```",
+      ],
+      typescript: [
+        "```ts",
+        "function isPalindrome(text: string): boolean {",
+        "  const cleaned = text.toLowerCase().replace(/[^a-z0-9]/g, '');",
+        "  return cleaned === [...cleaned].reverse().join('');",
+        "}",
+        "```",
+      ],
+      java: [
+        "```java",
+        "static boolean isPalindrome(String text) {",
+        "    String cleaned = text.toLowerCase().replaceAll(\"[^a-z0-9]\", \"\");",
+        "    return new StringBuilder(cleaned).reverse().toString().equals(cleaned);",
+        "}",
+        "```",
+      ],
+      go: [
+        "```go",
+        "import \"strings\"",
+        "",
+        "func isPalindrome(text string) bool {",
+        "    cleaned := make([]rune, 0, len(text))",
+        "    for _, ch := range strings.ToLower(text) {",
+        "        if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') {",
+        "            cleaned = append(cleaned, ch)",
+        "        }",
+        "    }",
+        "    for left, right := 0, len(cleaned)-1; left < right; left, right = left+1, right-1 {",
+        "        if cleaned[left] != cleaned[right] {",
+        "            return false",
+        "        }",
+        "    }",
+        "    return true",
+        "}",
+        "```",
+      ],
+      rust: [
+        "```rust",
+        "fn is_palindrome(text: &str) -> bool {",
+        "    let cleaned: Vec<char> = text",
+        "        .chars()",
+        "        .filter(|ch| ch.is_ascii_alphanumeric())",
+        "        .map(|ch| ch.to_ascii_lowercase())",
+        "        .collect();",
+        "    cleaned.iter().eq(cleaned.iter().rev())",
+        "}",
+        "```",
+      ],
+    },
+    complexity: [
+      "- Time: O(N)",
+      "- Space: O(N)",
+    ],
+  });
+}
+
+export function buildCodingFallbackV2(message: string) {
+  const text = message.toLowerCase();
+  const language = detectRequestedLanguageForFallback(message);
+
+  if (/\bn[-\s]?queens?\b/.test(text)) {
+    return buildNQueensFallback(language);
   }
 
   if (/\brat\b/.test(text) && /\bmaze\b/.test(text)) {
-    if (prefersCpp) {
-      return buildRatInMazeCppFallback();
-    }
-
-    return [
-      "💻 *Rat in a Maze (All Paths) - Python*",
-      "",
-      "```python",
-      "def find_paths(maze):",
-      "    n = len(maze)",
-      "    if n == 0 or maze[0][0] == 0 or maze[n - 1][n - 1] == 0:",
-      "        return []",
-      "",
-      "    moves = [(1, 0, 'D'), (0, -1, 'L'), (0, 1, 'R'), (-1, 0, 'U')]",
-      "    visited = [[False] * n for _ in range(n)]",
-      "    paths = []",
-      "",
-      "    def dfs(r, c, path):",
-      "        if r == n - 1 and c == n - 1:",
-      "            paths.append(path)",
-      "            return",
-      "",
-      "        for dr, dc, ch in moves:",
-      "            nr, nc = r + dr, c + dc",
-      "            if 0 <= nr < n and 0 <= nc < n and maze[nr][nc] == 1 and not visited[nr][nc]:",
-      "                visited[nr][nc] = True",
-      "                dfs(nr, nc, path + ch)",
-      "                visited[nr][nc] = False",
-      "",
-      "    visited[0][0] = True",
-      "    dfs(0, 0, '')",
-      "    return sorted(paths)",
-      "",
-      "if __name__ == '__main__':",
-      "    n = int(input().strip())",
-      "    maze = [list(map(int, input().split())) for _ in range(n)]",
-      "    ans = find_paths(maze)",
-      "    print(' '.join(ans) if ans else -1)",
-      "```",
-      "",
-      "• *Time:* O(4^(N²)) worst-case",
-      "• *Space:* O(N²) for visited + recursion",
-    ].join("\n");
+    return buildRatInMazeFallback(language);
   }
 
   if (/\bfibonacci\b/.test(text)) {
-    return [
-      prefersPython ? "💻 *Fibonacci - Python*" : "💻 *Fibonacci - C++*",
-      "",
-      ...(prefersCpp
-        ? [
-            "```cpp",
-            "#include <bits/stdc++.h>",
-            "using namespace std;",
-            "",
-            "long long fib(int n) {",
-            "    if (n <= 1) return n;",
-            "    long long a = 0, b = 1;",
-            "    for (int i = 2; i <= n; ++i) {",
-            "        long long c = a + b;",
-            "        a = b;",
-            "        b = c;",
-            "    }",
-            "    return b;",
-            "}",
-            "",
-            "int main() {",
-            "    int n;",
-            "    cin >> n;",
-            "    cout << fib(n) << \"\\n\";",
-            "    return 0;",
-            "}",
-            "```",
-          ]
-        : [
-            "```python",
-            "def fib(n: int) -> int:",
-            "    if n <= 1:",
-            "        return n",
-            "    a, b = 0, 1",
-            "    for _ in range(2, n + 1):",
-            "        a, b = b, a + b",
-            "    return b",
-            "",
-            "if __name__ == '__main__':",
-            "    n = int(input().strip())",
-            "    print(fib(n))",
-            "```",
-          ]),
-      "",
-      "• *Time:* O(N)",
-      "• *Space:* O(1)",
-    ].join("\n");
+    return buildFibonacciFallback(language);
   }
 
   if (/\bbinary search\b/.test(text)) {
-    return [
-      "💻 *Binary Search - Python*",
-      "",
-      "```python",
-      "def binary_search(arr, target):",
-      "    left, right = 0, len(arr) - 1",
-      "    while left <= right:",
-      "        mid = (left + right) // 2",
-      "        if arr[mid] == target:",
-      "            return mid",
-      "        if arr[mid] < target:",
-      "            left = mid + 1",
-      "        else:",
-      "            right = mid - 1",
-      "    return -1",
-      "",
-      "if __name__ == '__main__':",
-      "    arr = list(map(int, input().split()))",
-      "    target = int(input().strip())",
-      "    print(binary_search(arr, target))",
-      "```",
-      "",
-      "• *Time:* O(log N)",
-      "• *Space:* O(1)",
-    ].join("\n");
+    return buildBinarySearchFallback(language);
   }
 
   if (/\bpalindrome\b/.test(text)) {
-    return [
-      "💻 *Palindrome Check - Python*",
-      "",
-      "```python",
-      "def is_palindrome(text: str) -> bool:",
-      "    cleaned = ''.join(ch.lower() for ch in text if ch.isalnum())",
-      "    return cleaned == cleaned[::-1]",
-      "",
-      "if __name__ == '__main__':",
-      "    s = input().rstrip('\\n')",
-      "    print('YES' if is_palindrome(s) else 'NO')",
-      "```",
-      "",
-      "• *Time:* O(N)",
-      "• *Space:* O(N)",
-    ].join("\n");
+    return buildPalindromeFallback(language);
   }
 
   const baselineByLanguage: Record<string, string[]> = {
@@ -2136,7 +4294,8 @@ function bestEffortProfessionalTemplateV2Legacy(intent: IntentType, message: str
 
   switch (intent) {
     case "coding":
-      return buildCodingFallbackV2(message);
+      // Let coding questions fall through to AI model — no hardcoded templates
+      break;
     case "math":
       {
         const bayesianFallback = tryBuildBayesianABMathFallback(message);
@@ -2188,6 +4347,32 @@ function buildDeterministicChatFallback(message: string, intent: IntentType): st
   const toTitle = (input: string) => input.replace(/\b\w/g, (ch) => ch.toUpperCase());
 
   if (
+    false
+    || (/^(hi+|hello+|hey+|good\s*(morning|afternoon|evening|night)|namaste|hola|bonjour|ciao|sup|yo|what'?s up|howdy|greetings)\b/.test(text) && text.length < 40)
+  ) {
+    const casualProfile = inferClawCloudCasualTalkProfile(message);
+    const opener =
+      /\bgood\s*morning\b/.test(text) ? "Good morning." :
+      /\bgood\s*afternoon\b/.test(text) ? "Good afternoon." :
+      /\bgood\s*(evening|night)\b/.test(text) ? "Good evening." :
+      /\b(what'?s up|sup|yo)\b/.test(text) ? "Hey." :
+      "Hey.";
+    const followUp =
+      casualProfile.primaryTone === "professional"
+        ? "What would you like help with today?"
+        : casualProfile.primaryTone === "playful"
+          ? "What are we working on?"
+          : "What do you want to dive into?";
+
+    return [
+      `ðŸ‘‹ *${opener}* I'm here and ready.`,
+      "",
+      "We can keep this natural - ask a question, continue the last topic, or just talk it through.",
+      followUp,
+    ].join("\n");
+  }
+
+  if (
     intent === "greeting"
     || (/^(hi+|hello+|hey+|good\s*(morning|afternoon|evening|night)|namaste|hola|bonjour|ciao|sup|yo|what'?s up|howdy|greetings)\b/.test(text) && text.length < 40)
   ) {
@@ -2200,7 +4385,11 @@ function buildDeterministicChatFallback(message: string, intent: IntentType): st
     ].join("\n");
   }
 
-  if (/\b(what can you do|what do you do|your capabilities|help me with|features|who are you|what are you|what's your purpose)\b/.test(text)) {
+  if (looksLikeClawCloudCapabilityQuestion(text)) {
+    return buildLocalizedCapabilityReplyFromMessage(message);
+  }
+
+  if (looksLikeClawCloudCapabilityQuestion(text)) {
     return [
       "🤖 *I can help you with anything:*",
       "",
@@ -2221,9 +4410,8 @@ function buildDeterministicChatFallback(message: string, intent: IntentType): st
     ].join("\n");
   }
 
-  if (/\b(weather|whether|temperature|forecast|rain|humidity|wind|aqi)\b/.test(text)) {
-    const cityMatch = text.match(/\b(?:in|at|for)\s+([a-z][a-z\s]{1,30})\b/);
-    const city = cityMatch?.[1]?.trim();
+  if (hasWeatherIntent(message)) {
+    const city = parseWeatherCity(message) || parseWeatherCity(normalizeRegionalQuestion(message));
     if (city) {
       return [
         `🌦️ *Weather for ${toTitle(city)}*`,
@@ -2282,44 +4470,12 @@ function buildDeterministicChatFallback(message: string, intent: IntentType): st
     ].join("\n");
   }
 
-  if (
-    /\bn[-\s]?queen(s)?\b/.test(text)
-    && /\b(code|program|algorithm|backtracking|python|java|c\+\+|javascript|js|typescript|ts|give|show|write|solve)\b/.test(text)
-  ) {
-    return [
-      "💻 *N-Queens (Backtracking) — Python*",
-      "",
-      "```python",
-      "def solve_n_queens(n: int):",
-      "    cols = set()",
-      "    diag1 = set()  # row - col",
-      "    diag2 = set()  # row + col",
-      "    board = [['.' for _ in range(n)] for _ in range(n)]",
-      "    ans = []",
-      "",
-      "    def dfs(r: int):",
-      "        if r == n:",
-      "            ans.append([''.join(row) for row in board])",
-      "            return",
-      "        for c in range(n):",
-      "            if c in cols or (r - c) in diag1 or (r + c) in diag2:",
-      "                continue",
-      "            cols.add(c); diag1.add(r - c); diag2.add(r + c)",
-      "            board[r][c] = 'Q'",
-      "            dfs(r + 1)",
-      "            board[r][c] = '.'",
-      "            cols.remove(c); diag1.remove(r - c); diag2.remove(r + c)",
-      "",
-      "    dfs(0)",
-      "    return ans",
-      "",
-      "print(solve_n_queens(4))",
-      "```",
-      "",
-      "• *Time:* O(N!)",
-      "• *Space:* O(N²) for board + recursion",
-    ].join("\n");
+  if (looksLikeHistoricalWealthQuestion(message)) {
+    return buildHistoricalWealthReply(message);
   }
+
+  // N-queens: let AI model generate a proper solution with explanation
+  // instead of returning a hardcoded template
 
   if (/\b(news of today|news today|today news|latest news|latest updates?)\b/.test(text)) {
     return [
@@ -3146,11 +5302,7 @@ function bestEffortProfessionalTemplateV2(intent: IntentType, message: string) {
     }
   }
 
-  if (intent !== "coding" && /\b(code|algorithm|program|script|n[-\s]?queen|n[-\s]?queens)\b/.test(t)) {
-    return buildCodingFallbackV2(message);
-  }
-
-  if (intent === "coding") return buildCodingFallbackV2(message);
+  // REMOVED: buildCodingFallbackV2 calls — let AI model handle coding questions
 
   if (intent === "math") {
     const tradingFallback = tryBuildTradingRiskMathFallback(message);
@@ -3241,9 +5393,7 @@ function bestEffortProfessionalTemplateV2(intent: IntentType, message: string) {
     ].join("\n");
   }
 
-  if (intent === "history" && /\b(code|program|algorithm|script|n[-\s]?queen)\b/.test(t)) {
-    return buildCodingFallbackV2(message);
-  }
+  // REMOVED: history+code override — let AI handle "history of algorithms" etc.
 
   if (intent === "history") {
     return [
@@ -3434,6 +5584,8 @@ async function rewriteReplyAsComplete(input: {
       buildSmartSystem("deep", input.intent, input.message, input.extraInstruction),
       "You are repairing a draft answer that was incomplete, truncated, or too generic.",
       "Rewrite it into one complete, self-contained, professional final answer.",
+      "Lead with the answer itself, not commentary about the user's confusion or the missing context.",
+      "For short fact or definition questions, answer the most likely meaning first and keep any ambiguity note brief.",
       "Do not mention repair, retries, timeouts, or missing context.",
       "If the draft contains correct pieces, preserve them and finish the answer cleanly.",
       "Never leave the final answer unfinished.",
@@ -3463,9 +5615,11 @@ async function buildProfessionalRecoveryReply(input: {
       buildSmartSystem("deep", input.intent, input.message, input.extraInstruction),
       "You are the final recovery layer for a production assistant.",
       "Answer the user's question directly with a complete, professional, self-contained reply.",
+      "Lead with the answer itself, not commentary about the user's confusion or the missing context.",
+      "For short fact or definition questions, answer the most likely meaning first and keep any ambiguity note brief.",
       "Never mention failure, retries, or latency.",
-      "If exact facts are not derivable from the prompt, state assumptions briefly.",
-      "If confidence is below medium, say plainly that you are not confident enough without better grounding.",
+      "If exact facts are not derivable from the prompt, state assumptions briefly and name the single missing detail that would tighten the answer.",
+      "Do not refuse unless the request is genuinely unsafe.",
       "Never leave the final answer unfinished.",
     ].join("\n\n"),
     user: input.message,
@@ -3482,20 +5636,250 @@ async function buildProfessionalRecoveryReply(input: {
   return answer.trim();
 }
 
+const FAST_REPLY_TOTAL_BUDGET_MS = 16_000;
+const DEEP_REPLY_TOTAL_BUDGET_MS = 28_000;
+const INBOUND_AGENT_ROUTE_TIMEOUT_MS = DEEP_REPLY_TOTAL_BUDGET_MS + 8_000;
+const INBOUND_AGENT_ROUTE_DIRECT_TIMEOUT_MS = 60_000;
+const INBOUND_AGENT_ROUTE_OPERATIONAL_TIMEOUT_MS = 50_000;
+const INBOUND_AGENT_ROUTE_DEEP_TIMEOUT_MS = 55_000;
+const NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS = 500;
+
+type InboundRouteTimeoutPolicy = {
+  kind: "default" | "direct_knowledge" | "operational" | "live_research" | "deep_reasoning";
+  timeoutMs: number;
+};
+
+function resolveInboundRouteTimeoutPolicy(message: string): InboundRouteTimeoutPolicy {
+  let requested = extractModeOverride(message);
+  let trimmed = requested.cleaned;
+  if (!trimmed) {
+    return { kind: "default", timeoutMs: INBOUND_AGENT_ROUTE_TIMEOUT_MS };
+  }
+
+  if (trimmed.startsWith("[Group message")) {
+    trimmed = trimmed.replace(/^\[Group message[^\]]*\]\s*/i, "").trim();
+    if (!requested.explicit) {
+      requested = extractModeOverride(trimmed);
+      trimmed = requested.cleaned;
+    }
+    if (!trimmed) {
+      return { kind: "default", timeoutMs: INBOUND_AGENT_ROUTE_TIMEOUT_MS };
+    }
+  }
+
+  if (requested.mode === "deep") {
+    return { kind: "deep_reasoning", timeoutMs: INBOUND_AGENT_ROUTE_DEEP_TIMEOUT_MS };
+  }
+
+  const timeoutReplyLanguageResolution = resolveClawCloudReplyLanguage({
+    message: trimmed,
+    preferredLocale: "en",
+  });
+
+  if (
+    buildDeterministicExplainReply(trimmed)
+    || solveHardMathQuestion(trimmed)
+    || solveCodingArchitectureQuestion(trimmed)
+    || detectPrimaryDirectAnswerLaneIntent(trimmed, requested.mode)
+    || detectNativeLanguageDirectAnswerLaneIntent(trimmed, timeoutReplyLanguageResolution)
+  ) {
+    return { kind: "direct_knowledge", timeoutMs: INBOUND_AGENT_ROUTE_DIRECT_TIMEOUT_MS };
+  }
+
+  if (
+    looksLikeRealtimeResearch(trimmed)
+    || detectNewsQuestion(trimmed)
+    || detectWebSearchIntent(trimmed)
+    || hasWeatherIntent(trimmed)
+    || detectFinanceQuery(trimmed) !== null
+    || detectOfficialPricingQuery(trimmed) !== null
+    || detectAiModelRoutingDecision(trimmed) !== null
+  ) {
+    return { kind: "live_research", timeoutMs: INBOUND_AGENT_ROUTE_TIMEOUT_MS };
+  }
+
+  if (
+    parseSendMessageCommand(trimmed)
+    || parseSaveContactCommand(trimmed)
+    || detectBillingIntent(trimmed) !== null
+    || detectDriveIntent(trimmed) !== null
+    || looksLikeStrongEmailReadQuestion(trimmed)
+    || looksLikeEmailSearchQuestion(trimmed)
+    || looksLikeCalendarQuestion(trimmed)
+    || looksLikeWhatsAppHistoryQuestion(trimmed)
+    || detectReminderIntent(trimmed).intent !== "unknown"
+    || detectGmailActionIntent(trimmed) !== null
+    || detectCalendarActionIntent(trimmed) !== null
+    || detectWhatsAppSettingsCommandIntent(trimmed) !== null
+    || inferAppAccessRequirement(trimmed) !== null
+  ) {
+    return { kind: "operational", timeoutMs: INBOUND_AGENT_ROUTE_OPERATIONAL_TIMEOUT_MS };
+  }
+
+  return { kind: "default", timeoutMs: INBOUND_AGENT_ROUTE_TIMEOUT_MS };
+}
+
+export function getInboundRouteTimeoutPolicyForTest(message: string) {
+  return resolveInboundRouteTimeoutPolicy(message);
+}
+
+function withSoftTimeout<T>(promise: Promise<T>, fallback: T, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(fallback);
+      }
+    }, timeoutMs);
+
+    promise
+      .then((value) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        }
+      })
+      .catch(() => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(fallback);
+        }
+      });
+  });
+}
+
+function remainingDeadlineMs(deadlineMs?: number) {
+  if (!deadlineMs) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  return deadlineMs - Date.now();
+}
+
+function hasReplyRecoveryBudget(deadlineMs: number | undefined, minMs: number) {
+  return remainingDeadlineMs(deadlineMs) >= minMs;
+}
+
+function replyPipelineBudgetMs(mode: ResponseMode) {
+  return mode === "deep" ? DEEP_REPLY_TOTAL_BUDGET_MS : FAST_REPLY_TOTAL_BUDGET_MS;
+}
+
+function buildTimeboxedProfessionalReply(message: string, intent: IntentType): string {
+  const profile = buildClawCloudAnswerQualityProfile({
+    question: message,
+    intent,
+    category: intent,
+  });
+
+  if (intent === "math") {
+    const bayesianFallback = tryBuildBayesianABMathFallback(message);
+    if (bayesianFallback) {
+      return bayesianFallback;
+    }
+
+    const tradingFallback = tryBuildTradingRiskMathFallback(message);
+    if (tradingFallback) {
+      return tradingFallback;
+    }
+
+    const deterministicMath = solveHardMathQuestion(message);
+    if (deterministicMath) {
+      return deterministicMath;
+    }
+  }
+
+  if (intent === "coding" || intent === "research") {
+    const deterministicCoding = solveCodingArchitectureQuestion(message);
+    if (deterministicCoding) {
+      return deterministicCoding;
+    }
+  }
+
+  if (intent === "explain") {
+    const deterministicExplain = buildDeterministicExplainReply(message);
+    if (deterministicExplain) {
+      return deterministicExplain;
+    }
+  }
+
+  // REMOVED: buildCodingFallbackV2 was returning hardcoded competitive
+  // programming templates (def solve, sys.stdin.read) for ANY question
+  // containing "algorithm", "code", etc. — even B+ tree explanations,
+  // Black-Scholes derivations, etc. Let the AI model handle these.
+
+  if (hasWeatherIntent(message)) {
+    return [
+      "Weather update",
+      "",
+      "Share your city name for a precise forecast with temperature, rain, humidity, and wind.",
+      "Example: Weather today in Delhi.",
+    ].join("\n");
+  }
+
+  if (looksLikeCurrentAffairsPowerCrisisQuestion(message)) {
+    return buildCurrentAffairsEvidenceAnswer(message, []);
+  }
+
+  if (detectNewsQuestion(message) || /\b(news|latest|today)\b/i.test(message)) {
+    return buildNewsCoverageRecoveryReply(message);
+  }
+
+  if (shouldAvoidGenericKnowledgeFallback(message, intent)) {
+    return buildClawCloudLowConfidenceReply(
+      message,
+      profile,
+      "I could not complete a grounded answer cleanly enough to avoid a misleading fallback.",
+    );
+  }
+
+  const bestEffort = bestEffortProfessionalTemplateV2(intent, message);
+  if (!isVisibleFallbackReply(bestEffort) && !isLowQualityTemplateReply(bestEffort)) {
+    return bestEffort;
+  }
+
+  const universal = buildUniversalDomainFallback(intent, message);
+  if (!isVisibleFallbackReply(universal) && !isLowQualityTemplateReply(universal)) {
+    return universal;
+  }
+
+  const universalV2 = buildUniversalDomainFallbackV2(intent, message);
+  if (!isVisibleFallbackReply(universalV2) && !isLowQualityTemplateReply(universalV2)) {
+    return universalV2;
+  }
+
+  return buildClawCloudLowConfidenceReply(message, profile);
+}
+
+export function buildTimeboxedProfessionalReplyForTest(message: string, intent: IntentType) {
+  return buildTimeboxedProfessionalReply(message, intent);
+}
+
 async function ensureProfessionalReply(input: {
   userId: string;
   message: string;
   intent: IntentType;
   reply: string | null | undefined;
   extraInstruction?: string;
+  deadlineMs?: number;
 }) {
   if (
     !isVisibleFallbackReply(input.reply)
     && !isLowQualityTemplateReply(input.reply)
     && !isProbablyIncompleteReply(input.message, input.intent, input.reply)
+    && !looksLikeIndirectOpeningForDirectAnswer(input.message, input.reply ?? "")
   ) {
     return input.reply!.trim();
   }
+
+  const profile = buildClawCloudAnswerQualityProfile({
+    question: input.message,
+    intent: input.intent,
+    category: input.intent,
+  });
+  const timeoutLowConfidenceReply = () => buildTimeboxedProfessionalReply(input.message, input.intent);
 
   if (input.intent === "math") {
     const bayesianFallback = tryBuildBayesianABMathFallback(input.message);
@@ -3525,11 +5909,22 @@ async function ensureProfessionalReply(input: {
       if (deterministicCodingFallback) {
         return deterministicCodingFallback;
       }
-      return buildCodingFallbackV2(input.message);
+      // No hardcoded template — fall through to AI model
     }
   }
 
-  if (input.reply && !isVisibleFallbackReply(input.reply)) {
+  if (
+    shouldFailClosedForDirectKnowledgeQuestion(input.message, input.intent)
+    && !hasReplyRecoveryBudget(input.deadlineMs, 3_500)
+  ) {
+    return timeoutLowConfidenceReply();
+  }
+
+  if (
+    input.reply
+    && !isVisibleFallbackReply(input.reply)
+    && hasReplyRecoveryBudget(input.deadlineMs, 4_500)
+  ) {
     const repaired = await rewriteReplyAsComplete({
       userId: input.userId,
       message: input.message,
@@ -3543,62 +5938,61 @@ async function ensureProfessionalReply(input: {
     }
   }
 
-  const rescued = await buildProfessionalRecoveryReply({
-    userId: input.userId,
-    message: input.message,
-    intent: input.intent,
-    extraInstruction: input.extraInstruction,
-  }).catch(() => "");
+  const rescued = hasReplyRecoveryBudget(input.deadlineMs, 4_500)
+    ? await buildProfessionalRecoveryReply({
+      userId: input.userId,
+      message: input.message,
+      intent: input.intent,
+      extraInstruction: input.extraInstruction,
+    }).catch(() => "")
+    : "";
 
   if (!isVisibleFallbackReply(rescued) && !isProbablyIncompleteReply(input.message, input.intent, rescued)) {
     return rescued.trim();
   }
 
-  const expertAnswer = await solveWithUniversalExpert({
-    question: input.message,
-    intent: input.intent,
-  }).catch(() => "");
+  const expertAnswer = hasReplyRecoveryBudget(input.deadlineMs, 3_000)
+    ? await solveWithUniversalExpert({
+      question: input.message,
+      intent: input.intent,
+    }).catch(() => "")
+    : "";
 
   if (expertAnswer.trim().length > 40) {
     return expertAnswer.trim();
   }
 
-  const forcedAnswer = await completeClawCloudPrompt({
-    system: [
-      "You are ClawCloud AI. Answer the user's question completely and professionally.",
-      "If exact facts are missing, give the safest professional answer and label assumptions.",
-      "If confidence is below medium, say: I'm not confident enough to answer that safely without better grounding.",
-      "Return a complete answer, not a placeholder.",
-    ].join("\n"),
-    user: input.message,
-    history: [],
-    intent: input.intent,
-    responseMode: "deep",
-    maxTokens: 1_200,
-    fallback: "",
-    skipCache: true,
-    temperature: 0.15,
-  }).catch(() => "");
+  const forcedAnswer = hasReplyRecoveryBudget(input.deadlineMs, 3_500)
+    ? await completeClawCloudPrompt({
+      system: [
+        "You are ClawCloud AI. Answer the user's question completely and professionally.",
+        "If exact facts are missing, give the safest professional answer, label assumptions briefly, and name the single missing detail that would tighten the answer.",
+        "Do not return a refusal or placeholder unless the request is genuinely unsafe.",
+        "Return a complete answer, not a placeholder.",
+      ].join("\n"),
+      user: input.message,
+      history: [],
+      intent: input.intent,
+      responseMode: "fast",
+      maxTokens: 900,
+      fallback: "",
+      skipCache: true,
+      temperature: 0.12,
+    }).catch(() => "")
+    : "";
 
   if (forcedAnswer.trim() && !isVisibleFallbackReply(forcedAnswer) && !isLowQualityTemplateReply(forcedAnswer)) {
     return forcedAnswer.trim();
   }
 
-  const bestEffort = bestEffortProfessionalTemplateV2(input.intent, input.message);
-  if (!isVisibleFallbackReply(bestEffort) && !isLowQualityTemplateReply(bestEffort)) {
-    return bestEffort;
-  }
-
   const deterministic = buildDeterministicChatFallback(input.message, input.intent);
-  if (deterministic) {
+  if (deterministic && !isLowQualityTemplateReply(deterministic)) {
     return deterministic;
   }
 
-  if (/\b(code|program|algorithm|n[-\s]?queen)\b/i.test(input.message)) {
-    return buildCodingFallbackV2(input.message);
-  }
+  // REMOVED: buildCodingFallbackV2 keyword match — let AI handle coding questions
 
-  if (/\b(weather|whether|temperature|forecast|rain|humidity|wind|aqi)\b/i.test(input.message)) {
+  if (hasWeatherIntent(input.message)) {
     return [
       "🌦️ *Weather Update*",
       "",
@@ -3611,16 +6005,29 @@ async function ensureProfessionalReply(input: {
     return buildNewsCoverageRecoveryReply(input.message);
   }
 
+  if (shouldAvoidGenericKnowledgeFallback(input.message, input.intent)) {
+    return buildClawCloudLowConfidenceReply(
+      input.message,
+      profile,
+      "I could not verify a direct answer cleanly enough to avoid a misleading fallback.",
+    );
+  }
+
+  const bestEffort = bestEffortProfessionalTemplateV2(input.intent, input.message);
+  if (!isVisibleFallbackReply(bestEffort) && !isLowQualityTemplateReply(bestEffort)) {
+    return bestEffort;
+  }
+
   const universal = buildUniversalDomainFallback(input.intent, input.message);
-  if (universal.trim()) {
+  if (universal.trim() && !isLowQualityTemplateReply(universal)) {
     return universal;
   }
 
-  return [
-    "I am ready to help.",
-    "",
-    "Please rephrase the question once in a single clear line and I will answer directly.",
-  ].join("\n");
+  return buildClawCloudLowConfidenceReply(
+    input.message,
+    profile,
+    "The remaining recovery paths were too generic to trust as a final answer.",
+  );
 }
 
 async function smartReply(
@@ -3632,81 +6039,142 @@ async function smartReply(
   extraInstruction?: string,
   memorySnippet?: string,
 ): Promise<string> {
+  const result = await smartReplyDetailed(
+    userId,
+    message,
+    intent,
+    mode,
+    explicitMode,
+    extraInstruction,
+    memorySnippet,
+  );
+  return result.reply;
+}
+
+function shouldPersistModelAuditTrail(trail: ClawCloudModelAuditTrail | null | undefined) {
+  if (!trail) {
+    return false;
+  }
+
+  return (
+    trail.responseMode === "deep"
+    || trail.planner.judgeEnabled
+    || Boolean(trail.judge?.used)
+    || Boolean(trail.judge?.materialDisagreement)
+  );
+}
+
+async function smartReplyDetailed(
+  userId: string,
+  message: string,
+  intent: IntentType,
+  mode: ResponseMode = "fast",
+  explicitMode = false,
+  extraInstruction?: string,
+  memorySnippet?: string,
+  preferredModels?: string[],
+): Promise<{ reply: string; modelAuditTrail: ClawCloudModelAuditTrail | null }> {
+  const pipelineDeadlineMs = Date.now() + replyPipelineBudgetMs(mode);
   const deterministic = buildDeterministicChatFallback(message, intent);
   if (deterministic) {
-    return deterministic;
+    return {
+      reply: deterministic,
+      modelAuditTrail: null,
+    };
   }
 
   if (mode !== "deep") {
-    const fastReply = await completeClawCloudPrompt({
+    const fastResult = await completeClawCloudPromptWithTrace({
       system: buildSmartSystem("fast", intent, message, extraInstruction, memorySnippet),
       user: message,
       history: await buildSmartHistory(userId, message, "fast", intent),
       intent,
       responseMode: "fast",
+      preferredModels,
       fallback: FAST_FALLBACK,
       skipCache: true,
       temperature: 0.75,
     });
-    return ensureProfessionalReply({
+    const reply = await ensureProfessionalReply({
       userId,
       message,
       intent,
-      reply: fastReply,
+      reply: fastResult.answer,
       extraInstruction,
+      deadlineMs: pipelineDeadlineMs,
     });
+    const modelAuditTrail = buildClawCloudModelAuditTrail(fastResult.trace);
+    return {
+      reply,
+      modelAuditTrail: shouldPersistModelAuditTrail(modelAuditTrail) ? modelAuditTrail : null,
+    };
   }
 
-  const deepPromise = completeClawCloudPrompt({
+  const deepPromise = completeClawCloudPromptWithTrace({
     system: buildSmartSystem("deep", intent, message, extraInstruction, memorySnippet),
     user: message,
     history: await buildSmartHistory(userId, message, "deep", intent),
     intent,
     responseMode: "deep",
+    preferredModels,
     fallback: DEEP_FALLBACK,
     skipCache: true,
     temperature: 0.85,
   });
 
   if (explicitMode) {
-    const deepReply = await deepPromise;
-    if (deepReply !== DEEP_FALLBACK) {
-      return ensureProfessionalReply({
+    const deepResult = await deepPromise;
+    if (deepResult.answer !== DEEP_FALLBACK) {
+      const reply = await ensureProfessionalReply({
         userId,
         message,
         intent,
-        reply: deepReply,
+        reply: deepResult.answer,
         extraInstruction,
+        deadlineMs: pipelineDeadlineMs,
       });
+      const modelAuditTrail = buildClawCloudModelAuditTrail(deepResult.trace);
+      return {
+        reply,
+        modelAuditTrail: shouldPersistModelAuditTrail(modelAuditTrail) ? modelAuditTrail : null,
+      };
     }
 
-    const fastReply = await completeClawCloudPrompt({
+    const fastResult = await completeClawCloudPromptWithTrace({
       system: buildSmartSystem("fast", intent, message, extraInstruction, memorySnippet),
       user: message,
       history: await buildSmartHistory(userId, message, "fast", intent),
       intent,
       responseMode: "fast",
+      preferredModels,
       fallback: FAST_FALLBACK,
       skipCache: true,
       temperature: 0.75,
     });
-    return ensureProfessionalReply({
+    const reply = await ensureProfessionalReply({
       userId,
       message,
       intent,
-      reply: fastReply,
+      reply: fastResult.answer,
       extraInstruction,
+      deadlineMs: pipelineDeadlineMs,
     });
+    const modelAuditTrail = buildClawCloudModelAuditTrail(fastResult.trace);
+    return {
+      reply,
+      modelAuditTrail: shouldPersistModelAuditTrail(modelAuditTrail) ? modelAuditTrail : null,
+    };
   }
 
   const fastPromise = (async () => {
     await new Promise((resolve) => setTimeout(resolve, autoDeepFastHeadstartMs(intent)));
-    return completeClawCloudPrompt({
+    return completeClawCloudPromptWithTrace({
       system: buildSmartSystem("fast", intent, message, extraInstruction, memorySnippet),
       user: message,
       history: await buildSmartHistory(userId, message, "fast", intent),
       intent,
       responseMode: "fast",
+      preferredModels,
       fallback: FAST_FALLBACK,
       skipCache: true,
       temperature: 0.75,
@@ -3715,25 +6183,56 @@ async function smartReply(
 
   try {
     const winner = await Promise.any([
-      usefulReply(deepPromise, DEEP_FALLBACK),
-      usefulReply(fastPromise, FAST_FALLBACK),
+      usefulReplyResult(
+        deepPromise.then((result) => ({
+          reply: result.answer,
+          modelAuditTrail: buildClawCloudModelAuditTrail(result.trace),
+        })),
+        DEEP_FALLBACK,
+      ),
+      usefulReplyResult(
+        fastPromise.then((result) => ({
+          reply: result.answer,
+          modelAuditTrail: buildClawCloudModelAuditTrail(result.trace),
+        })),
+        FAST_FALLBACK,
+      ),
     ]);
-    return ensureProfessionalReply({
+    const reply = await ensureProfessionalReply({
       userId,
       message,
       intent,
-      reply: winner,
+      reply: winner.reply,
       extraInstruction,
+      deadlineMs: pipelineDeadlineMs,
     });
+    return {
+      reply,
+      modelAuditTrail: shouldPersistModelAuditTrail(winner.modelAuditTrail) ? winner.modelAuditTrail : null,
+    };
   } catch {
-    const [deepReply, fastReply] = await Promise.all([deepPromise, fastPromise]);
-    return ensureProfessionalReply({
+    const [deepResult, fastResult] = await Promise.all([deepPromise, fastPromise]);
+    const picked = deepResult.answer !== DEEP_FALLBACK
+      ? {
+        reply: deepResult.answer,
+        modelAuditTrail: buildClawCloudModelAuditTrail(deepResult.trace),
+      }
+      : {
+        reply: fastResult.answer,
+        modelAuditTrail: buildClawCloudModelAuditTrail(fastResult.trace),
+      };
+    const reply = await ensureProfessionalReply({
       userId,
       message,
       intent,
-      reply: deepReply !== DEEP_FALLBACK ? deepReply : fastReply,
+      reply: picked.reply,
       extraInstruction,
+      deadlineMs: pipelineDeadlineMs,
     });
+    return {
+      reply,
+      modelAuditTrail: shouldPersistModelAuditTrail(picked.modelAuditTrail) ? picked.modelAuditTrail : null,
+    };
   }
 }
 
@@ -3967,6 +6466,60 @@ function isMathOrStatisticsQuestion(text: string): boolean {
 }
 
 type DetectedIntent = { type: IntentType; category: string };
+type StrictIntentRoute = {
+  intent: DetectedIntent;
+  confidence: "high" | "medium" | "low";
+  locked: boolean;
+  clarificationReply: string | null;
+};
+
+const SMALL_COUNT_WORDS: Record<string, number> = {
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+};
+
+const EMAIL_READ_VERB_PATTERN =
+  /\b(search|find|look up|lookup|check|show|read|open|review|summarize|summarise|list|pull|fetch|get|give|tell|share|see|bring)\b/;
+
+const EMAIL_SURFACE_PATTERN =
+  /\b(gmail|inbox|mailbox|emails?|mails?)\b/;
+
+const EMAIL_MAILBOX_SIGNAL_PATTERN =
+  /\b(today|yesterday|latest|recent|newest|top|first|important|priority|unread|read|spam|junk|trash|deleted|sent|drafts?|starred|promotions?|social|updates|forums|all mail|attachment|attachments|last \d+\s+days?|this week|last week)\b/;
+
+const RECENT_EMAIL_LISTING_PATTERN =
+  /\b(latest|recent|newest|top|first)\b/;
+
+function looksLikeStrongEmailReadQuestion(text: string) {
+  const normalized = text.toLowerCase().trim();
+  if (looksLikeGmailKnowledgeQuestion(text)) {
+    return false;
+  }
+
+  const hasExplicitMailboxSurface =
+    /\b(gmail|inbox|mailbox)\b/.test(normalized)
+    || /\bmy\s+(?:emails?|mails?|mail)\b/.test(normalized);
+  const asksForEmailContents =
+    /\b(?:what\s+(?:do|does)|tell\s+me|show\s+me|read|summari[sz]e)\b.*\b(?:emails?|mails?|messages?|gmail|inbox|mailbox)\b.*\b(?:say|says|said)\b/.test(normalized);
+  const asksForMailboxSlice =
+    /\b(?:top|latest|recent|newest|first|\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\b.*\b(?:important|priority|unread|read)?\s*(?:gmail\s+)?(?:emails?|mails?|messages?)\b/.test(normalized);
+
+  return (
+    (hasExplicitMailboxSurface && (EMAIL_READ_VERB_PATTERN.test(normalized) || EMAIL_MAILBOX_SIGNAL_PATTERN.test(normalized)))
+    || (hasExplicitMailboxSurface && asksForMailboxSlice)
+    || (hasExplicitMailboxSurface && asksForEmailContents)
+    || /\bemail from\b/.test(normalized)
+    || /\bany emails? (from|about|regarding)\b/.test(normalized)
+  );
+}
 
 function looksLikeResearchMemoQuestion(text: string) {
   return (
@@ -3990,15 +6543,32 @@ function looksLikeArchitectureCodingQuestion(text: string, rawText: string, word
   );
 }
 
+function isArchitectureCodingRouteCandidate(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  const normalized = trimmed.toLowerCase();
+  return looksLikeArchitectureCodingQuestion(normalized, trimmed, normalized.split(/\s+/));
+}
+
 function looksLikeCalendarQuestion(text: string) {
+  if (looksLikePublicAffairsMeetingQuestion(text) || looksLikeCalendarKnowledgeQuestion(text)) {
+    return false;
+  }
+
   return (
     /\b(show|check|look at|summarize|list|review|pull|give|tell|share)\s+(?:me\s+)?(?:(?:my|today(?:'|\u2019)?s|tomorrow(?:'|\u2019)?s)\s+)?(calendar|schedule|agenda|meetings?|events?)\b/.test(text)
     || /\b(?:give|tell|show|share)\s+(?:me\s+)?(?:the\s+)?(?:start times?|meeting titles?|free gaps?|availability)\b.*\b(calendar|schedule|agenda|meetings?|events?)\b/.test(text)
     || /\b(show|check|look at|summarize|list|review|pull|give|tell|share)\s+(me\s+)?(my\s+)?(calendar|schedule|agenda|meetings?|events?)\b/.test(text)
-    || /\b(my\s+)?(meetings?|calendar|schedule|events?|appointments?|agenda)\s+(today|tomorrow|tonight|this week|next week|for today|for tomorrow|right now|upcoming)\b/.test(text)
+    || /\bmy\s+(meetings?|calendar|schedule|events?|appointments?|agenda)\s+(today|tomorrow|tonight|this week|next week|for today|for tomorrow|right now|upcoming)\b/.test(text)
     || /\bwhat('s|\s+is)\s+(on\s+)?(my\s+)?(calendar|schedule|agenda|plate)\b/.test(text)
     || /\bdo i have (any\s+)?(meetings?|events?|calls?)\b/.test(text)
-    || /\b(today(?:'|\u2019)?s|tomorrow(?:'|\u2019)?s)\s+(meetings?|calendar|schedule|agenda)\b/.test(text)
+    || /\b(today(?:'|\u2019)?s|tomorrow(?:'|\u2019)?s)\s+(calendar|schedule|agenda)\b/.test(text)
+    || /\b(today(?:'|\u2019)?s|tomorrow(?:'|\u2019)?s)\s+my\s+(meetings?|events?|appointments?)\b/.test(text)
+    || /\b(?:show|tell|list|give|check)\s+(?:me\s+)?(?:my\s+)?(?:next|upcoming)\s+\d+\s+(?:calendar\s+)?(?:meetings?|events?|appointments?)\b/.test(text)
+    || /\b(?:next|upcoming)\s+\d+\s+(?:meetings?|events?|appointments?)\b/.test(text)
     || /\b(calendar|schedule|meetings?|events?)\b.*\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/.test(text)
     || /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b.*\b(calendar|schedule|meetings?|events?|overlap|back-to-back)\b/.test(text)
     || /\b(overlap|back-to-back|conflict|double-booked)\b.*\b(calendar|schedule|meetings?|events?)\b/.test(text)
@@ -4008,6 +6578,15 @@ function looksLikeCalendarQuestion(text: string) {
       /\b(calendar|schedule|agenda|meetings?|events?)\b/.test(text)
       && /\b(today|tomorrow|tonight|this week|next week|start times?|meeting titles?|free gaps?|free slots?|free time|availability|available time|longer than \d+\s*(?:min|mins|minute|minutes|hour|hours))\b/.test(text)
     )
+  );
+}
+
+function looksLikePublicAffairsMeetingQuestion(text: string) {
+  const normalized = text.toLowerCase().trim();
+  return (
+    /\b(meeting|meetings|conference|talks?|summit)\b/.test(normalized)
+    && /\b(president|prime minister|minister|summit|bilateral|joint statement|white house|state visit|press conference|delegation)\b/.test(normalized)
+    && !/\b(my|calendar|schedule|agenda|appointment|appointments|do i have|free gap|availability)\b/.test(normalized)
   );
 }
 
@@ -4055,6 +6634,9 @@ function parseClockTime(value: string) {
 function buildCalendarQueryWindow(text: string): CalendarQueryWindow {
   const normalized = text.toLowerCase();
   const base = new Date();
+  const usesUpcomingWindow =
+    /\bupcoming\b/.test(normalized)
+    || /\bnext\s+\d+\s+(?:meetings?|events?|appointments?)\b/.test(normalized);
   let dayStart = new Date(base);
   dayStart.setHours(0, 0, 0, 0);
   let label = "today";
@@ -4133,11 +6715,16 @@ function buildCalendarQueryWindow(text: string): CalendarQueryWindow {
     endMinute = 59;
   }
 
-  const timeMin = new Date(dayStart);
-  timeMin.setHours(startHour, startMinute, 0, 0);
+  const timeMin = usesUpcomingWindow ? new Date(base) : new Date(dayStart);
+  if (!usesUpcomingWindow) {
+    timeMin.setHours(startHour, startMinute, 0, 0);
+  }
 
-  const timeMax = new Date(dayStart);
-  if (label === "next week") {
+  const timeMax = usesUpcomingWindow ? new Date(base) : new Date(dayStart);
+  if (usesUpcomingWindow) {
+    label = "upcoming";
+    timeMax.setDate(timeMax.getDate() + 14);
+  } else if (label === "next week") {
     timeMax.setDate(timeMax.getDate() + 7);
     timeMax.setHours(0, 0, 0, 0);
   } else {
@@ -4266,22 +6853,1010 @@ function hasExplicitGmailSearchOperators(text: string) {
 function looksLikeEmailSearchQuestion(text: string) {
   const t = text.toLowerCase().trim();
   if (
-    /\b(spending|expenses?|budget|receipt|invoice|transaction|money spent|cost me)\b/.test(t)
+    isArchitectureCodingRouteCandidate(text)
+    || looksLikeResearchMemoQuestion(t)
+    ||
+    looksLikeGmailKnowledgeQuestion(text)
+    || looksLikeEmailWritingKnowledgeQuestion(text)
+    ||
+    detectGmailActionIntent(text)
+    || /\b(spending|expenses?|budget|receipt|invoice|transaction|money spent|cost me)\b/.test(t)
+  ) {
+    return false;
+  }
+
+  if (
+    /\b(write|draft|compose|create|generate)\b.*\b(email|mail|follow.?up(?:\s+email)?)\b/.test(t)
+    || /\b(write|draft|compose|create|generate)\b.*\b(reply|response)\b.*\b(?:to|for)\b/.test(t)
   ) {
     return false;
   }
 
   return (
-    /\b(search|find|look up|check|show|get|give|tell|summarize|list|review|pull)\s+(?:me\s+)?(?:(?:my|the|today(?:'|\u2019)?s|yesterday(?:'|\u2019)?s|latest|recent|important|priority|unread)\s+)*(gmail|emails?|inbox|mail|messages?)\b/.test(t)
-    || /\b(gmail|emails?|inbox|mail|messages?)\b.*\b(today|yesterday|latest|recent|important|priority|unread|from|about|regarding|last \d+\s+days?|this week|last week)\b/.test(t)
-    || /\bwhat did .+ (say|write|send|email)\b/.test(t)
-    || /\bemail from\b/.test(t)
-    || /\bdid .+ (reply|respond|email|send)\b/.test(t)
-    || /\bany (emails?|messages?) (from|about|regarding)\b/.test(t)
+    looksLikeStrongEmailReadQuestion(text)
+    || /\b(search|find|look up|lookup|check|show|read|open|review|summari[sz]e|list|pull|fetch|get|give|tell|share|see|bring)\s+(?:me\s+)?(?:(?:my|the|today(?:'|\u2019)?s|yesterday(?:'|\u2019)?s|latest|recent|newest|top|first|important|priority|unread|read|spam|junk|trash|deleted|sent|drafts?|starred|promotions?|social|updates|forums|all)\s+)*(gmail|emails?|mails?|inbox|mailbox|mail)\b/.test(t)
+    || /\b(gmail|emails?|mails?|inbox|mailbox|mail)\b.*\b(today|yesterday|latest|recent|newest|top|first|important|priority|unread|read|spam|junk|trash|deleted|sent|drafts?|starred|promotions?|social|updates|forums|all mail|attachment|attachments|last \d+\s+days?|this week|last week)\b/.test(t)
   );
 }
 
-function buildNaturalLanguageEmailSearchQuery(userMessage: string | null | undefined) {
+function detectExplicitPersonalSurfaces(text: string): PersonalSurface[] {
+  const lower = text.toLowerCase().trim();
+  const surfaces = new Set<PersonalSurface>();
+
+  if (/\bwhatsapp\b/.test(lower)) {
+    surfaces.add("whatsapp");
+  }
+
+  if (/\b(gmail|emails?|mails?|inbox|mailbox)\b/.test(lower) || (/\bmail\b/.test(lower) && /\bmy\b/.test(lower))) {
+    surfaces.add("gmail");
+  }
+
+  if (
+    /\b(google calendar|gcal|g calendar|calendar|agenda|schedule)\b/.test(lower)
+    || (/\b(my|our)\b/.test(lower) && /\b(meetings?|events?|appointments?)\b/.test(lower))
+    || /\b(free slot|free slots|availability|available time)\b/.test(lower)
+  ) {
+    surfaces.add("calendar");
+  }
+
+  if (/\b(google drive|my drive|gdrive|g drive|google docs?|google sheets?|gdoc|gsheet)\b/.test(lower)) {
+    surfaces.add("drive");
+  }
+
+  return [...surfaces];
+}
+
+function looksLikeGenericMessageLookup(text: string) {
+  const lower = text.toLowerCase().trim();
+
+  return (
+    /\bwhat\s+was\s+(?:the\s+)?(?:messages?|chat|conversation|history|texts?)\b/.test(lower)
+    || /\bwhat did\s+.+?\s+(?:say|send|text|message|write)\b/.test(lower)
+    || /\b(?:see|show|read|check|find|look up|tell|list|review|pull)\s+(?:me\s+)?(?:what\s+)?(?:the\s+)?(?:messages?|chat|conversation|history|texts?)\b/.test(lower)
+    || /\b(?:message|messages|chat|conversation|history|texts?)\s+(?:i got|i received|from|with|of)\b/.test(lower)
+    || /\b(?:got|received)\s+(?:a\s+)?message\s+from\b/.test(lower)
+    || /\b(?:did|has)\s+.+?\s+(?:reply|respond|send|text|message)\b/.test(lower)
+  );
+}
+
+function looksLikeWhatsAppContactConversationLookup(text: string) {
+  const lower = text.toLowerCase().trim();
+
+  return (
+    /\b(?:message|messages|chat|conversation|texts?)\b/.test(lower)
+    && /\bcontact\b/.test(lower)
+    && !/\b(gmail|email|emails|mail|inbox|mailbox|calendar|schedule|agenda|drive|docs?|sheets?|spreadsheet|file|files)\b/.test(lower)
+  );
+}
+
+function looksLikeGenericFileLookup(text: string) {
+  const lower = text.toLowerCase().trim();
+
+  return (
+    /\b(show|see|read|open|find|search|list|check|get|summarize|what(?:'s| is) in)\b/.test(lower)
+    && /\b(file|files|doc|docs|document|documents|folder|folders|sheet|sheets|spreadsheet|spreadsheets|pdf|attachment|attachments)\b/.test(lower)
+  );
+}
+
+function looksLikeGenericScheduleLookup(text: string) {
+  const lower = text.toLowerCase().trim();
+  if (looksLikePublicAffairsMeetingQuestion(lower)) {
+    return false;
+  }
+
+  return (
+    /\b(show|see|check|find|list|get|what(?:'s| is)|when|do i have|am i free)\b/.test(lower)
+    && /\b(calendar|schedule|agenda|meeting|meetings|event|events|appointment|appointments|free slot|free slots|availability|available time)\b/.test(lower)
+  );
+}
+
+function inferPossiblePersonalSurfaces(text: string): PersonalSurface[] {
+  const explicit = detectExplicitPersonalSurfaces(text);
+  if (explicit.length) {
+    return explicit;
+  }
+
+  const lower = text.toLowerCase().trim();
+  const surfaces = new Set<PersonalSurface>();
+
+  if (looksLikeWhatsAppContactConversationLookup(lower)) {
+    surfaces.add("whatsapp");
+  } else if (looksLikeGenericMessageLookup(lower)) {
+    surfaces.add("whatsapp");
+    surfaces.add("gmail");
+  }
+
+  if (looksLikeGenericFileLookup(lower)) {
+    surfaces.add("drive");
+    if (/\battachment|attachments\b/.test(lower)) {
+      surfaces.add("gmail");
+    }
+  }
+
+  if (looksLikeGenericScheduleLookup(lower)) {
+    surfaces.add("calendar");
+  }
+
+  return [...surfaces];
+}
+
+function buildPersonalSurfaceClarificationReply(text: string, surfaces: PersonalSurface[]) {
+  const surfaceDisplayName = (surface: PersonalSurface) =>
+    surface === "whatsapp"
+      ? "WhatsApp"
+      : surface === "gmail"
+        ? "Gmail"
+        : surface === "calendar"
+          ? "Calendar"
+          : "Drive";
+  const labels = surfaces.map((surface) =>
+    surface === "whatsapp"
+      ? "WhatsApp messages"
+      : surface === "gmail"
+        ? "Gmail emails"
+        : surface === "calendar"
+          ? "Calendar events"
+          : "Drive files",
+  );
+
+  const options = labels.length === 2
+    ? `${labels[0]} or ${labels[1]}`
+    : `${labels.slice(0, -1).join(", ")}, or ${labels[labels.length - 1]}`;
+  const examples = surfaces
+    .slice(0, 2)
+    .map((surface) => `${surfaceDisplayName(surface)}: ${text}`);
+
+  return [
+    "I want to check the right place before I answer.",
+    "",
+    `Do you want me to look in ${options}?`,
+    `Reply like this: "${examples.join('" or "')}".`,
+  ].join("\n");
+}
+
+function shouldClarifyPersonalSurface(text: string) {
+  return inferPossiblePersonalSurfaces(text).length > 1;
+}
+
+function stripExplicitReplyLocaleSuffix(text: string) {
+  const trimmed = text.trim();
+  const match = trimmed.match(/\b(?:in|into)\s+([a-z][a-z\s()+-]{1,24})[.!?]*$/i);
+  if (!match) {
+    return trimmed;
+  }
+
+  const candidate = match?.[1]?.trim();
+  if (!candidate || !resolveSupportedLocale(candidate.replace(/\bnatural\b/gi, "").trim())) {
+    return trimmed;
+  }
+
+  return trimmed.slice(0, match.index ?? trimmed.length).trim() || trimmed;
+}
+
+function normalizeCultureStoryTitleCandidate(candidate: string) {
+  return candidate
+    .replace(
+      /\s+(?:and|&|plus|as)\s+(?:is|was|does|did|can|could|will|would|should|what|who|when|where|why|how)\b[\s\S]*$/i,
+      "",
+    )
+    .replace(/\b(?:is|was)\s+it\s+based\s+on\s+true\s+events?\b[\s\S]*$/i, "")
+    .replace(/\b(?:is|was)\s+it\s+(?:a\s+)?true\s+story\b[\s\S]*$/i, "")
+    .replace(/\b(?:is|was)\s+it\s+real\b[\s\S]*$/i, "")
+    .replace(/\b(?:did|does)\s+it\s+really\s+happen\b[\s\S]*$/i, "")
+    .replace(/\b(?:ending|plot|summary|synopsis)\s+explained\b[\s\S]*$/i, "")
+    .replace(/[,:-]\s*$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function asksWhetherStoryIsBasedOnTrueEvents(text: string) {
+  return /\b(?:based on true events?|true story|real story|real events?|actually happened|really happened)\b/i.test(text);
+}
+
+function extractCultureStoryTitleCandidate(text: string) {
+  const normalized = stripExplicitReplyLocaleSuffix(text).toLowerCase().trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const patterns = [
+    /(?:tell me (?:the )?(?:full )?(?:story|plot|summary|synopsis|ending) of|explain (?:the )?(?:story|plot|ending) of|story of|plot of|summary of|synopsis of|ending of)\s+(.+?)(?:\?|$)/i,
+    /(?:what(?:'s| is) the (?:story|plot|summary|synopsis|ending) of)\s+(.+?)(?:\?|$)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    const candidate = normalizeCultureStoryTitleCandidate(match?.[1]
+      ?.replace(/\b(?:please|in detail|detailed|briefly|shortly|full)\b/gi, " ")
+      ?.replace(/\s+/g, " ")
+      ?.trim() ?? "");
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  return "";
+}
+
+function looksLikeCultureStoryQuestion(text: string) {
+  const normalized = stripExplicitReplyLocaleSuffix(text).toLowerCase().trim();
+  if (!normalized) {
+    return false;
+  }
+  const koreanStoryIntent =
+    /(?:\uc904\uac70\ub9ac|\uc2a4\ud1a0\ub9ac|\ub0b4\uc6a9|\uacb0\ub9d0|\uc694\uc57d|\uc124\uba85\ud574|\uc124\uba85\ud574\uc918|\uc2dc\uc98c|\uc5d0\ud53c\uc18c\ub4dc|\ub4f1\uc7a5\uc778\ubb3c)/u;
+  const koreanEntertainmentSurface =
+    /(?:\ub4dc\ub77c\ub9c8|\uc601\ud654|\uc2dc\ub9ac\uc988|\uc560\ub2c8|\uc18c\uc124|\uc6f9\ud230|\ub3c4\uae68\ube44|\ud658\ud63c|\ub9c8\uc774\s*\ub370\ubaac)/u;
+  if (koreanStoryIntent.test(text) && koreanEntertainmentSurface.test(text)) {
+    return true;
+  }
+
+  const hasStoryIntent =
+    /\b(story|plot|storyline|summary|synopsis|ending|season|episode|character arc|plot of|story of|full story|tell me the story|explain the story)\b/.test(normalized)
+    || /줄거리|스토리|내용|결말|요약|설명해|설명해줘|시즌|에피소드|등장인물/u.test(text);
+
+  const hasEntertainmentSurface =
+    /\b(drama|kdrama|k-drama|movie|film|series|show|anime|novel|book|webtoon|character|ending|season)\b/.test(normalized)
+    || /\b(goblin|alchemy of souls|my demon)\b/.test(normalized)
+    || /드라마|영화|시리즈|애니|소설|웹툰|도깨비|환혼/u.test(text);
+
+  const titleCandidate = extractCultureStoryTitleCandidate(text);
+  const hasTitleLikeCandidate =
+    Boolean(titleCandidate)
+    && titleCandidate.split(/\s+/).filter(Boolean).length <= 5
+    && !/\b(price|weather|news|policy|war|economy|market|stock|tax|history|science|math|code|calendar|email|whatsapp|message|problem|question)\b/.test(titleCandidate);
+
+  return hasStoryIntent && (hasEntertainmentSurface || hasTitleLikeCandidate);
+}
+
+const KNOWN_STORY_ANCHOR_RULES: Array<{
+  title: RegExp;
+  anchors: RegExp[];
+}> = [
+  {
+    title: /\b(goblin|guardian:\s*the lonely and great god)\b|\ub3c4\uae68\ube44/u,
+    anchors: [
+      /\bkim shin\b|\uae40\uc2e0/u,
+      /\bji eun-?tak\b|\uc9c0\uc740\ud0c1/u,
+      /\bwang yeo\b|\uc655\uc5ec|\uc800\uc2b9\uc0ac\uc790/u,
+      /\bsunny\b|\uc36c\ub2c8/u,
+    ],
+  },
+  {
+    title: /\b(alchemy of souls)\b|\ud658\ud63c/u,
+    anchors: [
+      /\bjang uk\b|\uc7a5\uc6b1/u,
+      /\bnak-?su\b|\ub099\uc218/u,
+      /\bmu-?deok\b|\ubb34\ub355/u,
+      /\bdaeho\b|\ub300\ud638/u,
+      /\bseo yul\b|\uc11c\uc728/u,
+      /\bbu-?yeon\b|\ubd80\uc5f0/u,
+      /\bjin mu\b|\uc9c4\ubb34/u,
+    ],
+  },
+  {
+    title: /\b(my demon)\b|\ub9c8\uc774\s*\ub370\ubaac/u,
+    anchors: [
+      /\bdo do-?hee\b|\ub3c4\ub3c4\ud76c/u,
+      /\bjung gu-?won\b|\uc815\uad6c\uc6d0/u,
+      /\bmirae\b|\ubbf8\ub798/u,
+      /\bcontract marriage\b|\uacc4\uc57d\s*\uacb0\ud63c/u,
+      /\bdemon\b|\uc545\ub9c8/u,
+    ],
+  },
+  {
+    title: /\bkalki(?:\s*2898\s*ad)?\b/i,
+    anchors: [
+      /\bbhairava\b/i,
+      /\bashwatthama\b/i,
+      /\bsum-?80\b/i,
+      /\byaskin\b/i,
+      /\bcomplex\b/i,
+    ],
+  },
+];
+
+function violatesKnownStoryAnchors(question: string, answer: string) {
+  const trimmedAnswer = answer.trim();
+  if (!trimmedAnswer) {
+    return false;
+  }
+
+  for (const rule of KNOWN_STORY_ANCHOR_RULES) {
+    if (!rule.title.test(question)) {
+      continue;
+    }
+
+    const hitCount = rule.anchors.reduce((count, pattern) => count + (pattern.test(trimmedAnswer) ? 1 : 0), 0);
+    return hitCount < 2;
+  }
+
+  return false;
+}
+
+function detectStrictIntentRoute(text: string): StrictIntentRoute | null {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const lower = trimmed.toLowerCase().trim();
+  if (looksLikeCultureStoryQuestion(trimmed)) {
+    return {
+      intent: { type: "culture", category: "culture_story" },
+      confidence: "high",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
+  const ambiguousPersonalSurfaces = inferPossiblePersonalSurfaces(trimmed);
+  if (ambiguousPersonalSurfaces.length > 1) {
+    return {
+      intent: { type: "general", category: "personal_tool_clarify" },
+      confidence: "low",
+      locked: true,
+      clarificationReply: buildPersonalSurfaceClarificationReply(trimmed, ambiguousPersonalSurfaces),
+    };
+  }
+
+  const gmailActionIntent = detectGmailActionIntent(trimmed);
+  if (gmailActionIntent) {
+    return {
+      intent: { type: "email", category: gmailActionIntent },
+      confidence: "high",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
+  if (isArchitectureCodingRouteCandidate(trimmed)) {
+    return {
+      intent: { type: "coding", category: "coding" },
+      confidence: "high",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
+  if (looksLikeEmailSearchQuestion(trimmed)) {
+    return {
+      intent: { type: "email", category: "email_search" },
+      confidence: detectExplicitPersonalSurfaces(trimmed).includes("gmail") ? "high" : "medium",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
+  const calendarActionIntent = detectCalendarActionIntent(trimmed);
+  if (calendarActionIntent) {
+    return {
+      intent: { type: "calendar", category: calendarActionIntent },
+      confidence: "high",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
+  if (shouldForceCalendarIntent(lower) || looksLikeCalendarQuestion(lower)) {
+    return {
+      intent: { type: "calendar", category: "calendar" },
+      confidence: "medium",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
+  if (looksLikeWhatsAppHistoryQuestion(trimmed)) {
+    return {
+      intent: { type: "send_message", category: "whatsapp_history" },
+      confidence: detectExplicitPersonalSurfaces(trimmed).includes("whatsapp") ? "high" : "medium",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
+  const whatsAppSettingsIntent = detectWhatsAppSettingsCommandIntent(trimmed);
+  if (whatsAppSettingsIntent) {
+    return {
+      intent: { type: "send_message", category: whatsAppSettingsIntent },
+      confidence: "high",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
+  if (
+    parseSaveContactCommand(trimmed)
+    || /\bmy contacts\b|\blist contacts\b|\bshow contacts\b/.test(lower)
+    || lower === "contacts"
+  ) {
+    return {
+      intent: { type: "save_contact", category: "save_contact" },
+      confidence: "high",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
+  if (parseSendMessageCommand(trimmed)) {
+    return {
+      intent: { type: "send_message", category: "send_message" },
+      confidence: "high",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
+  if (detectReminderIntent(lower).intent !== "unknown") {
+    return {
+      intent: { type: "reminder", category: "reminder" },
+      confidence: "high",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
+  if (detectMemoryCommand(lower).type !== "none") {
+    return {
+      intent: { type: "memory", category: "memory" },
+      confidence: "high",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
+  return null;
+}
+
+function looksLikeWhatsAppHistoryQuestion(text: string) {
+  const lower = text.toLowerCase().trim();
+  const explicitSurfaces = detectExplicitPersonalSurfaces(lower);
+  const contactConversationLookup = looksLikeWhatsAppContactConversationLookup(lower);
+
+  if (
+    explicitSurfaces.length === 1
+    && explicitSurfaces[0] === "whatsapp"
+    && (
+      looksLikeGenericMessageLookup(lower)
+      || /\b(message|messages|chat|conversation|text|texts|reply|replies|said|sent)\b/.test(lower)
+    )
+  ) {
+    return true;
+  }
+
+  return explicitSurfaces.length === 0 && contactConversationLookup;
+}
+
+function normalizePersonalLookupHint(value: string | null | undefined) {
+  return String(value ?? "")
+    .replace(/["']/g, "")
+    .replace(/\b(?:in|on)\s+whatsapp\b/gi, " ")
+    .replace(/\b(?:in|on)\s+gmail\b/gi, " ")
+    .replace(/\b(?:today|yesterday|this week|last week|last \d+\s+days?)\b/gi, " ")
+    .replace(/\b(?:message|messages|chat|conversation|history|text|texts|reply|replies)\b/gi, " ")
+    .replace(/\bcontact\b/gi, " ")
+    .replace(/\bthere\b/gi, " ")
+    .replace(/\btell me\b/gi, " ")
+    .replace(/\bread(?:\s+and)?\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractWhatsAppHistoryContactHint(raw: string) {
+  const patterns = [
+    /\bwhat did\s+(.+?)\s+(?:say|send|text|message|write)\b/i,
+    /\b(?:what was|show|tell me|read|check|see)\s+(?:the\s+)?(?:messages?|chat|conversation|history|texts?)\s+i\s+(?:had|have)\s+with\s+(.+?)(?=\s+\b(?:about|regarding|today|yesterday|this week|last week|last \d+\s+days?|in|on)\b|$)/i,
+    /\b(?:what was|show|tell me|read|check|see)\s+(?:the\s+)?(?:messages?|chat|conversation|history|texts?)\s+(?:there\s+)?(?:in|with)\s+(.+?)\s+contact\b/i,
+    /\b(?:what was|show|tell me|read|check|see)\s+(?:the\s+)?(?:messages?|chat|conversation|history|texts?)\s+(?:there\s+)?(?:of|from|with)\s+(.+?)(?=\s+\b(?:about|regarding|today|yesterday|this week|last week|last \d+\s+days?|in|on)\b|$)/i,
+    /\b(?:conversation|chat|history|messages?|texts?)\s+i\s+(?:had|have)\s+with\s+(.+?)(?=\s+\b(?:about|regarding|today|yesterday|this week|last week|last \d+\s+days?|in|on)\b|$)/i,
+    /\b(?:messages?|chat|conversation|history|texts?)\s+(?:there\s+)?(?:in|with)\s+(.+?)\s+contact\b/i,
+    /\b(?:message|messages|chat|conversation|history|texts?)\s+(?:i\s+got\s+|i\s+received\s+)?from\s+(.+?)(?=\s+\b(?:about|regarding|today|yesterday|this week|last week|last \d+\s+days?|in|on)\b|$)/i,
+    /\b(?:message|messages|chat|conversation|history|texts?)\s+with\s+(.+?)(?=\s+\b(?:about|regarding|today|yesterday|this week|last week|last \d+\s+days?|in|on)\b|$)/i,
+    /\b(?:message|messages|chat|conversation|history|texts?)\s+of\s+(.+?)(?=\s+\b(?:about|regarding|today|yesterday|this week|last week|last \d+\s+days?|in|on)\b|$)/i,
+    /\b(?:got|received)\s+(?:a\s+)?message\s+from\s+(.+?)(?=\s+\b(?:about|regarding|today|yesterday|this week|last week|last \d+\s+days?|in|on)\b|$)/i,
+    /\bin\s+(.+?)\s+contact\b/i,
+    /\bwith\s+(.+?)\s+contact\b/i,
+    /\bfrom\s+(.+?)(?=\s+\b(?:about|regarding|today|yesterday|this week|last week|last \d+\s+days?|in|on)\b|$)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    const candidate = normalizePersonalLookupHint(match?.[1]);
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function extractWhatsAppHistoryQueryHint(raw: string) {
+  const match = raw.match(/\b(?:about|regarding|saying|that says)\s+(.+?)(?=\s+\b(?:today|yesterday|this week|last week|last \d+\s+days?|from|with|in|on)\b|$)/i);
+  return normalizePersonalLookupHint(match?.[1]) || null;
+}
+
+export function extractWhatsAppHistoryHintsForTest(raw: string) {
+  return {
+    contactHint: extractWhatsAppHistoryContactHint(raw),
+    queryHint: extractWhatsAppHistoryQueryHint(raw),
+    direction: detectWhatsAppHistoryDirection(raw),
+  };
+}
+
+function detectWhatsAppHistoryDirection(raw: string): "inbound" | "outbound" | null {
+  const lower = raw.toLowerCase();
+  if (/\b(i sent|sent to|my sent|outgoing)\b/.test(lower)) {
+    return "outbound";
+  }
+  if (/\b(from|got|received|incoming)\b/.test(lower)) {
+    return "inbound";
+  }
+  return null;
+}
+
+function looksLikePlainEmailWritingRequest(text: string) {
+  const t = text.toLowerCase().trim();
+  if (
+    looksLikeEmailWritingKnowledgeQuestion(text)
+    || detectGmailActionIntent(text)
+    || looksLikeEmailSearchQuestion(t)
+  ) {
+    return false;
+  }
+
+  return (
+    /\b(write|draft|compose|create|generate)\b.*\b(email|mail|follow.?up(?:\s+email)?)\b/.test(t)
+    || /\b(write|draft|compose|create|generate)\b.*\b(reply|response)\b.*\b(?:to|for)\b/.test(t)
+    || /\b(email|mail)\s+(asking|saying|telling|about|regarding|for)\b/.test(t)
+  );
+}
+
+function buildDeterministicExplainReply(question: string) {
+  const normalized = question.toLowerCase().replace(/[^\w\s]/g, " ");
+  const isAiMlDlComparison =
+    /\b(difference|different|compare|comparison|vs|versus|explain)\b/.test(normalized)
+    && /\b(ai|artificial intelligence)\b/.test(normalized)
+    && /\b(ml|machine learning)\b/.test(normalized)
+    && /\bdeep learning\b/.test(normalized);
+  const isIdempotencyVsDeduplication =
+    /\b(difference|different|compare|comparison|vs|versus|explain)\b/.test(normalized)
+    && /\bidempotency\b/.test(normalized)
+    && /\b(deduplication|dedupe)\b/.test(normalized);
+
+  if (!isAiMlDlComparison && !isIdempotencyVsDeduplication) {
+    const directTopicMatch = question
+      .toLowerCase()
+      .trim()
+      .match(/^(?:what is|what are|define|explain|meaning of)\s+(.+?)(?:\?|$)/i);
+    const directTopic = directTopicMatch?.[1]
+      ?.replace(/\s+/g, " ")
+      .trim()
+      .replace(/^the\s+/, "");
+
+    if (directTopic === "ai" || directTopic === "artificial intelligence") {
+      return [
+        "Artificial intelligence (AI) is the broad field of building systems that perform tasks that normally require human intelligence.",
+        "",
+        "That includes understanding language, recognizing patterns, making predictions, solving problems, and taking actions from rules or learned data.",
+        "",
+        "Machine learning is one major way to build AI systems, but not all AI is machine learning.",
+      ].join("\n");
+    }
+
+    if (directTopic === "ml" || directTopic === "machine learning") {
+      return [
+        "Machine learning (ML) is a subset of AI where a system learns patterns from data instead of being programmed with every rule by hand.",
+        "",
+        "The model is trained on examples, then uses what it learned to make predictions, classifications, or recommendations on new data.",
+        "",
+        "Examples include spam filters, recommendation systems, fraud detection, and demand forecasting.",
+      ].join("\n");
+    }
+
+    if (directTopic === "deep learning") {
+      return [
+        "Deep learning is a subset of machine learning that uses multi-layer neural networks to learn complex patterns from large amounts of data.",
+        "",
+        "It is especially strong for images, speech, language, and other problems where hand-written rules are too limited.",
+        "",
+        "Modern vision systems, speech recognition, and many large language models rely on deep learning.",
+      ].join("\n");
+    }
+
+    if (
+      directTopic === "llm"
+      || directTopic === "llms"
+      || directTopic === "large language model"
+      || directTopic === "large language models"
+    ) {
+      return [
+        "A large language model (LLM) is a neural-network model trained on very large amounts of text to predict and generate language.",
+        "",
+        "In practice, it learns patterns in words, sentences, and documents so it can answer questions, summarize, translate, write, and reason over text.",
+        "",
+        "ChatGPT and Claude are examples of applications built on top of LLM technology.",
+      ].join("\n");
+    }
+
+    if (
+      directTopic === "rag"
+      || directTopic === "retrieval augmented generation"
+      || directTopic === "retrieval-augmented generation"
+    ) {
+      return [
+        "RAG stands for retrieval-augmented generation.",
+        "",
+        "It combines a language model with a retrieval step: the system first fetches relevant documents or database chunks, then uses that evidence to generate a grounded answer.",
+        "",
+        "The main benefit is better factual grounding, fresher answers, and citations from the retrieved source material.",
+      ].join("\n");
+    }
+
+    return null;
+  }
+
+  if (isIdempotencyVsDeduplication) {
+    return [
+      "Idempotency and deduplication solve different problems in event-driven systems.",
+      "",
+      "*Idempotency:* applying the same business operation more than once still leaves the system in the same final state after the first successful run.",
+      "*Deduplication:* detecting and dropping duplicate deliveries of the same message or event envelope.",
+      "",
+      "Deduplication protects the transport layer. Idempotency protects the business effect even when retries, replays, or differently wrapped duplicates still reach the handler.",
+      "",
+      "*Concrete payment example:* a worker sends `capture payment for order_123` twice after a timeout, but the two retries have different queue message IDs. Message-level deduplication may miss that because the envelopes are different. An idempotency key like `order_123:capture` at the payment layer prevents a second capture and returns the original result instead of double-charging.",
+    ].join("\n");
+  }
+
+  return [
+    "🧠 *AI vs ML vs Deep Learning*",
+    "",
+    "*Artificial intelligence (AI):* the broad goal of making computers do tasks that normally need human intelligence, like understanding language, recognizing images, or making decisions.",
+    "",
+    "*Machine learning (ML):* a subset of AI where the system learns patterns from data instead of being told every rule by hand.",
+    "",
+    "*Deep learning:* a subset of ML that uses multi-layer neural networks to learn more complex patterns, especially for images, speech, and large language tasks.",
+    "",
+    "*Simple way to remember it:*",
+    "• AI = the big field",
+    "• ML = one way to do AI",
+    "• Deep learning = one advanced way to do ML",
+    "",
+    "*Example:* a spam filter can use ML, while image recognition or modern voice assistants often use deep learning.",
+  ].join("\n");
+}
+
+export function buildDeterministicExplainReplyForTest(question: string) {
+  return buildDeterministicExplainReply(question);
+}
+
+type EmailSearchWindow =
+  | { kind: "today" | "yesterday"; label: string; dateKeys: Set<string> }
+  | { kind: "this_week" | "last_week" | "last_days"; label: string; startMs: number; endMs: number }
+  | { kind: "none"; label: null };
+
+type PersonalSurface = "whatsapp" | "gmail" | "calendar" | "drive";
+
+type GmailMailboxScope =
+  | "inbox"
+  | "spam"
+  | "trash"
+  | "sent"
+  | "drafts"
+  | "starred"
+  | "all_mail"
+  | "promotions"
+  | "social"
+  | "updates"
+  | "forums"
+  | null;
+
+function detectGmailMailboxScope(userMessage: string | null | undefined): GmailMailboxScope {
+  const lower = userMessage?.toLowerCase() ?? "";
+
+  if (/\b(spam|junk)\b/.test(lower)) return "spam";
+  if (/\b(trash|bin|deleted)\b/.test(lower)) return "trash";
+  if (/\bsent\b/.test(lower)) return "sent";
+  if (/\bdrafts?\b/.test(lower)) return "drafts";
+  if (/\bstarred\b/.test(lower)) return "starred";
+  if (/\ball mail\b|\ball emails\b|\ball messages\b/.test(lower)) return "all_mail";
+  if (/\bpromotions?\b|\bpromotional\b/.test(lower)) return "promotions";
+  if (/\bsocial\b/.test(lower)) return "social";
+  if (/\bupdates\b/.test(lower)) return "updates";
+  if (/\bforums\b/.test(lower)) return "forums";
+  if (/\binbox\b/.test(lower)) return "inbox";
+
+  return null;
+}
+
+function buildGmailMailboxQueryClause(scope: GmailMailboxScope) {
+  switch (scope) {
+    case "inbox":
+      return "in:inbox";
+    case "spam":
+      return "in:spam";
+    case "trash":
+      return "in:trash";
+    case "sent":
+      return "in:sent";
+    case "drafts":
+      return "in:drafts";
+    case "starred":
+      return "is:starred";
+    case "all_mail":
+      return "in:anywhere";
+    case "promotions":
+      return "category:promotions";
+    case "social":
+      return "category:social";
+    case "updates":
+      return "category:updates";
+    case "forums":
+      return "category:forums";
+    default:
+      return null;
+  }
+}
+
+function buildGmailMailboxLabel(scope: GmailMailboxScope) {
+  switch (scope) {
+    case "inbox":
+      return "Inbox";
+    case "spam":
+      return "Spam";
+    case "trash":
+      return "Trash";
+    case "sent":
+      return "Sent mail";
+    case "drafts":
+      return "Drafts";
+    case "starred":
+      return "Starred mail";
+    case "all_mail":
+      return "All mail";
+    case "promotions":
+      return "Promotions";
+    case "social":
+      return "Social";
+    case "updates":
+      return "Updates";
+    case "forums":
+      return "Forums";
+    default:
+      return "Inbox";
+  }
+}
+
+function shouldUseDefaultEmailFreshness(scope: GmailMailboxScope) {
+  return scope === null || scope === "inbox" || scope === "starred" || scope === "promotions" || scope === "social" || scope === "updates" || scope === "forums";
+}
+
+function getTimeZoneMidnightDateKey(base: Date, timeZone: string, dayOffset = 0) {
+  return formatDateKey(new Date(base.getTime() + dayOffset * 86_400_000), timeZone);
+}
+
+function parseDateKeyParts(dateKey: string) {
+  const [year, month, day] = dateKey.split("-").map((value) => Number(value));
+  return { year, month, day };
+}
+
+function getTimeZoneOffsetMs(date: Date, timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+
+  const year = Number(parts.find((part) => part.type === "year")?.value ?? "1970");
+  const month = Number(parts.find((part) => part.type === "month")?.value ?? "1");
+  const day = Number(parts.find((part) => part.type === "day")?.value ?? "1");
+  const hour = Number(parts.find((part) => part.type === "hour")?.value ?? "0");
+  const minute = Number(parts.find((part) => part.type === "minute")?.value ?? "0");
+  const second = Number(parts.find((part) => part.type === "second")?.value ?? "0");
+
+  return Date.UTC(year, month - 1, day, hour, minute, second) - date.getTime();
+}
+
+function buildTimeZoneDayBounds(dateKey: string, timeZone: string) {
+  const { year, month, day } = parseDateKeyParts(dateKey);
+  const utcGuess = new Date(Date.UTC(year, month - 1, day, 0, 0, 0));
+  const offsetMs = getTimeZoneOffsetMs(utcGuess, timeZone);
+  const start = new Date(utcGuess.getTime() - offsetMs);
+  return {
+    startMs: start.getTime(),
+    endMs: start.getTime() + 86_400_000,
+  };
+}
+
+function buildCalendarWeekWindow(
+  baseDate: Date,
+  timeZone: string,
+  weekOffset: 0 | -1,
+): { startMs: number; endMs: number } {
+  const todayKey = formatDateKey(baseDate, timeZone);
+  const todayParts = parseDateKeyParts(todayKey);
+  const todayUtc = new Date(Date.UTC(todayParts.year, todayParts.month - 1, todayParts.day));
+  const weekDay = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "short",
+  }).format(baseDate);
+  const weekdayIndex = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(weekDay);
+  const mondayOffset = weekdayIndex <= 0 ? -6 : 1 - weekdayIndex;
+  const mondayKey = formatDateKey(
+    new Date(todayUtc.getTime() + (mondayOffset + weekOffset * 7) * 86_400_000),
+    timeZone,
+  );
+  const mondayBounds = buildTimeZoneDayBounds(mondayKey, timeZone);
+  return {
+    startMs: mondayBounds.startMs,
+    endMs: mondayBounds.startMs + 7 * 86_400_000,
+  };
+}
+
+function resolveEmailSearchWindow(
+  userMessage: string | null | undefined,
+  timeZone = "Asia/Kolkata",
+  referenceDate = new Date(),
+): EmailSearchWindow {
+  const lower = userMessage?.toLowerCase() ?? "";
+  if (/\btoday(?:'|\u2019)?s?\b/.test(lower)) {
+    return {
+      kind: "today",
+      label: "from today",
+      dateKeys: new Set([getTimeZoneMidnightDateKey(referenceDate, timeZone, 0)]),
+    };
+  }
+  if (/\byesterday\b/.test(lower)) {
+    return {
+      kind: "yesterday",
+      label: "from yesterday",
+      dateKeys: new Set([getTimeZoneMidnightDateKey(referenceDate, timeZone, -1)]),
+    };
+  }
+
+  const lastDaysMatch = lower.match(/\blast\s+(\d+)\s+days?\b/);
+  if (lastDaysMatch?.[1]) {
+    const dayCount = Math.max(1, Math.min(30, Number(lastDaysMatch[1])));
+    const referenceMs = referenceDate.getTime();
+    return {
+      kind: "last_days",
+      label: `from the last ${dayCount} day${dayCount === 1 ? "" : "s"}`,
+      startMs: referenceMs - dayCount * 86_400_000,
+      endMs: referenceMs + 1_000,
+    };
+  }
+
+  if (/\bthis week\b/.test(lower)) {
+    return {
+      kind: "this_week",
+      label: "from this week",
+      ...buildCalendarWeekWindow(referenceDate, timeZone, 0),
+    };
+  }
+
+  if (/\blast week\b/.test(lower)) {
+    return {
+      kind: "last_week",
+      label: "from last week",
+      ...buildCalendarWeekWindow(referenceDate, timeZone, -1),
+    };
+  }
+
+  return { kind: "none", label: null };
+}
+
+export function extractRequestedEmailCount(userMessage: string | null | undefined, defaultCount = 5) {
+  const raw = userMessage?.trim() ?? "";
+  if (!raw) {
+    return defaultCount;
+  }
+
+  const patterns = [
+    /\btop\s+(\d{1,2})\b/i,
+    /\bfirst\s+(\d{1,2})\b/i,
+    /\b(\d{1,2})\s+(?:most\s+)?(?:important\s+)?(?:gmail\s+)?(?:emails?|mails?|messages?)\b/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    const count = Number(match?.[1] ?? "");
+    if (Number.isFinite(count) && count > 0) {
+      return Math.max(1, Math.min(10, count));
+    }
+  }
+
+  const wordPatterns = [
+    /\btop\s+(one|two|three|four|five|six|seven|eight|nine|ten)\b/i,
+    /\bfirst\s+(one|two|three|four|five|six|seven|eight|nine|ten)\b/i,
+    /\b(one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:most\s+)?(?:important\s+)?(?:gmail\s+)?(?:emails?|mails?|messages?)\b/i,
+  ];
+
+  for (const pattern of wordPatterns) {
+    const match = raw.match(pattern);
+    const count = SMALL_COUNT_WORDS[(match?.[1] ?? "").toLowerCase()];
+    if (Number.isFinite(count) && count > 0) {
+      return Math.max(1, Math.min(10, count));
+    }
+  }
+
+  return defaultCount;
+}
+
+function parseEmailTimestampMs(value: string | null | undefined) {
+  const parsed = Date.parse(value ?? "");
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+export function filterEmailsForPromptWindow<T extends { date: string }>(
+  emails: T[],
+  userMessage: string | null | undefined,
+  timeZone = "Asia/Kolkata",
+  referenceDate = new Date(),
+) {
+  const window = resolveEmailSearchWindow(userMessage, timeZone, referenceDate);
+  if (window.kind === "none") {
+    return emails;
+  }
+
+  if (window.kind === "today" || window.kind === "yesterday") {
+    return emails.filter((email) => window.dateKeys.has(formatDateKey(new Date(email.date), timeZone)));
+  }
+
+  if (window.kind === "this_week" || window.kind === "last_week" || window.kind === "last_days") {
+    return emails.filter((email) => {
+      const timestamp = parseEmailTimestampMs(email.date);
+      return timestamp >= window.startMs && timestamp < window.endMs;
+    });
+  }
+
+  return emails;
+}
+
+function rankEmailSearchResults<T extends { date: string; isRead: boolean; labels: string[] }>(
+  emails: T[],
+  preferImportant: boolean,
+) {
+  return [...emails].sort((left, right) => {
+    const leftImportant = left.labels.includes("IMPORTANT") ? 1 : 0;
+    const rightImportant = right.labels.includes("IMPORTANT") ? 1 : 0;
+    if (leftImportant !== rightImportant) {
+      return rightImportant - leftImportant;
+    }
+
+    if (preferImportant) {
+      const leftPrimary = left.labels.includes("CATEGORY_PRIMARY") ? 1 : 0;
+      const rightPrimary = right.labels.includes("CATEGORY_PRIMARY") ? 1 : 0;
+      if (leftPrimary !== rightPrimary) {
+        return rightPrimary - leftPrimary;
+      }
+    }
+
+    const leftStarred = left.labels.includes("STARRED") ? 1 : 0;
+    const rightStarred = right.labels.includes("STARRED") ? 1 : 0;
+    if (leftStarred !== rightStarred) {
+      return rightStarred - leftStarred;
+    }
+
+    const leftUnread = left.isRead ? 0 : 1;
+    const rightUnread = right.isRead ? 0 : 1;
+    if (leftUnread !== rightUnread) {
+      return rightUnread - leftUnread;
+    }
+
+    return parseEmailTimestampMs(right.date) - parseEmailTimestampMs(left.date);
+  });
+}
+
+export function buildNaturalLanguageEmailSearchQuery(
+  userMessage: string | null | undefined,
+  timeZone = "Asia/Kolkata",
+) {
   const raw = userMessage?.trim() ?? "";
   if (!raw) {
     return "is:unread newer_than:30d";
@@ -4293,6 +7868,18 @@ function buildNaturalLanguageEmailSearchQuery(userMessage: string | null | undef
 
   const lower = raw.toLowerCase();
   const clauses: string[] = [];
+  const mailboxScope = detectGmailMailboxScope(raw);
+  const mailboxClause = buildGmailMailboxQueryClause(mailboxScope);
+  const wantsRecentListing =
+    RECENT_EMAIL_LISTING_PATTERN.test(lower)
+    || /\b(?:latest|recent|newest)\s+\d*\s*(?:emails?|mails?|messages?)\b/.test(lower)
+    || /\b(?:emails?|mails?|messages?)\b.*\b(?:say|says|said)\b/.test(lower);
+
+  if (mailboxClause) {
+    clauses.push(mailboxClause);
+  } else if (wantsRecentListing) {
+    clauses.push("in:inbox");
+  }
 
   if (/\bunread\b/.test(lower)) {
     clauses.push("is:unread");
@@ -4308,8 +7895,25 @@ function buildNaturalLanguageEmailSearchQuery(userMessage: string | null | undef
   } else {
     const fromNameMatch = raw.match(/\bfrom\s+([A-Za-z][A-Za-z0-9._'-]{1,40})\b/i);
     const candidate = fromNameMatch?.[1]?.trim() ?? "";
-    if (candidate && !/\b(today|yesterday|week|month)\b/i.test(candidate)) {
+    if (
+      candidate
+      && !/\b(today|yesterday|last|this|next|day|days|week|month|year|spam|trash|sent|drafts?)\b/i.test(candidate)
+    ) {
       clauses.push(`from:${candidate}`);
+    }
+  }
+
+  const toEmailMatch = raw.match(/\bto\s+([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\b/i);
+  if (toEmailMatch?.[1]) {
+    clauses.push(`to:${toEmailMatch[1]}`);
+  } else {
+    const toNameMatch = raw.match(/\bto\s+([A-Za-z][A-Za-z0-9._'-]{1,40})\b/i);
+    const candidate = toNameMatch?.[1]?.trim() ?? "";
+    if (
+      candidate
+      && !/\b(today|yesterday|week|month|spam|junk|trash|sent|draft|starred|promotions|social|updates|forums|me|my|myself)\b/i.test(candidate)
+    ) {
+      clauses.push(`to:${candidate}`);
     }
   }
 
@@ -4319,20 +7923,34 @@ function buildNaturalLanguageEmailSearchQuery(userMessage: string | null | undef
     clauses.push(topic);
   }
 
+  if (/\battachment|attachments|attached|pdf|docx?|xlsx?|pptx?|resume|invoice\b/i.test(lower)) {
+    clauses.push("has:attachment");
+  }
+
   const lastDaysMatch = lower.match(/\blast\s+(\d+)\s+days?\b/);
-  if (/\btoday(?:'|\u2019)?s?\b/.test(lower)) {
-    clauses.push("newer_than:1d");
-  } else if (/\byesterday\b/.test(lower)) {
+  const window = resolveEmailSearchWindow(raw, timeZone);
+  if (window.kind === "today") {
     clauses.push("newer_than:2d");
+  } else if (window.kind === "yesterday") {
+    clauses.push("newer_than:3d");
   } else if (lastDaysMatch?.[1]) {
-    clauses.push(`newer_than:${lastDaysMatch[1]}d`);
+    clauses.push(`newer_than:${Math.max(2, Number(lastDaysMatch[1]) + 1)}d`);
+  } else if (window.kind === "this_week" || window.kind === "last_week") {
+    clauses.push("newer_than:14d");
   } else if (/\b(this week|last week)\b/.test(lower)) {
     clauses.push("newer_than:7d");
   }
 
   if (clauses.length === 0) {
-    clauses.push("is:unread", "newer_than:30d");
-  } else if (!clauses.some((clause) => /\b(?:newer_than|older_than|before|after)\s*:/i.test(clause))) {
+    if (wantsRecentListing) {
+      clauses.push("in:inbox", "newer_than:30d");
+    } else {
+      clauses.push("is:unread", "newer_than:30d");
+    }
+  } else if (
+    shouldUseDefaultEmailFreshness(mailboxScope)
+    && !clauses.some((clause) => /\b(?:newer_than|older_than|before|after)\s*:/i.test(clause))
+  ) {
     clauses.push("newer_than:30d");
   }
 
@@ -4365,11 +7983,19 @@ async function buildEmailSearchReply(
   locale: SupportedLocale,
 ) {
   const promptText = userMessage?.trim() || "Show my recent emails";
-  const query = buildNaturalLanguageEmailSearchQuery(promptText);
+  const userTimezone = await getUserReminderTimezone(userId);
+  const requestedCount = extractRequestedEmailCount(promptText);
+  const requestedImportant = /\b(important|priority)\b/i.test(promptText);
+  const requestedUnread = /\bunread\b/i.test(promptText);
+  const mailboxScope = detectGmailMailboxScope(promptText);
+  const mailboxLabel = buildGmailMailboxLabel(mailboxScope);
+  const window = resolveEmailSearchWindow(promptText, userTimezone);
+  const query = buildNaturalLanguageEmailSearchQuery(promptText, userTimezone);
+  const fetchCount = Math.max(12, Math.min(40, requestedCount * 4));
   let emails: Awaited<ReturnType<typeof getClawCloudGmailMessages>> = [];
 
   try {
-    emails = await getClawCloudGmailMessages(userId, { query, maxResults: 8 });
+    emails = await getClawCloudGmailMessages(userId, { query, maxResults: fetchCount });
   } catch (error) {
     if (isClawCloudGoogleReconnectRequiredError(error)) {
       return {
@@ -4378,16 +8004,48 @@ async function buildEmailSearchReply(
         reply: await translateMessage(buildGoogleReconnectRequiredReply("Gmail"), locale),
       };
     }
+    if (isClawCloudGoogleNotConnectedError(error, "gmail")) {
+      return {
+        found: 0,
+        reconnectRequired: false,
+        reply: await translateMessage(buildGoogleNotConnectedReply("Gmail"), locale),
+      };
+    }
     throw error;
   }
 
+  emails = filterEmailsForPromptWindow(emails, promptText, userTimezone);
   let fallbackLabel = "";
-  if (!emails.length && /\blabel:important\b/i.test(query)) {
+  let resultMode: "important" | "unread" | "recent" =
+    requestedImportant ? "important" : requestedUnread ? "unread" : "recent";
+  if (!emails.length && mailboxScope === null && /\blabel:important\b/i.test(query)) {
     const fallbackQuery = query.replace(/\blabel:important\b/gi, "is:unread").replace(/\s+/g, " ").trim();
     if (fallbackQuery && fallbackQuery !== query) {
-      emails = await getClawCloudGmailMessages(userId, { query: fallbackQuery, maxResults: 8 });
+      try {
+        emails = await getClawCloudGmailMessages(userId, { query: fallbackQuery, maxResults: fetchCount });
+      } catch (error) {
+        if (isClawCloudGoogleReconnectRequiredError(error)) {
+          return {
+            found: 0,
+            reconnectRequired: true,
+            reply: await translateMessage(buildGoogleReconnectRequiredReply("Gmail"), locale),
+          };
+        }
+        if (isClawCloudGoogleNotConnectedError(error, "gmail")) {
+          return {
+            found: 0,
+            reconnectRequired: false,
+            reply: await translateMessage(buildGoogleNotConnectedReply("Gmail"), locale),
+          };
+        }
+        throw error;
+      }
+      emails = filterEmailsForPromptWindow(emails, promptText, userTimezone);
       if (emails.length) {
-        fallbackLabel = "No important messages matched, so here are the newest unread emails instead.";
+        resultMode = "unread";
+        fallbackLabel = window.label
+          ? `No important emails matched ${window.label}, so here are the newest unread emails instead.`
+          : "No important messages matched, so here are the newest unread emails instead.";
       }
     }
   }
@@ -4397,18 +8055,23 @@ async function buildEmailSearchReply(
       found: 0,
       reconnectRequired: false,
       reply: await translateMessage(
-        `🔍 *No Gmail messages found*\n\nI couldn't find matching emails for: _${promptText}_`,
+        `🔍 *No ${mailboxLabel.toLowerCase()} messages found*\n\nI couldn't find matching emails for: _${promptText}_`,
         locale,
       ),
     };
   }
 
-  const lines = emails.slice(0, 5).map((email, index) => {
+  const rankedEmails = rankEmailSearchResults(emails, requestedImportant);
+  const lines = rankedEmails.slice(0, requestedCount).map((email, index) => {
+    const participantLabel = mailboxScope === "sent" || mailboxScope === "drafts" ? "To" : "From";
+    const participantValue = mailboxScope === "sent" || mailboxScope === "drafts"
+      ? (email.to || email.from || "Unknown recipient")
+      : (email.from || "Unknown sender");
     const parts = [
-      `*${index + 1}.* *From:* ${email.from || "Unknown sender"}`,
+      `*${index + 1}.* *${participantLabel}:* ${participantValue}`,
       `*Subject:* ${email.subject || "(No subject)"}`,
     ];
-    const timestamp = formatEmailTimestamp(email.date);
+    const timestamp = formatEmailTimestamp(email.date, userTimezone);
     if (timestamp) {
       parts.push(`*Time:* ${timestamp}`);
     }
@@ -4416,9 +8079,12 @@ async function buildEmailSearchReply(
     return parts.join("\n");
   });
 
-  const heading = /\btoday(?:'|\u2019)?s?\b/i.test(promptText)
-    ? "📬 *Important Gmail messages from today*"
-    : "📬 *Inbox results*";
+  const headingScope = window.label ? ` ${window.label}` : "";
+  const heading = resultMode === "important"
+    ? `📬 *Important ${mailboxLabel} messages${headingScope}*`
+    : resultMode === "unread"
+      ? `📬 *Newest unread ${mailboxLabel.toLowerCase()} messages${headingScope}*`
+      : `📬 *${mailboxLabel} results${headingScope}*`;
 
   const reply = [
     heading,
@@ -4426,11 +8092,11 @@ async function buildEmailSearchReply(
     "",
     ...lines,
     "",
-    `_${emails.length} match${emails.length === 1 ? "" : "es"}_`,
+    `_${Math.min(rankedEmails.length, requestedCount)} of ${rankedEmails.length} match${rankedEmails.length === 1 ? "" : "es"}_`,
   ].filter(Boolean).join("\n");
 
   return {
-    found: emails.length,
+    found: rankedEmails.length,
     reconnectRequired: false,
     reply,
   };
@@ -4449,6 +8115,399 @@ async function isGoogleCalendarConnected(userId: string) {
   return Boolean(data);
 }
 
+async function isWhatsAppConnected(userId: string) {
+  const { data } = await getClawCloudSupabaseAdmin()
+    .from("connected_accounts")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("provider", "whatsapp")
+    .eq("is_active", true)
+    .maybeSingle()
+    .catch(() => ({ data: null }));
+
+  return Boolean(data);
+}
+
+function formatWhatsAppMessageTimestamp(value: string | null | undefined, timezone = "Asia/Kolkata") {
+  if (!value) {
+    return "";
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "";
+  }
+
+  return parsed.toLocaleString("en-IN", {
+    timeZone: timezone,
+    day: "2-digit",
+    month: "short",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
+function cleanWhatsAppSummarySnippet(value: string | null | undefined, maxLength = 120) {
+  const cleaned = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!cleaned) {
+    return "No readable message content was available.";
+  }
+
+  if (cleaned.length <= maxLength) {
+    return cleaned;
+  }
+
+  return `${cleaned.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+function getWhatsAppHistorySpeakerLabel(
+  row: {
+    direction?: string | null;
+    contact_name?: string | null;
+    remote_phone?: string | null;
+  },
+  resolvedContactName: string | null | undefined,
+) {
+  if (row.direction === "outbound") {
+    return "You";
+  }
+
+  return row.contact_name || resolvedContactName || row.remote_phone || "Unknown contact";
+}
+
+function buildWhatsAppSummaryBullet(speaker: string, message: string) {
+  const cleaned = cleanWhatsAppSummarySnippet(message, 96);
+  const lower = cleaned.toLowerCase();
+  const isQuestion = /[?]$/.test(cleaned);
+  const isAcknowledgement =
+    cleaned.split(/\s+/).length <= 4
+    && /^(ok|okay|okk|done|fine|haan|han|yes|no|thik hai|theek hai|noted|sure|alright)\b/i.test(lower);
+
+  if (speaker === "You") {
+    if (isQuestion) {
+      return `- You asked for clarification: "${cleaned}"`;
+    }
+    if (isAcknowledgement) {
+      return `- You acknowledged the update with "${cleaned}"`;
+    }
+    return `- You said: "${cleaned}"`;
+  }
+
+  if (isQuestion) {
+    return `- ${speaker} asked: "${cleaned}"`;
+  }
+  if (isAcknowledgement) {
+    return `- ${speaker} acknowledged the exchange with "${cleaned}"`;
+  }
+  return `- ${speaker} said: "${cleaned}"`;
+}
+
+function summarizeParticipantList(participants: string[]) {
+  if (participants.length <= 1) {
+    return participants[0] ?? "the visible participant";
+  }
+
+  if (participants.length === 2) {
+    return `${participants[0]} and ${participants[1]}`;
+  }
+
+  return `${participants.slice(0, -1).join(", ")}, and ${participants[participants.length - 1]}`;
+}
+
+export function buildWhatsAppHistoryProfessionalSummaryForTest(input: {
+  rows: Array<{
+    direction: string | null;
+    content: string;
+    contact_name: string | null;
+    remote_phone: string | null;
+    sent_at: string | null;
+  }>;
+  resolvedContactName?: string | null;
+  queryHint?: string | null;
+  requestedCount?: number;
+  timezone?: string;
+}) {
+  const timezone = input.timezone ?? "Asia/Kolkata";
+  const requestedCount = Math.min(Math.max(input.requestedCount ?? 4, 3), 5);
+  const recentRows = input.rows.slice(0, Math.max(requestedCount + 2, 6));
+  const chronological = [...recentRows].reverse();
+  const participants = [...new Set(
+    chronological
+      .map((row) => getWhatsAppHistorySpeakerLabel(row, input.resolvedContactName))
+      .filter(Boolean),
+  )];
+  const nonUserParticipants = participants.filter((speaker) => speaker !== "You");
+  const focusLabel =
+    input.resolvedContactName?.trim()
+    || (nonUserParticipants.length === 1 ? nonUserParticipants[0] : null)
+    || "this chat";
+  const heading = input.resolvedContactName?.trim()
+    ? `WhatsApp conversation summary with ${input.resolvedContactName.trim()}`
+    : "WhatsApp conversation summary";
+  const latestRow = chronological[chronological.length - 1] ?? null;
+  const latestSpeaker = latestRow ? getWhatsAppHistorySpeakerLabel(latestRow, input.resolvedContactName) : "Unknown contact";
+  const latestTime = latestRow ? formatWhatsAppMessageTimestamp(latestRow.sent_at, timezone) : "";
+  const focusSentence = input.queryHint?.trim()
+    ? `The visible chat history was filtered around "${input.queryHint.trim()}".`
+    : rowsNeedThinHistoryNote(recentRows, input.rows)
+      ? "The visible synced history is still limited, so this summary only reflects the messages currently available in ClawCloud."
+      : null;
+
+  const summarySentences: string[] = [];
+  if (nonUserParticipants.length <= 1) {
+    summarySentences.push(`This is a professional summary of the recent WhatsApp exchange between you and ${focusLabel}.`);
+  } else {
+    summarySentences.push(`This is a professional summary of a multi-person WhatsApp conversation involving ${summarizeParticipantList(participants)}.`);
+  }
+
+  if (latestRow) {
+    summarySentences.push(
+      latestTime
+        ? `${latestSpeaker} sent the latest visible message on ${latestTime}.`
+        : `${latestSpeaker} sent the latest visible message in the synced chat history.`,
+    );
+  }
+
+  if (focusSentence) {
+    summarySentences.push(focusSentence);
+  }
+
+  const briefLines = chronological
+    .slice(Math.max(chronological.length - requestedCount, 0))
+    .map((row) =>
+      buildWhatsAppSummaryBullet(
+        getWhatsAppHistorySpeakerLabel(row, input.resolvedContactName),
+        row.content,
+      ),
+    );
+
+  const latestStatusLines = latestRow
+    ? [
+      latestTime
+        ? `Latest visible message: ${latestSpeaker} at ${latestTime}.`
+        : `Latest visible message: ${latestSpeaker}.`,
+      `Latest message summary: "${cleanWhatsAppSummarySnippet(latestRow.content, 110)}"`,
+      `Messages reviewed for this summary: ${recentRows.length}${input.rows.length > recentRows.length ? ` of ${input.rows.length}` : ""}.`,
+    ]
+    : [
+      `Messages reviewed for this summary: ${recentRows.length}${input.rows.length > recentRows.length ? ` of ${input.rows.length}` : ""}.`,
+    ];
+
+  return [
+    heading,
+    "",
+    "Summary",
+    summarySentences.join(" "),
+    "",
+    "Professional brief",
+    ...briefLines,
+    "",
+    "Latest status",
+    ...latestStatusLines,
+  ].join("\n");
+}
+
+function rowsNeedThinHistoryNote(recentRows: Array<unknown>, allRows: Array<unknown>) {
+  return recentRows.length < 4 || allRows.length < 4;
+}
+
+async function buildWhatsAppHistoryProfessionalSummary(input: {
+  rows: Array<{
+    direction: string | null;
+    content: string;
+    contact_name: string | null;
+    remote_phone: string | null;
+    sent_at: string | null;
+  }>;
+  resolvedContactName?: string | null;
+  queryHint?: string | null;
+  requestedCount?: number;
+  timezone?: string;
+}) {
+  const fallback = buildWhatsAppHistoryProfessionalSummaryForTest(input);
+  const timezone = input.timezone ?? "Asia/Kolkata";
+  const summaryRows = input.rows.slice(0, 12);
+  const transcript = [...summaryRows]
+    .reverse()
+    .map((row, index) => {
+      const speaker = getWhatsAppHistorySpeakerLabel(row, input.resolvedContactName);
+      const time = formatWhatsAppMessageTimestamp(row.sent_at, timezone);
+      const content = cleanWhatsAppSummarySnippet(row.content, 180);
+      return `${index + 1}. ${time ? `[${time}] ` : ""}${speaker}: ${content}`;
+    })
+    .join("\n");
+
+  return completeClawCloudPrompt({
+    system: [
+      "You summarize WhatsApp conversations professionally and accurately.",
+      "Use only the provided transcript.",
+      "Do not invent context, names, motives, or missing details.",
+      "Prefer crisp paraphrase over long raw message dumps.",
+      "Return plain text in this exact structure:",
+      "WhatsApp conversation summary with ...",
+      "",
+      "Summary",
+      "1-2 concise sentences.",
+      "",
+      "Professional brief",
+      "- bullet",
+      "- bullet",
+      "- bullet",
+      "",
+      "Latest status",
+      "1-3 concise lines.",
+      "",
+      "If the visible conversation is limited, say that clearly.",
+    ].join("\n"),
+    user: [
+      `Conversation label: ${input.resolvedContactName?.trim() || "WhatsApp conversation"}`,
+      input.queryHint?.trim() ? `Requested focus: ${input.queryHint.trim()}` : null,
+      `Messages reviewed: ${summaryRows.length}`,
+      "",
+      "Transcript:",
+      transcript,
+    ].filter(Boolean).join("\n"),
+    intent: "general",
+    responseMode: "fast",
+    maxTokens: 260,
+    temperature: 0.1,
+    fallback,
+  });
+}
+
+async function buildWhatsAppHistoryReply(
+  userId: string,
+  promptText: string,
+  locale: SupportedLocale,
+) {
+  const requestedCount = extractRequestedEmailCount(promptText, 5);
+  const contactHint = extractWhatsAppHistoryContactHint(promptText);
+  const queryHint = extractWhatsAppHistoryQueryHint(promptText);
+  const direction = detectWhatsAppHistoryDirection(promptText);
+  const timezone = "Asia/Kolkata";
+
+  let resolvedContactName = contactHint;
+  let contactSearchValue = contactHint;
+  let resolvedContactScope: {
+    phone?: string | null;
+    jid?: string | null;
+    aliases?: string[];
+  } | null = null;
+
+  if (contactHint) {
+    const fuzzyResult = await lookupContactFuzzy(userId, contactHint);
+    if (fuzzyResult.type === "ambiguous") {
+      return translateMessage(
+        [
+          `I found multiple WhatsApp contacts matching "${contactHint}".`,
+          "",
+          ...fuzzyResult.matches.map((match, index) => `${index + 1}. ${match.name}`),
+          "",
+          "Tell me the exact contact name and I will check the right chat.",
+        ].join("\n"),
+        locale,
+      );
+    }
+
+    if (fuzzyResult.type === "not_found") {
+      const suggestionLine = fuzzyResult.suggestions.length
+        ? `Closest synced contacts: ${fuzzyResult.suggestions.join(", ")}`
+        : "Tell me the exact contact name and I will check the right chat.";
+      return translateMessage(
+        [
+          `I couldn't match "${contactHint}" in your synced WhatsApp contacts.`,
+          "",
+          suggestionLine,
+        ].join("\n"),
+        locale,
+      );
+    }
+
+    if (fuzzyResult.type === "found") {
+      resolvedContactName = fuzzyResult.contact.name;
+      contactSearchValue = fuzzyResult.contact.phone;
+      resolvedContactScope = {
+        phone: fuzzyResult.contact.phone,
+        jid: fuzzyResult.contact.jid ?? null,
+        aliases: [...new Set([
+          fuzzyResult.contact.name,
+          ...(Array.isArray(fuzzyResult.contact.aliases) ? fuzzyResult.contact.aliases : []),
+        ].map((value) => String(value ?? "").trim()).filter(Boolean))],
+      };
+    }
+  }
+
+  let history = await listWhatsAppHistory({
+    userId,
+    contact: resolvedContactScope ? null : contactSearchValue,
+    resolvedContact: resolvedContactScope,
+    query: queryHint,
+    direction,
+    limit: Math.max(20, requestedCount * 4),
+  }).catch(() => null);
+
+  let rows = history?.rows ?? [];
+  if (!rows.length) {
+    if (!(await isWhatsAppConnected(userId))) {
+      return translateMessage(
+        [
+          "WhatsApp is not connected.",
+          "",
+          "Reconnect WhatsApp in the dashboard, then I can read your chat history here.",
+        ].join("\n"),
+        locale,
+      );
+    }
+
+    try {
+      await refreshClawCloudWhatsAppContacts(userId);
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      history = await listWhatsAppHistory({
+        userId,
+        contact: resolvedContactScope ? null : contactSearchValue,
+        resolvedContact: resolvedContactScope,
+        query: queryHint,
+        direction,
+        limit: Math.max(20, requestedCount * 4),
+      }).catch(() => null);
+      rows = history?.rows ?? [];
+    } catch (error) {
+      console.error("[agent] WhatsApp history bootstrap refresh failed:", error);
+    }
+  }
+
+  if (!rows.length) {
+    if (resolvedContactName) {
+      return translateMessage(
+        `I couldn't find matching WhatsApp messages from ${resolvedContactName}. Try a more specific contact name or a keyword from the message.`,
+        locale,
+      );
+    }
+
+    return translateMessage(
+      "I couldn't find matching WhatsApp messages. Tell me the contact name or a keyword from the chat and I'll check it.",
+      locale,
+    );
+  }
+
+  const summary = await buildWhatsAppHistoryProfessionalSummary({
+    rows: rows.map((row) => ({
+      direction: row.direction ?? null,
+      content: String(row.content ?? ""),
+      contact_name: row.contact_name ?? null,
+      remote_phone: row.remote_phone ?? null,
+      sent_at: row.sent_at ?? null,
+    })),
+    resolvedContactName,
+    queryHint,
+    requestedCount,
+    timezone,
+  });
+
+  return translateMessage(summary, locale);
+}
+
 function looksLikeDocumentContext(text: string) {
   return (
     /📄\s*\*user sent a document:/i.test(text)
@@ -4461,10 +8520,14 @@ function looksLikeDocumentContext(text: string) {
 function shouldRouteToWebSearch(text: string): boolean {
   const t = text.toLowerCase().trim();
   if (!detectWebSearchIntent(t)) return false;
+  if (hasWeatherIntent(text)) return false;
+  if (detectNewsQuestion(t)) return false;
 
   // Keep first-party personal-tool queries on dedicated intents.
   if (
     looksLikeEmailSearchQuestion(t)
+    || looksLikeWhatsAppHistoryQuestion(t)
+    || shouldClarifyPersonalSurface(t)
     || /\b(search|find|look up|check|show|get|give|tell|summarize|list|review|pull)\s+(my\s+)?gmail\b/.test(t)
     || /\b(search|find|look up|check|show|get)\s+(my\s+)?(email|inbox|mail|messages?|calendar|schedule|agenda|meetings?|events?|reminders?|spending|expenses?|contacts?|profile)\b/.test(t)
     || /\b(my\s+)?(emails?|inbox|calendar|schedule|agenda|reminders?|spending|expenses?|contacts?|profile)\b/.test(t)
@@ -4478,16 +8541,39 @@ function shouldRouteToWebSearch(text: string): boolean {
 
 function shouldForceCalendarIntent(text: string): boolean {
   const t = text.toLowerCase().trim();
+  if (looksLikePublicAffairsMeetingQuestion(t)) {
+    return false;
+  }
+
   return (
     /\b(today(?:'|\u2019)?s\s+calendar|tomorrow(?:'|\u2019)?s\s+calendar)\b/.test(t)
     || (
-      /\b(calendar|schedule|agenda|meetings?|events?)\b/.test(t)
+      /\b(calendar|schedule|agenda)\b/.test(t)
+      && /\b(today|tomorrow|tonight|this week|next week|start times?|meeting titles?|free gap|free gaps|free slot|free slots|free time|availability|available time|longer than \d+\s*(?:min|mins|minute|minutes|hour|hours))\b/.test(t)
+    )
+    || (
+      /\bmy\s+(meetings?|events?)\b/.test(t)
       && /\b(today|tomorrow|tonight|this week|next week|start times?|meeting titles?|free gap|free gaps|free slot|free slots|free time|availability|available time|longer than \d+\s*(?:min|mins|minute|minutes|hour|hours))\b/.test(t)
     )
   );
 }
 
+function hasWeatherIntent(text: string) {
+  const normalized = normalizeRegionalQuestion(text);
+  return Boolean(
+    parseWeatherCity(text)
+    || parseWeatherCity(normalized)
+    || looksLikeDirectWeatherQuestion(text)
+    || looksLikeDirectWeatherQuestion(normalized),
+  );
+}
+
 function detectIntentLegacy(text: string): DetectedIntent {
+  const strictRoute = detectStrictIntentRoute(text);
+  if (strictRoute) {
+    return strictRoute.intent;
+  }
+
   const t = text.toLowerCase().trim();
   const words = t.split(/\s+/);
 
@@ -4499,10 +8585,7 @@ function detectIntentLegacy(text: string): DetectedIntent {
     return { type: "research", category: "research" };
   }
 
-  if (
-    /^(\/help|help|menu|\/menu)$/i.test(t) ||
-    /\b(what can you do|your (features|capabilities|commands)|how (to use|do i use)|kya kar sakte|mujhe kya|show me features)\b/.test(t)
-  ) {
+  if (looksLikeClawCloudCapabilityQuestion(t)) {
     return { type: "help", category: "help" };
   }
 
@@ -4514,12 +8597,65 @@ function detectIntentLegacy(text: string): DetectedIntent {
     return { type: "reminder", category: "reminder" };
   }
 
+  if (
+    looksLikeGmailKnowledgeQuestion(text)
+    || looksLikeCalendarKnowledgeQuestion(text)
+    || looksLikeDriveKnowledgeQuestion(text)
+    || looksLikeWhatsAppSettingsKnowledgeQuestion(text)
+    || looksLikeEmailWritingKnowledgeQuestion(text)
+  ) {
+    return { type: "explain", category: "explain" };
+  }
+
+  if (shouldClarifyPersonalSurface(text)) {
+    return { type: "general", category: "personal_tool_clarify" };
+  }
+
+  if (looksLikeWhatsAppHistoryQuestion(text)) {
+    return { type: "send_message", category: "whatsapp_history" };
+  }
+
   if (looksLikeEmailSearchQuestion(t)) {
     return { type: "email", category: "email_search" };
   }
 
+  const gmailActionIntent = detectGmailActionIntent(text);
+  if (gmailActionIntent) {
+    return { type: "email", category: gmailActionIntent };
+  }
+
+  const calendarActionIntent = detectCalendarActionIntent(text);
+  if (calendarActionIntent) {
+    return { type: "calendar", category: calendarActionIntent };
+  }
+
+  const whatsAppSettingsIntent = detectWhatsAppSettingsCommandIntent(text);
+  if (whatsAppSettingsIntent) {
+    return { type: "send_message", category: whatsAppSettingsIntent };
+  }
+
+  if (looksLikePlainEmailWritingRequest(text)) {
+    return { type: "email", category: "draft_email" };
+  }
+
+  if (looksLikePublicAffairsMeetingQuestion(t)) {
+    return { type: "research", category: "news" };
+  }
+
+  if (looksLikeAmbiguousCurrentWarQuestion(t)) {
+    return { type: "research", category: "news" };
+  }
+
+  if (looksLikeHistoricalPowerRankingQuestion(t)) {
+    return { type: "history", category: "history" };
+  }
+
   if (shouldForceCalendarIntent(t)) {
     return { type: "calendar", category: "calendar" };
+  }
+
+  if (detectNewsQuestion(t)) {
+    return { type: "research", category: "news" };
   }
 
   if (detectFinanceQuery(t) !== null) {
@@ -4534,11 +8670,6 @@ function detectIntentLegacy(text: string): DetectedIntent {
     return { type: "technology", category: "technology" };
   }
 
-  // === NEWS ===
-  if (detectNewsQuestion(t)) {
-    return { type: "research", category: "news" };
-  }
-
   if (parseSendMessageCommand(text)) {
     return { type: "send_message", category: "send_message" };
   }
@@ -4551,10 +8682,7 @@ function detectIntentLegacy(text: string): DetectedIntent {
     return { type: "save_contact", category: "save_contact" };
   }
 
-  if (
-    parseWeatherCity(t)
-    || /\b(weather|temperature|temp|forecast|rain|humidity|wind|aqi|climate)\b/.test(t)
-  ) {
+  if (hasWeatherIntent(text)) {
     return { type: "research", category: "weather" };
   }
 
@@ -4585,21 +8713,10 @@ function detectIntentLegacy(text: string): DetectedIntent {
   }
 
   // === EMAIL DRAFTING ===
-  if (
-    /\b(draft|write|compose|create|send)\s+(an?\s+)?(email|mail|message|reply|response|follow.?up)\b/.test(t) ||
-    /\b(reply|respond)\s+(to|with)\b/.test(t) ||
-    /\bwrite (to|for|an email)\b/.test(t) ||
-    /\b(email|message)\s+(asking|saying|telling|about|regarding|for)\b/.test(t)
-  ) return { type: "email", category: "draft_email" };
+  if (looksLikePlainEmailWritingRequest(text)) return { type: "email", category: "draft_email" };
 
   // === EMAIL SEARCH ===
-  if (
-    /\b(search|find|look up|check|show|get)\s+(my\s+)?(email|inbox|mail|messages?)\b/.test(t) ||
-    /\bwhat did .+ (say|write|send|email)\b/.test(t) ||
-    /\bemail from\b/.test(t) ||
-    /\bdid .+ (reply|respond|email|send)\b/.test(t) ||
-    /\bany (emails?|messages?) (from|about|regarding)\b/.test(t)
-  ) return { type: "email", category: "email_search" };
+  if (looksLikeEmailSearchQuestion(text)) return { type: "email", category: "email_search" };
 
   // === CALENDAR ===
   if (
@@ -4637,6 +8754,11 @@ function detectIntentLegacy(text: string): DetectedIntent {
 // ─── Main router ──────────────────────────────────────────────────────────────
 
 function detectIntent(text: string): DetectedIntent {
+  const strictRoute = detectStrictIntentRoute(text);
+  if (strictRoute) {
+    return strictRoute.intent;
+  }
+
   const t = text.toLowerCase().trim();
   const words = t.split(/\s+/);
 
@@ -4648,10 +8770,7 @@ function detectIntent(text: string): DetectedIntent {
     return { type: "research", category: "research" };
   }
 
-  if (
-    /^(\/help|help|menu|\/menu)$/i.test(t) ||
-    /\b(what can you do|your (features|capabilities|commands)|how (to use|do i use)|kya kar sakte|mujhe kya|show me features)\b/.test(t)
-  ) {
+  if (looksLikeClawCloudCapabilityQuestion(t)) {
     return { type: "help", category: "help" };
   }
 
@@ -4663,12 +8782,65 @@ function detectIntent(text: string): DetectedIntent {
     return { type: "reminder", category: "reminder" };
   }
 
+  if (
+    looksLikeGmailKnowledgeQuestion(text)
+    || looksLikeCalendarKnowledgeQuestion(text)
+    || looksLikeDriveKnowledgeQuestion(text)
+    || looksLikeWhatsAppSettingsKnowledgeQuestion(text)
+    || looksLikeEmailWritingKnowledgeQuestion(text)
+  ) {
+    return { type: "explain", category: "explain" };
+  }
+
+  if (shouldClarifyPersonalSurface(text)) {
+    return { type: "general", category: "personal_tool_clarify" };
+  }
+
+  if (looksLikeWhatsAppHistoryQuestion(text)) {
+    return { type: "send_message", category: "whatsapp_history" };
+  }
+
   if (looksLikeEmailSearchQuestion(t)) {
     return { type: "email", category: "email_search" };
   }
 
+  const gmailActionIntent = detectGmailActionIntent(text);
+  if (gmailActionIntent) {
+    return { type: "email", category: gmailActionIntent };
+  }
+
+  const calendarActionIntent = detectCalendarActionIntent(text);
+  if (calendarActionIntent) {
+    return { type: "calendar", category: calendarActionIntent };
+  }
+
+  const whatsAppSettingsIntent = detectWhatsAppSettingsCommandIntent(text);
+  if (whatsAppSettingsIntent) {
+    return { type: "send_message", category: whatsAppSettingsIntent };
+  }
+
+  if (looksLikePlainEmailWritingRequest(text)) {
+    return { type: "email", category: "draft_email" };
+  }
+
+  if (looksLikePublicAffairsMeetingQuestion(t)) {
+    return { type: "research", category: "news" };
+  }
+
+  if (looksLikeAmbiguousCurrentWarQuestion(t)) {
+    return { type: "research", category: "news" };
+  }
+
+  if (looksLikeHistoricalPowerRankingQuestion(t)) {
+    return { type: "history", category: "history" };
+  }
+
   if (shouldForceCalendarIntent(t)) {
     return { type: "calendar", category: "calendar" };
+  }
+
+  if (detectNewsQuestion(t)) {
+    return { type: "research", category: "news" };
   }
 
   if (detectFinanceQuery(t) !== null) {
@@ -4683,10 +8855,6 @@ function detectIntent(text: string): DetectedIntent {
     return { type: "technology", category: "technology" };
   }
 
-  if (detectNewsQuestion(t)) {
-    return { type: "research", category: "news" };
-  }
-
   if (parseSendMessageCommand(text)) {
     return { type: "send_message", category: "send_message" };
   }
@@ -4699,10 +8867,7 @@ function detectIntent(text: string): DetectedIntent {
     return { type: "save_contact", category: "save_contact" };
   }
 
-  if (
-    parseWeatherCity(t)
-    || /\b(weather|temperature|temp|forecast|rain|humidity|wind|aqi|climate)\b/.test(t)
-  ) {
+  if (hasWeatherIntent(text)) {
     return { type: "research", category: "weather" };
   }
 
@@ -4717,22 +8882,11 @@ function detectIntent(text: string): DetectedIntent {
     return { type: "spending", category: "spending" };
   }
 
-  if (
-    /\b(search|find|look up|check|show|get)\s+(my\s+)?(email|inbox|mail|messages?)\b/.test(t)
-    || /\bwhat did .+ (say|write|send|email)\b/.test(t)
-    || /\bemail from\b/.test(t)
-    || /\bdid .+ (reply|respond|email|send)\b/.test(t)
-    || /\bany (emails?|messages?) (from|about|regarding)\b/.test(t)
-  ) {
+  if (looksLikeEmailSearchQuestion(text)) {
     return { type: "email", category: "email_search" };
   }
 
-  if (
-    /\b(draft|write|compose|create|send)\s+(an?\s+)?(email|mail|message|reply|response|follow.?up)\b/.test(t)
-    || /\b(reply|respond)\s+(to|with)\b/.test(t)
-    || /\bwrite (to|for|an email)\b/.test(t)
-    || /\b(email|message)\s+(asking|saying|telling|about|regarding|for)\b/.test(t)
-  ) {
+  if (looksLikePlainEmailWritingRequest(text)) {
     return { type: "email", category: "draft_email" };
   }
 
@@ -4856,9 +9010,9 @@ function detectIntent(text: string): DetectedIntent {
   }
 
   if (
-    /\b(write|create|compose|generate|draft)\s+(an?\s+|some\s+)?(story|poem|essay|letter|speech|article|articles|blog|blog post|script|song|caption|tagline|slogan|joke|riddle|limerick)\b/.test(t)
-    || /\b(write|create|compose|generate|draft)\s+me\s+(an?\s+|some\s+)?(story|poem|essay|letter|speech|article|articles|blog|blog post|script|song|caption|tagline|slogan|joke|riddle|limerick)\b/.test(t)
-    || /\b(can|could|will|please)\s+you\s+(write|create|compose|generate|draft)\s+(an?\s+|some\s+)?(story|poem|essay|letter|speech|article|articles|blog|blog post|script|song|caption|tagline|slogan|joke|riddle|limerick)\b/.test(t)
+    /\b(write|create|compose|generate|draft)\s+(an?\s+|some\s+)?(story|poem|haiku|sonnet|essay|letter|speech|article|articles|blog|blog post|script|song|lyrics|caption|tagline|slogan|joke|riddle|limerick|verse)\b/.test(t)
+    || /\b(write|create|compose|generate|draft)\s+me\s+(an?\s+|some\s+)?(story|poem|haiku|sonnet|essay|letter|speech|article|articles|blog|blog post|script|song|lyrics|caption|tagline|slogan|joke|riddle|limerick|verse)\b/.test(t)
+    || /\b(can|could|will|please)\s+you\s+(write|create|compose|generate|draft)\s+(an?\s+|some\s+)?(story|poem|haiku|sonnet|essay|letter|speech|article|articles|blog|blog post|script|song|lyrics|caption|tagline|slogan|joke|riddle|limerick|verse)\b/.test(t)
   ) {
     return { type: "creative", category: "creative" };
   }
@@ -4869,7 +9023,33 @@ function detectIntent(text: string): DetectedIntent {
     return { type: "research", category: "research" };
   }
 
+  // Regex cascade fell through to "general" — use confidence-based classifier
+  // to catch misclassified questions (e.g. "explain B+ tree algorithm" should
+  // be "explain" not "general", "mRNA vaccine mechanism" should be "science").
+  const confidenceResult = resolveIntentOverlap(
+    classifyIntentWithConfidence(text),
+    text,
+  );
+
+  if (
+    confidenceResult.primary.confidence >= 0.45
+    && confidenceResult.primary.intent !== "general"
+  ) {
+    return {
+      type: confidenceResult.primary.intent,
+      category: confidenceResult.primary.intent,
+    };
+  }
+
   return { type: "general", category: "general" };
+}
+
+export function detectIntentForTest(text: string): DetectedIntent {
+  return detectIntent(text);
+}
+
+export function detectStrictIntentRouteForTest(text: string) {
+  return detectStrictIntentRoute(text);
 }
 
 function buildHelpMessage(): string {
@@ -5006,58 +9186,95 @@ function normalizeResearchMarkdownForWhatsApp(reply: string): string {
     .trim();
 }
 
-function hasLiveEvidenceMarkers(answer: string): boolean {
-  const t = answer.toLowerCase();
-  return (
-    /\bsources?:/i.test(answer)
-    || t.includes("source domains:")
-    || t.includes("live data as of")
-    || t.includes("searched:")
-    || t.includes("live answer")
-    || t.includes("source note:")
-  );
-}
-
-function looksUnsafeUngroundedNumericalAnswer(answer: string): boolean {
-  const t = answer.toLowerCase();
-  const hasNumbers = /\d+(?:\.\d+)?/.test(answer);
-  const hasRiskLanguage = /unavailable|not found|could not|cannot|may shift|verify|subject to change/.test(t);
-  return hasNumbers && !hasLiveEvidenceMarkers(answer) && !hasRiskLanguage;
-}
-
-function isAcceptableLiveAnswer(answer: string | null | undefined): boolean {
+function isAcceptableLiveAnswer(
+  answer: string | null | undefined,
+  question?: string,
+): boolean {
   const normalized = answer?.trim() ?? "";
   if (!normalized) return false;
   if (isVisibleFallbackReply(normalized) || isLowCoverageResearchReply(normalized)) return false;
-  if (!hasLiveEvidenceMarkers(normalized)) return false;
-  if (looksUnsafeUngroundedNumericalAnswer(normalized)) return false;
-  return true;
+  return isClawCloudGroundedLiveAnswer({
+    question,
+    answer: normalized,
+  });
+}
+
+function isAcceptableNewsCoverageAnswer(
+  answer: string | null | undefined,
+  question?: string,
+): boolean {
+  const normalized = answer?.trim() ?? "";
+  if (!normalized) {
+    return false;
+  }
+
+  if (isAcceptableLiveAnswer(normalized, question)) {
+    return true;
+  }
+
+  if (isVisibleFallbackReply(normalized) || isLowCoverageResearchReply(normalized)) {
+    return false;
+  }
+
+  return (
+    Boolean(question && detectNewsQuestion(question))
+    && /\b(current-affairs check|closest source signals|source mix:)\b/i.test(normalized)
+    && /\b(searched:|live data as of)\b/i.test(normalized)
+  );
 }
 
 function looksStructuredLiveFinanceReply(answer: string, question: string): boolean {
   const normalized = answer.toLowerCase();
+  const detectedFinance = detectFinanceQuery(question);
+  if (detectedFinance === null || isVisibleFallbackReply(answer) || !isClawCloudGroundedLiveAnswer({ question, answer })) {
+    return false;
+  }
+
+  const hasSafetyLine = /\b(not financial advice|verify before trading|verify on nse\/bse)\b/i.test(normalized);
+  if (!hasSafetyLine) {
+    return false;
+  }
+
+  if (detectedFinance.type === "forex") {
+    return (
+      /\*market snapshot\*/i.test(answer)
+      && (/\brate:\b/i.test(answer) || /\b1\s+[A-Z]{3}\s*=/i.test(answer))
+      && /\*source\*/i.test(answer)
+    );
+  }
+
   return (
-    detectFinanceQuery(question) !== null
-    && hasLiveEvidenceMarkers(answer)
-    && /\b(price|change|day high|day low|market cap|volume)\b/i.test(answer)
-    && /\b(not financial advice|verify before trading|verify on nse\/bse)\b/i.test(normalized)
-    && !isVisibleFallbackReply(answer)
+    /\b(price|change|day high|day low|market cap|volume)\b/i.test(answer)
+  );
+}
+
+function looksStructuredTaxReply(answer: string, question: string): boolean {
+  const normalized = answer.toLowerCase();
+  if (detectTaxQuery(question) === null || isVisibleFallbackReply(answer)) {
+    return false;
+  }
+
+  return (
+    /\b(gst calculation|tds calculation|income tax estimate|gst slabs|tds rates)\b/i.test(answer)
+    || (
+      /\bwhat gst rate applies\?\b/i.test(answer)
+      && /\bactual item\/service|item\/service|service category|gst 5%|gst 12%|gst 18%|gst 28%\b/i.test(normalized)
+    )
+    || /\bsend me an amount to calculate|send your income\b/i.test(normalized)
   );
 }
 
 function buildNewsCoverageRecoveryReply(question: string): string {
   const q = question.trim().slice(0, 120);
   return [
-    `*Latest Update Request:* ${q}`,
+    `*Latest update request:* ${q}`,
     "",
-    "I could not verify enough reliable live sources for this exact query yet.",
+    "To answer this cleanly, send one concrete live scope: the topic plus the location, company, person, or timeframe that matters.",
     "",
-    "Send one specific topic + location for a precise update:",
+    "Examples:",
     "- _India stock market news today_",
     "- _Delhi weather today_",
     "- _Latest AI policy news in US today_",
-    "",
-    "I will return a clean, professional update.",
   ].join("\n");
 }
 
@@ -5068,12 +9285,12 @@ async function buildLiveCoverageRecoveryReply(
   memorySnippet?: string,
 ): Promise<string> {
   if (shouldUseLiveSearch(question)) {
-    const q = question.trim().slice(0, 100);
+    const scopedQuestion = question.trim().slice(0, 100);
     return [
-      `🔍 *${q}*`,
+      `*Scoped live answer needed:* ${scopedQuestion}`,
       "",
-      "I could not verify enough live sources right now for an accurate answer.",
-      "Please retry in a moment. I will return fresh, source-backed data.",
+      "This needs a tighter live scope for a precise source-backed answer.",
+      "Send the exact topic plus the location, company, person, or date window that matters.",
     ].join("\n");
   }
 
@@ -5139,6 +9356,16 @@ async function buildLiveCoverageRecoveryReply(
     return forced;
   }
 
+  const scopedQuestion = question.trim().slice(0, 100);
+  return [
+    `*Live answer recovery:* ${scopedQuestion}`,
+    "",
+    "I do not have a clean enough live source set to answer this precisely yet.",
+    "Resend it with the exact topic plus the location, company, person, or date window for a source-backed update.",
+    "If you prefer a stable overview instead of a live update, ask for an overview and I will answer directly.",
+  ].join("\n");
+
+  if (false) {
   const q = question.trim().slice(0, 100);
   return [
     `🔍 *${q}*`,
@@ -5147,6 +9374,7 @@ async function buildLiveCoverageRecoveryReply(
     "Ask the same question more specifically and I will answer from knowledge immediately.",
     "Example: _Who are the top 10 richest people in 2026?_",
   ].join("\n");
+  }
 }
 
 async function buildEvidenceFirstReply(input: {
@@ -5211,11 +9439,35 @@ async function enforceAnswerQuality(input: {
   });
 
   let answer = input.reply.trim();
+  let directRecoveryUsed = false;
+  const tryDirectRecovery = async (failureReason: string) => {
+    if (directRecoveryUsed || !shouldAttemptDirectAnswerRecovery(input.question, profile)) {
+      return "";
+    }
+
+    directRecoveryUsed = true;
+    const recovered = await recoverDirectAnswer({
+      question: input.question,
+      answer,
+      intent: input.intent,
+      failureReason,
+      history: input.history,
+      extraInstruction: input.extraInstruction,
+    }).catch(() => "");
+
+    return recovered.trim();
+  };
+
   if (!answer) {
-    return buildClawCloudLowConfidenceReply(input.question, profile);
+    const recovered = await tryDirectRecovery("The initial answer draft was empty.");
+    if (recovered) {
+      answer = recovered;
+    } else {
+      return buildClawCloudLowConfidenceReply(input.question, profile);
+    }
   }
 
-  if (profile.requiresLiveGrounding && !isAcceptableLiveAnswer(answer)) {
+  if (profile.requiresLiveGrounding && !isAcceptableLiveAnswer(answer, input.question)) {
     const history = input.history?.length
       ? input.history
       : await buildSmartHistory(input.userId, input.question, "deep", input.intent);
@@ -5225,7 +9477,7 @@ async function enforceAnswerQuality(input: {
       history,
     }).catch(() => "");
     const normalizedGrounded = normalizeResearchMarkdownForWhatsApp((grounded ?? "").trim());
-    if (isAcceptableLiveAnswer(normalizedGrounded)) {
+    if (isAcceptableLiveAnswer(normalizedGrounded, input.question)) {
       answer = normalizedGrounded;
     } else {
       return buildClawCloudLowConfidenceReply(input.question, profile);
@@ -5252,6 +9504,44 @@ async function enforceAnswerQuality(input: {
     }
   }
 
+  if (looksLikeQuestionTopicMismatch(input.question, answer)) {
+    const repairedAnswer = await repairAnswerTopicMismatch({
+      question: input.question,
+      answer,
+      intent: input.intent,
+    }).catch(() => "");
+
+    if (repairedAnswer.trim() && !looksLikeQuestionTopicMismatch(input.question, repairedAnswer.trim())) {
+      answer = repairedAnswer.trim();
+    } else {
+      return buildClawCloudLowConfidenceReply(
+        input.question,
+        profile,
+        "The draft answer drifted away from the user's actual question.",
+      );
+    }
+  }
+
+  if (looksLikeWrongModeAnswer(input.question, answer)) {
+    const repairedAnswer = await tryDirectRecovery(
+      "The draft answer matched the wrong mode instead of answering the requested content directly.",
+    );
+
+    if (
+      repairedAnswer
+      && !looksLikeWrongModeAnswer(input.question, repairedAnswer)
+      && !looksLikeQuestionTopicMismatch(input.question, repairedAnswer)
+    ) {
+      answer = repairedAnswer;
+    } else {
+      return buildClawCloudLowConfidenceReply(
+        input.question,
+        profile,
+        "The draft answer matched the wrong mode instead of answering the requested content directly.",
+      );
+    }
+  }
+
   const verification = await verifyClawCloudAnswer({
     question: input.question,
     answer,
@@ -5259,6 +9549,10 @@ async function enforceAnswerQuality(input: {
   }).catch(() => null);
 
   if (profile.domain === "finance" && looksStructuredLiveFinanceReply(answer, input.question)) {
+    return answer;
+  }
+
+  if (profile.domain === "tax" && looksStructuredTaxReply(answer, input.question)) {
     return answer;
   }
 
@@ -5362,60 +9656,693 @@ function runReplyApprovalsFireAndForget(
   })();
 }
 
-export async function routeInboundAgentMessage(
-  userId: string,
-  message: string,
-): Promise<string | null> {
-  const routeStartedAt = Date.now();
-  let requested = extractModeOverride(message);
-  let trimmed = requested.cleaned;
-  if (!trimmed) return null;
+function normalizeInboundMessageForConsent(message: string) {
+  let trimmed = extractModeOverride(message).cleaned;
+  if (!trimmed) {
+    return "";
+  }
 
   if (trimmed.startsWith("[Group message")) {
     trimmed = trimmed.replace(/^\[Group message[^\]]*\]\s*/i, "").trim();
-    if (!trimmed) {
-      return null;
+  }
+
+  return trimmed;
+}
+
+function looksLikeStandaloneDriveWriteRequest(message: string) {
+  return (
+    /\b(add row|append|insert)\b/i.test(message)
+    && /\bto\b/i.test(message)
+    && !detectCalendarActionIntent(message)
+    && !detectGmailActionIntent(message)
+  );
+}
+
+function inferAppAccessRequirement(message: string): AppAccessRequirement | null {
+  const trimmed = normalizeInboundMessageForConsent(message);
+  if (!trimmed) {
+    return null;
+  }
+
+  const sendCommandSafety = analyzeSendMessageCommandSafety(trimmed);
+  if (sendCommandSafety?.allowed) {
+    return {
+      surface: "whatsapp",
+      operation: "write",
+      summary: buildAppAccessConsentSummary("whatsapp", "write"),
+    };
+  }
+
+  if (sendCommandSafety && !sendCommandSafety.allowed) {
+    return null;
+  }
+
+  const driveIntent = detectDriveIntent(trimmed);
+  if (driveIntent || looksLikeStandaloneDriveWriteRequest(trimmed)) {
+    const resolvedDriveIntent = driveIntent ?? "write";
+    const operation: AppAccessOperation = resolvedDriveIntent === "write" ? "write" : "read";
+    return {
+      surface: "google_drive",
+      operation,
+      summary: buildAppAccessConsentSummary("google_drive", operation),
+    };
+  }
+
+  const detected = detectStrictIntentRoute(trimmed)?.intent ?? detectIntent(trimmed);
+
+  if (detected.category === "whatsapp_history") {
+    return {
+      surface: "whatsapp",
+      operation: "read",
+      summary: buildAppAccessConsentSummary("whatsapp", "read"),
+    };
+  }
+
+  if (detected.category === "whatsapp_contacts_sync") {
+    return {
+      surface: "whatsapp",
+      operation: "read",
+      summary: buildAppAccessConsentSummary("whatsapp", "read"),
+    };
+  }
+
+  if (detected.category === "send_message") {
+    return {
+      surface: "whatsapp",
+      operation: "write",
+      summary: buildAppAccessConsentSummary("whatsapp", "write"),
+    };
+  }
+
+  if (
+    detected.category === "gmail_draft"
+    || detected.category === "gmail_send"
+    || detected.category === "gmail_reply_draft"
+    || detected.category === "gmail_reply_send"
+    || detected.category === "gmail_mark_read"
+    || detected.category === "gmail_mark_unread"
+    || detected.category === "gmail_archive"
+    || detected.category === "gmail_trash"
+    || detected.category === "gmail_restore"
+    || detected.category === "gmail_mark_spam"
+    || detected.category === "gmail_mark_not_spam"
+    || detected.category === "gmail_star"
+    || detected.category === "gmail_unstar"
+    || detected.category === "gmail_reply_queue"
+    || detectGmailActionIntent(trimmed)
+  ) {
+    return {
+      surface: "gmail",
+      operation: "write",
+      summary: buildAppAccessConsentSummary("gmail", "write"),
+    };
+  }
+
+  if (detected.category === "email_search" || looksLikeEmailSearchQuestion(trimmed)) {
+    return {
+      surface: "gmail",
+      operation: "read",
+      summary: buildAppAccessConsentSummary("gmail", "read"),
+    };
+  }
+
+  if (
+    detected.category === "calendar_create"
+    || detected.category === "calendar_update"
+    || detected.category === "calendar_cancel"
+    || detectCalendarActionIntent(trimmed)
+  ) {
+    return {
+      surface: "google_calendar",
+      operation: "write",
+      summary: buildAppAccessConsentSummary("google_calendar", "write"),
+    };
+  }
+
+  if (detected.category === "calendar") {
+    return {
+      surface: "google_calendar",
+      operation: "read",
+      summary: buildAppAccessConsentSummary("google_calendar", "read"),
+    };
+  }
+
+  return null;
+}
+
+export function inferAppAccessRequirementForTest(message: string) {
+  return inferAppAccessRequirement(message);
+}
+
+const ROUTING_CONTEXT_LOCK_CATEGORIES = new Set([
+  "send_message",
+  "save_contact",
+  "whatsapp_history",
+  "whatsapp_settings_status",
+  "whatsapp_settings_update",
+  "whatsapp_contacts_sync",
+  "email_search",
+  "draft_email",
+  "gmail_reply_queue",
+  "gmail_draft",
+  "gmail_send",
+  "gmail_reply_draft",
+  "gmail_reply_send",
+  "gmail_mark_read",
+  "gmail_mark_unread",
+  "gmail_archive",
+  "gmail_trash",
+  "gmail_restore",
+  "gmail_mark_spam",
+  "gmail_mark_not_spam",
+  "gmail_star",
+  "gmail_unstar",
+  "calendar",
+  "calendar_create",
+  "calendar_update",
+  "calendar_cancel",
+  "reminder",
+  "memory",
+  "language",
+]);
+
+function shouldPreserveOriginalMessageForRouting(message: string) {
+  const trimmed = normalizeInboundMessageForConsent(message);
+  if (!trimmed) {
+    return false;
+  }
+
+  const strictRoute = detectStrictIntentRoute(trimmed);
+  if (strictRoute?.locked) {
+    return true;
+  }
+
+  if (
+    parseSendMessageCommand(trimmed)
+    || parseSaveContactCommand(trimmed)
+    || detectBillingIntent(trimmed)
+    || detectDriveIntent(trimmed)
+    || looksLikeStandaloneDriveWriteRequest(trimmed)
+  ) {
+    return true;
+  }
+
+  const detected = detectIntent(trimmed);
+  return ROUTING_CONTEXT_LOCK_CATEGORIES.has(detected.category);
+}
+
+function looksLikeReflectiveToolFollowUp(message: string) {
+  const trimmed = normalizeInboundMessageForConsent(message);
+  if (!trimmed || shouldPreserveOriginalMessageForRouting(trimmed)) {
+    return false;
+  }
+
+  if (
+    /^(?:what happened|what changed|what did (?:you|it|that|this)|why did (?:you|it|that|this)|how did (?:that|this|it)|what does (?:that|this|it)\s+mean|explain (?:that|this|it|what happened)|summari[sz]e (?:that|this|it|what happened)|walk me through (?:that|this|it)|tell me more about (?:that|this|it)|compare (?:that|this|them)|which one|why that|why this)\b/i.test(trimmed)
+  ) {
+    return true;
+  }
+
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  if (words.length > 7) {
+    return false;
+  }
+
+  return (
+    /\b(it|this|that|them|those|these)\b/i.test(trimmed)
+    && /\b(what|why|how|which|explain|summari[sz]e|compare|walk me through|tell me more)\b/i.test(trimmed)
+  );
+}
+
+function looksLikeOperationalResolvedContext(message: string) {
+  const trimmed = normalizeInboundMessageForConsent(message);
+  if (!trimmed) {
+    return false;
+  }
+
+  const strictRoute = detectStrictIntentRoute(trimmed);
+  if (strictRoute?.locked) {
+    return true;
+  }
+
+  const detected = detectIntent(trimmed);
+  if (ROUTING_CONTEXT_LOCK_CATEGORIES.has(detected.category)) {
+    return true;
+  }
+
+  return /\b(gmail|email|inbox|mail|calendar|schedule|meeting|event|reminder|whatsapp|message|messages|contact|reply|draft|archive|attachment|send)\b/i.test(trimmed);
+}
+
+function shouldKeepReflectiveToolFollowUpOnConversationRouting(
+  originalMessage: string,
+  memoryResolvedQuestion: string,
+) {
+  return (
+    looksLikeReflectiveToolFollowUp(originalMessage)
+    && looksLikeOperationalResolvedContext(memoryResolvedQuestion)
+  );
+}
+
+function resolveRoutingMessage(originalMessage: string, memoryResolvedQuestion: string) {
+  const trimmed = normalizeInboundMessageForConsent(originalMessage);
+  const resolved = memoryResolvedQuestion.trim();
+
+  if (!trimmed) {
+    return resolved;
+  }
+
+  if (shouldPreserveOriginalMessageForRouting(trimmed)) {
+    return trimmed;
+  }
+
+  if (shouldKeepReflectiveToolFollowUpOnConversationRouting(trimmed, resolved)) {
+    return trimmed;
+  }
+
+  return resolved || trimmed;
+}
+
+export function resolveRoutingMessageForTest(originalMessage: string, memoryResolvedQuestion: string) {
+  return resolveRoutingMessage(originalMessage, memoryResolvedQuestion);
+}
+
+async function handleNaturalOutboundDraftReview(userId: string, message: string) {
+  const decision = parseOutboundReviewDecision(message);
+  if (decision.kind === "none") {
+    return { handled: false, response: "" };
+  }
+
+  const [latestReplyApproval, latestWhatsAppGroup] = await Promise.all([
+    getLatestPendingReplyApproval(userId).catch(() => null),
+    getLatestPendingWhatsAppApprovalGroup(userId).catch(() => null),
+  ]);
+
+  const latestReplyAt = latestReplyApproval ? Date.parse(latestReplyApproval.created_at) : Number.NEGATIVE_INFINITY;
+  const latestWhatsAppAt = latestWhatsAppGroup ? Date.parse(latestWhatsAppGroup.latestCreatedAt) : Number.NEGATIVE_INFINITY;
+
+  if (!Number.isFinite(latestReplyAt) && !Number.isFinite(latestWhatsAppAt)) {
+    return { handled: false, response: "" };
+  }
+
+  if (latestWhatsAppAt >= latestReplyAt) {
+    const result = await handleLatestWhatsAppApprovalReview(userId, message);
+    if (result.handled) {
+      return { handled: true, response: result.response };
     }
   }
 
-  const localePromise = getUserLocale(userId);
-  const finalizeEarlyRaw = async (reply: string, intent: string, category: string) =>
-    finalizeAgentReply({
+  const replyResult = await handleLatestReplyApprovalReview(userId, message);
+  if (replyResult.handled) {
+    return { handled: true, response: replyResult.response };
+  }
+
+  if (latestReplyAt > latestWhatsAppAt) {
+    const result = await handleLatestWhatsAppApprovalReview(userId, message);
+    if (result.handled) {
+      return { handled: true, response: result.response };
+    }
+  }
+
+  return { handled: false, response: "" };
+}
+
+type PendingApprovalContextKind = "review" | "explain" | "target";
+
+function detectPendingApprovalContextQuestion(message: string): PendingApprovalContextKind | null {
+  const trimmed = message.trim();
+  if (!trimmed || parseOutboundReviewDecision(trimmed).kind !== "none") {
+    return null;
+  }
+
+  if (
+    /^(?:show|review|preview|repeat|remind me of|what am i approving|what is pending|what''s pending|show me the draft|show the draft|what''s the draft|what is the draft|show me that draft again|read me the draft again)\b/i.test(trimmed)
+  ) {
+    return "review";
+  }
+
+  if (
+    /\b(why (?:does|is|do)|why approval|need approval|needs approval|reason for approval|why is this pending|why are you asking for approval)\b/i.test(trimmed)
+  ) {
+    return "explain";
+  }
+
+  if (
+    /\b(who is this (?:for|to)|who are you sending this to|who am i replying to|which contact|which email|what recipient|who is the recipient|what is the subject|who is this going to)\b/i.test(trimmed)
+  ) {
+    return "target";
+  }
+
+  return null;
+}
+
+export function detectPendingApprovalContextQuestionForTest(message: string) {
+  return detectPendingApprovalContextQuestion(message);
+}
+
+async function handlePendingApprovalContextQuestion(userId: string, message: string) {
+  const kind = detectPendingApprovalContextQuestion(message);
+  if (!kind) {
+    return { handled: false, response: "" };
+  }
+
+  const [latestReplyApproval, latestWhatsAppGroup, locale] = await Promise.all([
+    getLatestPendingReplyApproval(userId).catch(() => null),
+    getLatestPendingWhatsAppApprovalGroup(userId).catch(() => null),
+    getUserLocale(userId).catch(() => "en" as SupportedLocale),
+  ]);
+
+  const latestReplyAt = latestReplyApproval ? Date.parse(latestReplyApproval.created_at) : Number.NEGATIVE_INFINITY;
+  const latestWhatsAppAt = latestWhatsAppGroup ? Date.parse(latestWhatsAppGroup.latestCreatedAt) : Number.NEGATIVE_INFINITY;
+
+  if (!Number.isFinite(latestReplyAt) && !Number.isFinite(latestWhatsAppAt)) {
+    return { handled: false, response: "" };
+  }
+
+  if (latestWhatsAppAt >= latestReplyAt && latestWhatsAppGroup?.approvals.length) {
+    const primary = latestWhatsAppGroup.approvals[0]!;
+    return {
+      handled: true,
+      response: await translateMessage(
+        buildWhatsAppApprovalContextReply(primary, kind, latestWhatsAppGroup.approvals.length),
+        locale,
+      ),
+    };
+  }
+
+  if (latestReplyApproval) {
+    return {
+      handled: true,
+      response: await translateMessage(
+        buildReplyApprovalContextReply(latestReplyApproval, kind),
+        locale,
+      ),
+    };
+  }
+
+  if (latestWhatsAppGroup?.approvals.length) {
+    const primary = latestWhatsAppGroup.approvals[0]!;
+    return {
+      handled: true,
+      response: await translateMessage(
+        buildWhatsAppApprovalContextReply(primary, kind, latestWhatsAppGroup.approvals.length),
+        locale,
+      ),
+    };
+  }
+
+  return { handled: false, response: "" };
+}
+
+async function routeInboundAgentMessageResultCore(
+  userId: string,
+  message: string,
+  options?: {
+    skipAppAccessConsent?: boolean;
+    skipConversationStyleChoice?: boolean;
+    conversationStyle?: ClawCloudConversationStyle;
+  },
+): Promise<RouteInboundAgentMessageResult> {
+  const embeddedConversationStyle = extractEmbeddedConversationStyle(message);
+  const normalizedMessage = normalizeInboundMessageForConsent(embeddedConversationStyle.cleaned);
+  if (!normalizedMessage) {
+    return { response: null, liveAnswerBundle: null };
+  }
+
+  if (looksLikeCurrentAffairsPowerCrisisQuestion(normalizedMessage)) {
+    return {
+      response: buildCurrentAffairsEvidenceAnswer(normalizedMessage, []),
+      liveAnswerBundle: null,
+      modelAuditTrail: null,
+    };
+  }
+
+  const directShortDefinition = detectShortDefinitionLookup(normalizedMessage);
+  if (directShortDefinition) {
+    const resolvedConversationStyle =
+      options?.conversationStyle
+      ?? embeddedConversationStyle.style
+      ?? detectExplicitConversationStyleOverride(normalizedMessage)
+      ?? "professional";
+    return routeInboundAgentMessageCore(userId, normalizedMessage, {
+      conversationStyle: resolvedConversationStyle,
+    });
+  }
+
+  if (!options?.skipConversationStyleChoice) {
+    const styleDecision = await resolveLatestConversationStyleDecision(userId, normalizedMessage);
+    if (styleDecision) {
+      return routeInboundAgentMessageResultCore(
+        userId,
+        embedConversationStyleInMessage(styleDecision.style, styleDecision.originalMessage),
+        {
+        ...options,
+        skipConversationStyleChoice: true,
+        },
+      );
+    }
+  }
+
+  const resolvedConversationStyle =
+    options?.conversationStyle
+    ?? embeddedConversationStyle.style
+    ?? detectExplicitConversationStyleOverride(normalizedMessage)
+    ?? "professional";
+  const continuationMessage = embedConversationStyleInMessage(
+    resolvedConversationStyle,
+    normalizedMessage,
+  );
+
+  const pendingDecision = await resolveLatestAppAccessConsentDecision(userId, normalizedMessage);
+  if (pendingDecision) {
+    if (pendingDecision.decision === "deny") {
+      return {
+        response: buildAppAccessDeniedReply(
+          pendingDecision.request.surface,
+          pendingDecision.request.operation,
+        ),
+      };
+    }
+
+    return routeInboundAgentMessageCore(userId, pendingDecision.originalMessage, {
+      conversationStyle: resolvedConversationStyle,
+    });
+  }
+
+  if (!options?.skipAppAccessConsent) {
+    const requirement = inferAppAccessRequirement(normalizedMessage);
+    if (requirement) {
+      const consentRequest = createAppAccessConsentRequest({
+        userId,
+        surface: requirement.surface,
+        operation: requirement.operation,
+        summary: requirement.summary,
+        originalMessage: continuationMessage,
+      });
+      await rememberLatestAppAccessConsent(userId, consentRequest, continuationMessage);
+
+      return {
+        response: consentRequest.prompt,
+        consentRequest,
+      };
+    }
+  }
+
+  return routeInboundAgentMessageCore(userId, normalizedMessage, {
+    conversationStyle: resolvedConversationStyle,
+  });
+}
+
+function buildInboundAgentTimeoutResult(message: string): RouteInboundAgentMessageResult {
+  const normalizedMessage = normalizeInboundMessageForConsent(message);
+  if (!normalizedMessage) {
+    return { response: null, liveAnswerBundle: null };
+  }
+
+  if (looksLikeClawCloudCapabilityQuestion(normalizedMessage)) {
+    return {
+      response: normalizeReplyForClawCloudDisplay(buildLocalizedCapabilityReplyFromMessage(normalizedMessage)),
+      liveAnswerBundle: null,
+      modelAuditTrail: null,
+    };
+  }
+
+  const detected = detectStrictIntentRoute(normalizedMessage)?.intent ?? detectIntent(normalizedMessage);
+  const response = buildTimeboxedProfessionalReply(normalizedMessage, detected.type);
+
+  return {
+    response,
+    liveAnswerBundle: null,
+    modelAuditTrail: null,
+  };
+}
+
+export async function routeInboundAgentMessageResult(
+  userId: string,
+  message: string,
+  options?: {
+    skipAppAccessConsent?: boolean;
+    skipConversationStyleChoice?: boolean;
+    conversationStyle?: ClawCloudConversationStyle;
+  },
+): Promise<RouteInboundAgentMessageResult> {
+  const timeoutPolicy = resolveInboundRouteTimeoutPolicy(message);
+  return Promise.race([
+    routeInboundAgentMessageResultCore(userId, message, options),
+    new Promise<RouteInboundAgentMessageResult>((resolve) => {
+      setTimeout(() => resolve(buildInboundAgentTimeoutResult(message)), timeoutPolicy.timeoutMs);
+    }),
+  ]);
+}
+
+async function routeInboundAgentMessageCore(
+  userId: string,
+  message: string,
+  options?: {
+    conversationStyle?: ClawCloudConversationStyle;
+  },
+): Promise<FinalizedAgentReplyResult> {
+  const routeStartedAt = Date.now();
+  const selectedConversationStyle = options?.conversationStyle ?? "professional";
+  let requested = extractModeOverride(message);
+  let trimmed = requested.cleaned;
+  if (!trimmed) return { response: null, liveAnswerBundle: null };
+
+  if (trimmed.startsWith("[Group message")) {
+    trimmed = trimmed.replace(/^\[Group message[^\]]*\]\s*/i, "").trim();
+    if (!requested.explicit) {
+      requested = extractModeOverride(trimmed);
+      trimmed = requested.cleaned;
+    }
+    if (!trimmed) {
+      return { response: null, liveAnswerBundle: null };
+    }
+  }
+
+  const earlyDeterministicExplainReply =
+    requested.mode === "deep" ? null : buildDeterministicExplainReply(trimmed);
+  if (earlyDeterministicExplainReply) {
+    const storedLocale = await withSoftTimeout(
+      getUserLocale(userId).catch(() => "en" as SupportedLocale),
+      "en" as SupportedLocale,
+      NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS,
+    );
+    const replyLanguage = resolveClawCloudReplyLanguage({
+      message: trimmed,
+      preferredLocale: storedLocale,
+    });
+
+    return finalizeAgentReply({
       userId,
-      locale: await localePromise,
+      locale: replyLanguage.locale,
+      preserveRomanScript: replyLanguage.preserveRomanScript,
+      question: trimmed,
+      intent: "explain",
+      category: "explain",
+      startedAt: routeStartedAt,
+      reply: earlyDeterministicExplainReply,
+    });
+  }
+
+  const ultraFastDefinitionLookup = requested.mode === "deep"
+    ? null
+    : await answerShortDefinitionLookup(trimmed).catch(() => null);
+  if (ultraFastDefinitionLookup?.trim()) {
+    return finalizeAgentReply({
+      userId,
+      locale: "en",
+      preserveRomanScript: false,
+      question: trimmed,
+      intent: "explain",
+      category: "explain",
+      startedAt: routeStartedAt,
+      reply: normalizeResearchMarkdownForWhatsApp(ultraFastDefinitionLookup),
+      alreadyTranslated: true,
+    });
+  }
+
+  const localePromise = getUserLocale(userId).catch(() => "en" as SupportedLocale);
+  const resolveStoredLocaleQuickly = () =>
+    withSoftTimeout(localePromise, "en" as SupportedLocale, NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS);
+  const emptyMemory = {
+    recentTurns: [],
+    topicSummary: "",
+    activeTopics: [],
+    isFollowUp: false,
+    resolvedQuestion: trimmed,
+    recentDocumentContext: null,
+    userToneProfile: "",
+    userEmotionalContext: "",
+    continuityHint: null,
+  };
+  const resolveReplyLocale = async (
+    messageForLocale: string,
+    recentTurns?: Array<{ role: "user" | "assistant"; content: string }>,
+  ) => resolveClawCloudReplyLanguage({
+    message: messageForLocale,
+    preferredLocale: await resolveStoredLocaleQuickly(),
+    recentUserMessages: recentTurns
+      ?.filter((turn) => turn.role === "user")
+      .map((turn) => turn.content)
+      .slice(-4),
+  });
+  const finalizeEarlyRaw = async (
+    reply: string,
+    intent: string,
+    category: string,
+    liveAnswerBundle?: ClawCloudAnswerBundle | null,
+  ) => {
+    const replyLanguage = await resolveReplyLocale(trimmed);
+    return finalizeAgentReply({
+      userId,
+      locale: replyLanguage.locale,
+      preserveRomanScript: replyLanguage.preserveRomanScript,
       question: trimmed,
       intent,
       category,
       startedAt: routeStartedAt,
       reply,
+      liveAnswerBundle,
     });
-  const finalizeEarlyTranslated = async (reply: string, intent: string, category: string) =>
-    finalizeAgentReply({
+  };
+  const finalizeEarlyTranslated = async (
+    reply: string,
+    intent: string,
+    category: string,
+    liveAnswerBundle?: ClawCloudAnswerBundle | null,
+  ) => {
+    const replyLanguage = await resolveReplyLocale(trimmed);
+    return finalizeAgentReply({
       userId,
-      locale: await localePromise,
+      locale: replyLanguage.locale,
+      preserveRomanScript: replyLanguage.preserveRomanScript,
       question: trimmed,
       intent,
       category,
       startedAt: routeStartedAt,
       reply,
       alreadyTranslated: true,
+      liveAnswerBundle,
     });
+  };
   const finalizeEarlyWithLocale = async (
     reply: string,
     locale: SupportedLocale,
     intent: string,
     category: string,
     alreadyTranslated = true,
+    liveAnswerBundle?: ClawCloudAnswerBundle | null,
   ) =>
     finalizeAgentReply({
       userId,
       locale,
+      preserveRomanScript: false,
       question: trimmed,
       intent,
       category,
       startedAt: routeStartedAt,
       reply,
       alreadyTranslated,
+      liveAnswerBundle,
     });
 
   const commandIntent = detectCommandIntent(trimmed);
@@ -5426,7 +10353,7 @@ export async function routeInboundAgentMessage(
         requested = extractModeOverride(commandResult.expandedPrompt);
         trimmed = requested.cleaned;
         if (!trimmed) {
-          return null;
+          return { response: null, liveAnswerBundle: null };
         }
       } else if (commandResult.response) {
         return finalizeEarlyRaw(commandResult.response, "help", "help");
@@ -5441,6 +10368,26 @@ export async function routeInboundAgentMessage(
   if (whatsappApproval.handled) {
     return finalizeEarlyTranslated(whatsappApproval.response, "help", "help");
   }
+  const naturalDraftReview = await handleNaturalOutboundDraftReview(userId, trimmed);
+  if (naturalDraftReview.handled) {
+    return finalizeEarlyTranslated(naturalDraftReview.response, "help", "help");
+  }
+  const approvalContextQuestion = await handlePendingApprovalContextQuestion(userId, trimmed);
+  if (approvalContextQuestion.handled) {
+    return finalizeEarlyTranslated(approvalContextQuestion.response, "help", "help");
+  }
+
+  if (looksLikeClawCloudCapabilityQuestion(trimmed)) {
+    const replyLanguage = await resolveReplyLocale(trimmed);
+    return finalizeEarlyTranslated(
+      buildLocalizedCapabilityReply(trimmed, replyLanguage.locale, {
+        preserveRomanScript: replyLanguage.preserveRomanScript,
+      }),
+      "help",
+      "help",
+    );
+  }
+
   const memoryCommand = detectMemoryCommand(trimmed);
 
   if (memoryCommand.type === "show_profile") {
@@ -5451,6 +10398,23 @@ export async function routeInboundAgentMessage(
   if (memoryCommand.type === "show_suggestions") {
     const facts = await getAllMemoryFacts(userId);
     return finalizeEarlyRaw(formatMemorySuggestionsReply(facts), "memory", "memory");
+  }
+
+  if (memoryCommand.type === "show_pending") {
+    const facts = await getAllMemoryFacts(userId);
+    return finalizeEarlyRaw(formatPendingMemoryReply(facts), "memory", "memory");
+  }
+
+  if (memoryCommand.type === "why_key") {
+    const facts = await getAllMemoryFacts(userId);
+    return finalizeEarlyRaw(
+      formatMemoryAuditReply(
+        memoryCommand.key,
+        facts.find((fact) => fact.key === memoryCommand.key) ?? null,
+      ),
+      "memory",
+      "memory",
+    );
   }
 
   if (memoryCommand.type === "forget_all") {
@@ -5538,41 +10502,337 @@ export async function routeInboundAgentMessage(
   if (detectBillingIntent(trimmed)) {
     const billingReply = await handleBillingCommand(userId, trimmed).catch(() => null);
     if (billingReply) {
-      await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+      void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
       return finalizeEarlyRaw(billingReply, "general", "general");
     }
   }
 
   if (!shouldBypassInboundRunLimit(trimmed)) {
-    const limitReply = await buildProfessionalInboundRunLimitReply(userId);
+    const limitReply = await withSoftTimeout(
+      buildProfessionalInboundRunLimitReply(userId).catch(() => null),
+      null,
+      NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS,
+    );
     if (limitReply) {
       return finalizeEarlyRaw(limitReply, "general", "general");
     }
+  }
+
+  const earlyReminderIntent = detectReminderIntent(trimmed);
+  if (detectTaxQuery(trimmed) && earlyReminderIntent.intent === "unknown") {
+    const taxReply = answerTaxQuery(trimmed);
+    if (taxReply) {
+      void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
+      return finalizeEarlyRaw(taxReply, "economics", "economics");
+    }
+  }
+
+  const deterministicExplainReply = buildDeterministicExplainReply(trimmed);
+  if (deterministicExplainReply) {
+    void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
+    return finalizeEarlyRaw(deterministicExplainReply, "explain", "explain");
+  }
+
+  const earlyDeterministicCodingReply = solveCodingArchitectureQuestion(trimmed);
+  if (earlyDeterministicCodingReply) {
+    void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
+    return finalizeEarlyRaw(earlyDeterministicCodingReply, "coding", "coding");
+  }
+
+  const earlyDeterministicMathReply = solveHardMathQuestion(trimmed);
+  if (earlyDeterministicMathReply) {
+    void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
+    return finalizeEarlyRaw(earlyDeterministicMathReply, "math", "math");
+  }
+
+  const earlyReplyLanguageResolution = await resolveReplyLocale(trimmed);
+  const earlyMultilingualRoutingBridge = await resolveMultilingualRoutingBridge(
+    trimmed,
+    earlyReplyLanguageResolution,
+  );
+  if (earlyMultilingualRoutingBridge.intent?.type === "help") {
+    return finalizeAgentReply({
+      userId,
+      locale: earlyReplyLanguageResolution.locale,
+      preserveRomanScript: earlyReplyLanguageResolution.preserveRomanScript,
+      question: trimmed,
+      intent: "help",
+      category: "help",
+      startedAt: routeStartedAt,
+      reply: buildLocalizedCapabilityReply(trimmed, earlyReplyLanguageResolution.locale, {
+        preserveRomanScript: earlyReplyLanguageResolution.preserveRomanScript,
+      }),
+      alreadyTranslated: true,
+    });
+  }
+
+  if (earlyMultilingualRoutingBridge.intent) {
+    const multilingualQuestion = earlyMultilingualRoutingBridge.gloss || trimmed;
+    const multilingualInstruction = [
+      buildIntentSpecificInstruction(earlyMultilingualRoutingBridge.intent.type, multilingualQuestion),
+      buildConversationStyleInstruction(selectedConversationStyle),
+      buildClawCloudReplyLanguageInstruction(earlyReplyLanguageResolution),
+      `Original user prompt: ${trimmed}`,
+      earlyMultilingualRoutingBridge.gloss
+        ? `Internal English routing gloss: ${earlyMultilingualRoutingBridge.gloss}`
+        : "",
+      "Answer the user's actual request using the English gloss for comprehension support.",
+      "You may reason from the English gloss internally, but the final user-facing answer will be localized later.",
+      "Mirror the user's language, tone, and level of formality naturally.",
+      "Answer directly. Do not ask for clarification unless the original prompt is still genuinely ambiguous.",
+    ].filter(Boolean).join("\n\n");
+
+    const multilingualReply = await smartReplyDetailed(
+      userId,
+      multilingualQuestion,
+      earlyMultilingualRoutingBridge.intent.type,
+      requested.mode ?? "fast",
+      requested.explicit || requested.mode === "fast",
+      multilingualInstruction,
+      undefined,
+    );
+    const guardedMultilingualReply = await enforceAnswerQuality({
+      userId,
+      question: multilingualQuestion,
+      intent: earlyMultilingualRoutingBridge.intent.type,
+      category: earlyMultilingualRoutingBridge.intent.category,
+      reply: postProcessIntentReply(
+        earlyMultilingualRoutingBridge.intent.type,
+        multilingualQuestion,
+        multilingualReply.reply,
+      ),
+      memorySnippet: "",
+      extraInstruction: multilingualInstruction,
+      history: [],
+      isDocumentBound: false,
+    });
+
+    return finalizeAgentReply({
+      userId,
+      locale: earlyReplyLanguageResolution.locale,
+      preserveRomanScript: earlyReplyLanguageResolution.preserveRomanScript,
+      question: multilingualQuestion,
+      intent: earlyMultilingualRoutingBridge.intent.type,
+      category: earlyMultilingualRoutingBridge.intent.category,
+      startedAt: routeStartedAt,
+      reply: guardedMultilingualReply,
+      modelAuditTrail: multilingualReply.modelAuditTrail,
+    });
+  }
+
+  const earlyNativeLanguageDirectIntent = detectNativeLanguageDirectAnswerLaneIntent(
+    trimmed,
+    earlyReplyLanguageResolution,
+  );
+  if (earlyNativeLanguageDirectIntent) {
+    const nativeLanguageLabel = earlyReplyLanguageResolution.detectedLocale
+      ? localeNames[earlyReplyLanguageResolution.detectedLocale]
+      : (earlyReplyLanguageResolution.preserveRomanScript ? "Hinglish" : "the user's language");
+    const nativeLanguageMode = requested.explicit ? (requested.mode ?? "fast") : "fast";
+    const nativeLanguageInstruction = [
+      buildIntentSpecificInstruction(earlyNativeLanguageDirectIntent.type, trimmed),
+      buildConversationStyleInstruction(selectedConversationStyle),
+      buildClawCloudReplyLanguageInstruction(earlyReplyLanguageResolution),
+      `The user wrote this request in ${nativeLanguageLabel}. Understand the original prompt directly in that language.`,
+      "Answer the user's actual request directly instead of asking for extra scope.",
+      "If the prompt asks for a story, summary, essay, explanation, list, or comparison, fulfill that exact request completely.",
+      "Keep the same tone, warmth, and level of formality as the user's message.",
+      "Do not switch to English unless the user explicitly asked for English.",
+    ].filter(Boolean).join("\n\n");
+
+    const nativeLanguageReply = await smartReplyDetailed(
+      userId,
+      trimmed,
+      earlyNativeLanguageDirectIntent.type,
+      nativeLanguageMode,
+      requested.explicit || nativeLanguageMode === "fast",
+      nativeLanguageInstruction,
+      undefined,
+      MULTILINGUAL_DIRECT_ANSWER_PREFERRED_MODELS,
+    );
+    const guardedNativeLanguageReply = await enforceAnswerQuality({
+      userId,
+      question: trimmed,
+      intent: earlyNativeLanguageDirectIntent.type,
+      category: earlyNativeLanguageDirectIntent.category,
+      reply: postProcessIntentReply(
+        earlyNativeLanguageDirectIntent.type,
+        trimmed,
+        nativeLanguageReply.reply,
+      ),
+      memorySnippet: "",
+      extraInstruction: nativeLanguageInstruction,
+      history: [],
+      isDocumentBound: false,
+    });
+
+    return finalizeAgentReply({
+      userId,
+      locale: earlyReplyLanguageResolution.locale,
+      preserveRomanScript: earlyReplyLanguageResolution.preserveRomanScript,
+      question: trimmed,
+      intent: earlyNativeLanguageDirectIntent.type,
+      category: earlyNativeLanguageDirectIntent.category,
+      startedAt: routeStartedAt,
+      reply: guardedNativeLanguageReply,
+      modelAuditTrail: nativeLanguageReply.modelAuditTrail,
+    });
+  }
+
+  const primaryDirectAnswerIntent = detectPrimaryDirectAnswerLaneIntent(trimmed, requested.mode);
+  if (primaryDirectAnswerIntent) {
+    const directAnswerInstruction = [
+      buildIntentSpecificInstruction(primaryDirectAnswerIntent.type, trimmed),
+      buildConversationStyleInstruction(selectedConversationStyle),
+      buildClawCloudReplyLanguageInstruction(earlyReplyLanguageResolution),
+      "Treat this as a standalone knowledge prompt.",
+      "Prefer a direct, professional answer from model knowledge.",
+      "Do not route into live search, personal tools, workflow actions, or retrieval unless the user explicitly asked for current information or connected-account data.",
+    ].filter(Boolean).join("\n\n");
+
+    const directAnswerReply = await smartReplyDetailed(
+      userId,
+      trimmed,
+      primaryDirectAnswerIntent.type,
+      "fast",
+      requested.explicit || requested.mode === "fast",
+      directAnswerInstruction,
+      undefined,
+    );
+    const guardedDirectAnswerReply = await enforceAnswerQuality({
+      userId,
+      question: trimmed,
+      intent: primaryDirectAnswerIntent.type,
+      category: primaryDirectAnswerIntent.category,
+      reply: postProcessIntentReply(
+        primaryDirectAnswerIntent.type,
+        trimmed,
+        directAnswerReply.reply,
+      ),
+      memorySnippet: "",
+      extraInstruction: directAnswerInstruction,
+      history: [],
+      isDocumentBound: false,
+    });
+
+    return finalizeAgentReply({
+      userId,
+      locale: earlyReplyLanguageResolution.locale,
+      preserveRomanScript: earlyReplyLanguageResolution.preserveRomanScript,
+      question: trimmed,
+      intent: primaryDirectAnswerIntent.type,
+      category: primaryDirectAnswerIntent.category,
+      startedAt: routeStartedAt,
+      reply: guardedDirectAnswerReply,
+      modelAuditTrail: directAnswerReply.modelAuditTrail,
+    });
   }
 
   void autoExtractAndSaveFacts(userId, trimmed).catch(() => null);
   void autoDetectAndSaveTimezone(userId, trimmed).catch(() => null);
 
   const [memory, userProfileSnippet, locale] = await Promise.all([
-    buildConversationMemory(userId, trimmed),
-    loadUserProfileSnippet(userId),
-    localePromise,
+    withSoftTimeout(
+      buildConversationMemory(userId, trimmed),
+      emptyMemory,
+      NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS,
+    ),
+    withSoftTimeout(
+      loadUserProfileSnippet(userId),
+      "",
+      NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS,
+    ),
+    resolveStoredLocaleQuickly(),
   ]);
   const memorySnippet = buildMemorySystemSnippet(memory, userProfileSnippet);
-  const finalMessage = memory.resolvedQuestion.trim() || trimmed;
+  const finalMessage = resolveRoutingMessage(trimmed, memory.resolvedQuestion);
+  const replyLanguageResolution = resolveClawCloudReplyLanguage({
+    message: trimmed,
+    preferredLocale: locale,
+    recentUserMessages: memory.recentTurns
+      .filter((turn) => turn.role === "user")
+      .map((turn) => turn.content)
+      .slice(-4),
+  });
+  const multilingualRoutingBridge = await resolveMultilingualRoutingBridge(
+    finalMessage,
+    replyLanguageResolution,
+  );
   const safetyRisk = detectClawCloudSafetyRisk(finalMessage);
   if (safetyRisk) {
-    await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+    void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
     return finalizeEarlyRaw(buildClawCloudSafetyReply(safetyRisk), "safety", "safety");
   }
+  const driveRouteMessage = detectDriveIntent(finalMessage)
+    ? finalMessage
+    : detectDriveIntent(trimmed)
+      ? trimmed
+      : null;
   const hasDocumentContext = looksLikeDocumentContext(finalMessage);
   const isHinglish = detectHinglish(trimmed);
   const hinglishIntentOverride = isHinglish ? extractHinglishIntent(trimmed) : null;
   const hinglishSnippet = isHinglish ? buildHinglishSystemSnippet() : undefined;
 
-  const detected = detectIntent(finalMessage);
+  const strictRoute = detectStrictIntentRoute(finalMessage) ?? detectStrictIntentRoute(trimmed);
+  const detected = strictRoute?.intent ?? multilingualRoutingBridge.intent ?? detectIntent(finalMessage);
   let resolvedType = hasDocumentContext ? "research" : detected.type;
   let resolvedCategory = hasDocumentContext ? "research" : detected.category;
+  const routeLocked = strictRoute?.locked ?? ROUTING_CONTEXT_LOCK_CATEGORIES.has(resolvedCategory);
+  const preferPrimaryConversationLane = shouldUsePrimaryConversationLane({
+    message: trimmed,
+    finalMessage,
+    resolvedType,
+    resolvedCategory,
+    routeLocked,
+    memoryIsFollowUp: memory.isFollowUp,
+    mode: requested.mode,
+    hasDocumentContext,
+    hasDriveRouteMessage: Boolean(driveRouteMessage),
+  });
+  const officialPricingQuery = (hasDocumentContext || preferPrimaryConversationLane)
+    ? null
+    : detectOfficialPricingQuery(finalMessage);
+  const aiModelRouting = (hasDocumentContext || preferPrimaryConversationLane)
+    ? null
+    : detectAiModelRoutingDecision(finalMessage);
+
+  if (resolvedType !== "email" && aiModelRouting?.mode === "clarify" && aiModelRouting.clarificationReply) {
+    void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
+    return finalizeEarlyRaw(aiModelRouting.clarificationReply, "technology", "technology");
+  }
+
+  if (
+    resolvedType !== "email"
+    && (officialPricingQuery || aiModelRouting?.mode === "web_search")
+    && resolvedCategory !== "finance"
+  ) {
+    resolvedType = "web_search";
+    resolvedCategory = "web_search";
+  }
+
+  if (
+    !preferPrimaryConversationLane
+    &&
+    !hasDocumentContext
+    && resolvedCategory === "research"
+    && !driveRouteMessage
+    && shouldUseLiveSearch(finalMessage)
+  ) {
+    // Guard: use confidence classifier to prevent knowledge questions
+    // (science, coding, math, health, explain) from being misrouted to web_search.
+    const KNOWLEDGE_INTENTS = new Set(["coding", "math", "science", "health", "explain", "history", "technology"]);
+    const confidenceCheck = resolveIntentOverlap(
+      classifyIntentWithConfidence(finalMessage),
+      finalMessage,
+    );
+    const isKnowledgeQuestion = KNOWLEDGE_INTENTS.has(confidenceCheck.primary.intent)
+      && confidenceCheck.primary.confidence >= 0.45;
+
+    if (!isKnowledgeQuestion) {
+      resolvedType = "web_search";
+      resolvedCategory = "web_search";
+    }
+  }
 
   if (!hasDocumentContext) {
     if (hinglishIntentOverride === "reminder") {
@@ -5588,7 +10848,11 @@ export async function routeInboundAgentMessage(
   }
 
   if (
+    !preferPrimaryConversationLane
+    &&
     !hasDocumentContext
+    && !routeLocked
+    && resolvedType !== "email"
     && resolvedCategory !== "send_message"
     && resolvedCategory !== "save_contact"
     && resolvedCategory !== "finance"
@@ -5606,15 +10870,25 @@ export async function routeInboundAgentMessage(
     } else if (
       /\b(code|program|algorithm|script|debug|n[-\s]?queen|n[-\s]?queens|python|javascript|java|c\+\+)\b/i.test(finalMessage)
       && resolvedCategory !== "coding"
+      && resolvedCategory !== "explain"
+      && resolvedCategory !== "science"
+      && resolvedCategory !== "health"
+      && resolvedCategory !== "math"
+      && resolvedCategory !== "history"
+      // Only override to coding if the confidence classifier agrees
+      && (() => {
+        const cc = resolveIntentOverlap(classifyIntentWithConfidence(finalMessage), finalMessage);
+        return cc.primary.intent === "coding" && cc.primary.confidence >= 0.5;
+      })()
     ) {
       resolvedType = "coding";
       resolvedCategory = "coding";
     } else if (
-      /\b(weather|whether|temperature|forecast|rain|humidity|wind|aqi)\b/i.test(finalMessage)
+      hasWeatherIntent(finalMessage)
       && resolvedCategory === "news"
     ) {
-      resolvedType = "general";
-      resolvedCategory = "general";
+      resolvedType = "research";
+      resolvedCategory = "weather";
     } else if (
       (resolvedCategory === "research" || resolvedCategory === "economics")
       && !looksLikeRealtimeResearch(finalMessage)
@@ -5637,8 +10911,24 @@ export async function routeInboundAgentMessage(
 
   const responseMode = resolveResponseMode(resolvedType, finalMessage, requested.mode);
   const explicitMode = requested.explicit;
+  const conversationStyleInstruction = buildConversationStyleInstruction(selectedConversationStyle);
+  const casualConversationInstruction = buildClawCloudCasualTalkInstruction({
+    message: trimmed,
+    intent: resolvedType,
+    recentTurns: memory.recentTurns,
+    resolvedQuestion: memory.resolvedQuestion,
+    activeTopics: memory.activeTopics,
+    topicSummary: memory.topicSummary,
+  });
+  const replyLanguageInstruction = buildClawCloudReplyLanguageInstruction(replyLanguageResolution);
   const combineExtraInstruction = (instruction?: string) =>
-    [instruction, hinglishSnippet].filter(Boolean).join("\n\n") || undefined;
+    [
+      instruction,
+      conversationStyleInstruction,
+      hinglishSnippet,
+      replyLanguageInstruction,
+      casualConversationInstruction,
+    ].filter(Boolean).join("\n\n") || undefined;
   const guardReply = (
     reply: string,
     intent: string = resolvedType,
@@ -5660,50 +10950,111 @@ export async function routeInboundAgentMessage(
       history: options?.history,
       isDocumentBound: options?.isDocumentBound ?? hasDocumentContext,
     });
+  const finalizeGuarded = async (
+    reply: string,
+    intent: string = resolvedType,
+    category: string = resolvedCategory,
+    options?: {
+      liveAnswerBundle?: ClawCloudAnswerBundle | null;
+      modelAuditTrail?: ClawCloudModelAuditTrail | null;
+      extraInstruction?: string;
+      history?: Array<{ role: "user" | "assistant"; content: string }>;
+      isDocumentBound?: boolean;
+      prepareReply?: (reply: string) => string;
+    },
+  ) => {
+    const preparedReply = options?.prepareReply ? options.prepareReply(reply) : reply;
+    const guardedReply = await guardReply(preparedReply, intent, category, {
+      extraInstruction: options?.extraInstruction,
+      history: options?.history,
+      isDocumentBound: options?.isDocumentBound,
+    });
+
+    return finalizeRaw(guardedReply, intent, category, {
+      liveAnswerBundle: options?.liveAnswerBundle,
+      modelAuditTrail: options?.modelAuditTrail,
+    });
+  };
   const finalizeRaw = (
     reply: string,
     intent: string = resolvedType,
     category: string = resolvedCategory,
+    options?: {
+      liveAnswerBundle?: ClawCloudAnswerBundle | null;
+      modelAuditTrail?: ClawCloudModelAuditTrail | null;
+    },
   ) =>
     finalizeAgentReply({
       userId,
-      locale,
+      locale: replyLanguageResolution.locale,
+      preserveRomanScript: replyLanguageResolution.preserveRomanScript,
       question: finalMessage,
       intent,
       category,
       startedAt: routeStartedAt,
       reply,
+      liveAnswerBundle: options?.liveAnswerBundle,
+      modelAuditTrail: options?.modelAuditTrail,
     });
   const finalizeTranslated = (
     reply: string,
     intent: string = resolvedType,
     category: string = resolvedCategory,
+    options?: {
+      liveAnswerBundle?: ClawCloudAnswerBundle | null;
+      modelAuditTrail?: ClawCloudModelAuditTrail | null;
+    },
   ) =>
     finalizeAgentReply({
       userId,
-      locale,
+      locale: replyLanguageResolution.locale,
+      preserveRomanScript: replyLanguageResolution.preserveRomanScript,
       question: finalMessage,
       intent,
       category,
       startedAt: routeStartedAt,
       reply,
       alreadyTranslated: true,
+      liveAnswerBundle: options?.liveAnswerBundle,
+      modelAuditTrail: options?.modelAuditTrail,
     });
+
+  if (
+    shouldAskClawCloudCasualClarification({
+      message: trimmed,
+      intent: resolvedType,
+      recentTurns: memory.recentTurns,
+      resolvedQuestion: memory.resolvedQuestion,
+    })
+    && ["general", "greeting", "help", "explain", "research"].includes(resolvedType)
+  ) {
+    return finalizeRaw(
+      buildClawCloudCasualClarificationReply({
+        message: trimmed,
+        recentTurns: memory.recentTurns,
+        activeTopics: memory.activeTopics,
+      }),
+      resolvedType,
+      resolvedCategory,
+    );
+  }
 
   if (detectCricketIntent(finalMessage)) {
     if (isCricketAvailable()) {
       const cricketReply = await answerCricketQuery(finalMessage).catch(() => null);
       if (cricketReply) {
-        await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+        void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
         return finalizeRaw(cricketReply, "sports", "sports");
       }
     }
   }
 
-  if (detectIndianStockQuery(finalMessage)) {
+  const detectedFinanceQuery = detectFinanceQuery(finalMessage);
+
+  if (detectedFinanceQuery?.type === "stock_india" && detectIndianStockQuery(finalMessage)) {
     const stockReply = await answerIndianStockQuery(finalMessage).catch(() => null);
     if (stockReply) {
-      await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+      void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
       return finalizeRaw(stockReply, "finance", "finance");
     }
   }
@@ -5711,7 +11062,7 @@ export async function routeInboundAgentMessage(
   if (detectTrainIntent(finalMessage).type !== null) {
     const trainReply = await answerTrainQuery(finalMessage).catch(() => null);
     if (trainReply) {
-      await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+      void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
       return finalizeRaw(trainReply, "general", "general");
     }
   }
@@ -5721,12 +11072,8 @@ export async function routeInboundAgentMessage(
   if (detectTaxQuery(finalMessage) && finalReminderIntent.intent === "unknown") {
     const taxReply = answerTaxQuery(finalMessage);
     if (taxReply) {
-      await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
-      return finalizeRaw(
-        await guardReply(taxReply, "economics", "economics"),
-        "economics",
-        "economics",
-      );
+      void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
+      return finalizeRaw(taxReply, "economics", "economics");
     }
   }
 
@@ -5737,10 +11084,10 @@ export async function routeInboundAgentMessage(
     }
   }
 
-  if (detectDriveIntent(finalMessage)) {
-    const driveReply = await handleDriveQuery(userId, finalMessage).catch(() => null);
+  if (driveRouteMessage) {
+    const driveReply = await handleDriveQuery(userId, driveRouteMessage).catch(() => null);
     if (driveReply) {
-      await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+      void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
       return finalizeRaw(driveReply, "research", "research");
     }
   }
@@ -5750,7 +11097,50 @@ export async function routeInboundAgentMessage(
     return finalizeRaw(deterministicResearchComparisonReply, "research", "research");
   }
 
+  const historicalPowerReply = buildHistoricalPowerRankingReply(finalMessage);
+  if (historicalPowerReply) {
+    return finalizeRaw(historicalPowerReply, "history", "history");
+  }
+
+  if (preferPrimaryConversationLane) {
+    const conversationInstruction = combineExtraInstruction([
+      buildIntentSpecificInstruction(resolvedType, finalMessage),
+      "Treat this as a normal multi-turn conversation.",
+      "Use the resolved question and recent turns for continuity.",
+      "Stay on the direct answer path unless the user explicitly asked for live information, a connected tool, or a workflow action.",
+    ].filter(Boolean).join("\n\n"));
+    const conversationReply = await smartReplyDetailed(
+      userId,
+      finalMessage,
+      resolvedType,
+      responseMode,
+      explicitMode,
+      conversationInstruction,
+      memorySnippet,
+    );
+    return finalizeGuarded(conversationReply.reply, resolvedType, resolvedCategory, {
+      modelAuditTrail: conversationReply.modelAuditTrail,
+      extraInstruction: conversationInstruction,
+      history: memory.recentTurns,
+      prepareReply: (reply) => postProcessIntentReply(resolvedType, finalMessage, reply),
+    });
+  }
+
   switch (resolvedCategory) {
+
+    case "personal_tool_clarify": {
+      const surfaces = inferPossiblePersonalSurfaces(trimmed);
+      return finalizeRaw(
+        buildPersonalSurfaceClarificationReply(trimmed, surfaces.length ? surfaces : ["whatsapp", "gmail"]),
+        "general",
+        "personal_tool_clarify",
+      );
+    }
+
+    case "whatsapp_history": {
+      const reply = await buildWhatsAppHistoryReply(userId, trimmed, locale);
+      return finalizeRaw(reply, "send_message", "whatsapp_history");
+    }
 
     case "send_message": {
       const whatsAppSettings = await getWhatsAppSettings(userId).catch(() => null);
@@ -5766,7 +11156,7 @@ export async function routeInboundAgentMessage(
       }
 
       return finalizeTranslated(
-        await handleSendMessageToContactProfessional(userId, trimmed, locale),
+        await handleSendMessageToContactProfessional(userId, trimmed, locale, selectedConversationStyle),
         "send_message",
         "send_message",
       );
@@ -5777,6 +11167,31 @@ export async function routeInboundAgentMessage(
         await handleSaveContactCommand(userId, trimmed, locale),
         "save_contact",
         "save_contact",
+      );
+    }
+
+    case "whatsapp_settings_status":
+    case "whatsapp_settings_update": {
+      const reply = await handleWhatsAppSettingsCommand(userId, trimmed);
+      if (reply) {
+        return finalizeRaw(reply, "send_message", resolvedCategory);
+      }
+      return finalizeRaw(
+        "I can update your WhatsApp assistant settings. Try: _Set WhatsApp mode to approve before send_ or _Show my WhatsApp settings_.",
+        "send_message",
+        resolvedCategory,
+      );
+    }
+
+    case "whatsapp_contacts_sync": {
+      const reply = await handleWhatsAppSettingsCommand(userId, trimmed);
+      if (reply) {
+        return finalizeRaw(reply, "send_message", resolvedCategory);
+      }
+      return finalizeRaw(
+        "I can refresh your WhatsApp contacts. Try: _Sync WhatsApp contacts_.",
+        "send_message",
+        resolvedCategory,
       );
     }
 
@@ -5791,20 +11206,79 @@ export async function routeInboundAgentMessage(
     case "spending": {
       const ans = await answerSpendingQuestion(userId, finalMessage);
       if (ans) return finalizeTranslated(ans, "spending", "spending");
-      return finalizeRaw(
-        await smartReply(userId, finalMessage, "spending", responseMode, explicitMode, combineExtraInstruction(), memorySnippet),
+      const spendingInstruction = combineExtraInstruction();
+      const spendingReply = await smartReplyDetailed(
+        userId,
+        finalMessage,
         "spending",
-        "spending",
+        responseMode,
+        explicitMode,
+        spendingInstruction,
+        memorySnippet,
       );
+      return finalizeGuarded(spendingReply.reply, "spending", "spending", {
+        modelAuditTrail: spendingReply.modelAuditTrail,
+        extraInstruction: spendingInstruction,
+        history: memory.recentTurns,
+      });
     }
 
     case "draft_email": {
+      const emailDraft = await completeClawCloudPrompt({
+        system: [
+          "You write polished, professional emails and replies.",
+          "Return only the ready-to-send draft.",
+          "Start with `Subject: ...`, then a blank line, then the email body.",
+          "Do not mention Gmail, drafts, search, or sources unless the user explicitly asked for Gmail actions.",
+          "Do not sign as the recipient, vendor, or company mentioned in the prompt.",
+          "If the user does not specify the sender identity, end with a neutral sign-off like `Best regards,` and no sender name.",
+          "Keep the subject short and the body clear, natural, and ready to send.",
+        ].join("\n"),
+        user: [
+          `User request: ${finalMessage}`,
+          (combineExtraInstruction() ?? "").trim(),
+        ].filter(Boolean).join("\n\n"),
+        intent: "email",
+        maxTokens: 360,
+        fallback: "Subject: Quick follow-up\n\nThank you for your message. I understand what you shared and will move forward accordingly.\n\nBest regards,",
+      });
+      return finalizeGuarded(emailDraft, "email", "draft_email", {
+        extraInstruction: combineExtraInstruction(),
+      });
+    }
+
+    case "gmail_reply_queue": {
       const count = /all|every|each/i.test(trimmed) ? 3 : 1;
       const ack = await fastAckQuick(
-        `User message: "${trimmed}". They want email help. Acknowledge you're checking their inbox and drafting ${count} reply${count === 1 ? "" : "s"}. 1-2 lines max.`
+        `User message: "${trimmed}". They want Gmail reply drafts queued for review. Acknowledge that you're checking their inbox and preparing ${count} reply draft${count === 1 ? "" : "s"} for approval. 1-2 lines max.`
       );
       runReplyApprovalsFireAndForget(userId, count, locale);
-      return finalizeRaw(ack, "email", "draft_email");
+      return finalizeRaw(ack, "email", "gmail_reply_queue");
+    }
+
+    case "gmail_draft":
+    case "gmail_send":
+    case "gmail_reply_draft":
+    case "gmail_reply_send":
+    case "gmail_mark_read":
+    case "gmail_mark_unread":
+    case "gmail_archive":
+    case "gmail_trash":
+    case "gmail_restore":
+    case "gmail_mark_spam":
+    case "gmail_mark_not_spam":
+    case "gmail_star":
+    case "gmail_unstar": {
+      const gmailCategory = resolvedCategory;
+      const gmailReply = await handleGmailActionRequest(userId, trimmed);
+      if (gmailReply) {
+        return finalizeRaw(gmailReply, "email", gmailCategory);
+      }
+      return finalizeRaw(
+        "📧 *I need a little more detail before I use Gmail.*\n\nTry: _Create a Gmail draft to name@example.com saying ..._ or _Send a reply to my latest email from Priya saying ..._",
+        "email",
+        gmailCategory,
+      );
     }
 
     case "email_search": {
@@ -5902,7 +11376,7 @@ export async function routeInboundAgentMessage(
           trimmed,
         );
         const reminders = await listActiveReminders(userId).catch(() => [saved]);
-        await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+        void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
         return finalizeRaw(
           formatReminderSetReply(saved, reminders.length, userTimezone),
           "reminder",
@@ -5922,6 +11396,20 @@ export async function routeInboundAgentMessage(
       }
     }
 
+    case "calendar_create":
+    case "calendar_update":
+    case "calendar_cancel": {
+      const calendarActionReply = await handleCalendarActionRequest(userId, finalMessage);
+      if (calendarActionReply) {
+        return finalizeTranslated(calendarActionReply, "calendar", resolvedCategory);
+      }
+      return finalizeTranslated(
+        "I can update your calendar when you give me a clear event and time. Try: _Create a calendar event called Project Sync tomorrow at 4pm_.",
+        "calendar",
+        resolvedCategory,
+      );
+    }
+
     case "calendar": {
       return finalizeTranslated(
         await answerCalendarQuestionSafe(userId, finalMessage, locale),
@@ -5931,9 +11419,14 @@ export async function routeInboundAgentMessage(
     }
 
     case "finance": {
+      const deterministicFinance = solveHardMathQuestion(finalMessage);
+      if (deterministicFinance) {
+        return finalizeRaw(deterministicFinance, "finance", "finance");
+      }
+
       const financeData = await getLiveFinanceData(finalMessage).catch(() => null);
       if (financeData) {
-        await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+        void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
         return finalizeRaw(
           await guardReply(formatFinanceReply(financeData), "finance", "finance"),
           "finance",
@@ -5941,22 +11434,21 @@ export async function routeInboundAgentMessage(
         );
       }
 
-      const searchAnswer = await answerWebSearch(finalMessage).catch(() => "");
-      const normalizedSearch = searchAnswer.trim();
-      if (isAcceptableLiveAnswer(normalizedSearch)) {
+      const searchResult = await answerWebSearchResult(finalMessage).catch(() => ({
+        answer: "",
+        liveAnswerBundle: null,
+      }));
+      const normalizedSearch = searchResult.answer.trim();
+      if (isAcceptableLiveAnswer(normalizedSearch, finalMessage)) {
         const withSafety = /not financial advice/i.test(normalizedSearch)
           ? normalizedSearch
           : `${normalizedSearch}\n\n\u26A0\uFE0F _Not financial advice. Verify before trading._`;
-        await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+        void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
         return finalizeRaw(
-          await guardReply(
-            normalizeResearchMarkdownForWhatsApp(withSafety),
-            "finance",
-            "finance",
-            { history: memory.recentTurns },
-          ),
+          normalizeResearchMarkdownForWhatsApp(withSafety),
           "finance",
           "finance",
+          { liveAnswerBundle: searchResult.liveAnswerBundle },
         );
       }
 
@@ -5972,19 +11464,26 @@ export async function routeInboundAgentMessage(
     }
 
     case "web_search": {
-      const searchAnswer = await answerWebSearch(finalMessage).catch(() => "");
-      const normalizedSearch = searchAnswer.trim();
-      if (isAcceptableLiveAnswer(normalizedSearch)) {
-        await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+      const currentAffairsClarification = buildCurrentAffairsClarificationReply(finalMessage);
+      if (currentAffairsClarification) {
+        return finalizeRaw(currentAffairsClarification, "web_search", "web_search");
+      }
+
+      const searchResult = await answerWebSearchResult(finalMessage).catch(() => ({
+        answer: "",
+        liveAnswerBundle: null,
+      }));
+      const normalizedSearch = searchResult.answer.trim();
+      if (
+        isAcceptableLiveAnswer(normalizedSearch, finalMessage)
+        || isAcceptableNewsCoverageAnswer(normalizedSearch, finalMessage)
+      ) {
+        void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
         return finalizeRaw(
-          await guardReply(
-            normalizeResearchMarkdownForWhatsApp(normalizedSearch),
-            "web_search",
-            "web_search",
-            { history: memory.recentTurns },
-          ),
+          normalizeResearchMarkdownForWhatsApp(normalizedSearch),
           "web_search",
           "web_search",
+          { liveAnswerBundle: searchResult.liveAnswerBundle },
         );
       }
 
@@ -5999,50 +11498,79 @@ export async function routeInboundAgentMessage(
       }).catch(() => "");
 
       const normalizedResearch = researchAnswer?.trim() ?? "";
-      if (isAcceptableLiveAnswer(normalizedResearch)) {
+      if (isAcceptableLiveAnswer(normalizedResearch, finalMessage)) {
         return finalizeRaw(
-          await guardReply(
-            normalizeResearchMarkdownForWhatsApp(normalizedResearch),
-            "web_search",
-            "web_search",
-            { history },
-          ),
+          normalizeResearchMarkdownForWhatsApp(normalizedResearch),
           "web_search",
           "web_search",
         );
+      }
+
+      if (hasHistoricalScope(finalMessage)) {
+        const historicalFallback = await completeClawCloudPrompt({
+          system: [
+            buildSmartSystem("deep", "research", finalMessage, undefined, memorySnippet),
+            "",
+            "OVERRIDE INSTRUCTIONS:",
+            "This is a stable historical fact question scoped to a past year or period.",
+            "Answer directly from established knowledge even if live web verification was incomplete.",
+            "If the fact is commonly agreed, state it plainly.",
+            "If there is ambiguity, mention it in one short line.",
+            "Add one short note that historical details should still be verified from official or reference sources when stakes are high.",
+            "Format for WhatsApp with concise sections.",
+            "End with: Need anything else?",
+          ].join("\n"),
+          user: finalMessage,
+          history,
+          intent: "research",
+          responseMode: "deep",
+          preferredModels: [
+            "meta/llama-3.3-70b-instruct",
+            "mistralai/mistral-large-3-675b-instruct-2512",
+            "moonshotai/kimi-k2-instruct-0905",
+          ],
+          maxTokens: 900,
+          fallback: "",
+          skipCache: true,
+          temperature: 0.2,
+        }).catch(() => "");
+
+        const normalizedHistorical = historicalFallback.trim();
+        if (normalizedHistorical) {
+          return finalizeRaw(
+            await guardReply(
+              normalizeResearchMarkdownForWhatsApp(normalizedHistorical),
+              "research",
+              "research",
+              { history },
+            ),
+            "research",
+            "research",
+          );
+        }
       }
 
       return finalizeRaw(buildNoLiveDataReply(finalMessage), "web_search", "web_search");
     }
 
     case "news": {
-      const newsAnswer = await answerNewsQuestion(finalMessage).catch(() => "");
-      const normalizedNews = newsAnswer.trim();
-      if (
-        normalizedNews
-        && hasLiveEvidenceMarkers(normalizedNews)
-        && !isVisibleFallbackReply(normalizedNews)
-        && !isLowCoverageResearchReply(normalizedNews)
-      ) {
-        await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+      const currentAffairsClarification = buildCurrentAffairsClarificationReply(finalMessage);
+      if (currentAffairsClarification) {
+        return finalizeRaw(currentAffairsClarification, "news", "news");
+      }
+
+      const newsResult = await answerNewsQuestionResult(finalMessage).catch(() => ({
+        answer: "",
+        liveAnswerBundle: null,
+      }));
+      const normalizedNews = newsResult.answer.trim();
+      if (isAcceptableNewsCoverageAnswer(normalizedNews, finalMessage)) {
+        void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
         return finalizeRaw(
           normalizeResearchMarkdownForWhatsApp(normalizedNews),
           "news",
           "news",
-        );
-      }
-
-      if (isAcceptableLiveAnswer(normalizedNews)) {
-        await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
-        return finalizeRaw(
-          await guardReply(
-            normalizeResearchMarkdownForWhatsApp(normalizedNews),
-            "news",
-            "news",
-            { history: memory.recentTurns },
-          ),
-          "news",
-          "news",
+          { liveAnswerBundle: newsResult.liveAnswerBundle },
         );
       }
 
@@ -6057,14 +11585,9 @@ export async function routeInboundAgentMessage(
       }).catch(() => "");
 
       const normalizedGrounded = groundedAnswer?.trim() ?? "";
-      if (isAcceptableLiveAnswer(normalizedGrounded)) {
+      if (isAcceptableLiveAnswer(normalizedGrounded, finalMessage)) {
         return finalizeRaw(
-          await guardReply(
-            normalizeResearchMarkdownForWhatsApp(normalizedGrounded),
-            "news",
-            "news",
-            { history },
-          ),
+          normalizeResearchMarkdownForWhatsApp(normalizedGrounded),
           "news",
           "news",
         );
@@ -6092,18 +11615,40 @@ export async function routeInboundAgentMessage(
         return finalizeRaw(deterministic, "coding", "coding");
       }
 
-      const reply =
-        responseMode === "deep"
-          ? (await expertReply(userId, finalMessage, "coding"))
-            ?? await smartReply(userId, finalMessage, "coding", responseMode, explicitMode, combineExtraInstruction(), memorySnippet)
-          : await smartReply(userId, finalMessage, "coding", responseMode, explicitMode, combineExtraInstruction(), memorySnippet);
-      return finalizeRaw(reply, "coding", "coding");
+      const codingInstruction = combineExtraInstruction(buildIntentSpecificInstruction("coding", finalMessage));
+
+      if (responseMode === "deep") {
+        const expertAnswer = await expertReply(userId, finalMessage, "coding");
+        if (expertAnswer) {
+          return finalizeGuarded(expertAnswer, "coding", "coding", {
+            extraInstruction: codingInstruction,
+            history: memory.recentTurns,
+          });
+        }
+      }
+
+      const codingReply = await smartReplyDetailed(
+        userId,
+        finalMessage,
+        "coding",
+        responseMode,
+        explicitMode,
+        codingInstruction,
+        memorySnippet,
+      );
+      return finalizeGuarded(codingReply.reply, "coding", "coding", {
+        modelAuditTrail: codingReply.modelAuditTrail,
+        extraInstruction: codingInstruction,
+        history: memory.recentTurns,
+      });
     }
 
     case "math": {
       const mathExpert = await expertReply(userId, finalMessage, "math");
       if (mathExpert) {
-        return finalizeRaw(mathExpert, "math", "math");
+        return finalizeGuarded(mathExpert, "math", "math", {
+          history: memory.recentTurns,
+        });
       }
 
       const mathDomain = await semanticDomainClassify(finalMessage).catch(() => "GENERAL");
@@ -6114,22 +11659,50 @@ export async function routeInboundAgentMessage(
         }).catch(() => "");
 
         if (semanticAnswer.trim()) {
-          return finalizeRaw(semanticAnswer, "math", "math");
+          return finalizeGuarded(semanticAnswer, "math", "math", {
+            history: memory.recentTurns,
+          });
         }
       }
 
-      const reply = await smartReply(userId, finalMessage, "math", responseMode, explicitMode, combineExtraInstruction(), memorySnippet);
-      return finalizeRaw(reply, "math", "math");
+      const mathInstruction = combineExtraInstruction();
+      const mathReply = await smartReplyDetailed(
+        userId,
+        finalMessage,
+        "math",
+        responseMode,
+        explicitMode,
+        mathInstruction,
+        memorySnippet,
+      );
+      return finalizeGuarded(mathReply.reply, "math", "math", {
+        modelAuditTrail: mathReply.modelAuditTrail,
+        extraInstruction: mathInstruction,
+        history: memory.recentTurns,
+      });
     }
 
     case "creative": {
-      const reply = await smartReply(userId, finalMessage, "creative", responseMode, explicitMode, combineExtraInstruction(), memorySnippet);
-      return finalizeRaw(reply, "creative", "creative");
+      const creativeInstruction = combineExtraInstruction();
+      const creativeReply = await smartReplyDetailed(
+        userId,
+        finalMessage,
+        "creative",
+        responseMode,
+        explicitMode,
+        creativeInstruction,
+        memorySnippet,
+      );
+      return finalizeGuarded(creativeReply.reply, "creative", "creative", {
+        modelAuditTrail: creativeReply.modelAuditTrail,
+        extraInstruction: creativeInstruction,
+        history: memory.recentTurns,
+      });
     }
 
     case "explain": {
       const explainInstruction = combineExtraInstruction("Answer this explanation question clearly, accurately, and in teaching style with WhatsApp-friendly formatting.");
-      const reply = await smartReply(
+      const explainReply = await smartReplyDetailed(
         userId,
         finalMessage,
         "explain",
@@ -6140,7 +11713,7 @@ export async function routeInboundAgentMessage(
       );
       return finalizeRaw(
         await guardReply(
-          reply,
+          postProcessIntentReply("explain", finalMessage, explainReply.reply),
           "explain",
           "explain",
           {
@@ -6150,6 +11723,9 @@ export async function routeInboundAgentMessage(
         ),
         "explain",
         "explain",
+        {
+          modelAuditTrail: explainReply.modelAuditTrail,
+        },
       );
     }
 
@@ -6160,7 +11736,7 @@ export async function routeInboundAgentMessage(
 
       if (hasDocumentContext) {
         const documentInstruction = combineExtraInstruction("Use only the document content already included in the message. Answer the user's question directly, check every stated constraint explicitly, and if choosing among options, name the winner, briefly explain why the others do not qualify, and mention one extra supporting operational differentiator from the winning row when the document provides it, such as support level, incident response, SLA, turnaround time, or another concrete field that was not already one of the hard constraints. Do not use Gmail, spending history, or outside knowledge.");
-        const reply = await smartReply(
+        const reply = await smartReplyDetailed(
           userId,
           finalMessage,
           "research",
@@ -6171,7 +11747,7 @@ export async function routeInboundAgentMessage(
         );
         return finalizeRaw(
           await guardReply(
-            reply,
+            reply.reply,
             "research",
             "research",
             {
@@ -6182,6 +11758,9 @@ export async function routeInboundAgentMessage(
           ),
           "research",
           "research",
+          {
+            modelAuditTrail: reply.modelAuditTrail,
+          },
         );
       }
 
@@ -6191,29 +11770,7 @@ export async function routeInboundAgentMessage(
       }
 
       const realtimeResearch = looksLikeRealtimeResearch(finalMessage);
-      const expertAnswer = shouldSkipResearchExpert ? null : await expertReply(userId, finalMessage, "research");
-      if (expertAnswer && !isVisibleFallbackReply(expertAnswer) && !isLowCoverageResearchReply(expertAnswer)) {
-        return finalizeRaw(
-          await guardReply(
-            postProcessIntentReply("research", finalMessage, expertAnswer),
-            "research",
-            "research",
-            {
-              extraInstruction: researchInstruction,
-              history: memory.recentTurns,
-            },
-          ),
-          "research",
-          "research",
-        );
-      }
-
       if (realtimeResearch) {
-        if (expertAnswer && isLowCoverageResearchReply(expertAnswer)) {
-          const recovery = await buildLiveCoverageRecoveryReply(userId, finalMessage, memory.recentTurns, memorySnippet);
-          return finalizeRaw(recovery, "research", "research");
-        }
-
         const history = memory.recentTurns.length
           ? memory.recentTurns
           : await buildSmartHistory(userId, finalMessage, "deep", "research");
@@ -6248,10 +11805,27 @@ export async function routeInboundAgentMessage(
         return finalizeRaw(recovery, "research", "research");
       }
 
-      const reply = await smartReply(userId, finalMessage, "research", responseMode, explicitMode, researchInstruction, memorySnippet);
+      const expertAnswer = shouldSkipResearchExpert ? null : await expertReply(userId, finalMessage, "research");
+      if (expertAnswer && !isVisibleFallbackReply(expertAnswer) && !isLowCoverageResearchReply(expertAnswer)) {
+        return finalizeRaw(
+          await guardReply(
+            postProcessIntentReply("research", finalMessage, expertAnswer),
+            "research",
+            "research",
+            {
+              extraInstruction: researchInstruction,
+              history: memory.recentTurns,
+            },
+          ),
+          "research",
+          "research",
+        );
+      }
+
+      const reply = await smartReplyDetailed(userId, finalMessage, "research", responseMode, explicitMode, researchInstruction, memorySnippet);
       return finalizeRaw(
         await guardReply(
-          postProcessIntentReply("research", finalMessage, reply),
+          postProcessIntentReply("research", finalMessage, reply.reply),
           "research",
           "research",
           {
@@ -6261,16 +11835,154 @@ export async function routeInboundAgentMessage(
         ),
         "research",
         "research",
+        {
+          modelAuditTrail: reply.modelAuditTrail,
+        },
       );
     }
 
+    case "culture_story": {
+      const deterministicStoryFromOriginal = buildDeterministicKnownStoryReply(finalMessage);
+      let reasoningQuestion = finalMessage;
+      const storyInstruction = [
+        conversationStyleInstruction,
+        "Generate the story answer in English only for internal reasoning.",
+        "This is a story or plot summary request for a known entertainment work.",
+        "Answer only with the plot or story of the named work.",
+        asksWhetherStoryIsBasedOnTrueEvents(finalMessage)
+          ? "The user also asked whether it is based on true events. Answer that explicitly in one clear line after the story summary."
+          : null,
+        "Do not ask for clarification unless the title itself is ambiguous.",
+        "Use a clear chronological flow.",
+        "If the user asked for detail, cover the setup, main characters, major turning points, and ending.",
+      ].filter(Boolean).join("\n\n");
+      let storyText = "";
+      let storyModelAudit: ClawCloudModelAuditTrail | null = null;
+      let storyLiveBundle: ClawCloudAnswerBundle | null = null;
+      if (deterministicStoryFromOriginal) {
+        const deterministicLocalizedStory = buildLocalizedDeterministicKnownStoryReply(
+          finalMessage,
+          replyLanguageResolution.locale,
+        );
+        if (deterministicLocalizedStory) {
+          return finalizeTranslated(deterministicLocalizedStory, "culture", "culture_story", {
+            liveAnswerBundle: storyLiveBundle,
+            modelAuditTrail: storyModelAudit,
+          });
+        }
+        storyText = maybeAppendKnownStoryRealityNote(finalMessage, deterministicStoryFromOriginal);
+      } else {
+        reasoningQuestion = replyLanguageResolution.locale === "en"
+          ? finalMessage
+          : await translateMessage(finalMessage, "en", { force: true });
+        const deterministicStory = resolveDeterministicKnownStoryReply(
+          reasoningQuestion || finalMessage,
+          finalMessage,
+        );
+
+        if (deterministicStory) {
+          storyText = maybeAppendKnownStoryRealityNote(finalMessage, deterministicStory);
+        } else {
+        const storyReply = await smartReplyDetailed(
+          userId,
+          reasoningQuestion || finalMessage,
+          "culture",
+          "deep",
+          explicitMode,
+          storyInstruction,
+          undefined,
+        );
+        const guardedStory = await guardReply(
+          postProcessIntentReply("culture", finalMessage, storyReply.reply),
+          "culture",
+          "culture_story",
+          {
+            extraInstruction: storyInstruction,
+            history: [],
+          },
+        );
+        if (
+          looksLikeQuestionTopicMismatch(reasoningQuestion || finalMessage, guardedStory)
+          || looksLikeWrongModeAnswer(reasoningQuestion || finalMessage, guardedStory)
+          || violatesKnownStoryAnchors(reasoningQuestion || finalMessage, guardedStory)
+        ) {
+          return finalizeRaw(
+            buildClawCloudLowConfidenceReply(
+              finalMessage,
+              buildClawCloudAnswerQualityProfile({
+                question: finalMessage,
+                intent: "culture",
+                category: "culture_story",
+              }),
+              "The story draft did not stay reliable enough to return as a final answer.",
+            ),
+            "culture",
+            "culture_story",
+          );
+        }
+        storyText = guardedStory;
+        storyModelAudit = storyReply.modelAuditTrail;
+        }
+      }
+
+      if (replyLanguageResolution.locale !== "en") {
+        const localizedStory = await translateMessage(storyText, replyLanguageResolution.locale, {
+          force: true,
+          preserveRomanScript: replyLanguageResolution.preserveRomanScript,
+        });
+        if (looksLikeWrongModeAnswer(finalMessage, localizedStory)) {
+          return finalizeRaw(
+            buildClawCloudLowConfidenceReply(
+              finalMessage,
+              buildClawCloudAnswerQualityProfile({
+                question: finalMessage,
+                intent: "culture",
+                category: "culture_story",
+              }),
+              "The localized story answer did not stay in direct story-summary mode.",
+            ),
+            "culture",
+            "culture_story",
+          );
+        }
+        return finalizeTranslated(localizedStory, "culture", "culture_story", {
+          liveAnswerBundle: storyLiveBundle,
+          modelAuditTrail: storyModelAudit,
+        });
+      }
+
+      return finalizeRaw(storyText, "culture", "culture_story", {
+        liveAnswerBundle: storyLiveBundle,
+        modelAuditTrail: storyModelAudit,
+      });
+    }
+
     case "help": {
-      return finalizeRaw(buildProfessionalHelpMessage(), "help", "help");
+      return finalizeTranslated(
+        buildLocalizedCapabilityReply(finalMessage, replyLanguageResolution.locale, {
+          preserveRomanScript: replyLanguageResolution.preserveRomanScript,
+        }),
+        "help",
+        "help",
+      );
     }
 
     case "greeting": {
-      const reply = await smartReply(userId, finalMessage, "greeting", responseMode, explicitMode, combineExtraInstruction(), memorySnippet);
-      return finalizeRaw(reply, "greeting", "greeting");
+      const greetingInstruction = combineExtraInstruction();
+      const greetingReply = await smartReplyDetailed(
+        userId,
+        finalMessage,
+        "greeting",
+        responseMode,
+        explicitMode,
+        greetingInstruction,
+        memorySnippet,
+      );
+      return finalizeGuarded(greetingReply.reply, "greeting", "greeting", {
+        modelAuditTrail: greetingReply.modelAuditTrail,
+        extraInstruction: greetingInstruction,
+        history: memory.recentTurns,
+      });
     }
 
     default: {
@@ -6303,7 +12015,7 @@ export async function routeInboundAgentMessage(
       }
 
       const intentInstruction = combineExtraInstruction(buildIntentSpecificInstruction(resolvedType, finalMessage));
-      const reply = await smartReply(
+      const reply = await smartReplyDetailed(
         userId,
         finalMessage,
         resolvedType,
@@ -6314,7 +12026,7 @@ export async function routeInboundAgentMessage(
       );
       return finalizeRaw(
         await guardReply(
-          postProcessIntentReply(resolvedType, finalMessage, reply),
+          postProcessIntentReply(resolvedType, finalMessage, reply.reply),
           resolvedType,
           resolvedCategory,
           {
@@ -6324,6 +12036,9 @@ export async function routeInboundAgentMessage(
         ),
         resolvedType,
         resolvedCategory,
+        {
+          modelAuditTrail: reply.modelAuditTrail,
+        },
       );
     }
   }
@@ -6343,19 +12058,29 @@ async function getUserPlan(userId: string) {
   return (data?.plan ?? "free") as ClawCloudPlan;
 }
 
-async function getTodayRuns(userId: string) {
-  const { data } = await getClawCloudSupabaseAdmin()
-    .from("analytics_daily")
-    .select("tasks_run")
-    .eq("user_id", userId)
-    .eq("date", formatDateKey())
-    .maybeSingle();
-  return Number(data?.tasks_run ?? 0);
+async function getTodayRuns(userId: string, options?: { limit?: number }) {
+  if (typeof options?.limit === "number" && Number.isFinite(options.limit) && options.limit > 0) {
+    return getClawCloudTodayRunCountUpToLimit(userId, options.limit);
+  }
+
+  return getClawCloudTodayRunCount(userId);
 }
 
 function shouldBypassInboundRunLimit(message: string) {
   const detected = detectIntent(message);
-  return detected.category === "help" || detected.category === "greeting";
+  if (detected.category === "help" || detected.category === "greeting") {
+    return true;
+  }
+
+  const reminderIntent = detectReminderIntent(message);
+  return (
+    reminderIntent.intent === "list"
+    || reminderIntent.intent === "status"
+    || reminderIntent.intent === "cancel_all"
+    || reminderIntent.intent === "cancel_index"
+    || reminderIntent.intent === "done"
+    || reminderIntent.intent === "snooze"
+  );
 }
 
 async function buildInboundRunLimitReply(userId: string) {
@@ -6390,8 +12115,8 @@ async function buildProfessionalInboundRunLimitReply(userId: string) {
     return null;
   }
 
-  const runs = await getTodayRuns(userId);
   const limit = clawCloudRunLimits[plan];
+  const runs = await getTodayRuns(userId, { limit });
   if (runs < limit) {
     return null;
   }
@@ -6408,7 +12133,6 @@ export async function createClawCloudTask(input: {
   const { data: existing } = await db.from("agent_tasks").select("id").eq("user_id", input.userId).eq("is_enabled", true);
   if ((existing?.length ?? 0) >= clawCloudActiveTaskLimits[plan]) {
     throw new Error(buildActiveAutomationLimitMessage({ plan, limit: clawCloudActiveTaskLimits[plan] }));
-    throw new Error(`Limit of ${clawCloudActiveTaskLimits[plan]} active tasks on ${plan} plan. Upgrade to add more.`);
   }
   const { data, error } = await db.from("agent_tasks").upsert({
     user_id: input.userId, task_type: input.taskType, is_enabled: true,
@@ -6460,7 +12184,10 @@ async function runMorningBriefingLegacy(userId: string, config: ClawCloudTaskCon
       query: "is:unread",
       maxResults: Number(config.max_emails ?? 50),
     }).catch((error) => {
-      if (isClawCloudGoogleReconnectRequiredError(error)) {
+      if (
+        isClawCloudGoogleReconnectRequiredError(error)
+        || isClawCloudGoogleNotConnectedError(error, "gmail")
+      ) {
         return [];
       }
       throw error;
@@ -6468,9 +12195,17 @@ async function runMorningBriefingLegacy(userId: string, config: ClawCloudTaskCon
     getClawCloudCalendarEvents(userId, {
       timeMin: new Date().toISOString(),
       timeMax: new Date(Date.now() + 86_400_000).toISOString(),
+    }).catch((error) => {
+      if (
+        isClawCloudGoogleReconnectRequiredError(error)
+        || isClawCloudGoogleNotConnectedError(error, "google_calendar")
+      ) {
+        return [];
+      }
+      throw error;
     }),
     getUserLocale(userId),
-    getAllMemoryFacts(userId).catch(() => []),
+    getDurableMemoryFacts(userId).catch(() => []),
     listActiveReminders(userId).catch(() => []),
     getTopCustomCommands(userId, 3).catch(() => []),
   ]);
@@ -6562,7 +12297,7 @@ async function runMorningBriefingLegacy(userId: string, config: ClawCloudTaskCon
 
   await sendClawCloudWhatsAppMessage(userId, msg);
   try { await sendClawCloudTelegramMessage(userId, msg); } catch { /* optional */ }
-  await upsertAnalyticsDaily(userId, { emails_processed: emails.length, tasks_run: 1, wa_messages_sent: 1 });
+  void upsertAnalyticsDaily(userId, { emails_processed: emails.length, tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
   return { emailCount: emails.length, eventCount: events.length, message: msg };
 }
 
@@ -6572,7 +12307,10 @@ async function runMorningBriefing(userId: string, config: ClawCloudTaskConfig) {
       query: "is:unread",
       maxResults: Number(config.max_emails ?? 50),
     }).catch((error) => {
-      if (isClawCloudGoogleReconnectRequiredError(error)) {
+      if (
+        isClawCloudGoogleReconnectRequiredError(error)
+        || isClawCloudGoogleNotConnectedError(error, "gmail")
+      ) {
         return [];
       }
       throw error;
@@ -6580,9 +12318,17 @@ async function runMorningBriefing(userId: string, config: ClawCloudTaskConfig) {
     getClawCloudCalendarEvents(userId, {
       timeMin: new Date().toISOString(),
       timeMax: new Date(Date.now() + 86_400_000).toISOString(),
+    }).catch((error) => {
+      if (
+        isClawCloudGoogleReconnectRequiredError(error)
+        || isClawCloudGoogleNotConnectedError(error, "google_calendar")
+      ) {
+        return [];
+      }
+      throw error;
     }),
     getUserLocale(userId),
-    getAllMemoryFacts(userId).catch(() => []),
+    getDurableMemoryFacts(userId).catch(() => []),
     listActiveReminders(userId).catch(() => []),
     getTopCustomCommands(userId, 3).catch(() => []),
   ]);
@@ -6693,7 +12439,7 @@ async function runMorningBriefing(userId: string, config: ClawCloudTaskConfig) {
 
   await sendClawCloudWhatsAppMessage(userId, msg);
   try { await sendClawCloudTelegramMessage(userId, msg); } catch { /* optional */ }
-  await upsertAnalyticsDaily(userId, { emails_processed: emails.length, tasks_run: 1, wa_messages_sent: 1 });
+  void upsertAnalyticsDaily(userId, { emails_processed: emails.length, tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
   return { emailCount: emails.length, eventCount: events.length, reminderCount: reminderSummary.length, message: msg };
 }
 
@@ -6709,6 +12455,14 @@ async function runMeetingReminders(userId: string, config: ClawCloudTaskConfig) 
   const events = await getClawCloudCalendarEvents(userId, {
     timeMin: windowStart.toISOString(),
     timeMax: windowEnd.toISOString(),
+  }).catch((error) => {
+    if (
+      isClawCloudGoogleReconnectRequiredError(error)
+      || isClawCloudGoogleNotConnectedError(error, "google_calendar")
+    ) {
+      return [];
+    }
+    throw error;
   });
 
   if (!events.length) {
@@ -6739,7 +12493,7 @@ async function runEmailSearch(userId: string, userMessage: string | null | undef
   const locale = await getUserLocale(userId);
   const result = await buildEmailSearchReply(userId, userMessage, locale);
   await sendClawCloudWhatsAppMessage(userId, result.reply);
-  await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+  void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
   return { found: result.found, reconnectRequired: result.reconnectRequired, answer: result.reply };
 }
 
@@ -6776,7 +12530,7 @@ async function runCustomReminder(userId: string, userMessage: string | null | un
         "• _Remind me tomorrow to send the report_",
       ].join("\n"),
     );
-    await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+    void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
     return { set: false };
   }
 
@@ -6801,11 +12555,11 @@ async function runCustomReminder(userId: string, userMessage: string | null | un
         ? `⚠️ *${message}*\n\nReply _show reminders_ to manage them.`
         : "❌ *I couldn't save that reminder right now.*",
     );
-    await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+    void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
     return { set: false };
   }
 
-  await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+  void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
   return { set: true, fireAt: parsed.fireAt, reminderText: parsed.reminderText };
 }
 
@@ -6816,7 +12570,7 @@ async function handleWeatherQuery(
   text: string,
   locale: SupportedLocale,
 ): Promise<string> {
-  const city = parseWeatherCity(text);
+  const city = parseWeatherCity(text) || parseWeatherCity(normalizeRegionalQuestion(text));
   if (!city) {
     return translateMessage(
       [
@@ -6832,7 +12586,7 @@ async function handleWeatherQuery(
 
   const weather = await getWeather(city);
   if (weather) {
-    await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+    void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
     return translateMessage(weather, locale);
   }
 
@@ -6876,8 +12630,145 @@ function buildDeterministicResearchComparisonReply(question: string): string | n
   return null;
 }
 
+function buildDeterministicKnownStoryReply(question: string): string | null {
+  const normalized = question.toLowerCase();
+
+  if (/\b(goblin|guardian:\s*the lonely and great god)\b|도깨비/u.test(question)) {
+    return [
+      "Goblin (Guardian: The Lonely and Great God) follows Kim Shin, an unbeatable Goryeo general who is betrayed by his young king and killed with a sword through his chest.",
+      "Because of the countless deaths tied to his fate, he becomes an immortal goblin, and the sword remains inside him; only the \"goblin's bride\" can remove it and end his life.",
+      "In the present day, Kim Shin lives for centuries in loneliness until he meets Ji Eun-tak, a cheerful young woman who can see ghosts and accidentally summons him.",
+      "Eun-tak slowly realizes she is the goblin's bride, while Kim Shin struggles between wanting release from immortality and wanting to stay alive because he falls in love with her.",
+      "Kim Shin shares his home with a grim reaper, who later learns he is the reincarnation of the king who once ordered Kim Shin's death.",
+      "The grim reaper falls in love with Sunny, who is revealed to be the reincarnation of Kim Shin's younger sister Kim Sun, whose tragic death is tied to the same past-life betrayal.",
+      "As memories of the Goryeo past return, all four characters are forced to confront guilt, love, fate, and unfinished grief.",
+      "A malicious spirit from the past returns and threatens Eun-tak and the people around Kim Shin, pushing the story toward sacrifice.",
+      "To stop the villain and protect Eun-tak, Kim Shin finally allows the sword to be fully drawn, and he disappears after ending the ancient curse.",
+      "Eun-tak is devastated but continues living, and years later she dies while saving children in an accident.",
+      "After death and reincarnation reshape their lives again, Kim Shin and Eun-tak reunite, suggesting that their love survives beyond a single lifetime.",
+    ].join("\n\n");
+  }
+
+  if (/\b(alchemy of souls)\b|환혼/u.test(question)) {
+    return [
+      "Alchemy of Souls is set in the fictional kingdom of Daeho, where mages can use a forbidden spell called \"alchemy of souls\" to move one person's soul into another person's body.",
+      "The story begins when the elite assassin Naksu is cornered and uses the spell to survive, but instead of landing in a powerful body, her soul ends up trapped inside the weak body of Mu-deok, who is later revealed to be Jin Bu-yeon.",
+      "Jang Uk, the troubled son of a noble family, meets Mu-deok and realizes she is actually the feared mage Naksu living in another body.",
+      "Uk convinces her to become his secret master, and she trains him in magic while hiding her real identity from the powerful mage families of Daeho.",
+      "As they grow closer, Uk becomes stronger, and the two slowly fall in love while becoming entangled with Seo Yul, Park Dang-gu, Jin Cho-yeon, and Crown Prince Go Won.",
+      "The main villain, Jin Mu, manipulates soul shifting for power and uses dark schemes to control Naksu and revive dangerous forces tied to the ice stone.",
+      "By the end of the first part, Mu-deok's hidden identity as Naksu is exposed, Jin Mu uses a bell to control her, and she fatally stabs Jang Uk before collapsing.",
+      "Jang Uk is brought back through the power of the ice stone, but he returns transformed and spends years hunting soul shifters while carrying deep grief and anger.",
+      "In the second part, Naksu's soul remains alive inside Jin Bu-yeon's body, but she has lost her memories and lives under a different identity.",
+      "Uk and Bu-yeon are drawn together again, and as her memories return, both realize that fate has brought them back into the same tragic story.",
+      "Jin Mu again tries to use the ice stone and soul shifting to seize absolute power, but Uk, Naksu, and their allies finally stop him.",
+      "The story ends with the central curse broken, the villain defeated, Naksu's identity restored, and Jang Uk and Naksu choosing each other after surviving years of loss, separation, and destiny.",
+    ].join("\n\n");
+  }
+
+  if (/\b(my demon)\b|\ub9c8\uc774\s*\ub370\ubaac/u.test(question)) {
+    return [
+      "My Demon follows Do Do-hee, a sharp and guarded heiress who runs the Mirae Group's affiliate business while surviving family power struggles and assassination attempts.",
+      "Her life collides with Jung Gu-won, a stylish and arrogant demon who has lived for centuries by making dangerous contracts with desperate humans in exchange for their souls.",
+      "After a violent encounter near the sea, Gu-won's supernatural cross tattoo and powers are mysteriously transferred to Do-hee, leaving him suddenly powerless and tying their fates together.",
+      "Because enemies are targeting Do-hee and Gu-won needs his powers back, the two enter a contract marriage and begin living together while pretending their relationship is strategic and temporary.",
+      "As they spend more time together, the fake arrangement turns into real love, and both begin protecting each other against corporate betrayal, murder plots, and people connected to Do-hee's late mentor and family empire.",
+      "The story gradually reveals that their bond is not accidental: Do-hee and Gu-won are connected to a tragic past-life story involving love, death, and the origin of Gu-won's demonic existence.",
+      "Gu-won is forced to confront the consequences of centuries of contracts, while Do-hee learns the truth behind the deaths and schemes surrounding Mirae Group and the people closest to her.",
+      "The central conflict becomes both romantic and existential: they must survive the human villains around them while also facing the rule that a demon's contract-bound life and a genuine human love cannot stay simple or consequence-free.",
+      "By the end, the major conspiracies around Do-hee's world are exposed, Gu-won faces sacrifice and separation, and the couple's relationship is tested by whether love can overcome fate, punishment, and his demonic nature.",
+      "The drama closes on an emotional but hopeful note, with Do-hee and Gu-won ultimately finding their way back to each other after enduring betrayal, loss, and the full truth of their intertwined past.",
+    ].join("\n\n");
+  }
+
+  if (
+    /\bkalki(?:\s*2898\s*ad)?\b/i.test(question)
+    && /\b(story|plot|summary|synopsis|movie|film)\b/i.test(question)
+  ) {
+    return [
+      "Assuming you mean *Kalki 2898 AD*: it is a dystopian sci-fi epic set in a post-apocalyptic future where the world is dominated by the Complex and its ruler, Supreme Yaskin.",
+      "The story follows Bhairava, a skilled but self-interested bounty hunter whose life changes when he becomes entangled with Sum-80, a woman carrying a mysterious unborn child believed to be crucial to humanity's future.",
+      "While Bhairava first sees her as a path to money and status, the immortal warrior Ashwatthama steps in to protect her because he believes the child is tied to the prophesied arrival of Kalki.",
+      "The film mixes futuristic world-building with strong references to the Mahabharata, divine prophecy, and the idea of Kalki as a savior figure who represents hope against oppression.",
+      "By the end, Bhairava's deeper identity and larger role in that mythic conflict become clearer, while the story sets up a continuing battle around the child, destiny, and the fall of Yaskin's regime.",
+    ].join("\n\n");
+  }
+
+  return null;
+}
+
+function maybeAppendKnownStoryRealityNote(question: string, answer: string) {
+  if (!asksWhetherStoryIsBasedOnTrueEvents(question) || !answer.trim()) {
+    return answer;
+  }
+
+  if (/\bkalki(?:\s*2898\s*ad)?\b/i.test(question)) {
+    return `${answer}\n\nIt is not based on true events. It is a fictional film that draws inspiration from Hindu mythology, especially the idea of Kalki and characters such as Ashwatthama, but the plot itself is not a historical account.`;
+  }
+
+  if (/\b(goblin|guardian:\s*the lonely and great god|alchemy of souls|my demon)\b/i.test(question)) {
+    return `${answer}\n\nIt is not based on true events. It is a fictional fantasy drama.`;
+  }
+
+  return answer;
+}
+
+function resolveDeterministicKnownStoryReply(
+  primaryQuestion: string,
+  fallbackQuestion?: string,
+): string | null {
+  return (
+    buildDeterministicKnownStoryReply(primaryQuestion)
+    || (fallbackQuestion ? buildDeterministicKnownStoryReply(fallbackQuestion) : null)
+  );
+}
+
+export function resolveDeterministicKnownStoryReplyForTest(
+  primaryQuestion: string,
+  fallbackQuestion?: string,
+) {
+  return resolveDeterministicKnownStoryReply(primaryQuestion, fallbackQuestion);
+}
+
+function buildLocalizedDeterministicKnownStoryReply(
+  question: string,
+  locale: SupportedLocale,
+): string | null {
+  if (locale === "ko" && /\b(my demon)\b|\ub9c8\uc774\s*\ub370\ubaac/u.test(question)) {
+    return [
+      "《마이 데몬》은 미래그룹 계열사를 이끄는 날카롭고 방어적인 상속녀 도도희의 이야기다. 그녀는 가문의 권력 다툼과 암살 위협 속에서 살아남아야 한다.",
+      "도희의 삶은 수백 년 동안 인간과 위험한 계약을 맺어 온 오만한 악마 정구원과 얽히면서 크게 바뀐다.",
+      "바닷가에서 벌어진 사건 이후 구원의 십자가 문신과 힘이 도희에게 옮겨 가고, 구원은 갑자기 능력을 잃은 채 도희와 운명적으로 묶이게 된다.",
+      "도희를 노리는 적들을 막고 구원이 자신의 힘을 되찾기 위해 두 사람은 계약 결혼을 하고 함께 지내기 시작한다.",
+      "처음에는 이해관계로 시작한 관계였지만, 함께 시간을 보내며 둘 사이에는 진짜 사랑이 싹트고 기업 내부의 배신과 살인 음모에도 함께 맞서게 된다.",
+      "이야기가 진행될수록 도희와 구원의 인연이 단순한 우연이 아니라 비극적인 전생의 사랑과 죽음에 연결되어 있었다는 사실이 드러난다.",
+      "구원은 오랜 세월 쌓여 온 악마 계약의 대가를 마주하고, 도희는 미래그룹과 주변 인물들을 둘러싼 죽음과 음모의 진실을 알게 된다.",
+      "결국 두 사람은 인간 악당들의 위협과 악마의 본성, 그리고 사랑과 운명이 충돌하는 더 큰 시련을 함께 견뎌야 한다.",
+      "후반부에서는 주요 음모가 폭로되고 구원은 희생과 이별의 위기를 맞지만, 두 사람의 관계는 더욱 깊어진다.",
+      "드라마는 배신과 상실, 전생의 진실을 모두 지나서도 도도희와 정구원이 결국 다시 서로를 선택한다는 희망적인 결말로 마무리된다.",
+    ].join("\n\n");
+  }
+
+  return null;
+}
+
+export function buildLocalizedDeterministicKnownStoryReplyForTest(
+  question: string,
+  locale: SupportedLocale,
+) {
+  return buildLocalizedDeterministicKnownStoryReply(question, locale);
+}
+
 function buildIntentSpecificInstruction(intent: IntentType, message: string) {
   const normalized = message.toLowerCase();
+
+  if (intent === "coding" && isArchitectureCodingRouteCandidate(message)) {
+    return "Answer as a production-grade systems design brief. Use this order: Decision, Core invariants, Schema/types, Execution flow, Idempotency and dedupe, Failure modes and rollback, Rollout/cutover, Bottom line. If the prompt is about a migration, explicitly cover shadow mode, dual-write, cutover, and rollback. If the prompt involves approvals or risky actions, state the human-gated control model explicitly. Include concrete table names, keys, constraints, or pseudocode when they materially improve correctness.";
+  }
+
+  if ((intent === "culture" || intent === "research" || intent === "general") && looksLikeCultureStoryQuestion(message)) {
+    return "This is a culture/story summary request. Answer only with the requested story or plot explanation. Stay strictly on the named work or series. Do not discuss ClawCloud, setup, features, pricing, product capabilities, or unrelated comparisons. If the user asked for a detailed version, cover the setup, main characters, major turning points, and ending in a clear chronological flow. Do not add a follow-up question unless clarification is required.";
+  }
 
   if (intent === "research" && /\b(compare|comparison|versus|vs\.?|trade-?off|recommend)\b/.test(normalized)) {
     return "Answer this as a decision memo, not as an implementation plan. Compare only the options the user named across the exact dimensions they asked for. Use short sections or bullets for each requested dimension, state the trade-offs clearly, and end with a final section that begins with `Recommendation:` and names the option you recommend. Do not include code, schemas, transaction boundaries, complexity analysis, or pseudocode unless the user explicitly asks for them.";
@@ -6920,6 +12811,94 @@ function parseDirectTranslationRequest(message: string): { text: string; targetL
   }
 
   return null;
+}
+
+function looksStructuredForWhatsApp(reply: string) {
+  return (
+    /```/.test(reply)
+    || /(^|\n)\*[A-Z][^*\n]{2,50}\*/.test(reply)
+    || /(^|\n)(?:•|- |\d+\.)/.test(reply)
+  );
+}
+
+function formatExplainReplyAsBriefing(question: string, reply: string) {
+  const trimmed = reply.trim();
+  if (!trimmed || looksStructuredForWhatsApp(trimmed) || trimmed.length < 260) {
+    return reply;
+  }
+
+  const paragraphs = trimmed
+    .split(/\n\s*\n/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  let quickAnswer = "";
+  let detail = "";
+
+  if (paragraphs.length >= 2) {
+    quickAnswer = paragraphs[0] ?? "";
+    detail = paragraphs.slice(1).join("\n\n");
+  } else {
+    const sentences = trimmed.match(/[^.!?]+[.!?]+(?:\s+|$)|[^.!?]+$/g)?.map((part) => part.trim()).filter(Boolean) ?? [];
+    if (sentences.length < 3) {
+      return reply;
+    }
+    quickAnswer = sentences.slice(0, 2).join(" ").trim();
+    detail = sentences.slice(2).join(" ").trim();
+  }
+
+  if (!quickAnswer || !detail) {
+    return reply;
+  }
+
+  const detailHeading = /\b(why|impact|matters|important|importance)\b/i.test(question)
+    ? "*Why it matters*"
+    : "*More detail*";
+
+  return [
+    "*Quick answer*",
+    "",
+    quickAnswer,
+    "",
+    detailHeading,
+    "",
+    detail,
+  ].join("\n");
+}
+
+function requestedSentenceLimit(question: string) {
+  if (/\b(?:in|within|under|just|only)\s*(?:1|one)\s+(?:line|lines|sentence|sentences)\b/i.test(question)) {
+    return 1;
+  }
+
+  if (/\b(?:in|within|under|just|only)\s*(?:2|two)\s+(?:line|lines|sentence|sentences)\b/i.test(question)) {
+    return 2;
+  }
+
+  if (/\b(?:in|within|under|just|only)\s*(?:3|three)\s+(?:line|lines|sentence|sentences)\b/i.test(question)) {
+    return 3;
+  }
+
+  return null;
+}
+
+function enforceRequestedBrevity(question: string, reply: string) {
+  const limit = requestedSentenceLimit(question);
+  if (!limit) {
+    return reply;
+  }
+
+  const sentences = reply
+    .replace(/\s+/g, " ")
+    .match(/[^.!?\n]+[.!?]?/g)
+    ?.map((part) => part.trim())
+    .filter(Boolean) ?? [];
+
+  if (!sentences.length || sentences.length <= limit) {
+    return reply.trim();
+  }
+
+  return sentences.slice(0, limit).join(" ").trim();
 }
 
 function postProcessIntentReply(intent: IntentType, question: string, reply: string) {
@@ -7024,6 +13003,10 @@ function postProcessIntentReply(intent: IntentType, question: string, reply: str
     return nextReply;
   }
 
+  if (intent === "explain" || intent === "technology" || intent === "science") {
+    return enforceRequestedBrevity(question, formatExplainReplyAsBriefing(question, reply));
+  }
+
   if (
     /\b(framework|playbook|plan|steps|approach)\b/.test(normalizedQuestion)
     && !/\b(framework|playbook)\b/.test(normalizedReply.slice(0, 120))
@@ -7049,11 +13032,22 @@ async function answerCalendarQuestion(
 
   const timezone = await getUserReminderTimezone(userId);
   const window = buildCalendarQueryWindow(text);
-  const events = await getClawCloudCalendarEvents(userId, {
-    timeMin: window.timeMin,
-    timeMax: window.timeMax,
-    maxResults: 20,
-  });
+  let events;
+  try {
+    events = await getClawCloudCalendarEvents(userId, {
+      timeMin: window.timeMin,
+      timeMax: window.timeMax,
+      maxResults: 20,
+    });
+  } catch (error) {
+    if (isClawCloudGoogleReconnectRequiredError(error)) {
+      return translateMessage(buildGoogleReconnectRequiredReply("Google Calendar"), locale);
+    }
+    if (isClawCloudGoogleNotConnectedError(error, "google_calendar")) {
+      return translateMessage(buildGoogleNotConnectedReply("Google Calendar"), locale);
+    }
+    throw error;
+  }
 
   if (!events.length) {
     return translateMessage(
@@ -7095,7 +13089,7 @@ async function answerCalendarQuestion(
     }
   }
 
-  await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+  void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
   return translateMessage(
     [
       `ðŸ“… *Calendar for ${window.label}*`,
@@ -7122,11 +13116,22 @@ async function answerCalendarQuestionSafe(
 
   const timezone = await getUserReminderTimezone(userId);
   const window = buildCalendarQueryWindow(text);
-  const events = await getClawCloudCalendarEvents(userId, {
-    timeMin: window.timeMin,
-    timeMax: window.timeMax,
-    maxResults: 20,
-  });
+  let events;
+  try {
+    events = await getClawCloudCalendarEvents(userId, {
+      timeMin: window.timeMin,
+      timeMax: window.timeMax,
+      maxResults: 20,
+    });
+  } catch (error) {
+    if (isClawCloudGoogleReconnectRequiredError(error)) {
+      return translateMessage(buildGoogleReconnectRequiredReply("Google Calendar"), locale);
+    }
+    if (isClawCloudGoogleNotConnectedError(error, "google_calendar")) {
+      return translateMessage(buildGoogleNotConnectedReply("Google Calendar"), locale);
+    }
+    throw error;
+  }
 
   if (!events.length) {
     const noEventsLines = [
@@ -7187,7 +13192,7 @@ async function answerCalendarQuestionSafe(
     );
   }
 
-  await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+  void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
   return translateMessage(
     [
       `*Calendar for ${window.label}*`,
@@ -7204,8 +13209,8 @@ async function handleSendMessageToContact(
   text: string,
   locale: SupportedLocale,
 ): Promise<string> {
-  const parsed = parseSendMessageCommand(text);
-  if (!parsed) {
+  const analysis = analyzeSendMessageCommandSafety(text);
+  if (!analysis) {
     return translateMessage(
       [
         "📤 *Send a message to a contact*",
@@ -7222,28 +13227,41 @@ async function handleSendMessageToContact(
     );
   }
 
+  if (!analysis.allowed) {
+    return translateMessage(formatWhatsAppSendSafetyReply(analysis), locale);
+  }
+
+  const { parsed } = analysis;
   const { contactName, message } = parsed;
-  const fuzzyResult = await lookupContactFuzzy(userId, contactName);
-  if (fuzzyResult.type === "not_found") {
+  const resolved = await resolveWhatsAppRecipientWithRetry(userId, contactName);
+  if (resolved.type === "not_found") {
     return translateMessage(
-      formatNotFoundReply(contactName, fuzzyResult.suggestions),
+      formatNotFoundReply(contactName, resolved.suggestions),
       locale,
     );
   }
 
-  if (fuzzyResult.type === "ambiguous") {
+  if (resolved.type === "ambiguous") {
     return translateMessage(
-      formatAmbiguousReply(contactName, fuzzyResult.matches),
+      formatAmbiguousReply(contactName, resolved.matches),
       locale,
     );
   }
 
-  const phone = fuzzyResult.contact.phone;
-  const resolvedName = fuzzyResult.contact.name;
+  const phone = resolved.contact.phone;
+  const resolvedName = resolved.contact.name;
 
   try {
-    await sendClawCloudWhatsAppToPhone(phone, message, { userId, contactName: resolvedName });
-    await upsertAnalyticsDaily(userId, { wa_messages_sent: 1, tasks_run: 1 });
+    await sendClawCloudWhatsAppToPhone(phone, message, {
+      userId,
+      contactName: resolvedName,
+      jid: resolved.contact.jid ?? null,
+      source: "direct_command",
+      metadata: {
+        send_path: "immediate_direct_command",
+      },
+    });
+    void upsertAnalyticsDaily(userId, { wa_messages_sent: 1, tasks_run: 1 }).catch(() => null);
     return translateMessage(
       [
         `✅ *Message sent to ${resolvedName}!*`,
@@ -7267,6 +13285,95 @@ async function handleSendMessageToContact(
   }
 }
 
+async function resolveWhatsAppRecipientWithRetry(userId: string, requestedName: string) {
+  let fuzzyResult = await lookupContactFuzzy(userId, requestedName);
+  if (fuzzyResult.type === "found") {
+    return {
+      type: "found" as const,
+      contact: {
+        name: fuzzyResult.contact.name,
+        phone: fuzzyResult.contact.phone,
+        jid: fuzzyResult.contact.jid ?? null,
+      },
+    };
+  }
+
+  if (fuzzyResult.type === "ambiguous") {
+    return {
+      type: "ambiguous" as const,
+      matches: fuzzyResult.matches,
+    };
+  }
+
+  try {
+    await refreshClawCloudWhatsAppContacts(userId);
+    fuzzyResult = await lookupContactFuzzy(userId, requestedName);
+  } catch (error) {
+    console.error("[agent] refreshClawCloudWhatsAppContacts failed:", error);
+  }
+
+  if (fuzzyResult.type === "found") {
+    return {
+      type: "found" as const,
+      contact: {
+        name: fuzzyResult.contact.name,
+        phone: fuzzyResult.contact.phone,
+        jid: fuzzyResult.contact.jid ?? null,
+      },
+    };
+  }
+
+  if (fuzzyResult.type === "ambiguous") {
+    return {
+      type: "ambiguous" as const,
+      matches: fuzzyResult.matches,
+    };
+  }
+
+  try {
+    const liveResolved = await resolveClawCloudWhatsAppContact(userId, requestedName);
+    if (liveResolved) {
+      if (liveResolved.type === "ambiguous") {
+        const matches = Array.isArray(liveResolved.matches) ? liveResolved.matches : [];
+        return {
+          type: "ambiguous" as const,
+          matches: matches.map((match) => ({
+            name: match.name,
+            phone: match.phone ?? "",
+            jid: match.jid ?? null,
+            aliases: [match.name],
+            score: 0.9,
+            exact: false,
+          })),
+        };
+      }
+
+      const liveContact = liveResolved.contact;
+      if (!liveContact) {
+        return {
+          type: "not_found" as const,
+          suggestions: fuzzyResult.suggestions,
+        };
+      }
+      return {
+        type: "found" as const,
+        contact: {
+          name: liveContact.name,
+          phone: liveContact.phone,
+          jid: liveContact.jid,
+        },
+      };
+    }
+  } catch (error) {
+    console.error("[agent] resolveClawCloudWhatsAppContact failed:", error);
+  }
+
+  return {
+    type: "not_found" as const,
+    suggestions: fuzzyResult.suggestions,
+  };
+}
+
 async function hasWhatsAppConversationHistory(userId: string, phone: string) {
   const normalizedPhone = phone.replace(/\D/g, "");
   if (!normalizedPhone) {
@@ -7286,13 +13393,157 @@ async function hasWhatsAppConversationHistory(userId: string, phone: string) {
   return (count ?? 0) > 0;
 }
 
+function createOutboundApprovalGroupId() {
+  return `wa-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function buildResolvedWhatsAppSendProfile(
+  parsed: ReturnType<typeof parseSendMessageCommand>,
+  resolvedRecipientCount: number,
+) {
+  if (!parsed) {
+    return {
+      requestedScope: "unknown",
+      requestedRecipientCount: 0,
+      confirmationMode: "always" as const,
+      riskSummary: "single_contact" as const,
+      reason: "Waiting for user confirmation before sending.",
+    };
+  }
+
+  const action = buildParsedSendMessageAction(parsed);
+
+  switch (action.scope) {
+    case "broadcast_all":
+      return {
+        requestedScope: action.scope,
+        requestedRecipientCount: resolvedRecipientCount,
+        confirmationMode: "broadcast_explicit" as const,
+        riskSummary: "broadcast_all" as const,
+        reason: `Broadcast draft targets ${resolvedRecipientCount} contacts and needs explicit broadcast confirmation.`,
+      };
+    case "multi_contact":
+      return {
+        requestedScope: action.scope,
+        requestedRecipientCount: resolvedRecipientCount,
+        confirmationMode: "always" as const,
+        riskSummary: "multi_recipient" as const,
+        reason: `Waiting for user confirmation before sending to ${resolvedRecipientCount} contacts.`,
+      };
+    case "direct_phone":
+      return {
+        requestedScope: action.scope,
+        requestedRecipientCount: 1,
+        confirmationMode: "always" as const,
+        riskSummary: "direct_phone" as const,
+        reason: "Waiting for user confirmation before sending to a direct WhatsApp number.",
+      };
+    case "single_contact":
+    default:
+      return {
+        requestedScope: action.scope,
+        requestedRecipientCount: 1,
+        confirmationMode: "always" as const,
+        riskSummary: "single_contact" as const,
+        reason: "Waiting for user confirmation before sending.",
+      };
+  }
+}
+
+async function generateStyledWhatsAppDraft(input: {
+  originalRequest: string;
+  requestedMessage: string;
+  recipientLabel: string;
+  conversationStyle: ClawCloudConversationStyle;
+}) {
+  const fallback = input.requestedMessage.trim();
+  const styleInstruction = input.conversationStyle === "casual"
+    ? [
+        "Write like a natural human in casual mode.",
+        "Keep it warm, adaptive, relaxed, and conversational without losing clarity.",
+        "Do not sound stiff, corporate, or overly formal.",
+      ].join("\n")
+    : [
+        "Write like a polished human in professional mode.",
+        "Keep it composed, clear, structured, and more formal without sounding robotic.",
+        "Do not use slang unless the user's request clearly requires it.",
+      ].join("\n");
+  const drafted = await completeClawCloudPrompt({
+    system: [
+      "You write polished WhatsApp messages for real personal and professional conversations.",
+      "Return only the final WhatsApp message text.",
+      "Preserve the user's exact intent, facts, promises, and requested outcome.",
+      "Improve grammar, clarity, tone, and professionalism without sounding robotic.",
+      "Match the relationship implied by the recipient label.",
+      styleInstruction,
+      "If the request is just a short greeting, keep it short but polished.",
+      "Do not add placeholders, explanations, or markdown bullets unless they belong inside the message.",
+    ].join("\n"),
+    user: [
+      `Original request: ${input.originalRequest}`,
+      `Recipient: ${input.recipientLabel}`,
+      `Raw message to convey: ${fallback}`,
+    ].join("\n\n"),
+    intent: "send_message",
+    maxTokens: 220,
+    fallback,
+  });
+
+  return drafted.trim() || fallback;
+}
+
+function formatWhatsAppSendSafetyReply(
+  decision: Exclude<ReturnType<typeof analyzeSendMessageCommandSafety>, null>,
+) {
+  if (decision.allowed) {
+    return "";
+  }
+
+  switch (decision.issue) {
+    case "ambiguous_recipient": {
+      const ambiguousList = decision.ambiguousRecipients?.join(", ") ?? "that recipient";
+      return [
+        "I couldn't safely tell who should receive that WhatsApp message.",
+        "",
+        `Ambiguous recipient reference: ${ambiguousList}.`,
+        "Tell me the exact contact name or phone number instead.",
+        'Example: _Send "Reached safely" to Maa_',
+      ].join("\n");
+    }
+
+    case "conditional_send":
+      return [
+        "I don't auto-send conditional or chained WhatsApp instructions.",
+        "",
+        "Tell me one exact message and the exact contact to queue now.",
+        'Example: _Send "Please call me when free" to Raj_',
+      ].join("\n");
+
+    case "scheduled_send":
+      return [
+        "I can queue a WhatsApp draft now, but I don't schedule future sends yet.",
+        "",
+        "Send it when you're ready, or ask me to create a reminder for the time you want.",
+        'Example: _Remind me tomorrow at 8am to message Maa_',
+      ].join("\n");
+
+    default:
+      return [
+        "I couldn't safely prepare that WhatsApp send request.",
+        "",
+        "Tell me the exact contact and the exact message to queue now.",
+      ].join("\n");
+  }
+}
+
 async function handleSendMessageToContactProfessional(
   userId: string,
   text: string,
   locale: SupportedLocale,
+  conversationStyle: ClawCloudConversationStyle,
 ): Promise<string> {
-  const parsed = parseSendMessageCommand(text);
-  if (!parsed) {
+  const analysis = analyzeSendMessageCommandSafety(text);
+  if (!analysis) {
     return translateMessage(
       [
         "Send a WhatsApp message",
@@ -7313,65 +13564,56 @@ async function handleSendMessageToContactProfessional(
     );
   }
 
-  const message = parsed.message;
+  if (!analysis.allowed) {
+    return translateMessage(formatWhatsAppSendSafetyReply(analysis), locale);
+  }
+
+  const { parsed } = analysis;
+  const rawMessage = parsed.message;
 
   if (parsed.kind === "phone" && parsed.phone) {
-    const whatsAppSettings = await getWhatsAppSettings(userId).catch(() => null);
+    const sendProfile = buildResolvedWhatsAppSendProfile(parsed, 1);
+    const professionalDraft = await generateStyledWhatsAppDraft({
+      originalRequest: text,
+      requestedMessage: rawMessage,
+      recipientLabel: parsed.contactName || `+${parsed.phone}`,
+      conversationStyle,
+    });
     const hasHistory = await hasWhatsAppConversationHistory(userId, parsed.phone);
+    const approval = await queueWhatsAppReplyApproval({
+      userId,
+      remoteJid: `${parsed.phone}@s.whatsapp.net`,
+      remotePhone: parsed.phone,
+      contactName: parsed.contactName,
+      sourceMessage: `Outgoing message requested for ${parsed.contactName || `+${parsed.phone}`}`,
+      draftReply: professionalDraft,
+      sensitivity: "normal",
+      confidence: 0.9,
+      reason: sendProfile.reason,
+      priority: "normal",
+      metadata: {
+        approval_origin: "send_command",
+        confirmation_mode: sendProfile.confirmationMode,
+        first_outreach: !hasHistory,
+        original_request: text,
+        send_scope: sendProfile.requestedScope,
+        requested_recipient_count: sendProfile.requestedRecipientCount,
+        risk_summary: sendProfile.riskSummary,
+      },
+    }).catch(() => null);
 
-    if (whatsAppSettings?.requireApprovalForFirstOutreach && !hasHistory) {
-      const approval = await queueWhatsAppReplyApproval({
-        userId,
-        remoteJid: parsed.phone ? `${parsed.phone}@s.whatsapp.net` : null,
-        remotePhone: parsed.phone,
-        contactName: parsed.contactName,
-        sourceMessage: `First outreach requested: ${parsed.contactName || parsed.phone}`,
-        draftReply: message,
-        sensitivity: "normal",
-        confidence: 0.76,
-        reason: "First outreach requires approval before sending.",
-        priority: "normal",
-        metadata: {
-          approval_origin: "send_command",
-          first_outreach: true,
-        },
-      }).catch(() => null);
-
-      if (approval) {
-        return translateMessage(
-          `Queued a first-outreach WhatsApp approval for ${parsed.contactName || parsed.phone}. Use WSEND ${approval.id.slice(0, 8)} to send it when you're ready.`,
-          locale,
-        );
-      }
-    }
-
-    try {
-      await sendClawCloudWhatsAppToPhone(parsed.phone, message, {
-        userId,
-        contactName: parsed.contactName,
-      });
-      await upsertAnalyticsDaily(userId, { wa_messages_sent: 1, tasks_run: 1 });
+    if (!approval) {
       return translateMessage(
         [
-          "Message sent successfully.",
+          `I couldn't prepare the WhatsApp draft for +${parsed.phone}.`,
           "",
-          `Message: ${message}`,
-          `To: +${parsed.phone}`,
-        ].join("\n"),
-        locale,
-      );
-    } catch (error) {
-      console.error("[agent] sendClawCloudWhatsAppToPhone failed:", error);
-      return translateMessage(
-        [
-          `Could not send the message to +${parsed.phone}.`,
-          "",
-          "This usually happens when the number is not on WhatsApp or the session is disconnected.",
           "Reconnect WhatsApp in the dashboard and try again.",
         ].join("\n"),
         locale,
       );
     }
+
+    return translateMessage(buildWhatsAppApprovalReviewReply(approval), locale);
   }
 
   const requestedNames = parsed.kind === "broadcast_all"
@@ -7392,130 +13634,114 @@ async function handleSendMessageToContactProfessional(
 
   const resolvedRecipients = new Map<string, { name: string; phone: string | null; jid: string | null }>();
   for (const requestedName of requestedNames) {
-    const fuzzyResult = await lookupContactFuzzy(userId, requestedName);
-    if (fuzzyResult.type === "ambiguous") {
+    const resolved = await resolveWhatsAppRecipientWithRetry(userId, requestedName);
+    if (resolved.type === "ambiguous") {
       return translateMessage(
-        formatAmbiguousReply(requestedName, fuzzyResult.matches),
+        formatAmbiguousReply(requestedName, resolved.matches),
         locale,
       );
     }
 
-    if (fuzzyResult.type === "found") {
-      resolvedRecipients.set(fuzzyResult.contact.phone, {
-        name: fuzzyResult.contact.name,
-        phone: fuzzyResult.contact.phone,
-        jid: null,
+    if (resolved.type === "found") {
+      resolvedRecipients.set(resolved.contact.phone ?? resolved.contact.jid ?? requestedName, {
+        name: resolved.contact.name,
+        phone: resolved.contact.phone,
+        jid: resolved.contact.jid ?? null,
       });
       continue;
     }
 
-    try {
-      const liveResolved = await resolveClawCloudWhatsAppContact(userId, requestedName);
-      if (liveResolved) {
-        resolvedRecipients.set(liveResolved.phone ?? liveResolved.jid ?? requestedName, {
-          name: liveResolved.name,
-          phone: liveResolved.phone,
-          jid: liveResolved.jid,
-        });
-        continue;
-      }
-    } catch (error) {
-      console.error("[agent] resolveClawCloudWhatsAppContact failed:", error);
-    }
-
     return translateMessage(
-      formatNotFoundReply(requestedName, fuzzyResult.suggestions),
+      formatNotFoundReply(requestedName, resolved.suggestions),
       locale,
     );
   }
 
   const recipients = [...resolvedRecipients.values()];
-  const successes: Array<{ name: string; phone: string | null; jid: string | null }> = [];
+  const sendProfile = buildResolvedWhatsAppSendProfile(parsed, recipients.length);
+  const approvalGroupId = createOutboundApprovalGroupId();
+  const recipientLabel = recipients.length === 1
+    ? recipients[0]!.name
+    : recipients.length <= 3
+      ? recipients.map((recipient) => recipient.name).join(", ")
+      : `${recipients.length} contacts`;
+  const professionalDraft = await generateStyledWhatsAppDraft({
+    originalRequest: text,
+    requestedMessage: rawMessage,
+    recipientLabel,
+    conversationStyle,
+  });
+
+  const queuedApprovals: Array<{
+    approval: Awaited<ReturnType<typeof queueWhatsAppReplyApproval>>;
+    recipient: { name: string; phone: string | null; jid: string | null };
+  }> = [];
   const failures: Array<{ name: string; phone: string | null; jid: string | null }> = [];
-  const queuedApprovals: Array<{ name: string; phone: string | null; jid: string | null }> = [];
 
   for (const recipient of recipients) {
-    const whatsAppSettings = await getWhatsAppSettings(userId).catch(() => null);
     const hasHistory = recipient.phone
       ? await hasWhatsAppConversationHistory(userId, recipient.phone)
       : false;
 
-    if (whatsAppSettings?.requireApprovalForFirstOutreach && !hasHistory) {
-      const approval = await queueWhatsAppReplyApproval({
-        userId,
-        remoteJid: recipient.phone ? `${recipient.phone}@s.whatsapp.net` : recipient.jid,
-        remotePhone: recipient.phone,
-        contactName: recipient.name,
-        sourceMessage: `First outreach requested: ${recipient.name}`,
-        draftReply: message,
-        sensitivity: "normal",
-        confidence: 0.76,
-        reason: "First outreach requires approval before sending.",
-        priority: "normal",
-        metadata: {
-          approval_origin: "send_command",
-          first_outreach: true,
-        },
-      }).catch(() => null);
+    const approval = await queueWhatsAppReplyApproval({
+      userId,
+      remoteJid: recipient.phone ? `${recipient.phone}@s.whatsapp.net` : recipient.jid,
+      remotePhone: recipient.phone,
+      contactName: recipient.name,
+      sourceMessage: `Outgoing message requested for ${recipient.name}`,
+      draftReply: professionalDraft,
+      sensitivity: "normal",
+      confidence: 0.9,
+      reason: sendProfile.reason,
+      priority: "normal",
+      metadata: {
+        approval_origin: "send_command",
+        approval_group_id: approvalGroupId,
+        confirmation_mode: sendProfile.confirmationMode,
+        first_outreach: !hasHistory,
+        original_request: text,
+        send_scope: sendProfile.requestedScope,
+        requested_recipient_count: sendProfile.requestedRecipientCount,
+        risk_summary: sendProfile.riskSummary,
+      },
+    }).catch(() => null);
 
-      if (approval) {
-        queuedApprovals.push(recipient);
-        continue;
-      }
-    }
-
-    try {
-      await sendClawCloudWhatsAppToPhone(recipient.phone, message, {
-        userId,
-        contactName: recipient.name,
-        jid: recipient.jid,
-      });
-      successes.push(recipient);
-    } catch (error) {
-      console.error("[agent] sendClawCloudWhatsAppToPhone failed:", error);
+    if (!approval) {
       failures.push(recipient);
+      continue;
     }
+
+    queuedApprovals.push({ approval, recipient });
   }
 
-  if (!successes.length && !queuedApprovals.length) {
+  if (!queuedApprovals.length) {
     const failedLabel = recipients.length === 1 ? recipients[0]?.name ?? "that contact" : "those contacts";
     return translateMessage(
       [
-        `Could not send the message to ${failedLabel}.`,
+        `I couldn't prepare the WhatsApp draft for ${failedLabel}.`,
         "",
-        "This usually happens when the number is not on WhatsApp or the session is disconnected.",
         "Reconnect WhatsApp in the dashboard and try again.",
       ].join("\n"),
       locale,
     );
   }
 
-  await upsertAnalyticsDaily(userId, { wa_messages_sent: successes.length, tasks_run: 1 });
-
-  const successTitle = parsed.kind === "broadcast_all"
-    ? `Broadcast handled for ${successes.length + queuedApprovals.length} contact${successes.length + queuedApprovals.length === 1 ? "" : "s"}.`
-    : successes.length === 1 && !queuedApprovals.length
-      ? `Message sent to ${successes[0]!.name}.`
-      : `Message handled for ${successes.length + queuedApprovals.length} contacts.`;
-
   const lines = [
-    successTitle,
-    "",
-    `Message: ${message}`,
-    "",
-    "Sent to:",
-    ...successes.map((recipient) =>
-      recipient.phone
-        ? `- ${recipient.name} - +${recipient.phone}`
-        : `- ${recipient.name}`,
-    ),
+    buildWhatsAppApprovalReviewReply(queuedApprovals[0]!.approval, queuedApprovals.length),
   ];
 
-  if (failures.length) {
+  if (sendProfile.riskSummary === "broadcast_all") {
     lines.push(
       "",
-      "Not sent to:",
-      ...failures.map((recipient) =>
+      `Safety check: this is a broadcast-style draft for ${queuedApprovals.length} contacts.`,
+    );
+  }
+
+  if (queuedApprovals.length > 1) {
+    lines.push(
+      "",
+      "Recipients:",
+      ...queuedApprovals.map(({ recipient }) =>
         recipient.phone
           ? `- ${recipient.name} - +${recipient.phone}`
           : `- ${recipient.name}`,
@@ -7523,11 +13749,11 @@ async function handleSendMessageToContactProfessional(
     );
   }
 
-  if (queuedApprovals.length) {
+  if (failures.length) {
     lines.push(
       "",
-      "Queued for approval:",
-      ...queuedApprovals.map((recipient) =>
+      "I couldn't queue a draft for:",
+      ...failures.map((recipient) =>
         recipient.phone
           ? `- ${recipient.name} - +${recipient.phone}`
           : `- ${recipient.name}`,
@@ -7619,8 +13845,8 @@ export async function runClawCloudTask(input: RunTaskInput) {
   if (!input.bypassEnabledCheck && !task.is_enabled) throw new Error(`Task ${input.taskType} disabled.`);
 
   const plan = await getUserPlan(input.userId);
-  const runs = await getTodayRuns(input.userId);
   const limit = clawCloudRunLimits[plan];
+  const runs = await getTodayRuns(input.userId, { limit });
 
   if (runs >= limit) {
     await sendClawCloudWhatsAppMessage(
@@ -7699,4 +13925,25 @@ export async function scheduleClawCloudTasks(userId: string) {
   const { data } = await getClawCloudSupabaseAdmin()
     .from("agent_tasks").select("*").eq("user_id", userId).eq("is_enabled", true);
   return data ?? [];
+}
+
+export async function routeInboundAgentMessage(
+  userId: string,
+  message: string,
+): Promise<string | null> {
+  const result = await routeInboundAgentMessageResult(userId, message);
+  if (message.trim()) {
+    void recordClawCloudChatRun({
+      userId,
+      status: result.response?.trim() ? "success" : "failed",
+      inputData: {
+        message: message.trim().slice(0, 500),
+        kind: "direct_inbound_message",
+      },
+      outputData: {
+        char_count: result.response?.length ?? 0,
+      },
+    }).catch(() => null);
+  }
+  return result.response;
 }

@@ -5,6 +5,7 @@ import {
   upsertWhatsAppSettings,
 } from "@/lib/clawcloud-whatsapp-control";
 import { getWhatsAppInboxSummary } from "@/lib/clawcloud-whatsapp-inbox";
+import { getClawCloudWhatsAppRuntimeStatus } from "@/lib/clawcloud-whatsapp";
 import {
   getClawCloudErrorMessage,
   requireClawCloudAuth,
@@ -19,12 +20,13 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const [settings, summary] = await Promise.all([
+    const [settings, summary, runtime] = await Promise.all([
       getWhatsAppSettings(auth.user.id),
       getWhatsAppInboxSummary(auth.user.id),
+      getClawCloudWhatsAppRuntimeStatus(auth.user.id).catch(() => null),
     ]);
 
-    return NextResponse.json({ settings, summary });
+    return NextResponse.json({ settings, summary, runtime });
   } catch (error) {
     return NextResponse.json(
       { error: getClawCloudErrorMessage(error) },

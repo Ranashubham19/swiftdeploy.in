@@ -225,9 +225,10 @@ async function main() {
   };
 
   console.log(JSON.stringify(summary, null, 2));
+  process.exit(0);
 }
 
 main().catch((error) => {
   console.error(error);
-  process.exitCode = 1;
+  process.exit(1);
 });

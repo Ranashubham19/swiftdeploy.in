@@ -11,6 +11,7 @@ import {
   fetchLatestBaileysVersion,
   makeWASocket,
   useMultiFileAuthState,
+  WAMessageStatus,
   type Contact as WAContact,
   type MediaType,
   type WAMessage,
@@ -50,45 +51,158 @@ import {
   saveUpiTransaction,
 } from "./lib/clawcloud-upi";
 import {
+  backfillWhatsAppContactsFromHistory,
   upsertWhatsAppContacts,
   type WhatsAppContactSyncInput,
 } from "./lib/clawcloud-whatsapp-contacts";
 import { buildWhatsAppApprovalNotice, queueWhatsAppReplyApproval } from "./lib/clawcloud-whatsapp-approval";
 import {
   applyWhatsAppReplyMode,
-  decideWhatsAppReplyAction,
   detectWhatsAppSensitivity,
   getWhatsAppPriorityForMessage,
   getWhatsAppSettings,
   markLatestWhatsAppThreadState,
   normalizeWhatsAppPriority,
   scoreWhatsAppReplyConfidence,
+  shouldRequireExplicitUserCommandForWhatsAppChat,
   writeWhatsAppAuditLog,
 } from "./lib/clawcloud-whatsapp-control";
 import {
   processDueWhatsAppWorkflowRuns,
   scheduleWhatsAppWorkflowRunsFromInbound,
 } from "./lib/clawcloud-whatsapp-workflows";
+import {
+  ensureWhatsAppOutboundMessage,
+  markWhatsAppOutboundAckByWaMessageId,
+  transitionWhatsAppOutboundMessage,
+  type WhatsAppMessageAckStatus,
+} from "./lib/clawcloud-whatsapp-outbound";
 import { registerClawCloudWhatsAppRuntime } from "./lib/clawcloud-whatsapp";
+import {
+  buildClawCloudWhatsAppSyncPolicy,
+  shouldRequestMoreClawCloudWhatsAppHistory,
+} from "./lib/clawcloud-whatsapp-sync-policy";
+import {
+  buildClawCloudWhatsAppHistoryBackfillPlan,
+  summarizeClawCloudWhatsAppHistoryCoverage,
+} from "./lib/clawcloud-whatsapp-history-plan";
+import { buildClawCloudWhatsAppContactIdentityGraph } from "./lib/clawcloud-whatsapp-contact-identity";
+import {
+  computeClawCloudWhatsAppSyncProgress,
+  deriveClawCloudWhatsAppRuntimeHealth,
+  type ClawCloudWhatsAppRuntimeConnectionStatus,
+  type ClawCloudWhatsAppRuntimeStatus,
+  type ClawCloudWhatsAppRuntimeSyncState,
+} from "./lib/clawcloud-whatsapp-runtime";
+import {
+  computeClawCloudWhatsAppReconnectDelayMs,
+  getClawCloudWhatsAppReconnectWaitMs,
+  normalizeClawCloudWhatsAppRecoveryCheckpoint,
+  type ClawCloudWhatsAppRecoveryCheckpoint,
+} from "./lib/clawcloud-whatsapp-recovery";
+import {
+  buildClawCloudWhatsAppSyncCheckpointResumeRecommended,
+  normalizeClawCloudWhatsAppSyncCheckpoint,
+  type ClawCloudWhatsAppSyncCheckpoint,
+} from "./lib/clawcloud-whatsapp-sync-checkpoint";
+import {
+  buildClawCloudWhatsAppSessionStorageHealth,
+  resolveClawCloudWhatsAppSessionBaseDir,
+  type ClawCloudWhatsAppSessionStorageHealth,
+} from "./lib/clawcloud-whatsapp-storage";
+import {
+  shouldStageWhatsAppReply,
+  splitWhatsAppStreamChunks,
+  whatsAppChunkDelayMs,
+  whatsAppInitialTypingDelayMs,
+} from "./lib/clawcloud-whatsapp-streaming";
+import {
+  isWhatsAppSelfChatJid,
+  resolveDefaultAssistantChatJid,
+  shouldRememberAssistantSelfChat,
+} from "./lib/clawcloud-whatsapp-routing";
 import type {
   WhatsAppContactPriority,
+  WhatsAppOutboundSource,
   WhatsAppSettings,
 } from "./lib/clawcloud-whatsapp-workspace-types";
 
 loadEnvConfig(process.cwd());
 
 const STALE_MS = 60_000;
-const QR_WAIT_TIMEOUT_MS = 6_000;
-const QR_WAIT_POLL_MS = 250;
-const QR_CONNECTING_RESET_MS = 4_000;
+const QR_WAIT_TIMEOUT_MS = 1_500;
+const QR_WAIT_POLL_MS = 120;
+const QR_CONNECTING_RESET_MS = 2_000;
+const WA_VERSION_CACHE_MS = 30 * 60_000;
 const DIRECT_REPLY_TIMEOUT_MS = 50_000;
 const HTTP_REPLY_TIMEOUT_MS = 55_000;
-const STREAM_REPLY_MIN_LENGTH = 900;
+const STREAM_REPLY_MIN_LENGTH = Math.max(
+  80,
+  Number.parseInt(process.env.WA_STREAM_REPLY_MIN_LENGTH ?? "140", 10) || 140,
+);
 const SESSION_WATCHDOG_STALE_MS = 3 * 60_000;
 const SESSION_WATCHDOG_INTERVAL_MS = 5 * 60_000;
 const MAX_SEND_RETRIES = 3;
 const RETRY_DELAYS_MS = [1_000, 3_000, 9_000] as const;
 const GROUP_RATE_LIMIT_MS = 8_000;
+const CONTACT_REFRESH_WAIT_MS = 1_000;
+const CONTACT_REFRESH_COLLECTIONS = [
+  "regular",
+  "regular_high",
+  "regular_low",
+  "critical_block",
+  "critical_unblock_low",
+] as const;
+const CONTACT_REFRESH_FOLLOWUP_DELAY_MS = 4_000;
+const CONTACT_REFRESH_FOLLOWUP_DELAYS_MS = [
+  CONTACT_REFRESH_FOLLOWUP_DELAY_MS,
+  15_000,
+  45_000,
+] as const;
+const SESSION_WORKSPACE_RESYNC_INITIAL_DELAY_MS = 20_000;
+const SESSION_WORKSPACE_RESYNC_INTERVAL_MS = 10 * 60_000;
+const SESSION_HISTORY_PERSIST_DEBOUNCE_MS = 1_500;
+const SESSION_HISTORY_CONTACT_BACKFILL_DEBOUNCE_MS = 2_000;
+const SESSION_RECOVERY_CHECKPOINT_FILE = ".clawcloud-runtime.json";
+const SESSION_SYNC_CHECKPOINT_FILE = ".clawcloud-sync-runtime.json";
+const SESSION_SYNC_CHECKPOINT_PERSIST_DEBOUNCE_MS = 900;
+const SESSION_HISTORY_EXPANSION_FOLLOWUP_DELAY_MS = 3_000;
+const SESSION_RECONNECT_BASE_DELAY_MS = 3_000;
+const SESSION_RECONNECT_MAX_DELAY_MS = 60_000;
+const SESSION_STORAGE_HEALTH_CACHE_MS = 15_000;
+
+function readPositiveIntEnv(name: string) {
+  const parsed = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+const WHATSAPP_SYNC_POLICY = buildClawCloudWhatsAppSyncPolicy({
+  contactRefreshTarget: readPositiveIntEnv("WA_CONTACT_REFRESH_TARGET"),
+  contactRefreshMaxPasses: readPositiveIntEnv("WA_CONTACT_REFRESH_MAX_PASSES"),
+  historyTarget: readPositiveIntEnv("WA_HISTORY_SYNC_TARGET"),
+  historyBufferLimit: readPositiveIntEnv("WA_HISTORY_BUFFER_LIMIT"),
+  historyKnownLookupLimit: readPositiveIntEnv("WA_HISTORY_KNOWN_LOOKUP_LIMIT"),
+  historyPersistBatchLimit: readPositiveIntEnv("WA_HISTORY_PERSIST_BATCH_LIMIT"),
+  historyExpansionChatLimit: readPositiveIntEnv("WA_HISTORY_EXPANSION_CHAT_LIMIT"),
+  historyExpansionBatchSize: readPositiveIntEnv("WA_HISTORY_EXPANSION_BATCH_SIZE"),
+  historyExpansionMaxAttemptsPerCursor: readPositiveIntEnv("WA_HISTORY_EXPANSION_MAX_ATTEMPTS"),
+  historyContactBackfillScanLimit: readPositiveIntEnv("WA_HISTORY_CONTACT_BACKFILL_SCAN_LIMIT"),
+});
+
+const CONTACT_REFRESH_MAX_PASSES = WHATSAPP_SYNC_POLICY.contactRefreshMaxPasses;
+const CONTACT_REFRESH_TARGET_COUNT = WHATSAPP_SYNC_POLICY.contactRefreshTarget;
+const SESSION_HISTORY_SYNC_TARGET = WHATSAPP_SYNC_POLICY.historyTarget;
+const SESSION_HISTORY_BUFFER_LIMIT = WHATSAPP_SYNC_POLICY.historyBufferLimit;
+const SESSION_HISTORY_KNOWN_LOOKUP_LIMIT = WHATSAPP_SYNC_POLICY.historyKnownLookupLimit;
+const SESSION_HISTORY_PERSIST_BATCH_LIMIT = WHATSAPP_SYNC_POLICY.historyPersistBatchLimit;
+const SESSION_HISTORY_EXPANSION_CHAT_LIMIT = WHATSAPP_SYNC_POLICY.historyExpansionChatLimit;
+const SESSION_HISTORY_EXPANSION_BATCH_SIZE = WHATSAPP_SYNC_POLICY.historyExpansionBatchSize;
+const SESSION_HISTORY_EXPANSION_MAX_ATTEMPTS_PER_CURSOR =
+  WHATSAPP_SYNC_POLICY.historyExpansionMaxAttemptsPerCursor;
+const SESSION_HISTORY_DEEP_CHAT_TARGET = Math.max(
+  24,
+  Math.min(SESSION_HISTORY_SYNC_TARGET, SESSION_HISTORY_EXPANSION_BATCH_SIZE * 2),
+);
 
 type SessionRecord = {
   sock: WASocket;
@@ -98,7 +212,30 @@ type SessionRecord = {
   phone: string | null;
   lastChatJid: string | null;
   startedAt: number;
+  connectedAt: number | null;
+  lastActivityAt: number;
+  activeSyncFrames: SessionSyncFrame[];
+  syncState: ClawCloudWhatsAppRuntimeSyncState;
+  lastSyncStartedAt: number | null;
+  lastSyncFinishedAt: number | null;
+  lastSuccessfulSyncAt: number | null;
+  lastSyncReason: string | null;
+  lastSyncError: string | null;
+  lastSyncDurationMs: number | null;
+  lastContactPersistedCount: number;
+  lastHistoryPersistedCount: number;
+  lastHistoryBackfillCount: number;
+  lastHistoryExpansionRequestedCount: number;
+  checkpointContactCount: number;
+  checkpointHistoryMessageCount: number;
+  checkpointHistoryCursors: SessionHistoryResumeCursor[];
+  reconnectAttempts: number;
+  lastDisconnectCode: number | null;
+  lastDisconnectAt: number | null;
+  nextReconnectAt: number | null;
+  sharedPhoneJids: Map<string, string>;
   contacts: Map<string, SessionContactEntry>;
+  historyRows: Map<string, SessionHistoryEntry>;
 };
 
 type SessionContactEntry = {
@@ -106,16 +243,93 @@ type SessionContactEntry = {
   phone: string | null;
   displayName: string;
   aliases: string[];
+  sourceKinds: string[];
+  messageCount: number;
+  lastMessageAt: number | null;
   updatedAt: number;
 };
 
+type SessionContactMatch = {
+  name: string;
+  phone: string | null;
+  jid: string | null;
+  score: number;
+};
+
+type SessionContactResolveResult =
+  | { type: "found"; contact: SessionContactMatch }
+  | { type: "ambiguous"; matches: SessionContactMatch[] };
+
+type SessionHistoryEntry = {
+  wa_message_id: string;
+  user_id: string;
+  direction: "inbound" | "outbound";
+  content: string;
+  message_type: string;
+  remote_jid: string | null;
+  remote_phone: string | null;
+  contact_name: string | null;
+  chat_type: "direct" | "group" | "self" | "broadcast" | "unknown";
+  sent_at: string;
+};
+
+type SessionHistoryCursor = {
+  remoteJid: string;
+  oldestMessageId: string;
+  oldestTimestampMs: number;
+  fromMe: boolean;
+  messageCount: number;
+};
+
+type SessionHistoryResumeCursor = SessionHistoryCursor & {
+  attempts: number;
+};
+
+type SessionSyncFrame = {
+  id: string;
+  kind: ClawCloudWhatsAppRuntimeSyncState;
+  reason: string;
+  startedAt: number;
+};
+
 type RouteInboundAgentMessageFn = (userId: string, message: string) => Promise<string | null>;
+type SessionScopedTask = {
+  record: SessionRecord;
+  promise: Promise<void>;
+};
 
 const sessions = new Map<string, SessionRecord>();
 const outboundIds = new Set<string>();
 const inboundIds = new Map<string, number>();
 const groupLastReplyAt = new Map<string, number>();
+const contactRefreshTasks = new Map<string, SessionScopedTask>();
+const workspaceBootstrapTasks = new Map<string, SessionScopedTask>();
+const sessionContactPersistTimers = new Map<string, NodeJS.Timeout>();
+const sessionHistoryPersistTimers = new Map<string, NodeJS.Timeout>();
+const sessionHistoryContactBackfillTimers = new Map<string, NodeJS.Timeout>();
+const sessionSyncCheckpointTimers = new Map<string, NodeJS.Timeout>();
+const sessionWorkspaceResyncTimers = new Map<string, NodeJS.Timeout>();
+const sessionHistoryExpansionFollowupTimers = new Map<string, NodeJS.Timeout>();
+const sessionHistoryExpansionTasks = new Map<string, SessionScopedTask>();
+const sessionHistoryExpansionState = new Map<string, Map<string, {
+  oldestMessageId: string;
+  attempts: number;
+}>>();
+const sessionReconnectTimers = new Map<string, NodeJS.Timeout>();
 let cachedRouteInboundAgentMessage: RouteInboundAgentMessageFn | null = null;
+let cachedWAVersion:
+  | {
+    version: [number, number, number];
+    fetchedAt: number;
+    isLatest: boolean;
+  }
+  | null = null;
+let cachedSessionStorageHealth:
+  | {
+    value: ClawCloudWhatsAppSessionStorageHealth;
+    checkedAtMs: number;
+  }
+  | null = null;
 
 const INBOUND_ID_TTL_MS = 10 * 60_000;
 const INBOUND_ID_MAX = 5_000;
@@ -146,6 +360,165 @@ function isGroupRateLimited(groupJid: string): boolean {
   }
 
   return Date.now() - lastAt < GROUP_RATE_LIMIT_MS;
+}
+
+function isActiveSessionRecord(userId: string, record: SessionRecord) {
+  return sessions.get(userId) === record;
+}
+
+function touchSessionActivity(record: SessionRecord, at = Date.now()) {
+  record.lastActivityAt = at;
+}
+
+function getSessionRuntimeContactCount(record: SessionRecord) {
+  return Math.max(record.contacts.size, record.checkpointContactCount);
+}
+
+function getSessionRuntimeHistoryMessageCount(record: SessionRecord) {
+  return Math.max(record.historyRows.size, record.checkpointHistoryMessageCount);
+}
+
+function beginSessionSync(
+  userId: string,
+  record: SessionRecord,
+  kind: ClawCloudWhatsAppRuntimeSyncState,
+  reason: string,
+): SessionSyncFrame {
+  const frame: SessionSyncFrame = {
+    id: `${kind}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
+    kind,
+    reason,
+    startedAt: Date.now(),
+  };
+
+  record.activeSyncFrames.push(frame);
+  record.syncState = frame.kind;
+  record.lastSyncStartedAt = frame.startedAt;
+  record.lastSyncReason = reason;
+  touchSessionActivity(record, frame.startedAt);
+  scheduleSessionSyncCheckpointPersist(userId, record, `${reason}.start`, 0);
+  return frame;
+}
+
+function completeSessionSync(
+  userId: string,
+  record: SessionRecord,
+  frame: SessionSyncFrame,
+  details?: {
+    error?: unknown;
+    contactPersistedCount?: number;
+    historyPersistedCount?: number;
+    historyBackfillCount?: number;
+    historyExpansionRequestedCount?: number;
+  },
+) {
+  const finishedAt = Date.now();
+  record.activeSyncFrames = record.activeSyncFrames.filter((item) => item.id !== frame.id);
+  record.syncState = record.activeSyncFrames[record.activeSyncFrames.length - 1]?.kind ?? "idle";
+  record.lastSyncFinishedAt = finishedAt;
+  record.lastSyncDurationMs = Math.max(0, finishedAt - frame.startedAt);
+  record.lastSyncReason = frame.reason;
+  touchSessionActivity(record, finishedAt);
+
+  if (typeof details?.contactPersistedCount === "number") {
+    record.lastContactPersistedCount = Math.max(0, Math.trunc(details.contactPersistedCount));
+    record.checkpointContactCount = Math.max(record.checkpointContactCount, record.lastContactPersistedCount);
+  }
+  if (typeof details?.historyPersistedCount === "number") {
+    record.lastHistoryPersistedCount = Math.max(0, Math.trunc(details.historyPersistedCount));
+    record.checkpointHistoryMessageCount = Math.max(
+      record.checkpointHistoryMessageCount,
+      record.lastHistoryPersistedCount,
+      record.historyRows.size,
+    );
+  }
+  if (typeof details?.historyBackfillCount === "number") {
+    record.lastHistoryBackfillCount = Math.max(0, Math.trunc(details.historyBackfillCount));
+  }
+  if (typeof details?.historyExpansionRequestedCount === "number") {
+    record.lastHistoryExpansionRequestedCount = Math.max(0, Math.trunc(details.historyExpansionRequestedCount));
+  }
+
+  if (details?.error) {
+    record.lastSyncError = details.error instanceof Error
+      ? details.error.message
+      : String(details.error);
+    persistSessionRecoveryCheckpoint(userId, { record });
+    persistSessionSyncCheckpoint(userId, record);
+    return;
+  }
+
+  record.lastSuccessfulSyncAt = finishedAt;
+  record.lastSyncError = null;
+  persistSessionRecoveryCheckpoint(userId, { record });
+  persistSessionSyncCheckpoint(userId, record);
+}
+
+function connectionStatusForRuntime(record: SessionRecord | null): ClawCloudWhatsAppRuntimeConnectionStatus {
+  if (!record) {
+    return "disconnected";
+  }
+
+  return record.status;
+}
+
+function toIsoOrNull(value: number | null | undefined) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? new Date(value).toISOString()
+    : null;
+}
+
+function buildSessionRuntimeStatus(userId: string, record: SessionRecord): ClawCloudWhatsAppRuntimeStatus {
+  const contactCount = getSessionRuntimeContactCount(record);
+  const historyMessageCount = getSessionRuntimeHistoryMessageCount(record);
+  const historyCoverage = summarizeClawCloudWhatsAppHistoryCoverage(
+    buildSessionHistoryBackfillPlan(userId, record),
+  );
+  const progress = computeClawCloudWhatsAppSyncProgress({
+    contactCount,
+    historyMessageCount,
+    contactTarget: CONTACT_REFRESH_TARGET_COUNT,
+    historyTarget: SESSION_HISTORY_SYNC_TARGET,
+  });
+
+  return {
+    connectionStatus: connectionStatusForRuntime(record),
+    health: deriveClawCloudWhatsAppRuntimeHealth({
+      connectionStatus: connectionStatusForRuntime(record),
+      syncState: record.syncState,
+      activeSyncJobs: record.activeSyncFrames.length,
+      lastSyncError: record.lastSyncError,
+      lastActivityAtMs: record.lastActivityAt,
+      staleAfterMs: SESSION_WATCHDOG_STALE_MS,
+      nowMs: Date.now(),
+    }),
+    syncState: record.syncState,
+    activeSyncJobs: record.activeSyncFrames.length,
+    connected: record.status === "connected",
+    requiresReauth: false,
+    phone: record.phone,
+    qrReady: Boolean(record.qr),
+    qrAgeSeconds: record.qrIssuedAt ? Math.floor((Date.now() - record.qrIssuedAt) / 1000) : null,
+    contactCount,
+    historyMessageCount,
+    progress,
+    historyCoverage,
+    startedAt: toIsoOrNull(record.startedAt),
+    connectedAt: toIsoOrNull(record.connectedAt),
+    lastActivityAt: toIsoOrNull(record.lastActivityAt),
+    lastSyncStartedAt: toIsoOrNull(record.lastSyncStartedAt),
+    lastSyncFinishedAt: toIsoOrNull(record.lastSyncFinishedAt),
+    lastSuccessfulSyncAt: toIsoOrNull(record.lastSuccessfulSyncAt),
+    lastSyncReason: record.lastSyncReason,
+    lastSyncError: record.lastSyncError,
+    lastSyncDurationMs: record.lastSyncDurationMs,
+    lastContactPersistedCount: record.lastContactPersistedCount,
+    lastHistoryPersistedCount: record.lastHistoryPersistedCount,
+    lastHistoryBackfillCount: record.lastHistoryBackfillCount,
+    lastHistoryExpansionRequestedCount: record.lastHistoryExpansionRequestedCount,
+    maintenanceResyncIntervalMs: SESSION_WORKSPACE_RESYNC_INTERVAL_MS,
+    staleAfterMs: SESSION_WATCHDOG_STALE_MS,
+  };
 }
 
 function markGroupReplied(groupJid: string): void {
@@ -180,17 +553,10 @@ function isRailwayRuntime() {
 }
 
 function sessionBaseDir() {
-  const configured = process.env.WA_SESSION_DIR?.trim();
-  if (configured) {
-    if (path.isAbsolute(configured) || !isRailwayRuntime()) {
-      return configured;
-    }
-
-    // Railway sessions need a mounted volume path; relative paths are ephemeral there.
-    return "/data/wa-sessions";
-  }
-
-  return isRailwayRuntime() ? "/data/wa-sessions" : "./wa-sessions";
+  return resolveClawCloudWhatsAppSessionBaseDir({
+    configuredBaseDir: process.env.WA_SESSION_DIR?.trim() ?? null,
+    isRailwayRuntime: isRailwayRuntime(),
+  });
 }
 
 function looksLikeUserId(value: string) {
@@ -217,6 +583,75 @@ function savedSessionUserIds() {
     );
     return [];
   }
+}
+
+function savedSessionCheckpointCount() {
+  return savedSessionUserIds().reduce((total, userId) => (
+    fs.existsSync(sessionRecoveryCheckpointPath(userId))
+      ? total + 1
+      : total
+  ), 0);
+}
+
+function savedSessionSyncCheckpointCount() {
+  return savedSessionUserIds().reduce((total, userId) => (
+    fs.existsSync(sessionSyncCheckpointPath(userId))
+      ? total + 1
+      : total
+  ), 0);
+}
+
+function readSessionStorageHealth(options: { force?: boolean } = {}) {
+  const now = Date.now();
+  if (
+    !options.force
+    && cachedSessionStorageHealth
+    && now - cachedSessionStorageHealth.checkedAtMs < SESSION_STORAGE_HEALTH_CACHE_MS
+  ) {
+    return cachedSessionStorageHealth.value;
+  }
+
+  const resolvedBaseDir = sessionBaseDir();
+  let writable = false;
+  let probeError: string | null = null;
+
+  try {
+    fs.mkdirSync(resolvedBaseDir, { recursive: true });
+    const probeFile = path.join(
+      resolvedBaseDir,
+      `.clawcloud-volume-probe-${process.pid}-${now.toString(36)}.tmp`,
+    );
+    const probePayload = `probe:${now}`;
+    fs.writeFileSync(probeFile, probePayload, "utf8");
+    const confirmed = fs.readFileSync(probeFile, "utf8");
+    writable = confirmed === probePayload;
+    fs.rmSync(probeFile, { force: true });
+    if (!writable) {
+      probeError = "Session storage probe did not round-trip correctly.";
+    }
+  } catch (error) {
+    writable = false;
+    probeError = error instanceof Error ? error.message : String(error);
+  }
+
+  const value = buildClawCloudWhatsAppSessionStorageHealth({
+    configuredBaseDir: process.env.WA_SESSION_DIR?.trim() ?? null,
+    resolvedBaseDir,
+    isRailwayRuntime: isRailwayRuntime(),
+    writable,
+    probeError,
+    authDirCount: savedSessionUserIds().length,
+    checkpointCount: savedSessionCheckpointCount(),
+    syncCheckpointCount: savedSessionSyncCheckpointCount(),
+    checkedAt: new Date(now).toISOString(),
+  });
+
+  cachedSessionStorageHealth = {
+    value,
+    checkedAtMs: now,
+  };
+
+  return value;
 }
 
 const NVIDIA_ENV_KEYS = [
@@ -319,6 +754,7 @@ function assertConfigured() {
 function logStartupDiagnostics() {
   console.log("[agent] ======= STARTUP DIAGNOSTICS =======");
   const nvidia = ensureCanonicalNvidiaEnv();
+  const storageHealth = readSessionStorageHealth({ force: true });
 
   const checks = [
     { key: "SUPABASE_URL", value: process.env.SUPABASE_URL ?? "MISSING" },
@@ -349,6 +785,22 @@ function logStartupDiagnostics() {
       key: "SAVED_SESSION_DIRS",
       value: String(savedSessionUserIds().length),
     },
+    {
+      key: "SESSION_STORAGE_STATUS",
+      value: storageHealth.status,
+    },
+    {
+      key: "SESSION_STORAGE_WRITABLE",
+      value: String(storageHealth.writable),
+    },
+    {
+      key: "SESSION_CHECKPOINT_DIRS",
+      value: String(storageHealth.checkpointCount),
+    },
+    {
+      key: "SESSION_SYNC_CHECKPOINT_DIRS",
+      value: String(storageHealth.syncCheckpointCount),
+    },
   ];
 
   for (const check of checks) {
@@ -367,13 +819,45 @@ function logStartupDiagnostics() {
     console.log(`[agent] App URL: ${url}`);
   }
 
+  if (storageHealth.warnings.length > 0) {
+    for (const warning of storageHealth.warnings) {
+      console.warn(`[agent] SESSION STORAGE WARNING: ${warning}`);
+    }
+  }
+  if (storageHealth.probeError) {
+    console.warn(`[agent] SESSION STORAGE PROBE ERROR: ${storageHealth.probeError}`);
+  }
+
   console.log("[agent] =================================");
 }
 
 async function getWAVersion(): Promise<[number, number, number]> {
-  const { version, isLatest } = await fetchLatestBaileysVersion();
-  console.log(`[agent] WA v${version.join(".")} (latest=${isLatest})`);
-  return version;
+  const now = Date.now();
+  if (cachedWAVersion && now - cachedWAVersion.fetchedAt < WA_VERSION_CACHE_MS) {
+    return cachedWAVersion.version;
+  }
+
+  try {
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    cachedWAVersion = {
+      version,
+      fetchedAt: now,
+      isLatest,
+    };
+    console.log(`[agent] WA v${version.join(".")} (latest=${isLatest})`);
+    return version;
+  } catch (error) {
+    if (cachedWAVersion) {
+      console.warn(
+        `[agent] Using cached WA version ${cachedWAVersion.version.join(".")} after refresh failed: ${
+          error instanceof Error ? error.message : error
+        }`,
+      );
+      return cachedWAVersion.version;
+    }
+
+    throw error;
+  }
 }
 
 function sessionDir(userId: string) {
@@ -381,16 +865,571 @@ function sessionDir(userId: string) {
   return path.join(base, userId.replace(/[^a-zA-Z0-9_-]/g, "_"));
 }
 
+function sessionRecoveryCheckpointPath(userId: string) {
+  return path.join(sessionDir(userId), SESSION_RECOVERY_CHECKPOINT_FILE);
+}
+
+function sessionSyncCheckpointPath(userId: string) {
+  return path.join(sessionDir(userId), SESSION_SYNC_CHECKPOINT_FILE);
+}
+
+function readSessionRecoveryCheckpoint(userId: string) {
+  const file = sessionRecoveryCheckpointPath(userId);
+  if (!fs.existsSync(file)) {
+    return null;
+  }
+
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+    return normalizeClawCloudWhatsAppRecoveryCheckpoint(raw);
+  } catch (error) {
+    console.warn(
+      `[agent] Could not read WhatsApp recovery checkpoint for ${userId}:`,
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  }
+}
+
+function writeSessionRecoveryCheckpoint(
+  userId: string,
+  checkpoint: ClawCloudWhatsAppRecoveryCheckpoint,
+) {
+  try {
+    fs.mkdirSync(sessionDir(userId), { recursive: true });
+    fs.writeFileSync(
+      sessionRecoveryCheckpointPath(userId),
+      JSON.stringify(checkpoint, null, 2),
+      "utf8",
+    );
+  } catch (error) {
+    console.warn(
+      `[agent] Could not persist WhatsApp recovery checkpoint for ${userId}:`,
+      error instanceof Error ? error.message : error,
+    );
+  }
+}
+
+function readSessionSyncCheckpoint(userId: string) {
+  const file = sessionSyncCheckpointPath(userId);
+  if (!fs.existsSync(file)) {
+    return null;
+  }
+
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+    return normalizeClawCloudWhatsAppSyncCheckpoint(raw);
+  } catch (error) {
+    console.warn(
+      `[agent] Could not read WhatsApp sync checkpoint for ${userId}:`,
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  }
+}
+
+function writeSessionSyncCheckpoint(
+  userId: string,
+  checkpoint: ClawCloudWhatsAppSyncCheckpoint,
+) {
+  try {
+    fs.mkdirSync(sessionDir(userId), { recursive: true });
+    fs.writeFileSync(
+      sessionSyncCheckpointPath(userId),
+      JSON.stringify(checkpoint, null, 2),
+      "utf8",
+    );
+  } catch (error) {
+    console.warn(
+      `[agent] Could not persist WhatsApp sync checkpoint for ${userId}:`,
+      error instanceof Error ? error.message : error,
+    );
+  }
+}
+
+function clearSessionReconnectTimer(userId: string) {
+  const timer = sessionReconnectTimers.get(userId);
+  if (timer) {
+    clearTimeout(timer);
+    sessionReconnectTimers.delete(userId);
+  }
+}
+
+function buildSessionRecoveryCheckpoint(
+  userId: string,
+  input: {
+    record?: SessionRecord | null;
+    connectionStatus?: ClawCloudWhatsAppRuntimeConnectionStatus;
+    connected?: boolean;
+    requiresReauth?: boolean;
+    lastSyncError?: string | null;
+    reconnectAttempts?: number;
+    lastDisconnectCode?: number | null;
+    lastDisconnectAt?: number | null;
+    nextReconnectAt?: number | null;
+    updatedAt?: number;
+  } = {},
+): ClawCloudWhatsAppRecoveryCheckpoint {
+  const record = input.record ?? null;
+  const updatedAt = input.updatedAt ?? Date.now();
+
+  return {
+    version: 1,
+    connectionStatus: input.connectionStatus ?? connectionStatusForRuntime(record),
+    phone: record?.phone ?? null,
+    connected: input.connected ?? record?.status === "connected",
+    requiresReauth: Boolean(input.requiresReauth),
+    reconnectAttempts: Math.max(
+      0,
+      Math.trunc(input.reconnectAttempts ?? record?.reconnectAttempts ?? 0),
+    ),
+    lastDisconnectCode:
+      typeof input.lastDisconnectCode === "number"
+        ? Math.trunc(input.lastDisconnectCode)
+        : record?.lastDisconnectCode ?? null,
+    lastDisconnectAt: toIsoOrNull(input.lastDisconnectAt ?? record?.lastDisconnectAt),
+    nextReconnectAt: toIsoOrNull(input.nextReconnectAt ?? record?.nextReconnectAt),
+    connectedAt: toIsoOrNull(record?.connectedAt),
+    lastActivityAt: toIsoOrNull(record?.lastActivityAt),
+    lastSuccessfulSyncAt: toIsoOrNull(record?.lastSuccessfulSyncAt),
+    lastSyncFinishedAt: toIsoOrNull(record?.lastSyncFinishedAt),
+    lastSyncReason: record?.lastSyncReason ?? null,
+    lastSyncError: input.lastSyncError ?? record?.lastSyncError ?? null,
+    lastSyncDurationMs: record?.lastSyncDurationMs ?? null,
+    lastContactPersistedCount: Math.max(0, Math.trunc(record?.lastContactPersistedCount ?? 0)),
+    lastHistoryPersistedCount: Math.max(0, Math.trunc(record?.lastHistoryPersistedCount ?? 0)),
+    lastHistoryBackfillCount: Math.max(0, Math.trunc(record?.lastHistoryBackfillCount ?? 0)),
+    lastHistoryExpansionRequestedCount: Math.max(
+      0,
+      Math.trunc(record?.lastHistoryExpansionRequestedCount ?? 0),
+    ),
+    updatedAt: toIsoOrNull(updatedAt),
+  };
+}
+
+function persistSessionRecoveryCheckpoint(
+  userId: string,
+  input: Parameters<typeof buildSessionRecoveryCheckpoint>[1] = {},
+) {
+  writeSessionRecoveryCheckpoint(userId, buildSessionRecoveryCheckpoint(userId, input));
+}
+
+function restoreSessionHistoryResumeCursors(
+  checkpoint: ClawCloudWhatsAppSyncCheckpoint | null | undefined,
+) {
+  const source = checkpoint?.historyCursors?.length
+    ? checkpoint.historyCursors.map((cursor) => ({
+      remoteJid: cursor.remoteJid,
+      oldestMessageId: cursor.oldestMessageId,
+      oldestTimestampAt: cursor.oldestTimestampAt,
+      fromMe: cursor.fromMe,
+      messageCount: cursor.messageCount,
+      attempts: cursor.attempts,
+    }))
+    : (checkpoint?.chatStates ?? [])
+      .filter((chat) =>
+        typeof chat.remoteJid === "string"
+        && Boolean(chat.oldestTimestampAt)
+        && typeof chat.oldestMessageId === "string"
+        && chat.oldestMessageId.trim().length > 0
+      )
+      .map((chat) => ({
+        remoteJid: chat.remoteJid,
+        oldestMessageId: chat.oldestMessageId,
+        oldestTimestampAt: chat.oldestTimestampAt,
+        fromMe: chat.fromMe,
+        messageCount: chat.messageCount,
+        attempts: chat.attempts,
+      }));
+
+  return source
+    .map((cursor): SessionHistoryResumeCursor | null => {
+      const oldestTimestampMs = cursor.oldestTimestampAt ? Date.parse(cursor.oldestTimestampAt) : NaN;
+      if (!Number.isFinite(oldestTimestampMs)) {
+        return null;
+      }
+
+      return {
+        remoteJid: cursor.remoteJid,
+        oldestMessageId: cursor.oldestMessageId,
+        oldestTimestampMs,
+        fromMe: cursor.fromMe,
+        messageCount: Math.max(1, Math.trunc(cursor.messageCount || 1)),
+        attempts: Math.max(0, Math.trunc(cursor.attempts || 0)),
+      };
+    })
+    .filter(Boolean) as SessionHistoryResumeCursor[];
+}
+
+function buildSessionHistoryResumeCursors(userId: string, record: SessionRecord) {
+  const requestState = sessionHistoryExpansionState.get(userId) ?? new Map();
+  const merged = new Map<string, SessionHistoryResumeCursor>();
+
+  for (const cursor of record.checkpointHistoryCursors) {
+    merged.set(cursor.remoteJid, { ...cursor });
+  }
+
+  for (const cursor of buildSessionHistoryCursors(record)) {
+    const attemptsState = requestState.get(cursor.remoteJid);
+    const next: SessionHistoryResumeCursor = {
+      ...cursor,
+      attempts:
+        attemptsState?.oldestMessageId === cursor.oldestMessageId
+          ? attemptsState.attempts
+          : 0,
+    };
+    const existing = merged.get(cursor.remoteJid);
+
+    if (!existing) {
+      merged.set(cursor.remoteJid, next);
+      continue;
+    }
+
+    const nextIsOlder = next.oldestTimestampMs < existing.oldestTimestampMs;
+    const sameCursor = next.oldestMessageId === existing.oldestMessageId;
+    if (nextIsOlder) {
+      merged.set(cursor.remoteJid, next);
+      continue;
+    }
+
+    if (sameCursor) {
+      merged.set(cursor.remoteJid, {
+        ...existing,
+        fromMe: next.fromMe,
+        messageCount: Math.max(existing.messageCount, next.messageCount),
+        attempts: Math.max(existing.attempts, next.attempts),
+      });
+      continue;
+    }
+
+    merged.set(cursor.remoteJid, {
+      ...existing,
+      messageCount: Math.max(existing.messageCount, next.messageCount),
+    });
+  }
+
+  return [...merged.values()].sort((left, right) => {
+    if (left.messageCount !== right.messageCount) {
+      return left.messageCount - right.messageCount;
+    }
+    return right.oldestTimestampMs - left.oldestTimestampMs;
+  });
+}
+
+function buildSessionHistoryBackfillPlan(userId: string, record: SessionRecord) {
+  const latestByRemoteJid = new Map<string, SessionHistoryEntry>();
+
+  for (const row of record.historyRows.values()) {
+    const remoteJid = toReplyableJid(row.remote_jid ?? null);
+    if (!remoteJid) {
+      continue;
+    }
+
+    const existing = latestByRemoteJid.get(remoteJid);
+    if (!existing || existing.sent_at.localeCompare(row.sent_at) < 0) {
+      latestByRemoteJid.set(remoteJid, row);
+    }
+  }
+
+  const chats = buildSessionHistoryResumeCursors(userId, record).map((cursor) => {
+    const latest = latestByRemoteJid.get(cursor.remoteJid);
+    const resolvedPhone = resolveSessionContactPhone(record, cursor.remoteJid, latest?.remote_phone ?? null);
+    const contactEntry =
+      (resolvedPhone ? record.contacts.get(resolvedPhone) : null)
+      ?? record.contacts.get(cursor.remoteJid)
+      ?? null;
+    return {
+      remoteJid: cursor.remoteJid,
+      oldestMessageId: cursor.oldestMessageId,
+      chatType: latest?.chat_type === "self"
+        ? "self"
+        : latest?.chat_type === "group"
+          ? "group"
+          : latest?.chat_type === "direct"
+            ? "direct"
+            : getChatType(cursor.remoteJid, record) === "self"
+              ? "self"
+              : getChatType(cursor.remoteJid, record) === "group"
+                ? "group"
+                : getChatType(cursor.remoteJid, record) === "direct"
+                  ? "direct"
+                  : "unknown",
+      messageCount: cursor.messageCount,
+      oldestTimestampMs: cursor.oldestTimestampMs,
+      latestTimestampMs: latest ? Date.parse(latest.sent_at) : null,
+      fromMe: cursor.fromMe,
+      attempts: cursor.attempts,
+      hasDisplayName: Boolean(contactEntry?.displayName || latest?.contact_name),
+    };
+  });
+
+  return buildClawCloudWhatsAppHistoryBackfillPlan(chats, {
+    deepMessageTarget: SESSION_HISTORY_DEEP_CHAT_TARGET,
+    completionAttemptThreshold: SESSION_HISTORY_EXPANSION_MAX_ATTEMPTS_PER_CURSOR,
+  });
+}
+
+function buildEligibleSessionHistoryExpansionCandidates(userId: string, record: SessionRecord) {
+  const requestState = sessionHistoryExpansionState.get(userId) ?? new Map();
+  const cursorsByRemoteJid = new Map(
+    buildSessionHistoryResumeCursors(userId, record).map((cursor) => [cursor.remoteJid, cursor] as const),
+  );
+
+  return buildSessionHistoryBackfillPlan(userId, record)
+    .map((chat) => cursorsByRemoteJid.get(chat.remoteJid) ?? null)
+    .filter(Boolean)
+    .filter((cursor) => {
+      const previous = requestState.get(cursor.remoteJid);
+      if (!previous) {
+        return true;
+      }
+      if (previous.oldestMessageId !== cursor.oldestMessageId) {
+        return true;
+      }
+      return previous.attempts < SESSION_HISTORY_EXPANSION_MAX_ATTEMPTS_PER_CURSOR;
+    }) as SessionHistoryResumeCursor[];
+}
+
+function buildSessionSyncCheckpoint(
+  userId: string,
+  record: SessionRecord,
+  updatedAt = Date.now(),
+): ClawCloudWhatsAppSyncCheckpoint {
+  const contactCount = getSessionRuntimeContactCount(record);
+  const historyMessageCount = getSessionRuntimeHistoryMessageCount(record);
+  const chatStates = buildSessionHistoryBackfillPlan(userId, record)
+    .slice(0, Math.max(SESSION_HISTORY_EXPANSION_CHAT_LIMIT * 2, 24));
+  const historyCursors = buildSessionHistoryResumeCursors(userId, record)
+    .slice(0, Math.max(SESSION_HISTORY_EXPANSION_CHAT_LIMIT * 2, 24))
+    .map((cursor) => ({
+      remoteJid: cursor.remoteJid,
+      oldestMessageId: cursor.oldestMessageId,
+      oldestTimestampAt: toIsoOrNull(cursor.oldestTimestampMs),
+      fromMe: cursor.fromMe,
+      messageCount: Math.max(1, Math.trunc(cursor.messageCount)),
+      attempts: Math.max(0, Math.trunc(cursor.attempts)),
+    }));
+
+  return {
+    version: 1,
+    syncState: record.syncState,
+    contactCount,
+    historyMessageCount,
+    contactTarget: CONTACT_REFRESH_TARGET_COUNT,
+    historyTarget: SESSION_HISTORY_SYNC_TARGET,
+    lastContactPersistedCount: Math.max(0, Math.trunc(record.lastContactPersistedCount)),
+    lastHistoryPersistedCount: Math.max(0, Math.trunc(record.lastHistoryPersistedCount)),
+    lastHistoryBackfillCount: Math.max(0, Math.trunc(record.lastHistoryBackfillCount)),
+    lastHistoryExpansionRequestedCount: Math.max(0, Math.trunc(record.lastHistoryExpansionRequestedCount)),
+    lastSyncReason: record.lastSyncReason,
+    lastSyncStartedAt: toIsoOrNull(record.lastSyncStartedAt),
+    lastSyncFinishedAt: toIsoOrNull(record.lastSyncFinishedAt),
+    lastSuccessfulSyncAt: toIsoOrNull(record.lastSuccessfulSyncAt),
+    resumeRecommended: buildClawCloudWhatsAppSyncCheckpointResumeRecommended({
+      syncState: record.syncState,
+      contactCount,
+      historyMessageCount,
+      contactTarget: CONTACT_REFRESH_TARGET_COUNT,
+      historyTarget: SESSION_HISTORY_SYNC_TARGET,
+    }),
+    historyCursors,
+    historyCoverage: summarizeClawCloudWhatsAppHistoryCoverage(chatStates),
+    chatStates,
+    updatedAt: toIsoOrNull(updatedAt),
+  };
+}
+
+function persistSessionSyncCheckpoint(userId: string, record: SessionRecord) {
+  record.checkpointContactCount = Math.max(record.checkpointContactCount, record.contacts.size);
+  record.checkpointHistoryMessageCount = Math.max(
+    record.checkpointHistoryMessageCount,
+    record.historyRows.size,
+    record.lastHistoryPersistedCount,
+  );
+  record.checkpointHistoryCursors = buildSessionHistoryResumeCursors(userId, record);
+  writeSessionSyncCheckpoint(userId, buildSessionSyncCheckpoint(userId, record));
+}
+
+function scheduleSessionSyncCheckpointPersist(
+  userId: string,
+  record: SessionRecord,
+  _reason: string,
+  delayMs = SESSION_SYNC_CHECKPOINT_PERSIST_DEBOUNCE_MS,
+) {
+  if (!isActiveSessionRecord(userId, record)) {
+    return;
+  }
+
+  const existing = sessionSyncCheckpointTimers.get(userId);
+  if (existing) {
+    clearTimeout(existing);
+  }
+
+  const timer = setTimeout(() => {
+    sessionSyncCheckpointTimers.delete(userId);
+    if (!isActiveSessionRecord(userId, record)) {
+      return;
+    }
+    persistSessionSyncCheckpoint(userId, record);
+  }, Math.max(0, Math.trunc(delayMs)));
+
+  sessionSyncCheckpointTimers.set(userId, timer);
+}
+
+function clearSessionHistoryExpansionFollowupTimer(userId: string) {
+  const timer = sessionHistoryExpansionFollowupTimers.get(userId);
+  if (timer) {
+    clearTimeout(timer);
+    sessionHistoryExpansionFollowupTimers.delete(userId);
+  }
+}
+
+function scheduleSessionHistoryExpansionFollowup(
+  userId: string,
+  record: SessionRecord,
+  reason: string,
+  delayMs = SESSION_HISTORY_EXPANSION_FOLLOWUP_DELAY_MS,
+) {
+  if (!isActiveSessionRecord(userId, record) || record.status !== "connected") {
+    return;
+  }
+
+  clearSessionHistoryExpansionFollowupTimer(userId);
+  const timer = setTimeout(() => {
+    sessionHistoryExpansionFollowupTimers.delete(userId);
+    const latest = sessions.get(userId);
+    if (latest !== record || latest?.status !== "connected") {
+      return;
+    }
+
+    void requestSessionHistoryExpansion(userId, latest, reason).catch((error) =>
+      console.error(
+        `[agent] Scheduled WhatsApp history follow-up failed for ${userId}:`,
+        error instanceof Error ? error.message : error,
+      ),
+    );
+  }, Math.max(0, Math.trunc(delayMs)));
+
+  sessionHistoryExpansionFollowupTimers.set(userId, timer);
+}
+
+function clearSessionRuntimeResources(
+  userId: string,
+  record: SessionRecord | undefined,
+) {
+  clearSessionReconnectTimer(userId);
+
+  const contactTask = contactRefreshTasks.get(userId);
+  if (!record || contactTask?.record === record) {
+    contactRefreshTasks.delete(userId);
+  }
+
+  const workspaceTask = workspaceBootstrapTasks.get(userId);
+  if (!record || workspaceTask?.record === record) {
+    workspaceBootstrapTasks.delete(userId);
+  }
+
+  const persistTimer = sessionContactPersistTimers.get(userId);
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    sessionContactPersistTimers.delete(userId);
+  }
+
+  const historyPersistTimer = sessionHistoryPersistTimers.get(userId);
+  if (historyPersistTimer) {
+    clearTimeout(historyPersistTimer);
+    sessionHistoryPersistTimers.delete(userId);
+  }
+
+  const historyBackfillTimer = sessionHistoryContactBackfillTimers.get(userId);
+  if (historyBackfillTimer) {
+    clearTimeout(historyBackfillTimer);
+    sessionHistoryContactBackfillTimers.delete(userId);
+  }
+  clearSessionHistoryExpansionFollowupTimer(userId);
+
+  const syncCheckpointTimer = sessionSyncCheckpointTimers.get(userId);
+  if (syncCheckpointTimer) {
+    clearTimeout(syncCheckpointTimer);
+    sessionSyncCheckpointTimers.delete(userId);
+  }
+
+  const resyncTimer = sessionWorkspaceResyncTimers.get(userId);
+  if (resyncTimer) {
+    clearTimeout(resyncTimer);
+    sessionWorkspaceResyncTimers.delete(userId);
+  }
+
+  const historyExpansionTask = sessionHistoryExpansionTasks.get(userId);
+  if (!record || historyExpansionTask?.record === record) {
+    sessionHistoryExpansionTasks.delete(userId);
+  }
+  sessionHistoryExpansionState.delete(userId);
+}
+
+function scheduleSessionReconnect(
+  userId: string,
+  record: SessionRecord,
+  reason: string,
+) {
+  const reconnectAttempts = Math.max(1, record.reconnectAttempts + 1);
+  const delayMs = computeClawCloudWhatsAppReconnectDelayMs(reconnectAttempts, {
+    baseMs: SESSION_RECONNECT_BASE_DELAY_MS,
+    maxMs: SESSION_RECONNECT_MAX_DELAY_MS,
+  });
+  const now = Date.now();
+
+  record.reconnectAttempts = reconnectAttempts;
+  record.lastDisconnectAt = now;
+  record.nextReconnectAt = now + delayMs;
+
+  persistSessionRecoveryCheckpoint(userId, {
+    record,
+    connectionStatus: "disconnected",
+    connected: false,
+    reconnectAttempts,
+    lastDisconnectAt: record.lastDisconnectAt,
+    nextReconnectAt: record.nextReconnectAt,
+    lastSyncError: record.lastSyncError ?? `WhatsApp connection closed. Retrying via ${reason}.`,
+    updatedAt: now,
+  });
+  persistSessionSyncCheckpoint(userId, record);
+
+  clearSessionReconnectTimer(userId);
+  const timer = setTimeout(() => {
+    sessionReconnectTimers.delete(userId);
+    void connectSession(userId).catch((error) =>
+      console.error(
+        `[agent] Scheduled reconnect failed for ${userId}:`,
+        error instanceof Error ? error.message : error,
+      ),
+    );
+  }, delayMs);
+  sessionReconnectTimers.set(userId, timer);
+
+  console.warn(
+    `[agent] Scheduling WhatsApp reconnect for ${userId} in ${delayMs}ms after ${reason} (attempt ${reconnectAttempts})`,
+  );
+}
+
 async function discardSession(
   userId: string,
   record: SessionRecord | undefined,
-  options: { deleteAuth?: boolean } = {},
+  options: { deleteAuth?: boolean; logout?: boolean } = {},
 ) {
   if (record) {
-    try {
-      await record.sock.logout();
-    } catch {
-      // Ignore logout failures during cleanup.
+    persistSessionSyncCheckpoint(userId, record);
+  }
+  clearSessionRuntimeResources(userId, record);
+
+  if (record) {
+    const shouldLogout = options.logout ?? Boolean(options.deleteAuth);
+    if (shouldLogout) {
+      try {
+        await record.sock.logout();
+      } catch {
+        // Ignore logout failures during cleanup.
+      }
     }
 
     try {
@@ -410,86 +1449,22 @@ async function discardSession(
   }
 }
 
-function splitIntoStreamChunks(text: string): string[] {
-  const normalized = text.replace(/\n{3,}/g, "\n\n").trim();
-  if (!normalized) {
-    return [];
-  }
-
-  const codeBlocks: string[] = [];
-  const withPlaceholders = normalized.replace(/```[\s\S]*?```/g, (match) => {
-    codeBlocks.push(match.trim());
-    return `___CODE_BLOCK_${codeBlocks.length - 1}___`;
-  });
-
-  const chunks: string[] = [];
-  const sections = withPlaceholders.split(/\n\n+/);
-  for (const section of sections) {
-    const trimmed = section.trim();
-    if (!trimmed) continue;
-
-    if (/^___CODE_BLOCK_\d+___$/.test(trimmed)) {
-      const idx = Number.parseInt(trimmed.match(/\d+/)?.[0] ?? "-1", 10);
-      if (idx >= 0 && codeBlocks[idx]) {
-        chunks.push(codeBlocks[idx]);
-      }
-      continue;
-    }
-
-    if (trimmed.length <= 220) {
-      chunks.push(trimmed);
-      continue;
-    }
-
-    const sentences = trimmed.split(/(?<=[.!?])\s+/);
-    let current = "";
-    for (const sentence of sentences) {
-      const candidate = current ? `${current} ${sentence}` : sentence;
-      if (candidate.length > 260 && current) {
-        chunks.push(current.trim());
-        current = sentence;
-      } else {
-        current = candidate;
-      }
-    }
-    if (current.trim()) {
-      chunks.push(current.trim());
-    }
-  }
-
-  return chunks.filter(Boolean);
-}
-
-function chunkDelay(chunk: string) {
-  if (chunk.startsWith("```")) {
-    return Math.min(600 + chunk.length * 2, 3_000);
-  }
-  const words = chunk.split(/\s+/).length;
-  return Math.min(500 + words * 55, 1_800);
-}
-
-function initialTypingDelay(text: string) {
-  const len = text.length;
-  if (len < 80) return 700;
-  if (len < 300) return 1_100;
-  if (len < 800) return 1_600;
-  return 2_000;
-}
-
 async function sendStreamingMessage(sock: WASocket, jid: string, fullText: string) {
   const trimmed = fullText.replace(/\n{3,}/g, "\n\n").trim();
-  const chunks = splitIntoStreamChunks(trimmed);
+  const chunks = splitWhatsAppStreamChunks(trimmed);
+  const messageIds: string[] = [];
 
   await sock.sendPresenceUpdate("composing", jid).catch(() => null);
-  await new Promise((resolve) => setTimeout(resolve, initialTypingDelay(trimmed)));
+  await new Promise((resolve) => setTimeout(resolve, whatsAppInitialTypingDelayMs(trimmed)));
 
   if (chunks.length <= 1) {
     const sent = await sock.sendMessage(jid, { text: trimmed });
     if (sent?.key?.id) {
       outboundIds.add(sent.key.id);
+      messageIds.push(sent.key.id);
     }
     await sock.sendPresenceUpdate("paused", jid).catch(() => null);
-    return;
+    return messageIds;
   }
 
   for (let index = 0; index < chunks.length; index += 1) {
@@ -498,13 +1473,14 @@ async function sendStreamingMessage(sock: WASocket, jid: string, fullText: strin
 
     if (index > 0) {
       await sock.sendPresenceUpdate("composing", jid).catch(() => null);
-      await new Promise((resolve) => setTimeout(resolve, chunkDelay(chunk)));
+      await new Promise((resolve) => setTimeout(resolve, whatsAppChunkDelayMs(chunk)));
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
 
     const sent = await sock.sendMessage(jid, { text: chunk });
     if (sent?.key?.id) {
       outboundIds.add(sent.key.id);
+      messageIds.push(sent.key.id);
     }
 
     if (!isLast) {
@@ -513,6 +1489,164 @@ async function sendStreamingMessage(sock: WASocket, jid: string, fullText: strin
   }
 
   await sock.sendPresenceUpdate("paused", jid).catch(() => null);
+  return messageIds;
+}
+
+type TrackedWhatsAppSendInput = {
+  userId: string | null;
+  source?: WhatsAppOutboundSource | null;
+  approvalId?: string | null;
+  workflowRunId?: string | null;
+  idempotencyKey?: string | null;
+  jid: string;
+  phone?: string | null;
+  contactName?: string | null;
+  message: string;
+  metadata?: Record<string, unknown> | null;
+};
+
+function normalizeTrackedWhatsAppMetadata(value: unknown) {
+  return value && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function buildAssistantReplyIdempotencyKey(userId: string, jid: string) {
+  return [
+    "assistant-reply",
+    userId,
+    jid,
+    Date.now().toString(36),
+    Math.random().toString(36).slice(2, 10),
+  ].join("-");
+}
+
+function buildTrackedWhatsAppMessageExcerpt(message: string) {
+  return message.replace(/\n{3,}/g, "\n\n").trim().slice(0, 200);
+}
+
+function mapBaileysStatusToAckStatus(status: number | null | undefined): WhatsAppMessageAckStatus | null {
+  if (status === WAMessageStatus.READ) {
+    return "read";
+  }
+  if (status === WAMessageStatus.DELIVERY_ACK) {
+    return "delivery_ack";
+  }
+  if (status === WAMessageStatus.SERVER_ACK) {
+    return "server_ack";
+  }
+  if (status === WAMessageStatus.PENDING) {
+    return "pending";
+  }
+  if (status === WAMessageStatus.ERROR) {
+    return "error";
+  }
+
+  return null;
+}
+
+function mapReceiptUpdateToAckStatus(receipt: {
+  readTimestamp?: number | string | null;
+  receiptTimestamp?: number | string | null;
+  deliveredDeviceJid?: string[] | null;
+  pendingDeviceJid?: string[] | null;
+} | null | undefined): WhatsAppMessageAckStatus | null {
+  if (!receipt) {
+    return null;
+  }
+
+  if (receipt.readTimestamp != null) {
+    return "read";
+  }
+  if (receipt.receiptTimestamp != null || (receipt.deliveredDeviceJid?.length ?? 0) > 0) {
+    return "delivery_ack";
+  }
+  if ((receipt.pendingDeviceJid?.length ?? 0) > 0) {
+    return "pending";
+  }
+
+  return null;
+}
+
+async function prepareTrackedWhatsAppOutbound(input: TrackedWhatsAppSendInput) {
+  if (!input.userId) {
+    return null;
+  }
+
+  let outbound = await ensureWhatsAppOutboundMessage({
+    userId: input.userId,
+    source: input.source ?? "api_send",
+    approvalId: input.approvalId,
+    workflowRunId: input.workflowRunId,
+    remoteJid: input.jid,
+    remotePhone: input.phone ?? phoneFromJid(input.jid),
+    contactName: sanitizeContactName(input.contactName),
+    messageText: input.message,
+    status: input.approvalId ? "approved" : "queued",
+    idempotencyKey: input.idempotencyKey,
+    metadata: normalizeTrackedWhatsAppMetadata(input.metadata),
+  }).catch(() => null);
+
+  if (!outbound) {
+    return null;
+  }
+
+  if (outbound.status === "approval_required") {
+    outbound = await transitionWhatsAppOutboundMessage({
+      userId: input.userId,
+      outboundMessageId: outbound.id,
+      nextStatus: "approved",
+      metadata: normalizeTrackedWhatsAppMetadata(input.metadata),
+    }).catch(() => outbound);
+  } else if (outbound.status === "failed") {
+    outbound = await transitionWhatsAppOutboundMessage({
+      userId: input.userId,
+      outboundMessageId: outbound.id,
+      nextStatus: "retrying",
+      metadata: normalizeTrackedWhatsAppMetadata(input.metadata),
+    }).catch(() => outbound);
+  }
+
+  return outbound;
+}
+
+async function recordTrackedWhatsAppSendSuccess(
+  tracking: TrackedWhatsAppSendInput,
+  waMessageIds: string[],
+  attemptCount: number,
+) {
+  if (!tracking.userId) {
+    return;
+  }
+
+  await transitionWhatsAppOutboundMessage({
+    userId: tracking.userId,
+    idempotencyKey: tracking.idempotencyKey ?? null,
+    nextStatus: "sent",
+    attemptCount,
+    waMessageIds,
+    metadata: normalizeTrackedWhatsAppMetadata(tracking.metadata),
+  }).catch(() => null);
+}
+
+async function recordTrackedWhatsAppSendFailure(
+  tracking: TrackedWhatsAppSendInput,
+  attemptCount: number,
+  errorMessage: string,
+  finalFailure: boolean,
+) {
+  if (!tracking.userId) {
+    return;
+  }
+
+  await transitionWhatsAppOutboundMessage({
+    userId: tracking.userId,
+    idempotencyKey: tracking.idempotencyKey ?? null,
+    nextStatus: finalFailure ? "failed" : "retrying",
+    attemptCount,
+    errorMessage,
+    metadata: normalizeTrackedWhatsAppMetadata(tracking.metadata),
+  }).catch(() => null);
 }
 
 async function logOutbound(
@@ -520,14 +1654,17 @@ async function logOutbound(
   content: string,
   targetJid?: string | null,
   contactName?: string | null,
+  waMessageIds?: string[] | null,
 ) {
   const session = sessions.get(userId);
   const sentAt = new Date().toISOString();
+  const primaryWaMessageId = waMessageIds?.find((value) => value.trim()) ?? null;
   const fullRow = {
     user_id: userId,
     direction: "outbound",
     content,
     message_type: "text",
+    wa_message_id: primaryWaMessageId,
     remote_jid: targetJid ?? null,
     remote_phone: phoneFromJid(targetJid),
     contact_name: sanitizeContactName(contactName),
@@ -549,6 +1686,7 @@ async function logOutbound(
         direction: "outbound",
         content,
         message_type: "text",
+        wa_message_id: primaryWaMessageId,
         sent_at: sentAt,
       })
       .catch(() => null);
@@ -584,7 +1722,12 @@ function normalizePhone(value: string | null | undefined) {
 }
 
 function phoneFromJid(jid: string | null | undefined) {
-  const digits = String(jid ?? "").split("@")[0]?.replace(/\D/g, "") ?? "";
+  const value = String(jid ?? "").trim().toLowerCase();
+  if (!/@s\.whatsapp\.net$/i.test(value)) {
+    return null;
+  }
+
+  const digits = value.split("@")[0]?.replace(/\D/g, "") ?? "";
   return digits || null;
 }
 
@@ -620,6 +1763,30 @@ function toReplyableJid(jid: string | null | undefined) {
   if (isIgnoredChatJid(value)) return null;
   if (!isDirectChatJid(value) && !isLidChatJid(value)) return null;
   return value;
+}
+
+function resolveSessionReplyableJid(
+  record: SessionRecord | null | undefined,
+  jid: string | null | undefined,
+) {
+  const value = toReplyableJid(jid);
+  if (!value) {
+    return null;
+  }
+
+  if (record && isLidChatJid(value)) {
+    return record.sharedPhoneJids.get(value) ?? value;
+  }
+
+  return value;
+}
+
+function resolveSessionContactPhone(
+  record: SessionRecord | null | undefined,
+  jid: string | null | undefined,
+  fallbackPhone?: string | null | undefined,
+) {
+  return phoneFromJid(resolveSessionReplyableJid(record, jid)) ?? normalizePhone(fallbackPhone);
 }
 
 function sanitizeContactName(value: string | null | undefined) {
@@ -662,6 +1829,20 @@ const LIVE_CONTACT_CANONICAL_ALIASES: Record<string, string> = {
   pappa: "papa",
   baba: "papa",
   pitaji: "papa",
+  di: "didi",
+  dii: "didi",
+  sister: "didi",
+  sis: "didi",
+  bro: "bhai",
+  brother: "bhai",
+  bhaiya: "bhai",
+};
+
+const LIVE_CONTACT_VARIANT_EXPANSIONS: Record<string, string[]> = {
+  maa: ["mom", "mother", "mummy", "mum", "mommy", "mamma", "mama", "ma"],
+  papa: ["dad", "father", "daddy", "pappa", "baba", "pitaji", "papaji", "papa ji"],
+  didi: ["dii", "di", "sister", "sis"],
+  bhai: ["bhaiya", "bro", "brother"],
 };
 
 function normalizeLiveContactName(value: string | null | undefined) {
@@ -697,37 +1878,154 @@ function normalizeLiveContactName(value: string | null | undefined) {
   return words.join(" ").trim();
 }
 
+function uniqueSanitizedStrings(values: Array<string | null | undefined>) {
+  return [...new Set(values.map((value) => sanitizeContactName(value)).filter(Boolean))] as string[];
+}
+
+function expandLiveAliasVariants(value: string | null | undefined) {
+  const base = normalizeLiveContactName(value);
+  if (!base) {
+    return [];
+  }
+
+  const variants = new Set<string>([base, base.replace(/\s+/g, "")]);
+  const words = base.split(/\s+/).filter(Boolean);
+
+  for (const word of words) {
+    variants.add(word);
+    for (const expansion of LIVE_CONTACT_VARIANT_EXPANSIONS[word] ?? []) {
+      variants.add(normalizeLiveContactName(expansion));
+    }
+  }
+
+  for (const expansion of LIVE_CONTACT_VARIANT_EXPANSIONS[base] ?? []) {
+    variants.add(normalizeLiveContactName(expansion));
+  }
+
+  return [...variants].filter(Boolean);
+}
+
+function getLiveContactQueryVariants(value: string) {
+  const base = normalizeLiveContactName(value);
+  if (!base) {
+    return [];
+  }
+
+  const variants = new Set<string>(expandLiveAliasVariants(base));
+  for (const word of base.split(/\s+/).filter(Boolean)) {
+    variants.add(word);
+  }
+  return [...variants].filter(Boolean);
+}
+
+function levenshteinDistance(left: string, right: string) {
+  if (left === right) return 0;
+  if (!left.length) return right.length;
+  if (!right.length) return left.length;
+
+  const matrix: number[][] = [];
+  for (let row = 0; row <= right.length; row += 1) {
+    matrix[row] = [row];
+  }
+  for (let column = 0; column <= left.length; column += 1) {
+    matrix[0]![column] = column;
+  }
+
+  for (let row = 1; row <= right.length; row += 1) {
+    for (let column = 1; column <= left.length; column += 1) {
+      const cost = left[column - 1] === right[row - 1] ? 0 : 1;
+      matrix[row]![column] = Math.min(
+        matrix[row - 1]![column]! + 1,
+        matrix[row]![column - 1]! + 1,
+        matrix[row - 1]![column - 1]! + cost,
+      );
+    }
+  }
+
+  return matrix[right.length]![left.length]!;
+}
+
+function liveContactSimilarity(left: string, right: string) {
+  const maxLen = Math.max(left.length, right.length);
+  if (!maxLen) {
+    return 1;
+  }
+  return 1 - levenshteinDistance(left, right) / maxLen;
+}
+
+function normalizeSessionSourceKinds(values: Array<string | null | undefined>) {
+  return [...new Set(
+    values
+      .map((value) => String(value ?? "").trim().toLowerCase())
+      .filter(Boolean),
+  )];
+}
+
+function normalizeTimestampToMs(value: string | number | null | undefined) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 10_000_000_000 ? value : value * 1000;
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function pickBetterDisplayName(current: string | null | undefined, candidate: string | null | undefined) {
+  const currentValue = sanitizeContactName(current);
+  const candidateValue = sanitizeContactName(candidate);
+  if (!candidateValue) {
+    return currentValue ?? null;
+  }
+  if (!currentValue) {
+    return candidateValue;
+  }
+
+  const currentWords = currentValue.split(/\s+/).length;
+  const candidateWords = candidateValue.split(/\s+/).length;
+  if (candidateWords > currentWords) {
+    return candidateValue;
+  }
+  if (candidateValue.length > currentValue.length + 2) {
+    return candidateValue;
+  }
+  return currentValue;
+}
+
 function collectLiveContactAliases(seed: WhatsAppContactSyncInput) {
   const rawAliases = [
     seed.contactName,
     seed.notifyName,
     seed.verifiedName,
-  ]
-    .map((value) => sanitizeContactName(value))
-    .filter((value): value is string => Boolean(value));
+    ...(Array.isArray(seed.aliases) ? seed.aliases : []),
+  ];
 
-  const normalizedAliases = rawAliases
-    .map((value) => normalizeLiveContactName(value))
-    .filter(Boolean);
-
-  return [...new Set(normalizedAliases)];
+  return [...new Set(rawAliases.flatMap((value) => expandLiveAliasVariants(value)))];
 }
 
 function rememberSessionContacts(record: SessionRecord, contacts: WhatsAppContactSyncInput[]) {
   for (const seed of contacts) {
-    const jid = toReplyableJid(seed.jid ?? null);
-    const phone = (
-      (isDirectChatJid(jid ?? "") ? phoneFromJid(jid) : null)
-      ?? String(seed.phoneNumber ?? "").replace(/\D/g, "")
-      || null
-    );
+    const jid = resolveSessionReplyableJid(record, seed.jid ?? null);
+    const phone = resolveSessionContactPhone(record, jid, seed.phoneNumber);
     const aliases = collectLiveContactAliases(seed);
-    const displayName =
+    const preferredNames = uniqueSanitizedStrings([
+      seed.contactName,
+      seed.notifyName,
+      seed.verifiedName,
+      ...(Array.isArray(seed.aliases) ? seed.aliases : []),
+    ]);
+    const displayName = pickBetterDisplayName(
+      null,
       sanitizeContactName(seed.contactName)
       ?? sanitizeContactName(seed.notifyName)
       ?? sanitizeContactName(seed.verifiedName)
+      ?? preferredNames[0]
       ?? aliases[0]
-      ?? null;
+      ?? null,
+    );
 
     if (!jid || !aliases.length || !displayName) {
       continue;
@@ -739,63 +2037,1132 @@ function rememberSessionContacts(record: SessionRecord, contacts: WhatsAppContac
     for (const alias of aliases) {
       mergedAliases.add(alias);
     }
+    const sourceKinds = normalizeSessionSourceKinds([
+      ...(existing?.sourceKinds ?? []),
+      ...(Array.isArray(seed.sourceKinds) ? seed.sourceKinds : []),
+      seed.source ?? "session",
+    ]);
+    const messageCount = Math.max(
+      existing?.messageCount ?? 0,
+      typeof seed.messageCount === "number" && Number.isFinite(seed.messageCount) ? Math.max(0, Math.trunc(seed.messageCount)) : 0,
+    );
+    const lastMessageAt = Math.max(
+      existing?.lastMessageAt ?? 0,
+      normalizeTimestampToMs(seed.lastMessageAt) ?? 0,
+    ) || null;
 
     record.contacts.set(contactKey, {
       jid,
       phone,
-      displayName,
+      displayName: pickBetterDisplayName(existing?.displayName, displayName) ?? displayName,
       aliases: [...mergedAliases],
+      sourceKinds,
+      messageCount,
+      lastMessageAt,
       updatedAt: Date.now(),
     });
   }
+
+  record.checkpointContactCount = Math.max(record.checkpointContactCount, record.contacts.size);
 }
 
-function resolveSessionContact(record: SessionRecord, rawName: string) {
-  const normalizedQuery = normalizeLiveContactName(rawName);
-  if (!normalizedQuery) {
+function applySessionPhoneShare(
+  record: SessionRecord,
+  lidJid: string | null | undefined,
+  directJid: string | null | undefined,
+) {
+  const normalizedLid = toReplyableJid(lidJid);
+  const normalizedDirect = toReplyableJid(directJid);
+  if (!normalizedLid || !isLidChatJid(normalizedLid) || !normalizedDirect || !isDirectChatJid(normalizedDirect)) {
+    return false;
+  }
+
+  const directPhone = phoneFromJid(normalizedDirect);
+  if (!directPhone) {
+    return false;
+  }
+
+  record.sharedPhoneJids.set(normalizedLid, normalizedDirect);
+
+  const existingLid = record.contacts.get(normalizedLid);
+  const existingDirect = record.contacts.get(directPhone) ?? record.contacts.get(normalizedDirect);
+  const mergedAliases = new Set<string>([
+    ...(existingLid?.aliases ?? []),
+    ...(existingDirect?.aliases ?? []),
+  ]);
+  mergedAliases.add(directPhone);
+
+  const mergedEntry: SessionContactEntry | null =
+    existingLid || existingDirect
+      ? {
+        jid: normalizedDirect,
+        phone: directPhone,
+        displayName:
+          pickBetterDisplayName(existingDirect?.displayName, existingLid?.displayName)
+          ?? existingDirect?.displayName
+          ?? existingLid?.displayName
+          ?? directPhone,
+        aliases: [...mergedAliases],
+        sourceKinds: normalizeSessionSourceKinds([
+          ...(existingDirect?.sourceKinds ?? []),
+          ...(existingLid?.sourceKinds ?? []),
+          "phone_number_share",
+        ]),
+        messageCount: Math.max(existingDirect?.messageCount ?? 0, existingLid?.messageCount ?? 0),
+        lastMessageAt: Math.max(existingDirect?.lastMessageAt ?? 0, existingLid?.lastMessageAt ?? 0) || null,
+        updatedAt: Date.now(),
+      }
+      : null;
+
+  if (existingLid) {
+    record.contacts.delete(normalizedLid);
+  }
+  if (existingDirect) {
+    const existingDirectKey = existingDirect.phone ?? existingDirect.jid;
+    record.contacts.delete(existingDirectKey);
+  }
+  if (mergedEntry) {
+    record.contacts.set(directPhone, mergedEntry);
+  }
+  if (record.lastChatJid === normalizedLid) {
+    record.lastChatJid = normalizedDirect;
+  }
+
+  for (const row of record.historyRows.values()) {
+    if (row.remote_jid !== normalizedLid) {
+      continue;
+    }
+
+    row.remote_jid = normalizedDirect;
+    row.remote_phone = directPhone;
+    if (!row.contact_name && mergedEntry?.displayName && mergedEntry.displayName !== directPhone) {
+      row.contact_name = mergedEntry.displayName;
+    }
+  }
+
+  return true;
+}
+
+function syncSessionContactSeeds(
+  userId: string,
+  record: SessionRecord,
+  seeds: WhatsAppContactSyncInput[],
+  sourceLabel: string,
+  options: { persist?: boolean } = {},
+) {
+  if (!seeds.length || !isActiveSessionRecord(userId, record)) {
+    return;
+  }
+
+  rememberSessionContacts(record, seeds);
+  scheduleSessionSyncCheckpointPersist(userId, record, `${sourceLabel}.contact-seeds`);
+
+  if (options.persist === false) {
+    return;
+  }
+
+  void upsertWhatsAppContacts(userId, seeds).catch((error) =>
+    console.error(
+      `[agent] WhatsApp ${sourceLabel} contact sync failed for ${userId}:`,
+      error instanceof Error ? error.message : error,
+    ),
+  );
+}
+
+function buildSessionContactSeeds(record: SessionRecord): WhatsAppContactSyncInput[] {
+  const timestamp = new Date().toISOString();
+  return [...record.contacts.values()]
+    .map((contact) => {
+      const aliases = contact.aliases.filter(Boolean);
+      const [contactName, notifyName, verifiedName] = aliases;
+      return {
+        jid: contact.jid,
+        phoneNumber: contact.phone,
+        contactName: contactName ?? contact.displayName,
+        notifyName: notifyName ?? null,
+        verifiedName: verifiedName ?? null,
+        aliases,
+        source: "session" as const,
+        sourceKinds: contact.sourceKinds,
+        messageCount: contact.messageCount || null,
+        lastMessageAt: contact.lastMessageAt ? new Date(contact.lastMessageAt).toISOString() : null,
+        lastSeenAt: timestamp,
+      };
+    })
+    .filter((seed) => Boolean(seed.jid));
+}
+
+async function persistSessionContactSnapshot(
+  userId: string,
+  record: SessionRecord,
+  sourceLabel: string,
+) {
+  if (!isActiveSessionRecord(userId, record)) {
+    return 0;
+  }
+
+  const seeds = buildSessionContactSeeds(record);
+  if (!seeds.length) {
+    return 0;
+  }
+
+  return await upsertWhatsAppContacts(userId, seeds).then((persisted) => {
+    record.lastContactPersistedCount = Math.max(0, Math.trunc(persisted));
+    record.checkpointContactCount = Math.max(record.checkpointContactCount, record.contacts.size, persisted);
+    touchSessionActivity(record);
+    persistSessionSyncCheckpoint(userId, record);
+    return persisted;
+  }).catch((error) => {
+    console.error(
+      `[agent] WhatsApp ${sourceLabel} contact snapshot persistence failed for ${userId}:`,
+      error instanceof Error ? error.message : error,
+    );
+    return 0;
+  });
+}
+
+function scheduleSessionContactSnapshotPersist(
+  userId: string,
+  record: SessionRecord,
+  sourceLabel: string,
+) {
+  if (!isActiveSessionRecord(userId, record)) {
+    return;
+  }
+
+  const existing = sessionContactPersistTimers.get(userId);
+  if (existing) {
+    clearTimeout(existing);
+  }
+
+  const timer = setTimeout(() => {
+    sessionContactPersistTimers.delete(userId);
+    if (!isActiveSessionRecord(userId, record)) {
+      return;
+    }
+    void persistSessionContactSnapshot(userId, record, sourceLabel).catch((error) =>
+      console.error(
+        `[agent] Scheduled WhatsApp contact persistence failed for ${userId}:`,
+        error instanceof Error ? error.message : error,
+      ),
+    );
+  }, 1_200);
+
+  sessionContactPersistTimers.set(userId, timer);
+}
+
+function scheduleSessionHistorySnapshotPersist(
+  userId: string,
+  record: SessionRecord,
+  sourceLabel: string,
+  delayMs = SESSION_HISTORY_PERSIST_DEBOUNCE_MS,
+) {
+  if (!isActiveSessionRecord(userId, record)) {
+    return;
+  }
+
+  const existing = sessionHistoryPersistTimers.get(userId);
+  if (existing) {
+    clearTimeout(existing);
+  }
+
+  const timer = setTimeout(() => {
+    sessionHistoryPersistTimers.delete(userId);
+    if (sessions.get(userId) !== record) {
+      return;
+    }
+
+    void persistSessionHistorySnapshot(userId, record, sourceLabel).catch((error) =>
+      console.error(
+        `[agent] Scheduled WhatsApp history persistence failed for ${userId}:`,
+        error instanceof Error ? error.message : error,
+      ),
+    );
+  }, delayMs);
+
+  sessionHistoryPersistTimers.set(userId, timer);
+}
+
+function extractHistoryMessageContent(message: WAMessage) {
+  const payload = message.message;
+  if (!payload) {
     return null;
   }
 
-  let best: SessionContactEntry | null = null;
-  let bestScore = -1;
+  const contactCardNames = Array.isArray(payload.contactsArrayMessage?.contacts)
+    ? payload.contactsArrayMessage.contacts
+      .map((contact) => contact.displayName?.trim())
+      .filter((value): value is string => Boolean(value))
+    : [];
 
-  for (const entry of record.contacts.values()) {
+  const text =
+    payload.conversation?.trim()
+    || payload.extendedTextMessage?.text?.trim()
+    || payload.imageMessage?.caption?.trim()
+    || payload.videoMessage?.caption?.trim()
+    || payload.documentMessage?.caption?.trim()
+    || payload.contactMessage?.displayName?.trim()
+    || contactCardNames.join(", ")
+    || "";
+
+  if (text) {
+    return text;
+  }
+
+  if (payload.audioMessage) return "[Audio message]";
+  if (payload.imageMessage) return "[Image]";
+  if (payload.videoMessage) return "[Video]";
+  if (payload.documentMessage?.fileName) return `[Document: ${payload.documentMessage.fileName}]`;
+  if (payload.documentMessage) return "[Document]";
+  if (payload.locationMessage) return "[Location]";
+  if (payload.reactionMessage?.text) return `[Reaction: ${payload.reactionMessage.text}]`;
+  if (payload.contactMessage || payload.contactsArrayMessage) return "[Contact card]";
+
+  return null;
+}
+
+function buildSessionHistoryEntry(
+  userId: string,
+  record: SessionRecord,
+  message: WAMessage,
+): SessionHistoryEntry | null {
+  const waMessageId = String(message.key.id ?? "").trim();
+  if (!waMessageId) {
+    return null;
+  }
+
+  const content = extractHistoryMessageContent(message);
+  if (!content) {
+    return null;
+  }
+
+  const replyableRemoteJid = toReplyableJid(message.key.remoteJid ?? null);
+  const replyableParticipantJid = toReplyableJid(message.key.participant ?? null);
+  const remoteJid = resolveSessionReplyableJid(
+    record,
+    replyableRemoteJid ?? replyableParticipantJid,
+  );
+  const syncSeed = buildSyncSeedFromMessage(message);
+  const resolvedSeedJid = resolveSessionReplyableJid(record, syncSeed?.jid ?? null);
+  const resolvedSeedPhone = resolveSessionContactPhone(record, resolvedSeedJid, syncSeed?.phoneNumber);
+  const knownSessionContact =
+    (resolvedSeedPhone ? record.contacts.get(resolvedSeedPhone) : null)
+    ?? (resolvedSeedJid ? record.contacts.get(resolvedSeedJid) : null)
+    ?? null;
+  const contactName =
+    sanitizeContactName(syncSeed?.contactName)
+    || sanitizeContactName(syncSeed?.notifyName)
+    || sanitizeContactName(syncSeed?.verifiedName)
+    || sanitizeContactName(message.pushName)
+    || knownSessionContact?.displayName
+    || null;
+  const timestampMs = normalizeTimestampToMs(
+    typeof message.messageTimestamp === "object" && message.messageTimestamp && "toNumber" in message.messageTimestamp
+      ? (message.messageTimestamp as { toNumber: () => number }).toNumber()
+      : (message.messageTimestamp as number | undefined),
+  );
+
+  return {
+    wa_message_id: waMessageId,
+    user_id: userId,
+    direction: message.key.fromMe ? "outbound" : "inbound",
+    content,
+    message_type: getInboundMessageType(message),
+    remote_jid: remoteJid,
+    remote_phone: resolveSessionContactPhone(record, remoteJid, syncSeed?.phoneNumber),
+    contact_name: contactName,
+    chat_type: getChatType(remoteJid, record),
+    sent_at: timestampMs ? new Date(timestampMs).toISOString() : new Date().toISOString(),
+  };
+}
+
+function buildSyncSeedFromHistoryRow(row: SessionHistoryEntry): WhatsAppContactSyncInput | null {
+  const jid = toReplyableJid(row.remote_jid ?? null);
+  const phoneNumber =
+    phoneFromJid(jid)
+    ?? normalizePhone(row.remote_phone ?? null);
+  if (!jid) {
+    return null;
+  }
+
+  const aliases = uniqueSanitizedStrings([
+    sanitizeContactName(row.contact_name),
+    phoneNumber,
+  ]);
+
+  return {
+    jid,
+    phoneNumber,
+    contactName: sanitizeContactName(row.contact_name),
+    aliases,
+    source: "history",
+    sourceKinds: ["history_message_snapshot"],
+    messageCount: 1,
+    lastMessageAt: row.sent_at,
+  };
+}
+
+async function persistSessionHistorySnapshot(
+  userId: string,
+  record: SessionRecord,
+  sourceLabel: string,
+) {
+  const rows = [...record.historyRows.values()];
+  if (!rows.length) {
+    return 0;
+  }
+
+  const knownIds = rows
+    .map((row) => row.wa_message_id)
+    .filter(Boolean)
+    .slice(0, SESSION_HISTORY_KNOWN_LOOKUP_LIMIT);
+  const { data: existing } = await db()
+    .from("whatsapp_messages")
+    .select("wa_message_id")
+    .eq("user_id", userId)
+    .in("wa_message_id", knownIds)
+    .catch(() => ({ data: [] as Array<{ wa_message_id: string | null }> }));
+
+  const existingIds = new Set((existing ?? []).map((row) => String(row.wa_message_id ?? "").trim()).filter(Boolean));
+  const pending = rows
+    .filter((row) => row.wa_message_id && !existingIds.has(row.wa_message_id))
+    .sort((left, right) => left.sent_at.localeCompare(right.sent_at))
+    .slice(-SESSION_HISTORY_PERSIST_BATCH_LIMIT);
+
+  if (!pending.length) {
+    return 0;
+  }
+
+  const { error } = await db()
+    .from("whatsapp_messages")
+    .insert(pending);
+
+  if (error) {
+    console.error(
+      `[agent] WhatsApp ${sourceLabel} history snapshot persistence failed for ${userId}:`,
+      error.message,
+    );
+    return 0;
+  }
+
+  record.lastHistoryPersistedCount = pending.length;
+  record.checkpointHistoryMessageCount = Math.max(
+    record.checkpointHistoryMessageCount,
+    record.historyRows.size,
+    pending.length,
+  );
+  touchSessionActivity(record);
+  persistSessionSyncCheckpoint(userId, record);
+  console.log(`[agent] Persisted ${pending.length} WhatsApp history messages for ${userId} after ${sourceLabel}`);
+  return pending.length;
+}
+
+function rememberSessionHistoryRows(record: SessionRecord, rows: SessionHistoryEntry[]) {
+  for (const row of rows) {
+    record.historyRows.set(row.wa_message_id, row);
+  }
+
+  const ordered = [...record.historyRows.values()].sort((left, right) => right.sent_at.localeCompare(left.sent_at));
+  record.checkpointHistoryMessageCount = Math.max(record.checkpointHistoryMessageCount, ordered.length);
+  if (ordered.length <= SESSION_HISTORY_BUFFER_LIMIT) {
+    return;
+  }
+
+  const trimmed = ordered.slice(0, SESSION_HISTORY_BUFFER_LIMIT);
+  record.historyRows = new Map(trimmed.map((row) => [row.wa_message_id, row]));
+}
+
+function scheduleSessionHistoryContactBackfill(userId: string, reason: string) {
+  const existing = sessionHistoryContactBackfillTimers.get(userId);
+  if (existing) {
+    clearTimeout(existing);
+  }
+
+  const timer = setTimeout(() => {
+    sessionHistoryContactBackfillTimers.delete(userId);
+    void backfillWhatsAppContactsFromHistory(userId)
+      .then((result) => {
+        const activeRecord = sessions.get(userId);
+        if (activeRecord) {
+          activeRecord.lastHistoryBackfillCount = Math.max(0, Math.trunc(result.createdCount));
+          touchSessionActivity(activeRecord);
+          persistSessionSyncCheckpoint(userId, activeRecord);
+        }
+        if (result.createdCount > 0) {
+          console.log(
+            `[agent] Backfilled ${result.createdCount} durable WhatsApp contacts from history for ${userId} after ${reason}`,
+          );
+        }
+      })
+      .catch((error) =>
+        console.error(
+          `[agent] WhatsApp history contact backfill failed for ${userId}:`,
+          error instanceof Error ? error.message : error,
+        ),
+      );
+  }, SESSION_HISTORY_CONTACT_BACKFILL_DEBOUNCE_MS);
+
+  sessionHistoryContactBackfillTimers.set(userId, timer);
+}
+
+function safeBuildHistoryContactSeed(
+  contact: Partial<WAContact>,
+  sourceLabel: string,
+) {
+  try {
+    return buildSyncSeedFromBaileysContact(contact);
+  } catch (error) {
+    console.error(
+      `[agent] Skipping malformed WhatsApp contact during ${sourceLabel}:`,
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  }
+}
+
+function safeBuildHistoryChatSeed(
+  chat: Record<string, unknown>,
+  sourceLabel: string,
+) {
+  try {
+    return buildSyncSeedFromChat(chat);
+  } catch (error) {
+    console.error(
+      `[agent] Skipping malformed WhatsApp chat during ${sourceLabel}:`,
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  }
+}
+
+function safeBuildHistoryMessageSeed(
+  message: WAMessage,
+  sourceLabel: string,
+) {
+  try {
+    return buildSyncSeedFromMessage(message);
+  } catch (error) {
+    console.error(
+      `[agent] Skipping malformed WhatsApp message contact seed during ${sourceLabel}:`,
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  }
+}
+
+function safeBuildSessionHistoryEntry(
+  userId: string,
+  record: SessionRecord,
+  message: WAMessage,
+  sourceLabel: string,
+) {
+  try {
+    return buildSessionHistoryEntry(userId, record, message);
+  } catch (error) {
+    console.error(
+      `[agent] Skipping malformed WhatsApp history message during ${sourceLabel}:`,
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  }
+}
+
+function buildSessionHistoryCursors(record: SessionRecord) {
+  const cursors = new Map<string, SessionHistoryCursor>();
+
+  for (const row of record.historyRows.values()) {
+    if (row.chat_type !== "direct" && row.chat_type !== "self") {
+      continue;
+    }
+
+    const remoteJid = toReplyableJid(row.remote_jid ?? null);
+    if (!remoteJid || !row.wa_message_id) {
+      continue;
+    }
+
+    const timestampMs = Date.parse(row.sent_at);
+    if (!Number.isFinite(timestampMs)) {
+      continue;
+    }
+
+    const existing = cursors.get(remoteJid);
+    if (!existing) {
+      cursors.set(remoteJid, {
+        remoteJid,
+        oldestMessageId: row.wa_message_id,
+        oldestTimestampMs: timestampMs,
+        fromMe: row.direction === "outbound",
+        messageCount: 1,
+      });
+      continue;
+    }
+
+    existing.messageCount += 1;
+    if (timestampMs < existing.oldestTimestampMs) {
+      existing.oldestMessageId = row.wa_message_id;
+      existing.oldestTimestampMs = timestampMs;
+      existing.fromMe = row.direction === "outbound";
+    }
+  }
+
+  return [...cursors.values()].sort((left, right) => {
+    if (left.messageCount !== right.messageCount) {
+      return left.messageCount - right.messageCount;
+    }
+    return right.oldestTimestampMs - left.oldestTimestampMs;
+  });
+}
+
+async function requestSessionHistoryExpansion(
+  userId: string,
+  record: SessionRecord,
+  reason: string,
+) {
+  if (record.status !== "connected" || !isActiveSessionRecord(userId, record)) {
+    return;
+  }
+
+  if (!shouldRequestMoreClawCloudWhatsAppHistory(
+    getSessionRuntimeHistoryMessageCount(record),
+    SESSION_HISTORY_SYNC_TARGET,
+  )) {
+    return;
+  }
+
+  const existing = sessionHistoryExpansionTasks.get(userId);
+  if (existing) {
+    if (existing.record === record) {
+      return existing.promise;
+    }
+
+    sessionHistoryExpansionTasks.delete(userId);
+  }
+
+  const task = (async () => {
+    const syncFrame = beginSessionSync(userId, record, "history_expansion", reason);
+    let requestedCount = 0;
+    const requestState = sessionHistoryExpansionState.get(userId) ?? new Map();
+    sessionHistoryExpansionState.set(userId, requestState);
+
+    try {
+      if (!isActiveSessionRecord(userId, record)) {
+        return;
+      }
+
+      const prioritizedCandidates = buildEligibleSessionHistoryExpansionCandidates(userId, record)
+        .slice(0, SESSION_HISTORY_EXPANSION_CHAT_LIMIT);
+
+      if (!prioritizedCandidates.length) {
+        return;
+      }
+
+      for (const cursor of prioritizedCandidates) {
+        if (!isActiveSessionRecord(userId, record) || record.status !== "connected") {
+          break;
+        }
+
+        try {
+          await record.sock.fetchMessageHistory(
+            SESSION_HISTORY_EXPANSION_BATCH_SIZE,
+            {
+              remoteJid: cursor.remoteJid,
+              id: cursor.oldestMessageId,
+              fromMe: cursor.fromMe,
+            },
+            cursor.oldestTimestampMs,
+          );
+          requestedCount += 1;
+          const previous = requestState.get(cursor.remoteJid);
+          requestState.set(cursor.remoteJid, {
+            oldestMessageId: cursor.oldestMessageId,
+            attempts:
+              previous?.oldestMessageId === cursor.oldestMessageId
+                ? previous.attempts + 1
+                : 1,
+          });
+        } catch (error) {
+          const previous = requestState.get(cursor.remoteJid);
+          requestState.set(cursor.remoteJid, {
+            oldestMessageId: cursor.oldestMessageId,
+            attempts:
+              previous?.oldestMessageId === cursor.oldestMessageId
+                ? previous.attempts + 1
+                : 1,
+          });
+          console.error(
+            `[agent] WhatsApp history expansion request failed for ${userId} via ${reason}:`,
+            error instanceof Error ? error.message : error,
+          );
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 220));
+      }
+
+      if (requestedCount > 0) {
+        console.log(
+          `[agent] Requested older WhatsApp history for ${requestedCount} chats for ${userId} via ${reason}`,
+        );
+        if (buildEligibleSessionHistoryExpansionCandidates(userId, record).length > 0) {
+          scheduleSessionHistoryExpansionFollowup(
+            userId,
+            record,
+            `${reason}.followup`,
+          );
+        }
+      }
+      completeSessionSync(userId, record, syncFrame, {
+        historyExpansionRequestedCount: requestedCount,
+      });
+    } catch (error) {
+      completeSessionSync(userId, record, syncFrame, {
+        historyExpansionRequestedCount: requestedCount,
+        error,
+      });
+      throw error;
+    } finally {
+      if (record.activeSyncFrames.some((item) => item.id === syncFrame.id)) {
+        completeSessionSync(userId, record, syncFrame, {
+          historyExpansionRequestedCount: requestedCount,
+        });
+      }
+      const activeTask = sessionHistoryExpansionTasks.get(userId);
+      if (activeTask?.record === record) {
+        sessionHistoryExpansionTasks.delete(userId);
+      }
+    }
+  })();
+
+  sessionHistoryExpansionTasks.set(userId, { record, promise: task });
+  return task;
+}
+
+function processSessionHistorySync(
+  userId: string,
+  record: SessionRecord,
+  payload: {
+    contacts?: Partial<WAContact>[] | null;
+    chats?: Record<string, unknown>[] | null;
+    messages?: WAMessage[] | null;
+    syncType?: unknown;
+    progress?: number | null;
+  },
+) {
+  if (!isActiveSessionRecord(userId, record)) {
+    return;
+  }
+
+  touchSessionActivity(record);
+
+  const contacts = Array.isArray(payload.contacts) ? payload.contacts : [];
+  const chats = Array.isArray(payload.chats) ? payload.chats : [];
+  const messages = Array.isArray(payload.messages) ? payload.messages : [];
+  const sourceLabel = `history.sync.${String(payload.syncType ?? "unknown")}`;
+
+  try {
+    const seeds = [
+      ...(contacts
+        .map((contact) => safeBuildHistoryContactSeed(contact, sourceLabel))
+        .filter(Boolean) as WhatsAppContactSyncInput[]),
+      ...(chats
+        .map((chat) => safeBuildHistoryChatSeed(chat, sourceLabel))
+        .filter(Boolean) as WhatsAppContactSyncInput[]),
+      ...(messages
+        .map((message) => safeBuildHistoryMessageSeed(message, sourceLabel))
+        .filter(Boolean) as WhatsAppContactSyncInput[]),
+    ];
+
+    if (contacts.length || chats.length || messages.length) {
+      console.log(
+        `[agent] WhatsApp history sync for ${userId}: contacts=${contacts.length} chats=${chats.length} messages=${messages.length} syncType=${String(payload.syncType ?? "unknown")} progress=${payload.progress ?? "?"}`,
+      );
+    }
+
+    syncSessionContactSeeds(userId, record, seeds, sourceLabel);
+    scheduleSessionContactSnapshotPersist(userId, record, sourceLabel);
+
+    const historyRows = messages
+      .map((message) => safeBuildSessionHistoryEntry(userId, record, message, sourceLabel))
+      .filter(Boolean) as SessionHistoryEntry[];
+
+    rememberSessionHistoryRows(record, historyRows);
+    scheduleSessionSyncCheckpointPersist(userId, record, `${sourceLabel}.history-rows`);
+    const historyContactSeeds = historyRows
+      .map((row) => buildSyncSeedFromHistoryRow(row))
+      .filter(Boolean) as WhatsAppContactSyncInput[];
+    syncSessionContactSeeds(userId, record, historyContactSeeds, `${sourceLabel}.rows`);
+
+    if (historyRows.length) {
+      scheduleSessionHistorySnapshotPersist(userId, record, sourceLabel);
+      scheduleSessionHistoryContactBackfill(userId, sourceLabel);
+      void persistSessionHistorySnapshot(userId, record, sourceLabel).catch((error) =>
+        console.error(
+          `[agent] WhatsApp history event persistence failed for ${userId}:`,
+          error instanceof Error ? error.message : error,
+        ),
+      );
+    }
+
+    if (record.status === "connected" && (messages.length || chats.length || contacts.length)) {
+      void requestSessionHistoryExpansion(userId, record, `${sourceLabel}.continue`).catch((error) =>
+        console.error(
+          `[agent] WhatsApp history continuation failed for ${userId}:`,
+          error instanceof Error ? error.message : error,
+        ),
+      );
+    }
+  } catch (error) {
+    console.error(
+      `[agent] WhatsApp history sync processing failed for ${userId}:`,
+      error instanceof Error ? error.message : error,
+    );
+  }
+}
+
+async function requestSessionContactRefresh(
+  userId: string,
+  record: SessionRecord,
+  reason: string,
+) {
+  if (record.status !== "connected" || !isActiveSessionRecord(userId, record)) {
+    console.log(
+      `[agent] Skipping WhatsApp contact refresh for ${userId} via ${reason}: session status is ${record.status}`,
+    );
+    return;
+  }
+
+  const existing = contactRefreshTasks.get(userId);
+  if (existing) {
+    if (existing.record === record) {
+      return existing.promise;
+    }
+
+    contactRefreshTasks.delete(userId);
+  }
+
+  const task = (async () => {
+    const syncFrame = beginSessionSync(userId, record, "contact_refresh", reason);
+    let bestPersisted = 0;
+    let bestHistoryPersisted = 0;
+    try {
+      if (!isActiveSessionRecord(userId, record)) {
+        return;
+      }
+
+      console.log(`[agent] Refreshing WhatsApp contacts for ${userId} via ${reason}`);
+      let previousPassCount = record.contacts.size;
+
+      for (let pass = 0; pass < CONTACT_REFRESH_MAX_PASSES; pass += 1) {
+        if (!isActiveSessionRecord(userId, record) || record.status !== "connected") {
+          break;
+        }
+
+        await record.sock.resyncAppState(CONTACT_REFRESH_COLLECTIONS, false);
+        await new Promise((resolve) => setTimeout(resolve, CONTACT_REFRESH_WAIT_MS));
+        if (!isActiveSessionRecord(userId, record) || record.status !== "connected") {
+          break;
+        }
+        const persisted = await persistSessionContactSnapshot(userId, record, `${reason}.pass${pass + 1}`);
+        bestPersisted = Math.max(bestPersisted, persisted);
+        const historyPersisted = await persistSessionHistorySnapshot(
+          userId,
+          record,
+          `${reason}.pass${pass + 1}`,
+        ).catch((error) => {
+          console.error(
+            `[agent] WhatsApp history refresh persistence failed for ${userId}:`,
+            error instanceof Error ? error.message : error,
+          );
+          return 0;
+        });
+        bestHistoryPersisted = Math.max(bestHistoryPersisted, historyPersisted);
+
+        const currentCount = record.contacts.size;
+        const reachedTarget = currentCount >= CONTACT_REFRESH_TARGET_COUNT;
+        const stalled = pass > 0 && currentCount <= previousPassCount;
+        previousPassCount = Math.max(previousPassCount, currentCount);
+        if (reachedTarget || stalled) {
+          break;
+        }
+      }
+
+      if (bestPersisted > 0) {
+        console.log(`[agent] Persisted ${bestPersisted} WhatsApp contacts for ${userId} after ${reason}`);
+      }
+      completeSessionSync(userId, record, syncFrame, {
+        contactPersistedCount: bestPersisted,
+        historyPersistedCount: bestHistoryPersisted,
+      });
+    } catch (error) {
+      console.error(
+        `[agent] WhatsApp contact refresh failed for ${userId}:`,
+        error instanceof Error ? error.message : error,
+      );
+      completeSessionSync(userId, record, syncFrame, {
+        contactPersistedCount: bestPersisted,
+        historyPersistedCount: bestHistoryPersisted,
+        error,
+      });
+    } finally {
+      if (record.activeSyncFrames.some((item) => item.id === syncFrame.id)) {
+        completeSessionSync(userId, record, syncFrame, {
+          contactPersistedCount: bestPersisted,
+          historyPersistedCount: bestHistoryPersisted,
+        });
+      }
+      const activeTask = contactRefreshTasks.get(userId);
+      if (activeTask?.record === record) {
+        contactRefreshTasks.delete(userId);
+      }
+    }
+  })();
+
+  contactRefreshTasks.set(userId, { record, promise: task });
+  return task;
+}
+
+async function bootstrapSessionWorkspace(
+  userId: string,
+  record: SessionRecord,
+  reason: string,
+) {
+  if (record.status !== "connected" || !isActiveSessionRecord(userId, record)) {
+    return;
+  }
+
+  const existing = workspaceBootstrapTasks.get(userId);
+  if (existing) {
+    if (existing.record === record) {
+      return existing.promise;
+    }
+
+    workspaceBootstrapTasks.delete(userId);
+  }
+
+  const task = (async () => {
+    const syncFrame = beginSessionSync(userId, record, "workspace_bootstrap", reason);
+    let backfillCount = 0;
+    try {
+      if (!isActiveSessionRecord(userId, record)) {
+        return;
+      }
+
+      await requestSessionContactRefresh(userId, record, reason);
+      if (!isActiveSessionRecord(userId, record)) {
+        return;
+      }
+
+      const backfill = await backfillWhatsAppContactsFromHistory(userId).catch((error) => {
+        console.error(
+          `[agent] WhatsApp history contact backfill failed for ${userId}:`,
+          error instanceof Error ? error.message : error,
+        );
+        return { createdCount: 0 };
+      });
+      backfillCount = Math.max(0, Math.trunc(backfill.createdCount));
+
+      if (isActiveSessionRecord(userId, record) && backfillCount > 0) {
+        console.log(
+          `[agent] Backfilled ${backfillCount} durable WhatsApp contacts from history for ${userId} after ${reason}`,
+        );
+      }
+
+      if (!isActiveSessionRecord(userId, record)) {
+        return;
+      }
+
+      await requestSessionHistoryExpansion(userId, record, reason).catch((error) => {
+        console.error(
+          `[agent] WhatsApp history expansion failed for ${userId}:`,
+          error instanceof Error ? error.message : error,
+        );
+      });
+      completeSessionSync(userId, record, syncFrame, {
+        historyBackfillCount: backfillCount,
+      });
+    } catch (error) {
+      completeSessionSync(userId, record, syncFrame, {
+        historyBackfillCount: backfillCount,
+        error,
+      });
+      throw error;
+    } finally {
+      if (record.activeSyncFrames.some((item) => item.id === syncFrame.id)) {
+        completeSessionSync(userId, record, syncFrame, {
+          historyBackfillCount: backfillCount,
+        });
+      }
+      const activeTask = workspaceBootstrapTasks.get(userId);
+      if (activeTask?.record === record) {
+        workspaceBootstrapTasks.delete(userId);
+      }
+    }
+  })();
+
+  workspaceBootstrapTasks.set(userId, { record, promise: task });
+  return task;
+}
+
+function scheduleSessionWorkspaceResync(
+  userId: string,
+  record: SessionRecord,
+  reason: string,
+  delayMs = SESSION_WORKSPACE_RESYNC_INTERVAL_MS,
+) {
+  const existing = sessionWorkspaceResyncTimers.get(userId);
+  if (existing) {
+    clearTimeout(existing);
+  }
+
+  const timer = setTimeout(() => {
+    sessionWorkspaceResyncTimers.delete(userId);
+    const latest = sessions.get(userId);
+    if (latest !== record || latest?.status !== "connected") {
+      return;
+    }
+
+    void bootstrapSessionWorkspace(userId, latest, reason)
+      .catch((error) =>
+        console.error(
+          `[agent] Scheduled WhatsApp workspace resync failed for ${userId}:`,
+          error instanceof Error ? error.message : error,
+        ),
+      )
+      .finally(() => {
+        const current = sessions.get(userId);
+        if (current === latest && current?.status === "connected") {
+          scheduleSessionWorkspaceResync(
+            userId,
+            current,
+            `${reason}.repeat`,
+            SESSION_WORKSPACE_RESYNC_INTERVAL_MS,
+          );
+        }
+      });
+  }, delayMs);
+
+  sessionWorkspaceResyncTimers.set(userId, timer);
+}
+
+function scoreSessionContactAlias(alias: string, normalizedQuery: string) {
+  if (alias === normalizedQuery) {
+    return 100;
+  }
+
+  if (alias.startsWith(normalizedQuery) || normalizedQuery.startsWith(alias)) {
+    return 92;
+  }
+
+  const aliasWords = alias.split(/\s+/).filter(Boolean);
+  const queryWords = normalizedQuery.split(/\s+/).filter(Boolean);
+  if (
+    aliasWords.some((word) => queryWords.includes(word))
+    || queryWords.some((word) => aliasWords.includes(word))
+  ) {
+    return 88;
+  }
+
+  if (alias.includes(normalizedQuery) || normalizedQuery.includes(alias)) {
+    return 84;
+  }
+
+  return Math.round(liveContactSimilarity(alias, normalizedQuery) * 100);
+}
+
+function resolveSessionContact(record: SessionRecord, rawName: string): SessionContactResolveResult | null {
+  const queryVariants = getLiveContactQueryVariants(rawName);
+  if (!queryVariants.length) {
+    return null;
+  }
+
+  const matches: Array<SessionContactMatch & { qualityRank: number; memberCount: number }> = [];
+  const identities = buildClawCloudWhatsAppContactIdentityGraph(
+    [...record.contacts.values()].map((entry) => ({
+      jid: entry.jid,
+      phone: entry.phone,
+      displayName: entry.displayName,
+      aliases: entry.aliases,
+      messageCount: entry.messageCount,
+      lastMessageAt: entry.lastMessageAt ? new Date(entry.lastMessageAt).toISOString() : null,
+      lastSeenAt: entry.updatedAt ? new Date(entry.updatedAt).toISOString() : null,
+    })),
+  );
+
+  for (const identity of identities) {
     let score = 0;
-    for (const alias of entry.aliases) {
-      if (alias === normalizedQuery) {
-        score = Math.max(score, 100);
-      } else if (alias.startsWith(normalizedQuery) || normalizedQuery.startsWith(alias)) {
-        score = Math.max(score, 90);
-      } else if (alias.includes(normalizedQuery) || normalizedQuery.includes(alias)) {
-        score = Math.max(score, 80);
+    for (const alias of identity.normalizedAliases) {
+      for (const queryVariant of queryVariants) {
+        score = Math.max(score, scoreSessionContactAlias(alias, queryVariant));
       }
     }
 
-    if (score > bestScore) {
-      best = entry;
-      bestScore = score;
+    if (score < 72) {
+      continue;
     }
+
+    matches.push({
+      name: identity.displayName,
+      phone: identity.phone,
+      jid: identity.primaryJid,
+      score,
+      qualityRank:
+        identity.phone
+          ? 3
+          : (identity.quality === "alias_bridge" ? 2 : 1),
+      memberCount: identity.memberCount,
+    });
   }
 
-  if (!best || bestScore < 80) {
+  matches.sort((left, right) =>
+    right.score - left.score
+    || right.qualityRank - left.qualityRank
+    || right.memberCount - left.memberCount
+    || right.name.length - left.name.length,
+  );
+
+  if (!matches.length) {
     return null;
   }
 
+  if (matches.length === 1) {
+    return { type: "found", contact: matches[0]! };
+  }
+
+  const top = matches[0]!;
+  const runnerUp = matches[1]!;
+  if (
+    top.score >= 100
+    || top.score - runnerUp.score > 8
+    || (top.score === runnerUp.score && top.qualityRank > runnerUp.qualityRank)
+  ) {
+    return { type: "found", contact: top };
+  }
+
   return {
-    name: best.displayName,
-    phone: best.phone,
-    jid: best.jid,
+    type: "ambiguous",
+    matches: matches.slice(0, 4),
   };
 }
 
 function buildSyncSeedFromBaileysContact(contact: Partial<WAContact>): WhatsAppContactSyncInput | null {
   const jid = toReplyableJid(contact.jid ?? contact.id ?? null);
   const phoneNumber = phoneFromJid(contact.jid ?? contact.id ?? null);
-  const contactName = sanitizeContactName(contact.name);
-  const notifyName = sanitizeContactName(contact.notify);
-  const verifiedName = sanitizeContactName(contact.verifiedName);
+  const raw = contact as Partial<WAContact> & Record<string, unknown>;
+  const nameAliases = uniqueSanitizedStrings([
+    sanitizeContactName(contact.name),
+    sanitizeContactName(contact.notify),
+    sanitizeContactName(contact.verifiedName),
+    sanitizeContactName(typeof raw.short === "string" ? raw.short : null),
+    sanitizeContactName(typeof raw.shortName === "string" ? raw.shortName : null),
+    sanitizeContactName(typeof raw.pushname === "string" ? raw.pushname : null),
+    sanitizeContactName(typeof raw.vname === "string" ? raw.vname : null),
+  ]);
+  const aliases = uniqueSanitizedStrings([
+    ...nameAliases,
+    phoneNumber,
+  ]);
+  const [contactName, notifyName, verifiedName] = nameAliases;
 
-  if (!jid || (!phoneNumber && !isLidChatJid(jid)) || (!contactName && !notifyName && !verifiedName)) {
+  if (!jid || (!phoneNumber && !isLidChatJid(jid)) || !aliases.length) {
     return null;
   }
 
@@ -805,47 +3172,67 @@ function buildSyncSeedFromBaileysContact(contact: Partial<WAContact>): WhatsAppC
     contactName,
     notifyName,
     verifiedName,
+    aliases,
+    sourceKinds: ["baileys_contact"],
   };
 }
 
 function buildSyncSeedFromMessage(message: WAMessage): WhatsAppContactSyncInput | null {
-  const jid = toReplyableJid(message.key.remoteJid ?? null);
+  const replyableJid = toReplyableJid(message.key.remoteJid ?? null);
+  const participantJid = toReplyableJid(message.key.participant ?? null);
+  const jid = participantJid ?? replyableJid;
   const phoneNumber = phoneFromJid(jid);
-  const notifyName = sanitizeContactName(message.pushName);
+  const nameAliases = uniqueSanitizedStrings([
+    sanitizeContactName(message.pushName),
+    sanitizeContactName(message.message?.contactMessage?.displayName),
+    sanitizeContactName(message.message?.contactsArrayMessage?.contacts?.[0]?.displayName),
+  ]);
+  const aliases = uniqueSanitizedStrings([
+    ...nameAliases,
+    phoneNumber,
+  ]);
+  const notifyName = nameAliases[0] ?? null;
 
-  if (!jid || (!phoneNumber && !isLidChatJid(jid)) || !notifyName) {
+  if (!jid || (!phoneNumber && !isLidChatJid(jid)) || !aliases.length) {
     return null;
   }
+
+  const messageTimestamp = normalizeTimestampToMs(
+    typeof message.messageTimestamp === "object" && message.messageTimestamp && "toNumber" in message.messageTimestamp
+      ? (message.messageTimestamp as { toNumber: () => number }).toNumber()
+      : (message.messageTimestamp as number | undefined),
+  );
 
   return {
     jid,
     phoneNumber,
     notifyName,
+    aliases,
     source: "message",
+    sourceKinds: [participantJid ? "group_participant_message" : "message"],
+    messageCount: 1,
+    lastMessageAt: messageTimestamp ? new Date(messageTimestamp).toISOString() : null,
   };
 }
 
 function buildSyncSeedFromChat(chat: Record<string, unknown>): WhatsAppContactSyncInput | null {
   const jid = toReplyableJid(chat.id);
-  const phoneNumber = isDirectChatJid(jid ?? "") ? phoneFromJid(jid) : null;
-  const contactName = sanitizeContactName(
-    typeof chat.name === "string"
-      ? chat.name
-      : typeof chat.formattedTitle === "string"
-        ? chat.formattedTitle
-        : typeof chat.contactName === "string"
-          ? chat.contactName
-          : null,
-  );
-  const notifyName = sanitizeContactName(
-    typeof chat.notifyName === "string"
-      ? chat.notifyName
-      : typeof chat.pushName === "string"
-        ? chat.pushName
-        : null,
-  );
+  const phoneNumber = jid ? phoneFromJid(jid) : null;
+  const nameAliases = uniqueSanitizedStrings([
+    typeof chat.name === "string" ? chat.name : null,
+    typeof chat.formattedTitle === "string" ? chat.formattedTitle : null,
+    typeof chat.contactName === "string" ? chat.contactName : null,
+    typeof chat.notifyName === "string" ? chat.notifyName : null,
+    typeof chat.pushName === "string" ? chat.pushName : null,
+    typeof chat.shortName === "string" ? chat.shortName : null,
+  ]);
+  const aliases = uniqueSanitizedStrings([
+    ...nameAliases,
+    phoneNumber,
+  ]);
+  const [contactName, notifyName] = nameAliases;
 
-  if (!jid || (!contactName && !notifyName)) {
+  if (!jid || !aliases.length) {
     return null;
   }
 
@@ -854,7 +3241,9 @@ function buildSyncSeedFromChat(chat: Record<string, unknown>): WhatsAppContactSy
     phoneNumber,
     contactName,
     notifyName,
+    aliases,
     source: "history",
+    sourceKinds: ["chat_history"],
   };
 }
 
@@ -971,12 +3360,12 @@ function resolveReplyJid(
     return candidate;
   }
 
-  const remembered = toReplyableJid(session.lastChatJid);
-  if (remembered) {
-    return remembered;
+  const assistantDefault = resolveDefaultAssistantChatJid(session.phone, session.lastChatJid);
+  if (assistantDefault) {
+    return assistantDefault;
   }
 
-  return jidFromPhone(session.phone);
+  return null;
 }
 
 async function loadPreferredChatJid(userId: string) {
@@ -1503,18 +3892,47 @@ async function sendReply(
 
   const cleaned = message.replace(/\n{3,}/g, "\n\n").trim();
   const messageExcerpt = cleaned.slice(0, 200);
+  const assistantTracking: TrackedWhatsAppSendInput = {
+    userId,
+    source: "assistant_reply",
+    jid,
+    phone: phoneFromJid(jid),
+    message: cleaned,
+    idempotencyKey: buildAssistantReplyIdempotencyKey(userId, jid),
+    metadata: {
+      staged_delivery: shouldStageWhatsAppReply(cleaned, STREAM_REPLY_MIN_LENGTH),
+      chat_type: getChatType(jid, session),
+    },
+  };
+  const trackedOutbound = await prepareTrackedWhatsAppOutbound(assistantTracking);
+  if (trackedOutbound?.status === "sent" || trackedOutbound?.status === "delivered" || trackedOutbound?.status === "read") {
+    touchSessionActivity(session);
+    return true;
+  }
+  if (trackedOutbound?.status === "skipped" || trackedOutbound?.status === "cancelled") {
+    touchSessionActivity(session);
+    return false;
+  }
+
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt < MAX_SEND_RETRIES; attempt += 1) {
     try {
-      if (cleaned.length >= STREAM_REPLY_MIN_LENGTH) {
-        await sendStreamingMessage(session.sock, jid, cleaned);
+      let waMessageIds: string[] = [];
+      if (shouldStageWhatsAppReply(cleaned, STREAM_REPLY_MIN_LENGTH)) {
+        waMessageIds = await sendStreamingMessage(session.sock, jid, cleaned);
       } else {
         const sent = await session.sock.sendMessage(jid, { text: cleaned });
         if (sent?.key?.id) {
           outboundIds.add(sent.key.id);
+          waMessageIds = [sent.key.id];
         }
       }
+
+      await recordTrackedWhatsAppSendSuccess({
+        ...assistantTracking,
+        idempotencyKey: trackedOutbound?.idempotency_key ?? assistantTracking.idempotencyKey,
+      }, waMessageIds, attempt + 1);
 
       if (attempt > 0) {
         await db()
@@ -1531,14 +3949,19 @@ async function sendReply(
           .catch(() => null);
       }
 
-      void logOutbound(userId, message, jid);
+      void logOutbound(userId, message, jid, null, waMessageIds);
       if (isGroupChatJid(jid)) {
         markGroupReplied(jid);
       }
+      touchSessionActivity(session);
       return true;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
       const finalStatus = attempt === MAX_SEND_RETRIES - 1 ? "failed" : "retrying";
+      await recordTrackedWhatsAppSendFailure({
+        ...assistantTracking,
+        idempotencyKey: trackedOutbound?.idempotency_key ?? assistantTracking.idempotencyKey,
+      }, attempt + 1, lastError.message, finalStatus === "failed");
 
       await db()
         .from("delivery_failures")
@@ -1562,6 +3985,7 @@ async function sendReply(
     }
   }
 
+  touchSessionActivity(session);
   console.error(
     `[agent] sendReply failed after ${MAX_SEND_RETRIES} attempts for ${userId}:`,
     lastError?.message ?? "Unknown error",
@@ -1585,17 +4009,19 @@ async function sendReplyLegacy(
   }
 
   const cleaned = message.replace(/\n{3,}/g, "\n\n").trim();
+  let waMessageIds: string[] = [];
 
-  if (cleaned.length >= STREAM_REPLY_MIN_LENGTH) {
-    await sendStreamingMessage(session.sock, jid, cleaned);
+  if (shouldStageWhatsAppReply(cleaned, STREAM_REPLY_MIN_LENGTH)) {
+    waMessageIds = await sendStreamingMessage(session.sock, jid, cleaned);
   } else {
     const sent = await session.sock.sendMessage(jid, { text: cleaned });
     if (sent?.key?.id) {
       outboundIds.add(sent.key.id);
+      waMessageIds = [sent.key.id];
     }
   }
 
-  void logOutbound(userId, message);
+  void logOutbound(userId, message, jid, null, waMessageIds);
   if (isGroupChatJid(jid)) {
     markGroupReplied(jid);
   }
@@ -1730,7 +4156,7 @@ async function handleInbound(
 
   const safeRemoteJid = toReplyableJid(remoteJid);
 
-  if (session && safeRemoteJid) {
+  if (session && safeRemoteJid && shouldRememberAssistantSelfChat(session.phone, safeRemoteJid)) {
     session.lastChatJid = safeRemoteJid;
     sessions.set(userId, session);
     void persistPreferredChatTarget(userId, session.phone, safeRemoteJid);
@@ -1741,13 +4167,46 @@ async function handleInbound(
     safeRemoteJid ||
     (session ? resolveReplyJid(session) : null);
 
+  if (shouldRequireExplicitUserCommandForWhatsAppChat(logFields.chat_type)) {
+    await markLatestWhatsAppThreadState({
+      userId,
+      remoteJid: logFields.remote_jid,
+      remotePhone: logFields.remote_phone,
+      needsReply: false,
+      approvalState: "blocked",
+      priority: "normal",
+      sensitivity: "normal",
+      replyConfidence: null,
+      auditPayload: {
+        passive_sync_only: true,
+        reason: "Explicit user command is required before ClawCloud can read, reply, or act in other WhatsApp chats.",
+        message_type: messageType,
+        chat_type: logFields.chat_type,
+        blocked_at: new Date().toISOString(),
+      },
+    }).catch(() => null);
+
+    await writeWhatsAppAuditLog(userId, {
+      eventType: "autonomous_action_blocked",
+      actor: "system",
+      summary: `Passive sync only for ${logFields.contact_name || logFields.remote_phone || "external chat"}.`,
+      targetValue: logFields.remote_jid ?? logFields.remote_phone,
+      metadata: {
+        reason: "Explicit user command is required before ClawCloud can read, reply, or act in other WhatsApp chats.",
+        message_type: messageType,
+        chat_type: logFields.chat_type,
+      },
+    }).catch(() => null);
+
+    return;
+  }
+
   if (jid && session) {
     void session.sock.sendPresenceUpdate("composing", jid).catch(() => null);
   }
 
   let finalReply: string | null = null;
   const settings = settingsOverride ?? await getWhatsAppSettings(userId).catch(() => null);
-  const userTimeZone = await getUserWhatsAppTimeZone(userId).catch(() => "Asia/Kolkata");
   const workspaceContact = await loadWhatsAppWorkspaceContact(
     userId,
     logFields.remote_jid,
@@ -1817,22 +4276,10 @@ async function handleInbound(
     sensitivity,
     isGroupMessage: logFields.chat_type === "group",
   });
-  const decision = decideWhatsAppReplyAction({
-    settings: settings ?? {
-      automationMode: "auto_reply",
-      replyMode: "balanced",
-      groupReplyMode: "mention_only",
-      requireApprovalForSensitive: true,
-      allowGroupReplies: true,
-      allowDirectSendCommands: true,
-      quietHoursStart: null,
-      quietHoursEnd: null,
-    },
-    sensitivity,
-    isGroupMessage: logFields.chat_type === "group",
-    isKnownContact: workspaceContact.isKnown,
-    timeZone: userTimeZone,
-  });
+  const decision = {
+    action: "send" as const,
+    reason: "Explicit user command in the assistant self chat.",
+  };
   finalReply = applyWhatsAppReplyMode(finalReply, settings?.replyMode ?? "balanced");
   const scheduleWorkflows = (replySent: boolean) =>
     scheduleWhatsAppWorkflowRunsFromInbound({
@@ -2007,9 +4454,107 @@ async function getActiveUserIds(): Promise<string[]> {
   return (data ?? []).map((row) => String(row.user_id ?? "").trim()).filter(Boolean);
 }
 
+async function buildDisconnectedRuntimeStatus(userId: string): Promise<ClawCloudWhatsAppRuntimeStatus> {
+  const checkpoint = readSessionRecoveryCheckpoint(userId);
+  const syncCheckpoint = readSessionSyncCheckpoint(userId);
+  const [{ data: account }, contactsResult, historyResult] = await Promise.all([
+    db()
+      .from("connected_accounts")
+      .select("phone_number, is_active")
+      .eq("user_id", userId)
+      .eq("provider", "whatsapp")
+      .maybeSingle()
+      .catch(() => ({ data: null as { phone_number?: string | null; is_active?: boolean } | null })),
+    db()
+      .from("whatsapp_contacts")
+      .select("jid", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .catch(() => ({ count: 0 })),
+    db()
+      .from("whatsapp_messages")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .catch(() => ({ count: 0 })),
+  ]);
+
+  const contactCount = Math.max(0, Math.trunc(Number(contactsResult.count ?? 0)));
+  const historyMessageCount = Math.max(0, Math.trunc(Number(historyResult.count ?? 0)));
+  const historyCoverage = syncCheckpoint?.historyCoverage ?? summarizeClawCloudWhatsAppHistoryCoverage([]);
+  const progress = computeClawCloudWhatsAppSyncProgress({
+    contactCount,
+    historyMessageCount,
+    contactTarget: CONTACT_REFRESH_TARGET_COUNT,
+    historyTarget: SESSION_HISTORY_SYNC_TARGET,
+  });
+  const hasAccount = Boolean(account);
+  const requiresReauth = checkpoint?.requiresReauth
+    || (hasAccount && !Boolean(account?.is_active));
+  const lastSyncError = checkpoint?.lastSyncError
+    ?? (hasAccount && account?.is_active
+      ? "Connected account exists but no live WhatsApp session is loaded in the worker."
+      : requiresReauth
+        ? "WhatsApp needs a fresh QR reconnect."
+        : null);
+
+  return {
+    connectionStatus: "disconnected",
+    health: deriveClawCloudWhatsAppRuntimeHealth({
+      connectionStatus: "disconnected",
+      syncState: "idle",
+      requiresReauth,
+    }),
+    syncState: "idle",
+    activeSyncJobs: 0,
+    connected: false,
+    requiresReauth,
+    phone: typeof account?.phone_number === "string"
+      ? account.phone_number
+      : checkpoint?.phone ?? null,
+    qrReady: false,
+    qrAgeSeconds: null,
+    contactCount,
+    historyMessageCount,
+    progress,
+    historyCoverage,
+    startedAt: null,
+    connectedAt: checkpoint?.connectedAt ?? null,
+    lastActivityAt: checkpoint?.lastActivityAt ?? null,
+    lastSyncStartedAt: syncCheckpoint?.lastSyncStartedAt ?? null,
+    lastSyncFinishedAt: checkpoint?.lastSyncFinishedAt ?? syncCheckpoint?.lastSyncFinishedAt ?? null,
+    lastSuccessfulSyncAt: checkpoint?.lastSuccessfulSyncAt ?? syncCheckpoint?.lastSuccessfulSyncAt ?? null,
+    lastSyncReason: checkpoint?.lastSyncReason ?? syncCheckpoint?.lastSyncReason ?? null,
+    lastSyncError,
+    lastSyncDurationMs: checkpoint?.lastSyncDurationMs ?? null,
+    lastContactPersistedCount: Math.max(
+      checkpoint?.lastContactPersistedCount ?? 0,
+      syncCheckpoint?.lastContactPersistedCount ?? 0,
+      contactCount,
+    ),
+    lastHistoryPersistedCount: Math.max(
+      checkpoint?.lastHistoryPersistedCount ?? 0,
+      syncCheckpoint?.lastHistoryPersistedCount ?? 0,
+      historyMessageCount,
+    ),
+    lastHistoryBackfillCount: Math.max(
+      checkpoint?.lastHistoryBackfillCount ?? 0,
+      syncCheckpoint?.lastHistoryBackfillCount ?? 0,
+    ),
+    lastHistoryExpansionRequestedCount: Math.max(
+      checkpoint?.lastHistoryExpansionRequestedCount ?? 0,
+      syncCheckpoint?.lastHistoryExpansionRequestedCount ?? 0,
+    ),
+    maintenanceResyncIntervalMs: SESSION_WORKSPACE_RESYNC_INTERVAL_MS,
+    staleAfterMs: SESSION_WATCHDOG_STALE_MS,
+  };
+}
+
 async function connectSession(userId: string): Promise<SessionRecord> {
   assertConfigured();
   const preferredChatJid = await loadPreferredChatJid(userId);
+  const recoveryCheckpoint = readSessionRecoveryCheckpoint(userId);
+  const syncCheckpoint = readSessionSyncCheckpoint(userId);
+  const restoredHistoryCursors = restoreSessionHistoryResumeCursors(syncCheckpoint);
+  clearSessionReconnectTimer(userId);
 
   const existing = sessions.get(userId);
   if (existing && (existing.status === "waiting" || existing.status === "connected")) {
@@ -2022,7 +4567,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
     }
 
     console.warn(`[agent] Resetting stale session for ${userId}`);
-    await discardSession(userId, existing, { deleteAuth: true });
+    await discardSession(userId, existing, { deleteAuth: true, logout: false });
   }
 
   const dir = sessionDir(userId);
@@ -2044,86 +4589,132 @@ async function connectSession(userId: string): Promise<SessionRecord> {
     status: "connecting",
     qr: null,
     qrIssuedAt: null,
-    phone: null,
+    phone: recoveryCheckpoint?.phone ?? null,
     lastChatJid: preferredChatJid,
     startedAt: Date.now(),
+    connectedAt: recoveryCheckpoint?.connectedAt ? Date.parse(recoveryCheckpoint.connectedAt) : null,
+    lastActivityAt: recoveryCheckpoint?.lastActivityAt ? Date.parse(recoveryCheckpoint.lastActivityAt) : Date.now(),
+    activeSyncFrames: [],
+    syncState: "idle",
+    lastSyncStartedAt: syncCheckpoint?.lastSyncStartedAt ? Date.parse(syncCheckpoint.lastSyncStartedAt) : null,
+    lastSyncFinishedAt:
+      recoveryCheckpoint?.lastSyncFinishedAt
+        ? Date.parse(recoveryCheckpoint.lastSyncFinishedAt)
+        : (syncCheckpoint?.lastSyncFinishedAt ? Date.parse(syncCheckpoint.lastSyncFinishedAt) : null),
+    lastSuccessfulSyncAt:
+      recoveryCheckpoint?.lastSuccessfulSyncAt
+        ? Date.parse(recoveryCheckpoint.lastSuccessfulSyncAt)
+        : (syncCheckpoint?.lastSuccessfulSyncAt ? Date.parse(syncCheckpoint.lastSuccessfulSyncAt) : null),
+    lastSyncReason: recoveryCheckpoint?.lastSyncReason ?? syncCheckpoint?.lastSyncReason ?? null,
+    lastSyncError: recoveryCheckpoint?.lastSyncError ?? null,
+    lastSyncDurationMs: recoveryCheckpoint?.lastSyncDurationMs ?? null,
+    lastContactPersistedCount: Math.max(
+      recoveryCheckpoint?.lastContactPersistedCount ?? 0,
+      syncCheckpoint?.lastContactPersistedCount ?? 0,
+    ),
+    lastHistoryPersistedCount: Math.max(
+      recoveryCheckpoint?.lastHistoryPersistedCount ?? 0,
+      syncCheckpoint?.lastHistoryPersistedCount ?? 0,
+    ),
+    lastHistoryBackfillCount: Math.max(
+      recoveryCheckpoint?.lastHistoryBackfillCount ?? 0,
+      syncCheckpoint?.lastHistoryBackfillCount ?? 0,
+    ),
+    lastHistoryExpansionRequestedCount: Math.max(
+      recoveryCheckpoint?.lastHistoryExpansionRequestedCount ?? 0,
+      syncCheckpoint?.lastHistoryExpansionRequestedCount ?? 0,
+    ),
+    checkpointContactCount: Math.max(
+      syncCheckpoint?.contactCount ?? 0,
+      recoveryCheckpoint?.lastContactPersistedCount ?? 0,
+    ),
+    checkpointHistoryMessageCount: Math.max(
+      syncCheckpoint?.historyMessageCount ?? 0,
+      recoveryCheckpoint?.lastHistoryPersistedCount ?? 0,
+    ),
+    checkpointHistoryCursors: restoredHistoryCursors,
+    reconnectAttempts: recoveryCheckpoint?.reconnectAttempts ?? 0,
+    lastDisconnectCode: recoveryCheckpoint?.lastDisconnectCode ?? null,
+    lastDisconnectAt: recoveryCheckpoint?.lastDisconnectAt ? Date.parse(recoveryCheckpoint.lastDisconnectAt) : null,
+    nextReconnectAt: null,
+    sharedPhoneJids: new Map<string, string>(),
     contacts: new Map<string, SessionContactEntry>(),
+    historyRows: new Map<string, SessionHistoryEntry>(),
   };
 
   sessions.set(userId, record);
+  if (restoredHistoryCursors.length > 0) {
+    sessionHistoryExpansionState.set(
+      userId,
+      new Map(
+        restoredHistoryCursors.map((cursor) => [
+          cursor.remoteJid,
+          {
+            oldestMessageId: cursor.oldestMessageId,
+            attempts: Math.max(0, Math.trunc(cursor.attempts)),
+          },
+        ]),
+      ),
+    );
+  }
+  persistSessionRecoveryCheckpoint(userId, { record });
+  persistSessionSyncCheckpoint(userId, record);
   sock.ev.on("creds.update", saveCreds);
 
-  sock.ev.on("messaging-history.set", ({ contacts, chats }) => {
-    const seeds = [
-      ...((contacts ?? [])
-      .map((contact) => buildSyncSeedFromBaileysContact(contact))
-      .filter(Boolean) as WhatsAppContactSyncInput[]),
-      ...((chats ?? [])
-      .map((chat) => buildSyncSeedFromChat(chat as Record<string, unknown>))
-      .filter(Boolean) as WhatsAppContactSyncInput[]),
-    ];
-
-    if (seeds.length) {
-      rememberSessionContacts(record, seeds);
-      void upsertWhatsAppContacts(userId, seeds).catch((error) =>
-        console.error(
-          `[agent] WhatsApp history contact sync failed for ${userId}:`,
-          error instanceof Error ? error.message : error,
-        ),
-      );
-    }
+  sock.ev.on("messaging-history.set", ({ contacts, chats, messages, syncType, progress }) => {
+    processSessionHistorySync(userId, record, {
+      contacts,
+      chats: chats as Record<string, unknown>[] | undefined,
+      messages,
+      syncType,
+      progress,
+    });
   });
 
   sock.ev.on("contacts.upsert", (contacts) => {
     const seeds = contacts
-      .map((contact) => buildSyncSeedFromBaileysContact(contact))
+      .map((contact) => safeBuildHistoryContactSeed(contact, "contacts.upsert"))
       .filter(Boolean) as WhatsAppContactSyncInput[];
 
-    if (seeds.length) {
-      rememberSessionContacts(record, seeds);
-      void upsertWhatsAppContacts(userId, seeds).catch((error) =>
-        console.error(
-          `[agent] WhatsApp contacts.upsert sync failed for ${userId}:`,
-          error instanceof Error ? error.message : error,
-        ),
-      );
-    }
+    syncSessionContactSeeds(userId, record, seeds, "contacts.upsert");
+    scheduleSessionContactSnapshotPersist(userId, record, "contacts.upsert");
   });
 
   sock.ev.on("contacts.update", (contacts) => {
     const seeds = contacts
-      .map((contact) => buildSyncSeedFromBaileysContact(contact))
+      .map((contact) => safeBuildHistoryContactSeed(contact, "contacts.update"))
       .filter(Boolean) as WhatsAppContactSyncInput[];
 
-    if (seeds.length) {
-      rememberSessionContacts(record, seeds);
-      void upsertWhatsAppContacts(userId, seeds).catch((error) =>
-        console.error(
-          `[agent] WhatsApp contacts.update sync failed for ${userId}:`,
-          error instanceof Error ? error.message : error,
-        ),
-      );
-    }
+    syncSessionContactSeeds(userId, record, seeds, "contacts.update");
+    scheduleSessionContactSnapshotPersist(userId, record, "contacts.update");
   });
 
   sock.ev.on("chats.upsert", (chats) => {
     const seeds = chats
-      .map((chat) => buildSyncSeedFromChat(chat as Record<string, unknown>))
+      .map((chat) => safeBuildHistoryChatSeed(chat as Record<string, unknown>, "chats.upsert"))
       .filter(Boolean) as WhatsAppContactSyncInput[];
 
-    if (seeds.length) {
-      rememberSessionContacts(record, seeds);
-    }
+    syncSessionContactSeeds(userId, record, seeds, "chats.upsert");
+    scheduleSessionContactSnapshotPersist(userId, record, "chats.upsert");
   });
 
   sock.ev.on("chats.update", (chats) => {
     const seeds = chats
-      .map((chat) => buildSyncSeedFromChat(chat as Record<string, unknown>))
+      .map((chat) => safeBuildHistoryChatSeed(chat as Record<string, unknown>, "chats.update"))
       .filter(Boolean) as WhatsAppContactSyncInput[];
 
-    if (seeds.length) {
-      rememberSessionContacts(record, seeds);
+    syncSessionContactSeeds(userId, record, seeds, "chats.update");
+    scheduleSessionContactSnapshotPersist(userId, record, "chats.update");
+  });
+
+  sock.ev.on("chats.phoneNumberShare", ({ lid, jid }) => {
+    const changed = applySessionPhoneShare(record, lid, jid);
+    if (!changed) {
+      return;
     }
+
+    scheduleSessionContactSnapshotPersist(userId, record, "chats.phoneNumberShare");
+    scheduleSessionHistorySnapshotPersist(userId, record, "chats.phoneNumberShare", 200);
   });
 
   sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
@@ -2137,7 +4728,11 @@ async function connectSession(userId: string): Promise<SessionRecord> {
       current.qr = await QRCode.toDataURL(qr, { width: 360, margin: 2 });
       current.qrIssuedAt = Date.now();
       current.status = "waiting";
+      current.lastSyncError = null;
+      touchSessionActivity(current);
       sessions.set(userId, current);
+      persistSessionRecoveryCheckpoint(userId, { record: current });
+      persistSessionSyncCheckpoint(userId, current);
     }
 
     if (connection === "open") {
@@ -2147,7 +4742,16 @@ async function connectSession(userId: string): Promise<SessionRecord> {
       current.phone = phone;
       current.qr = null;
       current.qrIssuedAt = null;
+      current.connectedAt = Date.now();
+      touchSessionActivity(current, current.connectedAt);
+      current.lastSyncError = null;
+      current.reconnectAttempts = 0;
+      current.lastDisconnectCode = null;
+      current.lastDisconnectAt = null;
+      current.nextReconnectAt = null;
       sessions.set(userId, current);
+      persistSessionRecoveryCheckpoint(userId, { record: current });
+      persistSessionSyncCheckpoint(userId, current);
 
       const sendWelcomeNow = await shouldSendWelcome(userId, phone);
       await db()
@@ -2169,6 +4773,26 @@ async function connectSession(userId: string): Promise<SessionRecord> {
       current.lastChatJid = jidFromPhone(phone);
       sessions.set(userId, current);
 
+      void bootstrapSessionWorkspace(userId, current, "connection.open");
+      for (const delay of CONTACT_REFRESH_FOLLOWUP_DELAYS_MS) {
+        setTimeout(() => {
+          const latest = sessions.get(userId);
+          if (latest === current && latest?.status === "connected") {
+            void bootstrapSessionWorkspace(
+              userId,
+              latest,
+              `connection.open.followup.${Math.round(delay / 1_000)}s`,
+            );
+          }
+        }, delay);
+      }
+      scheduleSessionWorkspaceResync(
+        userId,
+        current,
+        "connection.open.maintenance",
+        SESSION_WORKSPACE_RESYNC_INITIAL_DELAY_MS,
+      );
+
       if (phone && sendWelcomeNow) {
         await sendWelcome(sock, phone, userId);
       }
@@ -2177,9 +4801,29 @@ async function connectSession(userId: string): Promise<SessionRecord> {
     if (connection === "close") {
       const code = (lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
       const reconnect = code !== DisconnectReason.loggedOut;
+      const closedAt = Date.now();
+      current.lastDisconnectCode = typeof code === "number" ? code : null;
+      current.lastDisconnectAt = closedAt;
+      current.nextReconnectAt = null;
+      current.lastSyncError = reconnect
+        ? current.lastSyncError ?? `WhatsApp socket closed (code: ${code ?? "?"}).`
+        : "WhatsApp session logged out and needs a fresh QR reconnect.";
+      touchSessionActivity(current, closedAt);
+      clearSessionRuntimeResources(userId, current);
       sessions.delete(userId);
 
       if (!reconnect) {
+        persistSessionSyncCheckpoint(userId, current);
+        persistSessionRecoveryCheckpoint(userId, {
+          record: current,
+          connectionStatus: "disconnected",
+          connected: false,
+          requiresReauth: true,
+          lastSyncError: current.lastSyncError,
+          lastDisconnectCode: current.lastDisconnectCode,
+          lastDisconnectAt: current.lastDisconnectAt,
+          updatedAt: closedAt,
+        });
         await markDisconnected(userId);
         const dir = sessionDir(userId);
         if (fs.existsSync(dir)) {
@@ -2189,9 +4833,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
 
       console.warn(`[agent] Closed for ${userId} (code: ${code ?? "?"}) reconnect=${reconnect}`);
       if (reconnect) {
-        setTimeout(() => {
-          void connectSession(userId);
-        }, 3_000);
+        scheduleSessionReconnect(userId, current, `connection.close.${code ?? "unknown"}`);
       }
     }
   });
@@ -2202,70 +4844,86 @@ async function connectSession(userId: string): Promise<SessionRecord> {
     }
 
     for (const message of messages) {
-      const current = sessions.get(userId);
-      if (current !== record) {
-        return;
-      }
+      try {
+        const current = sessions.get(userId);
+        if (current !== record) {
+          return;
+        }
+        touchSessionActivity(record);
 
-      const remoteJid = message.key.remoteJid ?? null;
-      const safeRemoteJid = toReplyableJid(remoteJid);
-      const isGroupMessage = Boolean(remoteJid && isGroupChatJid(remoteJid));
-      const mentionedJids = isGroupMessage ? getMentionedJids(message) : [];
-      let replyTargetJid = safeRemoteJid;
-      let whatsAppSettings: WhatsAppSettings | null = null;
+        const remoteJid = message.key.remoteJid ?? null;
+        const safeRemoteJid = toReplyableJid(remoteJid);
+        const isGroupMessage = Boolean(remoteJid && isGroupChatJid(remoteJid));
+        const mentionedJids = isGroupMessage ? getMentionedJids(message) : [];
+        let replyTargetJid = safeRemoteJid;
+        let whatsAppSettings: WhatsAppSettings | null = null;
 
-      if (isGroupMessage) {
-        whatsAppSettings = await getWhatsAppSettings(userId).catch(() => null);
-        const isMentioned = isBotMentioned(message, current);
-        const allowGroupReplies = whatsAppSettings?.allowGroupReplies ?? true;
-        const groupReplyMode = whatsAppSettings?.groupReplyMode ?? "mention_only";
+        if (isGroupMessage) {
+          whatsAppSettings = await getWhatsAppSettings(userId).catch(() => null);
+          const isMentioned = isBotMentioned(message, current);
+          const allowGroupReplies = whatsAppSettings?.allowGroupReplies ?? true;
+          const groupReplyMode = whatsAppSettings?.groupReplyMode ?? "mention_only";
 
-        if (!allowGroupReplies || groupReplyMode === "never") {
+          if (!allowGroupReplies || groupReplyMode === "never") {
+            continue;
+          }
+
+          if (groupReplyMode === "mention_only" && !isMentioned) {
+            continue;
+          }
+
+          if (remoteJid && isGroupRateLimited(remoteJid)) {
+            console.log(`[agent] Group rate limited: ${remoteJid}`);
+            continue;
+          }
+
+          replyTargetJid = remoteJid ?? safeRemoteJid;
+        }
+
+        const messageId = message.key.id ?? "";
+        if (messageId && outboundIds.has(messageId)) {
+          outboundIds.delete(messageId);
           continue;
         }
 
-        if (groupReplyMode === "mention_only" && !isMentioned) {
+        const syncSeed = safeBuildHistoryMessageSeed(message, "messages.upsert");
+        if (syncSeed) {
+          syncSessionContactSeeds(userId, record, [syncSeed], "message");
+          scheduleSessionContactSnapshotPersist(userId, record, "message");
+        }
+
+        const historyEntry = safeBuildSessionHistoryEntry(userId, record, message, "messages.upsert");
+        if (historyEntry) {
+          rememberSessionHistoryRows(record, [historyEntry]);
+          scheduleSessionSyncCheckpointPersist(userId, record, "message.history-rows");
+          const historySeed = buildSyncSeedFromHistoryRow(historyEntry);
+          if (historySeed) {
+            syncSessionContactSeeds(userId, record, [historySeed], "message.history");
+          }
+          scheduleSessionHistorySnapshotPersist(userId, record, "message");
+        }
+
+        if (message.key.fromMe && !isSelfChat(message, current)) {
+          if (historyEntry) {
+            void persistSessionHistorySnapshot(userId, record, "message.fromMe").catch((error) =>
+              console.error(
+                `[agent] WhatsApp outbound history persistence failed for ${userId}:`,
+                error instanceof Error ? error.message : error,
+              ),
+            );
+          }
           continue;
         }
 
-        if (remoteJid && isGroupRateLimited(remoteJid)) {
-          console.log(`[agent] Group rate limited: ${remoteJid}`);
+        if (!message.key.fromMe && !replyTargetJid) {
           continue;
         }
 
-        replyTargetJid = remoteJid ?? safeRemoteJid;
-      }
-
-      const messageId = message.key.id ?? "";
-      if (messageId && outboundIds.has(messageId)) {
-        outboundIds.delete(messageId);
-        continue;
-      }
-
-      const syncSeed = buildSyncSeedFromMessage(message);
-      if (syncSeed) {
-        rememberSessionContacts(record, [syncSeed]);
-        void upsertWhatsAppContacts(userId, [syncSeed]).catch((error) =>
-          console.error(
-            `[agent] WhatsApp message contact sync failed for ${userId}:`,
-            error instanceof Error ? error.message : error,
-          ),
-        );
-      }
-
-      if (message.key.fromMe && !isSelfChat(message, current)) {
-        continue;
-      }
-
-      if (!message.key.fromMe && !replyTargetJid) {
-        continue;
-      }
-
-      let text =
-        message.message?.conversation ||
-        message.message?.extendedTextMessage?.text ||
-        "";
-      let mediaHandled = false;
+        let text =
+          message.message?.conversation ||
+          message.message?.extendedTextMessage?.text ||
+          "";
+        let mediaHandled = false;
 
       if (isGroupMessage && text) {
         text = stripMentionTokens(text, mentionedJids);
@@ -2715,6 +5373,66 @@ async function connectSession(userId: string): Promise<SessionRecord> {
         agentText,
         whatsAppSettings,
       );
+      } catch (error) {
+        console.error(
+          `[agent] Failed to process WhatsApp message for ${userId}:`,
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
+  });
+
+  sock.ev.on("messages.update", async (updates) => {
+    for (const update of updates) {
+      try {
+        if (!update.key?.fromMe || !update.key.id) {
+          continue;
+        }
+
+        const ackStatus = mapBaileysStatusToAckStatus(
+          typeof update.update?.status === "number" ? update.update.status : null,
+        );
+        if (!ackStatus) {
+          continue;
+        }
+
+        await markWhatsAppOutboundAckByWaMessageId({
+          userId,
+          waMessageId: update.key.id,
+          ackStatus,
+        }).catch(() => null);
+      } catch (error) {
+        console.error(
+          `[agent] Failed to process WhatsApp message status update for ${userId}:`,
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
+  });
+
+  sock.ev.on("message-receipt.update", async (updates) => {
+    for (const update of updates) {
+      try {
+        if (!update.key?.id) {
+          continue;
+        }
+
+        const ackStatus = mapReceiptUpdateToAckStatus(update.receipt);
+        if (!ackStatus) {
+          continue;
+        }
+
+        await markWhatsAppOutboundAckByWaMessageId({
+          userId,
+          waMessageId: update.key.id,
+          ackStatus,
+        }).catch(() => null);
+      } catch (error) {
+        console.error(
+          `[agent] Failed to process WhatsApp receipt update for ${userId}:`,
+          error instanceof Error ? error.message : error,
+        );
+      }
     }
   });
 
@@ -2722,6 +5440,10 @@ async function connectSession(userId: string): Promise<SessionRecord> {
 }
 
 async function waitForQrOrConnection(userId: string, timeoutMs = QR_WAIT_TIMEOUT_MS) {
+  if (timeoutMs <= 0) {
+    return sessions.get(userId) ?? null;
+  }
+
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
@@ -2762,9 +5484,7 @@ function shouldRegenerateQr(session: SessionRecord, forceRefresh: boolean) {
 }
 
 function isSelfChat(message: { key?: { remoteJid?: string | null } }, session: SessionRecord) {
-  const jid = String(message.key?.remoteJid ?? "").split("@")[0]?.replace(/\D/g, "") ?? "";
-  const phone = session.phone?.replace(/\D/g, "") ?? "";
-  return Boolean(phone && jid && phone === jid);
+  return isWhatsAppSelfChatJid(message.key?.remoteJid, session.phone);
 }
 
 function findSessionByPhone(phone: string) {
@@ -2778,7 +5498,7 @@ function findSessionByPhone(phone: string) {
 }
 
 registerClawCloudWhatsAppRuntime({
-  async send({ userId, phone, jid, message, contactName }) {
+  async send({ userId, phone, jid, message, contactName, source, approvalId, workflowRunId, idempotencyKey, metadata }) {
     const resolvedSession = userId
       ? { userId, session: sessions.get(userId) ?? null }
       : (phone ? findSessionByPhone(phone) : null);
@@ -2793,9 +5513,37 @@ registerClawCloudWhatsAppRuntime({
       return false;
     }
 
-    await sendStreamingMessage(session.sock, targetJid, message);
+    const tracking: TrackedWhatsAppSendInput | null = resolvedSession?.userId
+      ? {
+        userId: resolvedSession.userId,
+        source: source ?? "api_send",
+        approvalId: approvalId ?? null,
+        workflowRunId: workflowRunId ?? null,
+        idempotencyKey: idempotencyKey ?? null,
+        jid: targetJid,
+        phone: normalizedPhone || phoneFromJid(targetJid),
+        contactName: sanitizeContactName(contactName),
+        message,
+        metadata: normalizeTrackedWhatsAppMetadata(metadata),
+      }
+      : null;
+    const trackedOutbound = tracking ? await prepareTrackedWhatsAppOutbound(tracking) : null;
+    if (trackedOutbound?.status === "sent" || trackedOutbound?.status === "delivered" || trackedOutbound?.status === "read") {
+      return true;
+    }
+    if (trackedOutbound?.status === "skipped" || trackedOutbound?.status === "cancelled") {
+      return false;
+    }
+
+    const waMessageIds = await sendStreamingMessage(session.sock, targetJid, message);
+    if (tracking) {
+      await recordTrackedWhatsAppSendSuccess({
+        ...tracking,
+        idempotencyKey: trackedOutbound?.idempotency_key ?? tracking.idempotencyKey,
+      }, waMessageIds, 1);
+    }
     if (resolvedSession?.userId) {
-      void logOutbound(resolvedSession.userId, message, targetJid, sanitizeContactName(contactName));
+      void logOutbound(resolvedSession.userId, message, targetJid, sanitizeContactName(contactName), waMessageIds);
     }
     return true;
   },
@@ -2805,15 +5553,54 @@ registerClawCloudWhatsAppRuntime({
       return null;
     }
 
-    const resolved = resolveSessionContact(session, contactName);
+    let resolved = resolveSessionContact(session, contactName);
+    if ((!resolved || session.contacts.size === 0) && session.status === "connected") {
+      await bootstrapSessionWorkspace(userId, session, "local-runtime-resolve-contact");
+      resolved = resolveSessionContact(session, contactName);
+    }
     if (!resolved) {
       return null;
     }
 
+    if (resolved.type === "ambiguous") {
+      return {
+        type: "ambiguous",
+        matches: resolved.matches.map((match) => ({
+          name: match.name,
+          phone: match.phone,
+          jid: match.jid,
+        })),
+      };
+    }
+
     return {
-      name: resolved.name,
-      phone: resolved.phone,
-      jid: resolved.jid,
+      type: "found",
+      contact: {
+        name: resolved.contact.name,
+        phone: resolved.contact.phone,
+        jid: resolved.contact.jid,
+      },
+    };
+  },
+  async refreshContacts({ userId }) {
+    const session = sessions.get(userId) ?? null;
+    if (!session) {
+      throw new Error("No active session for this user.");
+    }
+    if (session.status !== "connected") {
+      throw new Error("WhatsApp session is not connected yet.");
+    }
+
+    const previousCount = session.contacts.size;
+    const previousHistoryCount = session.historyRows.size;
+    await bootstrapSessionWorkspace(userId, session, "local-runtime-manual-refresh");
+    return {
+      success: true as const,
+      contactCount: session.contacts.size,
+      previousCount,
+      persistedCount: buildSessionContactSeeds(session).length,
+      historyMessageCount: session.historyRows.size,
+      previousHistoryMessageCount: previousHistoryCount,
     };
   },
 });
@@ -2842,6 +5629,26 @@ async function restoreSessions() {
 
     console.log(`[agent] Restoring ${ids.length} session(s)...`);
     for (const id of ids) {
+      const checkpoint = readSessionRecoveryCheckpoint(id);
+      const reconnectWaitMs = getClawCloudWhatsAppReconnectWaitMs(checkpoint);
+      if (reconnectWaitMs > 0 && !checkpoint?.requiresReauth) {
+        console.log(
+          `[agent] Delaying restore for ${id} by ${reconnectWaitMs}ms to honor reconnect backoff`,
+        );
+        clearSessionReconnectTimer(id);
+        const timer = setTimeout(() => {
+          sessionReconnectTimers.delete(id);
+          void connectSession(id).catch((error) =>
+            console.error(
+              `[agent] Deferred restore failed for ${id}:`,
+              error instanceof Error ? error.message : error,
+            ),
+          );
+        }, reconnectWaitMs);
+        sessionReconnectTimers.set(id, timer);
+        continue;
+      }
+
       await new Promise((resolve) => setTimeout(resolve, 1_500));
       void connectSession(id).catch((error) =>
         console.error(
@@ -2869,7 +5676,7 @@ async function sessionWatchdog() {
 
     console.warn(`[agent] Watchdog restarting stuck session for ${userId} (${session.status})`);
     const hasSavedAuth = fs.existsSync(sessionDir(userId));
-    await discardSession(userId, session, { deleteAuth: false });
+    await discardSession(userId, session, { deleteAuth: false, logout: false });
 
     if (!hasSavedAuth) {
       await markDisconnected(userId);
@@ -2909,7 +5716,8 @@ app.get("/wa/qr/:userId", auth, async (req, res) => {
     const forceRefresh = String(req.query.refresh ?? "").trim() === "1";
 
     let session = await connectSession(userId);
-    session = (await waitForQrOrConnection(userId, forceRefresh ? 2_500 : QR_WAIT_TIMEOUT_MS)) ?? session;
+    const initialWaitMs = forceRefresh ? 1_200 : session.qr ? 0 : QR_WAIT_TIMEOUT_MS;
+    session = (await waitForQrOrConnection(userId, initialWaitMs)) ?? session;
 
     if (shouldRegenerateQr(session, forceRefresh)) {
       console.log(
@@ -2917,17 +5725,24 @@ app.get("/wa/qr/:userId", auth, async (req, res) => {
           session.qrIssuedAt ? Date.now() - session.qrIssuedAt : Date.now() - session.startedAt
         })`,
       );
-      await discardSession(userId, sessions.get(userId), { deleteAuth: true });
+      await discardSession(userId, sessions.get(userId), { deleteAuth: true, logout: false });
       await markDisconnected(userId);
       session = await connectSession(userId);
-      session = (await waitForQrOrConnection(userId, QR_WAIT_TIMEOUT_MS)) ?? session;
+      session = (await waitForQrOrConnection(userId, 1_200)) ?? session;
     }
 
+    res.setHeader("Cache-Control", "no-store, max-age=0");
     res.json({
       status: session.status,
       qr: session.qr,
       phone: session.phone,
       qr_age_seconds: session.qrIssuedAt ? Math.floor((Date.now() - session.qrIssuedAt) / 1000) : null,
+      poll_after_ms:
+        session.status === "connected"
+          ? null
+          : session.qr
+            ? 1_200
+            : 700,
     });
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : "Failed" });
@@ -2936,7 +5751,7 @@ app.get("/wa/qr/:userId", auth, async (req, res) => {
 
 app.delete("/wa/session/:userId", auth, async (req, res) => {
   const userId = readParam(req.params.userId);
-  await discardSession(userId, sessions.get(userId), { deleteAuth: true });
+  await discardSession(userId, sessions.get(userId), { deleteAuth: true, logout: true });
   await markDisconnected(userId);
   res.json({ success: true });
 });
@@ -2947,6 +5762,20 @@ app.post("/wa/send", auth, async (req, res) => {
   const message = String(req.body.message ?? "").trim();
   const userId = String(req.body.userId ?? "").trim() || null;
   const contactName = sanitizeContactName(req.body.contactName);
+  const source = (
+    req.body.source === "approval"
+    || req.body.source === "workflow"
+    || req.body.source === "direct_command"
+    || req.body.source === "assistant_reply"
+    || req.body.source === "system"
+    || req.body.source === "api_send"
+  )
+    ? req.body.source as WhatsAppOutboundSource
+    : "api_send";
+  const approvalId = typeof req.body.approvalId === "string" ? req.body.approvalId.trim() || null : null;
+  const workflowRunId = typeof req.body.workflowRunId === "string" ? req.body.workflowRunId.trim() || null : null;
+  const idempotencyKey = typeof req.body.idempotencyKey === "string" ? req.body.idempotencyKey.trim() || null : null;
+  const metadata = normalizeTrackedWhatsAppMetadata(req.body.metadata);
 
   if ((!phone && !jid) || !message) {
     res.status(400).json({ error: "phone or jid, plus message, required" });
@@ -2963,11 +5792,55 @@ app.post("/wa/send", auth, async (req, res) => {
   }
 
   const targetJid = jid || `${phone.replace(/\D/g, "")}@s.whatsapp.net`;
-  await sendStreamingMessage(session.sock, targetJid, message);
-  if (resolvedSession?.userId) {
-    void logOutbound(resolvedSession.userId, message, targetJid, contactName);
+  const tracking: TrackedWhatsAppSendInput | null = resolvedSession?.userId
+    ? {
+      userId: resolvedSession.userId,
+      source,
+      approvalId,
+      workflowRunId,
+      idempotencyKey,
+      jid: targetJid,
+      phone: phone.replace(/\D/g, "") || phoneFromJid(targetJid),
+      contactName,
+      message,
+      metadata,
+    }
+    : null;
+  const trackedOutbound = tracking ? await prepareTrackedWhatsAppOutbound(tracking) : null;
+  if (trackedOutbound?.status === "sent" || trackedOutbound?.status === "delivered" || trackedOutbound?.status === "read") {
+    res.json({
+      success: true,
+      deduped: true,
+      messageIds: trackedOutbound.wa_message_ids,
+    });
+    return;
   }
-  res.json({ success: true });
+  if (trackedOutbound?.status === "skipped" || trackedOutbound?.status === "cancelled") {
+    res.status(409).json({ error: "WhatsApp outbound message was cancelled before send." });
+    return;
+  }
+
+  try {
+    const waMessageIds = await sendStreamingMessage(session.sock, targetJid, message);
+    if (tracking) {
+      await recordTrackedWhatsAppSendSuccess({
+        ...tracking,
+        idempotencyKey: trackedOutbound?.idempotency_key ?? tracking.idempotencyKey,
+      }, waMessageIds, 1);
+    }
+    if (resolvedSession?.userId) {
+      void logOutbound(resolvedSession.userId, message, targetJid, contactName, waMessageIds);
+    }
+    res.json({ success: true, messageIds: waMessageIds });
+  } catch (error) {
+    if (tracking) {
+      await recordTrackedWhatsAppSendFailure({
+        ...tracking,
+        idempotencyKey: trackedOutbound?.idempotency_key ?? tracking.idempotencyKey,
+      }, 1, error instanceof Error ? error.message : "Failed to send WhatsApp message.", true);
+    }
+    throw error;
+  }
 });
 
 app.post("/wa/resolve-contact", auth, async (req, res) => {
@@ -2985,17 +5858,89 @@ app.post("/wa/resolve-contact", auth, async (req, res) => {
     return;
   }
 
-  const resolved = resolveSessionContact(session, contactName);
+  let resolved = resolveSessionContact(session, contactName);
+  if ((!resolved || session.contacts.size === 0) && session.status === "connected") {
+    await bootstrapSessionWorkspace(userId, session, "resolve-contact");
+    resolved = resolveSessionContact(session, contactName);
+  }
+
   if (!resolved) {
     res.status(404).json({ error: "No matching contact in active WhatsApp session" });
     return;
   }
 
+  if (resolved.type === "ambiguous") {
+    res.json({
+      success: true,
+      type: "ambiguous",
+      matches: resolved.matches.map((match) => ({
+        name: match.name,
+        phone: match.phone,
+        jid: match.jid,
+      })),
+    });
+    return;
+  }
+
   res.json({
     success: true,
-    name: resolved.name,
-    phone: resolved.phone,
-    jid: resolved.jid,
+    type: "found",
+    name: resolved.contact.name,
+    phone: resolved.contact.phone,
+    jid: resolved.contact.jid,
+  });
+});
+
+app.get("/wa/runtime/:userId", auth, async (req, res) => {
+  const userId = readParam(req.params.userId);
+  if (!userId) {
+    res.status(400).json({ error: "userId required" });
+    return;
+  }
+
+  const session = sessions.get(userId) ?? null;
+  if (!session) {
+    res.json(await buildDisconnectedRuntimeStatus(userId));
+    return;
+  }
+
+  res.json(buildSessionRuntimeStatus(userId, session));
+});
+
+app.post("/wa/refresh-contacts", auth, async (req, res) => {
+  const userId = String(req.body.userId ?? "").trim();
+
+  if (!userId) {
+    res.status(400).json({ error: "userId required" });
+    return;
+  }
+
+  const session = sessions.get(userId) ?? null;
+  if (!session) {
+    res.status(503).json({ error: "No active session for this user" });
+    return;
+  }
+  if (session.status !== "connected") {
+    res.status(409).json({
+      error: "WhatsApp session is not connected yet.",
+      sessionStatus: session.status,
+    });
+    return;
+  }
+
+  const beforeCount = session.contacts.size;
+  const beforeHistoryCount = session.historyRows.size;
+  await bootstrapSessionWorkspace(userId, session, "manual-refresh");
+  const persistedCount = buildSessionContactSeeds(session).length;
+
+  res.json({
+    success: true,
+    contactCount: session.contacts.size,
+    previousCount: beforeCount,
+    persistedCount,
+    historyMessageCount: session.historyRows.size,
+    previousHistoryMessageCount: beforeHistoryCount,
+    runtime: buildSessionRuntimeStatus(userId, session),
   });
 });
 
@@ -3023,6 +5968,7 @@ app.post("/wa/send-user/:userId", auth, async (req, res) => {
 
 app.get("/health", (_req, res) => {
   const error = configError();
+  const sessionStorage = readSessionStorageHealth();
   const connected = [...sessions.values()].filter((session) => session.status === "connected");
   const nvidia = ensureCanonicalNvidiaEnv();
   const nvidiaHints = getNvidiaEnvHints();
@@ -3033,7 +5979,7 @@ app.get("/health", (_req, res) => {
     || null;
 
   res.json({
-    status: error ? "degraded" : "ok",
+    status: error || sessionStorage.status !== "healthy" ? "degraded" : "ok",
     configured: !error,
     build_sha: buildSha,
     railway_service: process.env.RAILWAY_SERVICE_NAME || null,
@@ -3043,18 +5989,20 @@ app.get("/health", (_req, res) => {
     nvidia_env_source: nvidia.key,
     nvidia_env_hints: nvidiaHints,
     app_url: appUrl() || "NOT SET",
+    active_sync_jobs: [...sessions.values()].reduce((total, session) => total + session.activeSyncFrames.length, 0),
     session_states: Object.fromEntries(
       [...sessions.entries()].map(([userId, session]) => [
         userId.slice(0, 8),
         {
-          status: session.status,
-          phone: session.phone ? "set" : "none",
+          ...buildSessionRuntimeStatus(userId, session),
+          phone_loaded: session.phone ? "set" : "none",
         },
       ]),
     ),
     missingRequiredEnv: error ? missingEnv() : [],
     session_base_dir: sessionBaseDir(),
     saved_auth_dirs: savedSessionUserIds().length,
+    session_storage: sessionStorage,
     uptime_seconds: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
   });

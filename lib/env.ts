@@ -88,10 +88,8 @@ function readNvidiaApiKey() {
 const defaultPublicGoogleEnabled = /localhost|127\.0\.0\.1/i.test(
   readFirstString(["NEXT_PUBLIC_APP_URL", "NEXTJS_URL"]),
 );
-// Workspace OAuth requests Gmail / Calendar / Drive scopes, which can trigger
-// the raw Google "unverified app" screen if the app has not completed public
-// verification yet. Keep local dev convenient, but require an explicit public
-// enable in production instead of auto-exposing the flow when env vars exist.
+// Legacy rollout defaults are kept for compatibility with older environments.
+// Public Workspace connect now follows whether the OAuth client is configured.
 const defaultWorkspaceGoogleEnabled = defaultPublicGoogleEnabled;
 
 export const env = {
@@ -144,6 +142,15 @@ export const env = {
     5,
   ),
   RESEARCH_RETRIEVE_LIMIT: readNumber("RESEARCH_RETRIEVE_LIMIT", 8),
+  API_RATE_LIMIT_WINDOW_MS: readNumber("API_RATE_LIMIT_WINDOW_MS", 60_000),
+  API_RATE_LIMIT_THREADS_READ: readNumber("API_RATE_LIMIT_THREADS_READ", 60),
+  API_RATE_LIMIT_THREADS_WRITE: readNumber("API_RATE_LIMIT_THREADS_WRITE", 30),
+  API_RATE_LIMIT_RESEARCH: readNumber("API_RATE_LIMIT_RESEARCH", 6),
+  API_RATE_LIMIT_SEARCH: readNumber("API_RATE_LIMIT_SEARCH", 20),
+  API_RATE_LIMIT_RETRIEVE: readNumber("API_RATE_LIMIT_RETRIEVE", 20),
+  API_RATE_LIMIT_EMBED: readNumber("API_RATE_LIMIT_EMBED", 10),
+  API_RATE_LIMIT_CRAWL: readNumber("API_RATE_LIMIT_CRAWL", 8),
+  CRAWL_ALLOWED_HOSTS: readStringList("CRAWL_ALLOWED_HOSTS"),
   SUPABASE_URL: readFirstString(["SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL"]),
   SUPABASE_ANON_KEY: readFirstString([
     "SUPABASE_ANON_KEY",
@@ -155,6 +162,10 @@ export const env = {
     "research_runs",
   ),
   SUPABASE_THREADS_TABLE: readString("SUPABASE_THREADS_TABLE", "chat_threads"),
+  SUPABASE_DASHBOARD_JOURNAL_TABLE: readString(
+    "SUPABASE_DASHBOARD_JOURNAL_TABLE",
+    "dashboard_journal_threads",
+  ),
   OPENAI_API_KEY: readString("OPENAI_API_KEY"),
   OPENAI_MODEL: readString("OPENAI_MODEL", "gpt-4o-mini"),
   STRIPE_SECRET_KEY: readString("STRIPE_SECRET_KEY"),
@@ -198,7 +209,7 @@ export const env = {
     false,
   ),
   GOOGLE_WORKSPACE_TEST_USER_EMAILS: readStringList("GOOGLE_WORKSPACE_TEST_USER_EMAILS"),
-  // Emergency brake for Workspace connect. Defaults off when OAuth is configured.
+  // Legacy rollout brake retained for backward compatibility with older env sets.
   GOOGLE_WORKSPACE_TEMPORARY_HOLD: readBoolean("GOOGLE_WORKSPACE_TEMPORARY_HOLD", false),
   TELEGRAM_BOT_TOKEN: readString("TELEGRAM_BOT_TOKEN"),
   TELEGRAM_BOT_USERNAME: readString("TELEGRAM_BOT_USERNAME"),
@@ -230,9 +241,49 @@ export const env = {
     "FIREBASE_MEASUREMENT_ID",
     "G-6LBM2T2XLS",
   ),
+  GOOGLE_WORKSPACE_SETUP_LITE_ONLY: readBoolean(
+    "GOOGLE_WORKSPACE_SETUP_LITE_ONLY",
+    true,
+  ),
   LANGSMITH_API_KEY: readString("LANGSMITH_API_KEY"),
   LANGSMITH_PROJECT: readString("LANGSMITH_PROJECT", "swiftdeploy-ai-assistant"),
 };
+
+export function isGoogleWorkspaceOauthConfigured() {
+  return Boolean(
+    env.GOOGLE_CLIENT_ID
+    && env.GOOGLE_CLIENT_SECRET
+    && env.NEXT_PUBLIC_APP_URL,
+  );
+}
+
+export function isGooglePublicSignInEnabled() {
+  return Boolean(
+    env.GOOGLE_SIGNIN_PUBLIC_ENABLED
+    && env.GOOGLE_CLIENT_ID
+    && env.GOOGLE_CLIENT_SECRET
+    && env.NEXT_PUBLIC_APP_URL
+    && env.SUPABASE_URL
+    && env.SUPABASE_ANON_KEY
+    && env.SUPABASE_SERVICE_ROLE_KEY,
+  );
+}
+
+export function isGoogleWorkspacePublicConnectEnabled() {
+  return Boolean(
+    isGoogleWorkspaceOauthConfigured()
+    && env.GOOGLE_WORKSPACE_PUBLIC_ENABLED
+    && !env.GOOGLE_WORKSPACE_TEMPORARY_HOLD,
+  );
+}
+
+export function isGoogleWorkspaceExtendedConnectEnabled() {
+  return Boolean(
+    isGoogleWorkspaceOauthConfigured()
+    && env.GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED
+    && !env.GOOGLE_WORKSPACE_TEMPORARY_HOLD,
+  );
+}
 
 export function getProviderSnapshot(): ProviderSnapshot {
   return {
@@ -261,13 +312,10 @@ export function getPublicAppConfig(): PublicAppConfig {
     appUrl: env.NEXT_PUBLIC_APP_URL,
     telegramBotUsername: env.TELEGRAM_BOT_USERNAME,
     googleRollout: {
-      publicSignInEnabled: env.GOOGLE_SIGNIN_PUBLIC_ENABLED,
-      publicWorkspaceEnabled:
-        env.GOOGLE_WORKSPACE_PUBLIC_ENABLED && !env.GOOGLE_WORKSPACE_TEMPORARY_HOLD,
-      publicWorkspaceExtendedEnabled:
-        env.GOOGLE_WORKSPACE_PUBLIC_ENABLED
-        && env.GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED
-        && !env.GOOGLE_WORKSPACE_TEMPORARY_HOLD,
+      publicSignInEnabled: isGooglePublicSignInEnabled(),
+      publicWorkspaceEnabled: isGoogleWorkspacePublicConnectEnabled(),
+      publicWorkspaceExtendedEnabled: isGoogleWorkspaceExtendedConnectEnabled(),
+      setupLiteMode: env.GOOGLE_WORKSPACE_SETUP_LITE_ONLY,
     },
     firebase: {
       apiKey: env.FIREBASE_API_KEY,

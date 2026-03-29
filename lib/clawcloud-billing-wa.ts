@@ -5,6 +5,7 @@ import {
   clawCloudRunLimits,
   type ClawCloudPlan,
 } from "@/lib/clawcloud-types";
+import { getClawCloudTodayRunCount } from "@/lib/clawcloud-usage";
 
 export type BillingIntent = "upgrade" | "plan_status" | "cancel" | null;
 
@@ -36,7 +37,9 @@ const PLAN_STATUS_PATTERNS = [
 
 const CANCEL_PATTERNS = [
   /\b(cancel|downgrade|end)\s+(my\s+)?(plan|subscription|pro|starter)\b/i,
-  /\b(how to cancel|stop subscription|cancel billing)\b/i,
+  /\bhow to cancel\b.*\b(plan|subscription|billing)\b/i,
+  /\bstop subscription\b/i,
+  /\bcancel billing\b/i,
 ];
 
 const BILLING_STATUS_PATTERNS = [
@@ -121,13 +124,11 @@ function buildUsageBar(used: number, limit: number) {
 
 async function getUserPlanInfo(userId: string): Promise<UserPlanInfo> {
   const db = getClawCloudSupabaseAdmin();
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
 
-  const [userResult, subscriptionResult, runsResult, tasksResult] = await Promise.all([
+  const [userResult, subscriptionResult, runsToday, tasksResult] = await Promise.all([
     db.from("users").select("plan, email").eq("id", userId).single(),
     db.from("subscriptions").select("status, current_period_end").eq("user_id", userId).maybeSingle(),
-    db.from("task_runs").select("id", { count: "exact", head: true }).eq("user_id", userId).gte("started_at", todayStart.toISOString()),
+    getClawCloudTodayRunCount(userId),
     db.from("agent_tasks").select("id", { count: "exact", head: true }).eq("user_id", userId).eq("is_enabled", true),
   ]);
 
@@ -136,7 +137,7 @@ async function getUserPlanInfo(userId: string): Promise<UserPlanInfo> {
   return {
     plan,
     email: userResult.data?.email ?? "",
-    runsToday: runsResult.count ?? 0,
+    runsToday,
     dailyLimit: clawCloudRunLimits[plan],
     activeTaskCount: tasksResult.count ?? 0,
     taskLimit: clawCloudActiveTaskLimits[plan],

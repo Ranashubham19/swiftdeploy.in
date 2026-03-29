@@ -1,0 +1,63 @@
+name: Quality Gate
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  phase0-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run typecheck
+        run: npm run typecheck
+
+      - name: Run unit tests
+        run: npm run test:unit
+
+      - name: Run production build
+        run: npm run build
+
+      - name: Run Phase 0 smoke checks
+        run: npm run qa:phase0
+
+      - name: Run scorecard
+        env:
+          NEXT_PUBLIC_APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
+          NEXTJS_URL: ${{ secrets.NEXTJS_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
+          CLAWCLOUD_AUDIT_USER_ID: ${{ secrets.CLAWCLOUD_AUDIT_USER_ID }}
+          WHATSAPP_AUTO_TEST_USER_ID: ${{ secrets.WHATSAPP_AUTO_TEST_USER_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -n "${NEXT_PUBLIC_APP_URL}${NEXTJS_URL}" ] && [ -n "${CRON_SECRET}${AGENT_SECRET}" ]; then
+            npm run qa:scorecard -- --with-live
+          else
+            npm run qa:scorecard
+          fi
+
+      - name: Run canary dry-run
+        run: npm run qa:canary -- --dry-run
+
+      - name: Run Phase 7 release gate
+        env:
+          NEXT_PUBLIC_APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
+          NEXTJS_URL: ${{ secrets.NEXTJS_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
+        run: npm run qa:phase7

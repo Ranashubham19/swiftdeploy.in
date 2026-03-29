@@ -48,6 +48,12 @@ const HEALTH_PATTERNS = [
   /\b(is it safe to|can i take|should i take|overdose|interaction between|combine .* with|mix .* with)\b/i,
 ];
 
+const PERSONAL_HEALTH_ADVICE_PATTERNS = [
+  /\b(can i take|should i take|is it safe to take|how much .* take|what medicine should i take|which medicine should i take)\b/i,
+  /\b(dose|dosage|tablet|capsule|injection|prescribed|prescription|side effects?)\b/i,
+  /\b(my child|my baby|my father|my mother|my wife|my husband|i have .* pain|i am having .* pain)\b/i,
+];
+
 const NON_CLINICAL_HEALTH_CONTEXT_PATTERNS = [
   /\b(treatment coefficient|treatment effect|effect estimate)\b/i,
   /\b(difference-?in-?differences?|parallel trends|event study|policy evaluation|regression)\b/i,
@@ -108,6 +114,11 @@ function looksLikeHealthQuestion(ctx: DisclaimerContext, question: string): bool
   return HEALTH_PATTERNS.some((pattern) => pattern.test(question));
 }
 
+function looksLikePersonalHealthAdviceQuestion(ctx: DisclaimerContext, question: string): boolean {
+  return looksLikeHealthQuestion(ctx, question)
+    && PERSONAL_HEALTH_ADVICE_PATTERNS.some((pattern) => pattern.test(question));
+}
+
 function firstMatchingDisclaimer(ctx: DisclaimerContext): string | null {
   const question = ctx.question.toLowerCase();
 
@@ -115,7 +126,7 @@ function firstMatchingDisclaimer(ctx: DisclaimerContext): string | null {
     !isBlockedIntent(ctx.intent)
     && !isBlockedIntent(ctx.category)
     && !alreadyHasEquivalentDisclaimer(ctx.answer, "health")
-    && looksLikeHealthQuestion(ctx, question)
+    && looksLikePersonalHealthAdviceQuestion(ctx, question)
   ) {
     return HEALTH_DISCLAIMER;
   }
@@ -124,8 +135,7 @@ function firstMatchingDisclaimer(ctx: DisclaimerContext): string | null {
     !isBlockedIntent(ctx.intent)
     && !isBlockedIntent(ctx.category)
     && !alreadyHasEquivalentDisclaimer(ctx.answer, "legal")
-    && (LEGAL_INTENTS.has(ctx.intent) || LEGAL_INTENTS.has(ctx.category)
-      || LEGAL_PATTERNS.some((pattern) => pattern.test(question)))
+    && LEGAL_PATTERNS.some((pattern) => pattern.test(question))
   ) {
     return LEGAL_DISCLAIMER;
   }
@@ -137,14 +147,6 @@ function firstMatchingDisclaimer(ctx: DisclaimerContext): string | null {
     && FINANCE_RECOMMENDATION_PATTERNS.some((pattern) => pattern.test(question))
   ) {
     return FINANCE_DISCLAIMER;
-  }
-
-  if (
-    !alreadyHasLiveSafetyLabel(ctx.answer)
-    && !alreadyHasEquivalentDisclaimer(ctx.answer, "freshness")
-    && FRESHNESS_PATTERNS.some((pattern) => pattern.test(question))
-  ) {
-    return FRESHNESS_DISCLAIMER;
   }
 
   return null;

@@ -91,9 +91,9 @@ export function buildBackgroundTaskFailureMessage(
 
 export function buildNoLiveDataProfessionalReply() {
   return [
-    "\u{1F50D} *I could not verify enough reliable live sources right now.*",
+    "*Time-sensitive query*",
     "",
-    "I do not want to guess on a time-sensitive answer.",
-    "Please retry with a narrower query, exact company/person name, or a clearer date/timeframe.",
+    "To keep this accurate, send the exact company, person, product, topic, date, or location you want checked live.",
+    "If you want a stable overview instead of a live update, ask for an overview and I will answer directly.",
   ].join("\n");
 }

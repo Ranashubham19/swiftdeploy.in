@@ -17,38 +17,63 @@ create table if not exists public.research_runs (
   question text not null,
   plan jsonb not null,
   progress jsonb not null default '[]'::jsonb,
+  search_diagnostics jsonb,
   sources jsonb not null default '[]'::jsonb,
   retrieved_context jsonb not null default '[]'::jsonb,
   report jsonb,
+  user_id uuid references auth.users(id) on delete set null,
   firebase_uid text,
   user_email text,
   user_name text,
   created_at timestamptz not null default timezone('utc', now())
 );
 
+create index if not exists research_runs_user_id_created_at_idx
+  on public.research_runs (user_id, created_at desc);
+
 alter table public.chat_threads enable row level security;
 alter table public.research_runs enable row level security;
 
-create policy if not exists "Allow anon read chat threads"
+drop policy if exists "Allow anon read chat threads" on public.chat_threads;
+drop policy if exists "Allow anon upsert chat threads" on public.chat_threads;
+drop policy if exists "Allow anon update chat threads" on public.chat_threads;
+drop policy if exists "Allow anon insert research runs" on public.research_runs;
+
+drop policy if exists "Users can read own chat threads" on public.chat_threads;
+create policy "Users can read own chat threads"
   on public.chat_threads
   for select
-  using (true);
+  to authenticated
+  using (auth.uid()::text = user_id);
 
-create policy if not exists "Allow anon upsert chat threads"
+drop policy if exists "Users can insert own chat threads" on public.chat_threads;
+create policy "Users can insert own chat threads"
   on public.chat_threads
   for insert
-  with check (true);
+  to authenticated
+  with check (auth.uid()::text = user_id);
 
-create policy if not exists "Allow anon update chat threads"
+drop policy if exists "Users can update own chat threads" on public.chat_threads;
+create policy "Users can update own chat threads"
   on public.chat_threads
   for update
-  using (true)
-  with check (true);
+  to authenticated
+  using (auth.uid()::text = user_id)
+  with check (auth.uid()::text = user_id);
 
-create policy if not exists "Allow anon insert research runs"
+drop policy if exists "Users can read own research runs" on public.research_runs;
+create policy "Users can read own research runs"
+  on public.research_runs
+  for select
+  to authenticated
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can insert own research runs" on public.research_runs;
+create policy "Users can insert own research runs"
   on public.research_runs
   for insert
-  with check (true);
+  to authenticated
+  with check (auth.uid() = user_id);
 
 create extension if not exists "uuid-ossp";
 
@@ -248,6 +273,55 @@ create index if not exists idx_wa_messages_sent
 create index if not exists idx_wa_messages_user_remote_sent
   on public.whatsapp_messages (user_id, remote_phone, sent_at desc);
 
+create table if not exists public.whatsapp_outbound_messages (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(id) on delete cascade,
+  source text not null
+    check (source in ('approval', 'workflow', 'direct_command', 'assistant_reply', 'system', 'api_send')),
+  approval_id uuid references public.whatsapp_reply_approvals(id) on delete set null,
+  workflow_run_id uuid references public.whatsapp_workflow_runs(id) on delete set null,
+  remote_jid text,
+  remote_phone text,
+  contact_name text,
+  message_text text not null,
+  idempotency_key text not null,
+  status text not null default 'drafted'
+    check (status in ('drafted', 'queued', 'approval_required', 'approved', 'retrying', 'sent', 'delivered', 'read', 'failed', 'skipped', 'cancelled')),
+  attempt_count integer not null default 0,
+  wa_message_ids text[] not null default '{}'::text[],
+  queued_at timestamptz not null default now(),
+  approved_at timestamptz,
+  sent_at timestamptz,
+  delivered_at timestamptz,
+  read_at timestamptz,
+  failed_at timestamptz,
+  error_message text,
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, idempotency_key)
+);
+
+create index if not exists idx_whatsapp_outbound_messages_user_status_created
+  on public.whatsapp_outbound_messages (user_id, status, created_at desc);
+
+create index if not exists idx_whatsapp_outbound_messages_approval
+  on public.whatsapp_outbound_messages (approval_id);
+
+create index if not exists idx_whatsapp_outbound_messages_workflow_run
+  on public.whatsapp_outbound_messages (workflow_run_id);
+
+create index if not exists idx_whatsapp_outbound_messages_queued
+  on public.whatsapp_outbound_messages (user_id, queued_at desc);
+
+create index if not exists idx_whatsapp_outbound_messages_wa_message_ids
+  on public.whatsapp_outbound_messages using gin (wa_message_ids);
+
+drop trigger if exists whatsapp_outbound_messages_updated_at on public.whatsapp_outbound_messages;
+create trigger whatsapp_outbound_messages_updated_at
+  before update on public.whatsapp_outbound_messages
+  for each row execute function public.set_updated_at();
+
 create table if not exists public.analytics_daily (
   id uuid primary key default uuid_generate_v4(),
   user_id uuid not null references public.users(id) on delete cascade,
@@ -262,6 +336,66 @@ create table if not exists public.analytics_daily (
 
 create index if not exists idx_analytics_user_date
   on public.analytics_daily (user_id, date desc);
+
+create table if not exists public.intent_analytics_daily (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(id) on delete cascade,
+  date date not null default current_date,
+  intent text not null,
+  count integer not null default 0,
+  avg_latency_ms integer not null default 0,
+  fallback_count integer not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, date, intent)
+);
+
+create index if not exists idx_intent_analytics_user_date
+  on public.intent_analytics_daily (user_id, date desc);
+
+create index if not exists idx_intent_analytics_user_intent_date
+  on public.intent_analytics_daily (user_id, intent, date desc);
+
+drop trigger if exists intent_analytics_daily_updated_at on public.intent_analytics_daily;
+create trigger intent_analytics_daily_updated_at
+  before update on public.intent_analytics_daily
+  for each row execute function public.set_updated_at();
+
+create table if not exists public.answer_observability_events (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(id) on delete cascade,
+  input_kind text not null default 'api_inbound_message',
+  question_preview text,
+  response_preview text,
+  intent text not null default 'general',
+  category text not null default 'general',
+  response_state text not null default 'answered'
+    check (response_state in ('answered', 'refused', 'consent_prompt', 'failed')),
+  latency_ms integer,
+  char_count integer not null default 0,
+  had_visible_fallback boolean not null default false,
+  live_answer boolean not null default false,
+  live_evidence_count integer not null default 0,
+  live_source_count integer not null default 0,
+  live_strategy text,
+  model_audited boolean not null default false,
+  selected_by text,
+  selected_model text,
+  judge_used boolean not null default false,
+  material_disagreement boolean not null default false,
+  needs_clarification boolean not null default false,
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_answer_observability_user_created
+  on public.answer_observability_events (user_id, created_at desc);
+
+create index if not exists idx_answer_observability_user_state_created
+  on public.answer_observability_events (user_id, response_state, created_at desc);
+
+create index if not exists idx_answer_observability_user_intent_created
+  on public.answer_observability_events (user_id, intent, created_at desc);
 
 create table if not exists public.subscriptions (
   id uuid primary key default uuid_generate_v4(),
@@ -282,6 +416,77 @@ create trigger subscriptions_updated_at
   before update on public.subscriptions
   for each row execute function public.set_updated_at();
 
+create table if not exists public.billing_webhook_events (
+  id uuid primary key default uuid_generate_v4(),
+  provider text not null check (provider in ('stripe', 'razorpay')),
+  external_event_id text not null,
+  event_type text not null,
+  user_id uuid references public.users(id) on delete set null,
+  status text not null default 'pending' check (status in ('pending', 'processing', 'processed', 'failed')),
+  payload jsonb not null default '{}'::jsonb,
+  signature_verified boolean not null default false,
+  attempts integer not null default 1,
+  first_seen_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  processed_at timestamptz,
+  failure_reason text,
+  updated_at timestamptz not null default now(),
+  unique (provider, external_event_id)
+);
+
+create index if not exists idx_billing_webhook_events_provider_status_last_seen
+  on public.billing_webhook_events (provider, status, last_seen_at desc);
+
+create index if not exists idx_billing_webhook_events_user_last_seen
+  on public.billing_webhook_events (user_id, last_seen_at desc);
+
+drop trigger if exists billing_webhook_events_updated_at on public.billing_webhook_events;
+create trigger billing_webhook_events_updated_at
+  before update on public.billing_webhook_events
+  for each row execute function public.set_updated_at();
+
+create table if not exists public.dashboard_journal_threads (
+  id uuid primary key default uuid_generate_v4(),
+  user_id uuid not null references public.users(id) on delete cascade,
+  thread_key text not null,
+  date_key date not null,
+  title text not null,
+  messages jsonb not null default '[]'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, thread_key)
+);
+
+create index if not exists idx_dashboard_journal_threads_user_date
+  on public.dashboard_journal_threads (user_id, date_key desc);
+
+drop trigger if exists dashboard_journal_threads_updated_at on public.dashboard_journal_threads;
+create trigger dashboard_journal_threads_updated_at
+  before update on public.dashboard_journal_threads
+  for each row execute function public.set_updated_at();
+
+create table if not exists public.global_lite_connections (
+  id uuid primary key default uuid_generate_v4(),
+  user_id uuid not null references public.users(id) on delete cascade,
+  provider text not null check (provider in ('gmail', 'google_calendar', 'google_drive')),
+  mode text not null check (mode in ('gmail_capture', 'calendar_ics', 'drive_uploads')),
+  label text,
+  config jsonb not null default '{}'::jsonb,
+  is_active boolean not null default true,
+  connected_at timestamptz not null default now(),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, provider)
+);
+
+create index if not exists idx_global_lite_connections_user_provider
+  on public.global_lite_connections (user_id, provider);
+
+drop trigger if exists global_lite_connections_updated_at on public.global_lite_connections;
+create trigger global_lite_connections_updated_at
+  before update on public.global_lite_connections
+  for each row execute function public.set_updated_at();
+
 alter table public.users enable row level security;
 alter table public.connected_accounts enable row level security;
 alter table public.custom_commands enable row level security;
@@ -289,8 +494,14 @@ alter table public.agent_tasks enable row level security;
 alter table public.task_runs enable row level security;
 alter table public.whatsapp_contacts enable row level security;
 alter table public.whatsapp_messages enable row level security;
+alter table public.whatsapp_outbound_messages enable row level security;
 alter table public.analytics_daily enable row level security;
+alter table public.intent_analytics_daily enable row level security;
+alter table public.answer_observability_events enable row level security;
 alter table public.subscriptions enable row level security;
+alter table public.billing_webhook_events enable row level security;
+alter table public.dashboard_journal_threads enable row level security;
+alter table public.global_lite_connections enable row level security;
 
 drop policy if exists "Users: read own" on public.users;
 create policy "Users: read own"
@@ -395,11 +606,54 @@ create policy "WA contacts: read own"
   for select
   using (auth.uid() = user_id);
 
+drop policy if exists "Users read own WhatsApp outbound messages" on public.whatsapp_outbound_messages;
+create policy "Users read own WhatsApp outbound messages"
+  on public.whatsapp_outbound_messages for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users manage own WhatsApp outbound messages" on public.whatsapp_outbound_messages;
+create policy "Users manage own WhatsApp outbound messages"
+  on public.whatsapp_outbound_messages for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Service role bypass WhatsApp outbound messages" on public.whatsapp_outbound_messages;
+create policy "Service role bypass WhatsApp outbound messages"
+  on public.whatsapp_outbound_messages for all to service_role
+  using (true)
+  with check (true);
+
 drop policy if exists "Analytics: read own" on public.analytics_daily;
 create policy "Analytics: read own"
   on public.analytics_daily
   for select
   using (auth.uid() = user_id);
+
+drop policy if exists "Intent analytics: read own" on public.intent_analytics_daily;
+create policy "Intent analytics: read own"
+  on public.intent_analytics_daily
+  for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Intent analytics: service role bypass" on public.intent_analytics_daily;
+create policy "Intent analytics: service role bypass"
+  on public.intent_analytics_daily
+  for all to service_role
+  using (true)
+  with check (true);
+
+drop policy if exists "Answer observability: read own" on public.answer_observability_events;
+create policy "Answer observability: read own"
+  on public.answer_observability_events
+  for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Answer observability: service role bypass" on public.answer_observability_events;
+create policy "Answer observability: service role bypass"
+  on public.answer_observability_events
+  for all to service_role
+  using (true)
+  with check (true);
 
 drop policy if exists "Subs: read own" on public.subscriptions;
 create policy "Subs: read own"
@@ -411,6 +665,63 @@ drop policy if exists "Subs: update own" on public.subscriptions;
 create policy "Subs: update own"
   on public.subscriptions
   for update
+  using (auth.uid() = user_id);
+
+drop policy if exists "billing_webhook_events: service role only" on public.billing_webhook_events;
+create policy "billing_webhook_events: service role only"
+  on public.billing_webhook_events
+  for all to service_role
+  using (true)
+  with check (true);
+
+drop policy if exists "Dashboard journal: read own" on public.dashboard_journal_threads;
+create policy "Dashboard journal: read own"
+  on public.dashboard_journal_threads
+  for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Dashboard journal: insert own" on public.dashboard_journal_threads;
+create policy "Dashboard journal: insert own"
+  on public.dashboard_journal_threads
+  for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Dashboard journal: update own" on public.dashboard_journal_threads;
+create policy "Dashboard journal: update own"
+  on public.dashboard_journal_threads
+  for update
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Dashboard journal: delete own" on public.dashboard_journal_threads;
+create policy "Dashboard journal: delete own"
+  on public.dashboard_journal_threads
+  for delete
+  using (auth.uid() = user_id);
+
+drop policy if exists "Global Lite: read own" on public.global_lite_connections;
+create policy "Global Lite: read own"
+  on public.global_lite_connections
+  for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Global Lite: insert own" on public.global_lite_connections;
+create policy "Global Lite: insert own"
+  on public.global_lite_connections
+  for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Global Lite: update own" on public.global_lite_connections;
+create policy "Global Lite: update own"
+  on public.global_lite_connections
+  for update
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Global Lite: delete own" on public.global_lite_connections;
+create policy "Global Lite: delete own"
+  on public.global_lite_connections
+  for delete
   using (auth.uid() = user_id);
 
 create or replace function public.seed_default_tasks(p_user_id uuid)

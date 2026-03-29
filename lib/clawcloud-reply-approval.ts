@@ -1,11 +1,18 @@
 import { upsertAnalyticsDaily } from "@/lib/clawcloud-analytics";
 import { completeClawCloudPrompt } from "@/lib/clawcloud-ai";
 import {
+  buildGoogleNotConnectedReply,
+  buildGoogleReconnectRequiredReply,
+  createClawCloudGmailDraft,
   getClawCloudGmailMessages,
+  isClawCloudGoogleNotConnectedError,
+  isClawCloudGoogleReconnectRequiredError,
   sendClawCloudGmailReply,
 } from "@/lib/clawcloud-google";
 import { getUserLocale, translateMessage } from "@/lib/clawcloud-i18n";
+import { parseOutboundReviewDecision } from "@/lib/clawcloud-outbound-review";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
+import { extractJsonObject, safeJsonParse } from "@/lib/utils";
 import { sendClawCloudWhatsAppMessage } from "@/lib/clawcloud-whatsapp";
 
 export type ApprovalStatus = "pending" | "sent" | "skipped" | "edit_requested";
@@ -21,6 +28,259 @@ export type ReplyApproval = {
   created_at: string;
   updated_at?: string | null;
 };
+
+type ReplyApprovalMode = "compose_send" | "compose_draft" | "reply_send" | "reply_draft" | "legacy_reply_send";
+
+type ReplyApprovalEnvelope = {
+  version: 1;
+  action: Exclude<ReplyApprovalMode, "legacy_reply_send">;
+  to: string;
+  inReplyTo?: string | null;
+  originalEmailId?: string | null;
+  originalPrompt?: string | null;
+  targetLabel?: string | null;
+};
+
+type QueueReplyApprovalInput = {
+  userId: string;
+  action: Exclude<ReplyApprovalMode, "legacy_reply_send">;
+  to: string;
+  subject: string;
+  body: string;
+  inReplyTo?: string | null;
+  originalEmailId?: string | null;
+  originalPrompt?: string | null;
+  targetLabel?: string | null;
+};
+
+type ReplyApprovalExecutionPlan = {
+  mode: ReplyApprovalMode;
+  to: string;
+  subject: string;
+  displayTarget: string;
+  inReplyTo: string | null;
+};
+
+function encodeReplyApprovalEnvelope(payload: ReplyApprovalEnvelope) {
+  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  return `meta:${encoded}`;
+}
+
+function decodeReplyApprovalEnvelope(emailId: string): ReplyApprovalEnvelope | null {
+  if (!emailId.startsWith("meta:")) {
+    return null;
+  }
+
+  try {
+    const decoded = Buffer.from(emailId.slice(5), "base64url").toString("utf8");
+    const parsed = JSON.parse(decoded) as Partial<ReplyApprovalEnvelope>;
+    if (
+      parsed?.version !== 1
+      || (parsed.action !== "compose_send"
+        && parsed.action !== "compose_draft"
+        && parsed.action !== "reply_send"
+        && parsed.action !== "reply_draft")
+      || typeof parsed.to !== "string"
+    ) {
+      return null;
+    }
+
+    return {
+      version: 1,
+      action: parsed.action,
+      to: parsed.to,
+      inReplyTo: typeof parsed.inReplyTo === "string" ? parsed.inReplyTo : null,
+      originalEmailId: typeof parsed.originalEmailId === "string" ? parsed.originalEmailId : null,
+      originalPrompt: typeof parsed.originalPrompt === "string" ? parsed.originalPrompt : null,
+      targetLabel: typeof parsed.targetLabel === "string" ? parsed.targetLabel : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function resolveReplyApprovalExecutionPlan(approval: ReplyApproval): ReplyApprovalExecutionPlan {
+  const envelope = decodeReplyApprovalEnvelope(approval.email_id);
+  if (!envelope) {
+    return {
+      mode: "legacy_reply_send",
+      to: extractEmailAddress(approval.email_from),
+      subject: `Re: ${approval.email_subject}`,
+      displayTarget: displayNameFromSender(approval.email_from),
+      inReplyTo: null,
+    };
+  }
+
+  const displayTarget = envelope.targetLabel?.trim()
+    || (envelope.action === "reply_send" || envelope.action === "reply_draft"
+      ? displayNameFromSender(approval.email_from)
+      : envelope.to);
+
+  return {
+    mode: envelope.action,
+    to: envelope.to,
+    subject: approval.email_subject,
+    displayTarget,
+    inReplyTo: envelope.inReplyTo ?? null,
+  };
+}
+
+function buildReplyApprovalHeadline(plan: ReplyApprovalExecutionPlan) {
+  return plan.mode === "compose_draft" || plan.mode === "reply_draft"
+    ? "Gmail draft ready for review"
+    : "Gmail message ready for review";
+}
+
+function buildReplyApprovalPrompt(plan: ReplyApprovalExecutionPlan) {
+  return plan.mode === "compose_draft" || plan.mode === "reply_draft"
+    ? "Should I save this to Gmail drafts?"
+    : "Should I send this now?";
+}
+
+export function buildReplyApprovalReviewReply(approval: ReplyApproval) {
+  const plan = resolveReplyApprovalExecutionPlan(approval);
+  const preview = approval.draft_body.length > 320
+    ? `${approval.draft_body.slice(0, 320)}...`
+    : approval.draft_body;
+
+  return [
+    `📧 *${buildReplyApprovalHeadline(plan)}*`,
+    `*To:* ${plan.displayTarget}`,
+    `*Subject:* ${plan.subject}`,
+    "",
+    "*Draft:*",
+    preview,
+    "",
+    buildReplyApprovalPrompt(plan),
+    "Reply `Yes` to confirm, `No` to cancel, or `Rewrite it ...` to refine it.",
+    `Power option: \`SEND ${approval.id.slice(0, 8)}\`, \`EDIT ${approval.id.slice(0, 8)} <text>\`, \`SKIP ${approval.id.slice(0, 8)}\``,
+  ].join("\n");
+}
+
+export function buildReplyApprovalContextReply(
+  approval: ReplyApproval,
+  kind: "review" | "explain" | "target",
+) {
+  const plan = resolveReplyApprovalExecutionPlan(approval);
+  const actionLabel = plan.mode === "compose_draft" || plan.mode === "reply_draft"
+    ? "save this Gmail draft"
+    : "send this Gmail message";
+
+  if (kind === "review") {
+    return buildReplyApprovalReviewReply(approval);
+  }
+
+  if (kind === "target") {
+    return [
+      `This pending Gmail ${plan.mode === "compose_draft" || plan.mode === "reply_draft" ? "draft" : "message"} is for *${plan.displayTarget}*.`,
+      `*Subject:* ${plan.subject}`,
+      `I'm waiting for your confirmation before I ${actionLabel.replace("this ", "")}. Reply \`Yes\`, \`No\`, or \`Rewrite it ...\`.`,
+    ].join("\n\n");
+  }
+
+  return [
+    `This Gmail ${plan.mode === "compose_draft" || plan.mode === "reply_draft" ? "draft" : "message"} is waiting because ClawCloud keeps outbound Gmail actions human-confirmed.`,
+    `*Target:* ${plan.displayTarget}`,
+    `*Subject:* ${plan.subject}`,
+    `If you want, reply \`Yes\` to confirm, \`No\` to cancel, or \`Rewrite it ...\` to refine the draft first.`,
+  ].join("\n\n");
+}
+
+type ReplyApprovalRewriteDraft = {
+  subject: string;
+  body: string;
+};
+
+function normalizeReplyApprovalRewriteDraft(
+  raw: string,
+  approval: Pick<ReplyApproval, "email_subject" | "draft_body">,
+): ReplyApprovalRewriteDraft {
+  const cleaned = raw.replace(/```json|```/gi, "").trim();
+  const jsonCandidate = extractJsonObject(cleaned) ?? cleaned;
+  const parsed = safeJsonParse<{ subject?: unknown; body?: unknown }>(jsonCandidate);
+  if (parsed) {
+    const subject = typeof parsed.subject === "string" && parsed.subject.trim()
+      ? parsed.subject.trim()
+      : approval.email_subject;
+    const body = typeof parsed.body === "string" && parsed.body.trim()
+      ? parsed.body.trim()
+      : approval.draft_body;
+    return { subject, body };
+  }
+
+  return {
+    subject: approval.email_subject,
+    body: cleaned || approval.draft_body,
+  };
+}
+
+export function normalizeReplyApprovalRewriteDraftForTest(
+  raw: string,
+  approval: Pick<ReplyApproval, "email_subject" | "draft_body">,
+) {
+  return normalizeReplyApprovalRewriteDraft(raw, approval);
+}
+
+async function rewriteReplyApprovalDraft(
+  approval: ReplyApproval,
+  guidance: string | null,
+) {
+  const plan = resolveReplyApprovalExecutionPlan(approval);
+  const rewritten = await completeClawCloudPrompt({
+    system: [
+      "You rewrite professional email drafts.",
+      "Return strict JSON only with keys `subject` and `body`.",
+      "`subject` must be a clean single-line email subject with no quotes or markdown.",
+      "`body` must be the full updated email body with no markdown fences.",
+      "Preserve the original intent, facts, commitments, and requested outcome.",
+      "Improve tone, clarity, and professionalism.",
+      "Only change the subject if the revision request asks for it or the current subject should be clarified for the same message.",
+      "If feedback is provided, follow it carefully.",
+      "Keep the draft concise and ready to send.",
+    ].join("\n"),
+    user: [
+      `Mode: ${plan.mode}`,
+      `Recipient: ${plan.displayTarget}`,
+      `Current subject: ${approval.email_subject}`,
+      `Current draft:\n${approval.draft_body}`,
+      guidance
+        ? `Revision request: ${guidance}`
+        : "Revision request: Rewrite this to sound more polished, professional, and accurate.",
+    ].join("\n\n"),
+    intent: "email",
+    maxTokens: 420,
+    fallback: JSON.stringify({
+      subject: approval.email_subject,
+      body: approval.draft_body,
+    }),
+  });
+
+  return normalizeReplyApprovalRewriteDraft(rewritten, approval);
+}
+
+async function updateReplyApprovalDraftOnly(
+  approvalId: string,
+  subject: string,
+  draftBody: string,
+) {
+  const supabaseAdmin = getClawCloudSupabaseAdmin();
+  const { data, error } = await supabaseAdmin
+    .from("reply_approvals")
+    .update({
+      email_subject: subject,
+      draft_body: draftBody,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", approvalId)
+    .select("*")
+    .single();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return data as ReplyApproval;
+}
 
 function extractEmailAddress(value: string) {
   const bracketMatch = value.match(/<([^>]+)>/);
@@ -185,6 +445,38 @@ async function generateReplyDraft(from: string, subject: string, body: string) {
   });
 }
 
+export async function queueReplyApproval(input: QueueReplyApprovalInput) {
+  const supabaseAdmin = getClawCloudSupabaseAdmin();
+  const emailId = encodeReplyApprovalEnvelope({
+    version: 1,
+    action: input.action,
+    to: input.to,
+    inReplyTo: input.inReplyTo ?? null,
+    originalEmailId: input.originalEmailId ?? null,
+    originalPrompt: input.originalPrompt ?? null,
+    targetLabel: input.targetLabel ?? null,
+  });
+
+  const { data, error } = await supabaseAdmin
+    .from("reply_approvals")
+    .insert({
+      user_id: input.userId,
+      email_id: emailId,
+      email_from: input.targetLabel || input.to,
+      email_subject: input.subject,
+      draft_body: input.body,
+      status: "pending",
+    })
+    .select("*")
+    .single();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return data as ReplyApproval;
+}
+
 export async function listReplyApprovals(userId: string, limit = 50) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const { data, error } = await supabaseAdmin
@@ -201,6 +493,24 @@ export async function listReplyApprovals(userId: string, limit = 50) {
   }
 
   return (data ?? []) as ReplyApproval[];
+}
+
+export async function getLatestPendingReplyApproval(userId: string) {
+  const supabaseAdmin = getClawCloudSupabaseAdmin();
+  const { data, error } = await supabaseAdmin
+    .from("reply_approvals")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("status", "pending")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data as ReplyApproval | null) ?? null;
 }
 
 export async function updateReplyApproval(
@@ -251,11 +561,23 @@ export async function updateReplyApproval(
   }
 
   const finalBody = input.draftBody?.trim() || approval.draft_body;
-  await sendClawCloudGmailReply(userId, {
-    to: extractEmailAddress(approval.email_from),
-    subject: `Re: ${approval.email_subject}`,
-    body: finalBody,
-  });
+  const plan = resolveReplyApprovalExecutionPlan(approval);
+
+  if (plan.mode === "compose_draft" || plan.mode === "reply_draft") {
+    await createClawCloudGmailDraft(userId, {
+      to: plan.to,
+      subject: plan.subject,
+      body: finalBody,
+      inReplyTo: plan.inReplyTo || null,
+    });
+  } else {
+    await sendClawCloudGmailReply(userId, {
+      to: plan.to,
+      subject: plan.subject,
+      body: finalBody,
+      inReplyTo: plan.inReplyTo || null,
+    });
+  }
 
   const { data: updated, error: updateError } = await supabaseAdmin
     .from("reply_approvals")
@@ -275,14 +597,118 @@ export async function updateReplyApproval(
   return updated as ReplyApproval;
 }
 
+export async function handleLatestReplyApprovalReview(userId: string, message: string) {
+  const decision = parseOutboundReviewDecision(message);
+  if (decision.kind === "none") {
+    return { handled: false, response: "", createdAt: null as string | null };
+  }
+
+  const locale = await getUserLocale(userId);
+
+  const approval = await getLatestPendingReplyApproval(userId);
+  if (!approval) {
+    return { handled: false, response: "", createdAt: null as string | null };
+  }
+
+  const plan = resolveReplyApprovalExecutionPlan(approval);
+
+  if (decision.kind === "cancel") {
+    await updateReplyApproval(userId, approval.id, { action: "skip" });
+    return {
+      handled: true,
+      response: await translateMessage(
+        `Okay, I won't ${plan.mode === "compose_draft" || plan.mode === "reply_draft" ? "save" : "send"} the Gmail ${plan.mode === "compose_draft" || plan.mode === "reply_draft" ? "draft" : "message"} for ${plan.displayTarget}.`,
+        locale,
+      ),
+      createdAt: approval.created_at,
+    };
+  }
+
+  if (decision.kind === "rewrite") {
+    const updatedDraft = await rewriteReplyApprovalDraft(approval, decision.feedback);
+    const updatedApproval = await updateReplyApprovalDraftOnly(
+      approval.id,
+      updatedDraft.subject,
+      updatedDraft.body,
+    );
+
+    return {
+      handled: true,
+      response: await translateMessage(buildReplyApprovalReviewReply(updatedApproval), locale),
+      createdAt: approval.created_at,
+    };
+  }
+
+  try {
+    await updateReplyApproval(userId, approval.id, {
+      action: "send",
+    });
+
+    await upsertAnalyticsDaily(userId, {
+      tasks_run: 1,
+      wa_messages_sent: 1,
+      drafts_created: plan.mode === "compose_draft" || plan.mode === "reply_draft" ? 1 : 0,
+    });
+
+    const completedLabel = plan.mode === "compose_draft" || plan.mode === "reply_draft"
+      ? `Saved the Gmail draft for ${plan.displayTarget}.`
+      : `Sent the Gmail message to ${plan.displayTarget}.`;
+
+    return {
+      handled: true,
+      response: await translateMessage(
+        `${completedLabel}\n\nSubject: ${plan.subject}`,
+        locale,
+      ),
+      createdAt: approval.created_at,
+    };
+  } catch (error) {
+    const messageText = isClawCloudGoogleReconnectRequiredError(error)
+      ? buildGoogleReconnectRequiredReply("Gmail")
+      : isClawCloudGoogleNotConnectedError(error, "gmail")
+        ? buildGoogleNotConnectedReply("Gmail")
+        : error instanceof Error
+          ? error.message
+          : "Unknown error while sending the reply.";
+
+    return {
+      handled: true,
+      response: await translateMessage(
+        `I couldn't complete that Gmail action yet.\n\n${messageText}\n\nReconnect Gmail at swift-deploy.in and try again.`,
+        locale,
+      ),
+      createdAt: approval.created_at,
+    };
+  }
+}
+
 export async function sendReplyApprovalRequests(userId: string, maxEmails = 3) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const locale = await getUserLocale(userId);
   const requestedCount = Math.min(Math.max(maxEmails, 1), 10);
-  const emails = await getClawCloudGmailMessages(userId, {
-    query: buildReplySearchQuery(),
-    maxResults: Math.max(requestedCount * 4, requestedCount),
-  });
+  let emails;
+  try {
+    emails = await getClawCloudGmailMessages(userId, {
+      query: buildReplySearchQuery(),
+      maxResults: Math.max(requestedCount * 4, requestedCount),
+    });
+  } catch (error) {
+    if (isClawCloudGoogleReconnectRequiredError(error)) {
+      await sendClawCloudWhatsAppMessage(
+        userId,
+        await translateMessage(buildGoogleReconnectRequiredReply("Gmail"), locale),
+      );
+      return { queued: 0 };
+    }
+    if (isClawCloudGoogleNotConnectedError(error, "gmail")) {
+      await sendClawCloudWhatsAppMessage(
+        userId,
+        await translateMessage(buildGoogleNotConnectedReply("Gmail"), locale),
+      );
+      return { queued: 0 };
+    }
+    throw error;
+  }
 
   if (emails.length === 0) {
     const message = await translateMessage(
@@ -336,10 +762,10 @@ export async function sendReplyApprovalRequests(userId: string, maxEmails = 3) {
         draft_body: draftBody,
         status: "pending",
       })
-      .select("id")
+      .select("*")
       .single();
 
-    if (!approval?.id) {
+    if (!(approval as ReplyApproval | null)?.id) {
       continue;
     }
 
@@ -382,8 +808,6 @@ export async function sendReplyApprovalRequests(userId: string, maxEmails = 3) {
 }
 
 export async function handleReplyApprovalCommand(userId: string, message: string) {
-  const supabaseAdmin = getClawCloudSupabaseAdmin();
-  const locale = await getUserLocale(userId);
   const sendMatch = message.match(/^SEND\s+([a-f0-9-]{8,})/i);
   const editMatch = message.match(/^EDIT\s+([a-f0-9-]{8,})\s+([\s\S]+)/i);
   const skipMatch = message.match(/^SKIP\s+([a-f0-9-]{8,})/i);
@@ -392,6 +816,8 @@ export async function handleReplyApprovalCommand(userId: string, message: string
     return { handled: false, response: "" };
   }
 
+  const supabaseAdmin = getClawCloudSupabaseAdmin();
+  const locale = await getUserLocale(userId);
   const shortId = (sendMatch?.[1] ?? editMatch?.[1] ?? skipMatch?.[1] ?? "").toLowerCase();
   const { data } = await supabaseAdmin
     .from("reply_approvals")
@@ -402,7 +828,7 @@ export async function handleReplyApprovalCommand(userId: string, message: string
 
   const approval = (data as ReplyApproval[] | null)?.find((item) =>
     item.id.toLowerCase().startsWith(shortId),
-  );
+  )!;
 
   if (!approval) {
     return {
@@ -416,6 +842,15 @@ export async function handleReplyApprovalCommand(userId: string, message: string
 
   if (skipMatch) {
     await updateReplyApproval(userId, approval.id, { action: "skip" });
+    const plan = resolveReplyApprovalExecutionPlan(approval);
+
+    return {
+      handled: true,
+      response: await translateMessage(
+        `Skipped the pending Gmail ${plan.mode === "compose_draft" || plan.mode === "reply_draft" ? "draft" : "message"} for ${plan.displayTarget}.`,
+        locale,
+      ),
+    };
 
     return {
       handled: true,
@@ -427,6 +862,7 @@ export async function handleReplyApprovalCommand(userId: string, message: string
   }
 
   const finalBody = editMatch?.[2]?.trim() || approval.draft_body;
+  const plan = resolveReplyApprovalExecutionPlan(approval);
 
   try {
     await updateReplyApproval(userId, approval.id, {
@@ -442,13 +878,30 @@ export async function handleReplyApprovalCommand(userId: string, message: string
     return {
       handled: true,
       response: await translateMessage(
+        `${
+          plan.mode === "compose_draft" || plan.mode === "reply_draft"
+            ? `Saved the Gmail draft for ${plan.displayTarget}.`
+            : `Sent the Gmail message to ${plan.displayTarget}.`
+        }\n\nSubject: ${plan.subject}`,
+        locale,
+      ),
+    };
+
+    return {
+      handled: true,
+      response: await translateMessage(
         `✅ *Reply sent to ${displayNameFromSender(approval.email_from)}.*\n\n_Subject: Re: ${approval.email_subject}_`,
         locale,
       ),
     };
   } catch (error) {
-    const messageText =
-      error instanceof Error ? error.message : "Unknown error while sending the reply.";
+    const messageText = isClawCloudGoogleReconnectRequiredError(error)
+      ? buildGoogleReconnectRequiredReply("Gmail")
+      : isClawCloudGoogleNotConnectedError(error, "gmail")
+        ? buildGoogleNotConnectedReply("Gmail")
+        : error instanceof Error
+          ? error.message
+          : "Unknown error while sending the reply.";
 
     return {
       handled: true,

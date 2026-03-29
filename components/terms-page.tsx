@@ -77,8 +77,8 @@ export function TermsPage() {
       <LegalSection title="7. Refunds">
         <p style={{ margin: 0 }}>
           If you are not satisfied within the first 7 days of a paid plan, contact{" "}
-          <a href="mailto:billing@clawcloud.ai" style={{ color: "#ff4d4d" }}>
-            billing@clawcloud.ai
+          <a href="mailto:ranashubu8988@gmail.com" style={{ color: "#ff4d4d" }}>
+            ranashubu8988@gmail.com
           </a>{" "}
           for a full refund. After 7 days, refunds are at our discretion.
         </p>
@@ -127,8 +127,8 @@ export function TermsPage() {
       <LegalSection title="13. Contact">
         <p style={{ margin: 0 }}>
           Questions?{" "}
-          <a href="mailto:legal@clawcloud.ai" style={{ color: "#ff4d4d" }}>
-            legal@clawcloud.ai
+          <a href="mailto:ranashubu8988@gmail.com" style={{ color: "#ff4d4d" }}>
+            ranashubu8988@gmail.com
           </a>{" "}
           - ClawCloud Technologies, Bengaluru, Karnataka, India.
         </p>

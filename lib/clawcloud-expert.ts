@@ -38,19 +38,19 @@ export async function semanticDomainClassify(question: string): Promise<ExpertDo
 
   const answer = await completeClawCloudFast({
     system: [
-      "You are a domain classifier.",
-      "Map the user's question to exactly one domain code.",
+      "You are a precision domain classifier. Your accuracy directly affects answer quality.",
+      "Map the user's question to exactly one domain code based on the core technical subject matter.",
       "Reply with only the code and nothing else.",
       "",
-      "Codes:",
-      "FINANCE_MATH - trading systems, options, bonds, portfolio risk, VaR, CVaR, Kelly, insurance reserving, actuarial math",
-      "CAUSAL_STATS - DiD, IV, RDD, causal inference, policy evaluation, beta or coefficient with standard error, t-statistic, confidence interval, survival analysis, Bayesian trials, diagnostics, econometrics",
-      "ML_SYSTEMS - feature stores, training-serving skew, stale features, feature freshness, MLOps, RAG, vector retrieval, GPU scheduling, model monitoring",
-      "SYS_ARCH - system design, ledgers, Stripe billing, carbon registry, CRDT, workflow engines, security architecture, CBDC, infra",
-      "REGULATED_AI - hospital copilots, medical AI, financial AI with oversight, human-in-the-loop AI, safety-critical AI",
-      "CLINICAL_BIO - clinical medicine, diagnostics, genomics, CRISPR, treatment protocols, biostatistics in clinical context",
-      "PHYSICS_CHEM - physics, chemistry, materials, quantum, thermodynamics, electromagnetism",
-      "GENERAL - everything else",
+      "Codes (classify by the dominant technical domain):",
+      "FINANCE_MATH - trading systems, options pricing (Black-Scholes, binomial), bonds (duration, convexity), portfolio optimization (Markowitz, MPT), risk metrics (VaR, CVaR, Expected Shortfall), Kelly criterion, insurance reserving, actuarial math, Monte Carlo simulations for finance",
+      "CAUSAL_STATS - DiD, IV, RDD, causal inference, policy evaluation, regression coefficients with standard errors, t-statistics, confidence intervals, survival analysis (Kaplan-Meier, Cox), Bayesian trials, diagnostics (sensitivity/specificity), econometrics, A/B testing methodology, propensity score matching",
+      "ML_SYSTEMS - feature stores, training-serving skew, feature freshness, MLOps, RAG pipelines, vector retrieval, GPU scheduling, model monitoring, transformer architecture, attention mechanisms, fine-tuning, RLHF, embedding models, inference optimization, model evaluation metrics",
+      "SYS_ARCH - system design, distributed systems, ledgers, payment processing (Stripe/Razorpay), CRDT, workflow engines, security architecture, CBDC, infrastructure, microservices, event-driven architecture, database design, caching strategies, load balancing, API design",
+      "REGULATED_AI - hospital copilots, medical AI with regulatory requirements, financial AI with oversight, human-in-the-loop AI, safety-critical AI, AI governance, AI ethics frameworks, FDA/CE marking for AI, explainable AI requirements",
+      "CLINICAL_BIO - clinical medicine, differential diagnosis, genomics, CRISPR, treatment protocols, drug mechanisms, biostatistics in clinical context, clinical trial design, pharmacokinetics, epidemiology, pathophysiology",
+      "PHYSICS_CHEM - physics (mechanics, electromagnetism, quantum, relativity, thermodynamics, optics), chemistry (organic, inorganic, physical, analytical), materials science, semiconductor physics, nuclear physics, astrophysics, spectroscopy",
+      "GENERAL - everything else that doesn't fit the above technical domains",
     ].join("\n"),
     user: question,
     maxTokens: 10,
@@ -95,6 +95,8 @@ type BayesianDiagnosticSetup = {
   sensitivity: number;
   specificity: number;
   falsePositiveCorrelation: number;
+  falsePositiveCorrelationSpecified: boolean;
+  asksAboutPositiveCorrelation: boolean;
   positiveCount: number;
 };
 
@@ -232,6 +234,812 @@ function solveSuccessiveDiscountQuestion(question: string) {
   ].join("\n");
 }
 
+const MONEY_LITERAL_PATTERN = "(\\d+(?:,\\d+)*(?:\\.\\d+)?(?:\\s*(?:crore|cr|lakh|lac|thousand|k|million|mn))?)";
+
+function escapeExpertRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseScaledAmountLiteral(raw: string) {
+  const normalized = raw.toLowerCase().replace(/,/g, "").trim();
+  const match = normalized.match(/^(-?\d+(?:\.\d+)?)(?:\s*(crore|cr|lakh|lac|thousand|k|million|mn))?$/i);
+  if (!match) return null;
+
+  const base = Number.parseFloat(match[1] ?? "");
+  if (!Number.isFinite(base)) return null;
+
+  const unit = (match[2] ?? "").toLowerCase();
+  const multiplier =
+    unit === "crore" || unit === "cr"
+      ? 10_000_000
+      : unit === "lakh" || unit === "lac"
+        ? 100_000
+        : unit === "thousand" || unit === "k"
+          ? 1_000
+          : unit === "million" || unit === "mn"
+            ? 1_000_000
+            : 1;
+
+  return base * multiplier;
+}
+
+function detectCurrencyPrefix(question: string) {
+  const text = question.toLowerCase();
+  if (/\b(?:₹|rs\.?|inr|rupees?)\b|₹/i.test(question) || /\b(?:lakh|lac|crore|cr)\b/.test(text)) {
+    return "Rs ";
+  }
+  if (/\$|\busd\b|\bdollars?\b/i.test(question)) {
+    return "$";
+  }
+  if (/€|\beur\b|\beuros?\b/i.test(question)) {
+    return "EUR ";
+  }
+  if (/£|\bgbp\b|\bpounds?\b|\bsterling\b/i.test(question)) {
+    return "GBP ";
+  }
+  return "";
+}
+
+function formatMoneyForQuestion(question: string, value: number) {
+  const prefix = detectCurrencyPrefix(question);
+  return `${prefix}${formatExpertNumber(value)}`;
+}
+
+function formatFinancePct(value: number, decimals = 2) {
+  return `${value.toFixed(decimals)}%`;
+}
+
+function extractLabeledAmount(question: string, labels: string[]) {
+  const text = question.replace(/,/g, "");
+  const labelPattern = labels.map((label) => escapeExpertRegex(label).replace(/\s+/g, "\\s+")).join("|");
+  const patterns = [
+    new RegExp(`(?:${labelPattern})(?:\\s+(?:amount|value|sum|investment|principal|cost|price|payment|deposit|contribution))?(?:\\s*(?:is|=|of|:|for))?\\s*(?:₹|rs\\.?|inr|\\$|€|£)?\\s*${MONEY_LITERAL_PATTERN}`, "i"),
+    new RegExp(`(?:₹|rs\\.?|inr|\\$|€|£)\\s*${MONEY_LITERAL_PATTERN}(?:\\s*(?:${labelPattern}))`, "i"),
+  ];
+
+  for (const pattern of patterns) {
+    const match = pattern.exec(text);
+    const value = match?.[1] ? parseScaledAmountLiteral(match[1]) : null;
+    if (value != null && Number.isFinite(value)) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function extractAnnualRatePercent(question: string) {
+  const text = question.toLowerCase().replace(/,/g, "");
+  const patterns = [
+    /\b(?:interest rate|rate of return|return rate|annual return|annual interest|rate|interest)\s*(?:is|=|of|:)?\s*(\d+(?:\.\d+)?)\s*%/i,
+    /(\d+(?:\.\d+)?)\s*%\s*(?:annual|per annum|interest|return)/i,
+    /\b(?:at|with)\s*(\d+(?:\.\d+)?)\s*%(?!\w)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = pattern.exec(text);
+    if (match) {
+      const value = Number.parseFloat(match[1] ?? "");
+      if (Number.isFinite(value) && value >= 0) {
+        return value;
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractDurationMonths(question: string) {
+  const text = question.toLowerCase().replace(/,/g, "");
+  const yearsMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\b/i);
+  if (yearsMatch) {
+    const years = Number.parseFloat(yearsMatch[1] ?? "");
+    if (Number.isFinite(years) && years > 0) {
+      return Math.max(1, Math.round(years * 12));
+    }
+  }
+
+  const monthsMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:months?|mos?)\b/i);
+  if (monthsMatch) {
+    const months = Number.parseFloat(monthsMatch[1] ?? "");
+    if (Number.isFinite(months) && months > 0) {
+      return Math.max(1, Math.round(months));
+    }
+  }
+
+  return null;
+}
+
+function extractDurationYears(question: string) {
+  const text = question.toLowerCase().replace(/,/g, "");
+  const yearsMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\b/i);
+  if (yearsMatch) {
+    const years = Number.parseFloat(yearsMatch[1] ?? "");
+    if (Number.isFinite(years) && years > 0) {
+      return years;
+    }
+  }
+
+  const monthsMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:months?|mos?)\b/i);
+  if (monthsMatch) {
+    const months = Number.parseFloat(monthsMatch[1] ?? "");
+    if (Number.isFinite(months) && months > 0) {
+      return months / 12;
+    }
+  }
+
+  return null;
+}
+
+function detectCompoundsPerYear(text: string, defaultCompounds = 1) {
+  return /\bmonthly\b/.test(text) ? 12
+    : /\bquarterly\b/.test(text) ? 4
+      : /\bhalf[- ]yearly\b|\bsemi[- ]annual\b/.test(text) ? 2
+        : /\bdaily\b/.test(text) ? 365
+          : defaultCompounds;
+}
+
+function durationTokenToMonths(value: number, unit: string) {
+  return /year|yr/i.test(unit) ? Math.max(1, Math.round(value * 12)) : Math.max(1, Math.round(value));
+}
+
+function extractElapsedDurationMonths(question: string) {
+  const text = question.toLowerCase().replace(/,/g, "");
+  const patterns = [
+    /\bafter\s+(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\b/i,
+    /\b(?:paid|repaying|paying|completed)\s*(?:for)?\s*(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\b/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = pattern.exec(text);
+    if (!match) {
+      continue;
+    }
+
+    const value = Number.parseFloat(match[1] ?? "");
+    if (Number.isFinite(value) && value > 0) {
+      return durationTokenToMonths(value, match[2] ?? "");
+    }
+  }
+
+  return null;
+}
+
+function extractRemainingDurationMonths(question: string) {
+  const text = question.toLowerCase().replace(/,/g, "");
+  const patterns = [
+    /\bremaining tenure(?:\s*(?:is|=|of))?\s*(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\b/i,
+    /\b(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\s*(?:left|remaining)\b/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = pattern.exec(text);
+    if (!match) {
+      continue;
+    }
+
+    const value = Number.parseFloat(match[1] ?? "");
+    if (Number.isFinite(value) && value > 0) {
+      return durationTokenToMonths(value, match[2] ?? "");
+    }
+  }
+
+  return null;
+}
+
+function formatTenureMonths(months: number) {
+  const normalized = Math.max(0, Math.round(months));
+  const years = Math.floor(normalized / 12);
+  const remainingMonths = normalized % 12;
+  if (years > 0 && remainingMonths > 0) {
+    return `${normalized} months (${years} years ${remainingMonths} months)`;
+  }
+  if (years > 0) {
+    return `${normalized} months (${years} years)`;
+  }
+  return `${normalized} months`;
+}
+
+function calculateLoanEmi(principal: number, monthlyRate: number, months: number) {
+  if (months <= 0) {
+    return null;
+  }
+  if (monthlyRate === 0) {
+    return principal / months;
+  }
+  return (principal * monthlyRate * (1 + monthlyRate) ** months) / (((1 + monthlyRate) ** months) - 1);
+}
+
+function calculateOutstandingLoanBalance(principal: number, monthlyRate: number, emi: number, monthsPaid: number) {
+  if (monthsPaid <= 0) {
+    return principal;
+  }
+  if (monthlyRate === 0) {
+    return Math.max(0, principal - emi * monthsPaid);
+  }
+  return principal * (1 + monthlyRate) ** monthsPaid - emi * (((1 + monthlyRate) ** monthsPaid - 1) / monthlyRate);
+}
+
+function simulateLoanPayoff(balance: number, monthlyRate: number, payment: number) {
+  let remainingBalance = balance;
+  let months = 0;
+  let totalPayment = 0;
+  let totalInterest = 0;
+
+  while (remainingBalance > 1e-8 && months < 2000) {
+    const interest = remainingBalance * monthlyRate;
+    const principalComponent = payment - interest;
+    if (principalComponent <= 0) {
+      return null;
+    }
+
+    const actualPrincipal = Math.min(principalComponent, remainingBalance);
+    const actualPayment = interest + actualPrincipal;
+    totalInterest += interest;
+    totalPayment += actualPayment;
+    remainingBalance -= actualPrincipal;
+    months += 1;
+  }
+
+  return remainingBalance > 1e-4
+    ? null
+    : { months, totalPayment, totalInterest };
+}
+
+function solveEmiQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (!containsAny(text, [/\b(emi|equated monthly installment|monthly installment|monthly payment|loan payment|mortgage payment)\b/])) {
+    return null;
+  }
+
+  const principal =
+    extractLabeledAmount(question, ["loan", "principal", "mortgage", "amount", "borrow", "borrowed"])
+    ?? extractLabeledAmount(question, ["home loan", "car loan", "personal loan"])
+    ?? (() => {
+      const normalized = question.replace(/,/g, "");
+      const match = normalized.match(new RegExp(`(?:â‚¹|rs\\.?|inr|\\$|â‚¬|Â£)?\\s*${MONEY_LITERAL_PATTERN}\\s*(?:loan|mortgage|principal)`, "i"));
+      return match?.[1] ? parseScaledAmountLiteral(match[1]) : null;
+    })();
+  const annualRate = extractAnnualRatePercent(question);
+  const months = extractDurationMonths(question);
+
+  if (principal == null || annualRate == null || months == null) {
+    return null;
+  }
+
+  const monthlyRate = annualRate / 12 / 100;
+  const emi = monthlyRate === 0
+    ? principal / months
+    : (principal * monthlyRate * (1 + monthlyRate) ** months) / (((1 + monthlyRate) ** months) - 1);
+  const totalRepayment = emi * months;
+  const totalInterest = totalRepayment - principal;
+
+  return [
+    "*Loan EMI Calculation*",
+    "",
+    `- Principal: ${formatMoneyForQuestion(question, principal)}`,
+    `- Annual interest rate: ${formatFinancePct(annualRate)}`,
+    `- Monthly interest rate: ${formatFinancePct(monthlyRate * 100, 4)}`,
+    `- Tenure: ${months} months`,
+    "",
+    "*Formula*",
+    "- EMI = P x r x (1 + r)^n / ((1 + r)^n - 1)",
+    "",
+    `- Monthly EMI: ${formatMoneyForQuestion(question, emi)}`,
+    `- Total repayment: ${formatMoneyForQuestion(question, totalRepayment)}`,
+    `- Total interest paid: ${formatMoneyForQuestion(question, totalInterest)}`,
+    "",
+    "*Assumption*",
+    "- This assumes a fixed-rate loan with equal monthly installments and no processing fees, insurance, or prepayments.",
+  ].join("\n");
+}
+
+function solveLoanPrepaymentQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (!containsAny(text, [/\b(prepay|pre-payment|prepayment|part payment|part prepayment|lump sum)\b/, /\b(foreclose|foreclosure)\b/])) {
+    return null;
+  }
+
+  const prepaymentAmount = extractLabeledAmount(question, [
+    "prepay",
+    "prepaid",
+    "prepayment",
+    "pre-payment",
+    "part payment",
+    "part prepayment",
+    "lump sum",
+    "extra payment",
+  ])
+    ?? (() => {
+      const normalized = question.replace(/,/g, "");
+      const match = normalized.match(new RegExp(`(?:prepay|prepaid|prepayment|pre-payment|part payment|part prepayment|lump sum|extra payment)\\s*(?:of|is|=|:|for)?\\s*(?:₹|rs\\.?|inr|\\$|€|£)?\\s*${MONEY_LITERAL_PATTERN}`, "i"));
+      return match?.[1] ? parseScaledAmountLiteral(match[1]) : null;
+    })();
+  if (prepaymentAmount == null || prepaymentAmount <= 0) {
+    return null;
+  }
+
+  const outstandingPrincipal = extractLabeledAmount(question, [
+    "outstanding principal",
+    "outstanding loan",
+    "outstanding balance",
+    "current balance",
+    "loan balance",
+    "remaining principal",
+  ]);
+  const principal =
+    outstandingPrincipal
+    ?? extractLabeledAmount(question, ["loan", "principal", "mortgage", "home loan", "car loan", "personal loan", "amount"]);
+  const annualRate = extractAnnualRatePercent(question);
+  const totalMonths = extractDurationMonths(question);
+  const elapsedMonths = extractElapsedDurationMonths(question) ?? 0;
+  const remainingMonths =
+    extractRemainingDurationMonths(question)
+    ?? (totalMonths != null ? Math.max(1, totalMonths - elapsedMonths) : null);
+
+  if (principal == null || annualRate == null || remainingMonths == null) {
+    return null;
+  }
+
+  const monthlyRate = annualRate / 12 / 100;
+  const currentEmi =
+    outstandingPrincipal != null
+      ? calculateLoanEmi(principal, monthlyRate, remainingMonths)
+      : totalMonths != null
+        ? calculateLoanEmi(principal, monthlyRate, totalMonths)
+        : null;
+  if (currentEmi == null || currentEmi <= 0) {
+    return null;
+  }
+
+  const outstandingBeforePrepayment =
+    outstandingPrincipal != null
+      ? principal
+      : calculateOutstandingLoanBalance(principal, monthlyRate, currentEmi, elapsedMonths);
+  const normalizedOutstanding = Math.max(0, outstandingBeforePrepayment);
+  const outstandingAfterPrepayment = Math.max(0, normalizedOutstanding - prepaymentAmount);
+
+  const baselineInterestRemaining = currentEmi * remainingMonths - normalizedOutstanding;
+  const baselineSummary = {
+    remainingMonths,
+    remainingInterest: Math.max(0, baselineInterestRemaining),
+  };
+
+  const keepEmiSchedule = outstandingAfterPrepayment > 0
+    ? simulateLoanPayoff(outstandingAfterPrepayment, monthlyRate, currentEmi)
+    : { months: 0, totalPayment: 0, totalInterest: 0 };
+  if (!keepEmiSchedule) {
+    return null;
+  }
+  const tenureSavedMonths = Math.max(0, baselineSummary.remainingMonths - keepEmiSchedule.months);
+  const keepEmiInterestSaved = Math.max(0, baselineSummary.remainingInterest - keepEmiSchedule.totalInterest);
+
+  const reducedEmi =
+    outstandingAfterPrepayment > 0
+      ? calculateLoanEmi(outstandingAfterPrepayment, monthlyRate, remainingMonths)
+      : 0;
+  if (reducedEmi == null) {
+    return null;
+  }
+  const keepTenureInterest = Math.max(0, reducedEmi * remainingMonths - outstandingAfterPrepayment);
+  const keepTenureInterestSaved = Math.max(0, baselineSummary.remainingInterest - keepTenureInterest);
+
+  return [
+    "*Loan Prepayment Analysis*",
+    "",
+    outstandingPrincipal == null ? `- Original loan amount: ${formatMoneyForQuestion(question, principal)}` : `- Current outstanding principal: ${formatMoneyForQuestion(question, principal)}`,
+    `- Annual interest rate: ${formatFinancePct(annualRate)}`,
+    `- Current scheduled EMI: ${formatMoneyForQuestion(question, currentEmi)}`,
+    `- Remaining scheduled tenure: ${formatTenureMonths(baselineSummary.remainingMonths)}`,
+    outstandingPrincipal == null && totalMonths != null ? `- Original tenure: ${formatTenureMonths(totalMonths)}` : null,
+    outstandingPrincipal == null && elapsedMonths > 0 ? `- Prepayment timing assumed: after ${formatTenureMonths(elapsedMonths)}` : null,
+    `- Estimated outstanding before prepayment: ${formatMoneyForQuestion(question, normalizedOutstanding)}`,
+    `- Lump-sum prepayment: ${formatMoneyForQuestion(question, prepaymentAmount)}`,
+    `- Outstanding after prepayment: ${formatMoneyForQuestion(question, outstandingAfterPrepayment)}`,
+    "",
+    "*Baseline Without Prepayment*",
+    `- Remaining interest from here: ${formatMoneyForQuestion(question, baselineSummary.remainingInterest)}`,
+    "",
+    "*Option 1: Keep EMI Same*",
+    `- EMI stays: ${formatMoneyForQuestion(question, currentEmi)}`,
+    `- New remaining tenure: ${formatTenureMonths(keepEmiSchedule.months)}`,
+    `- Tenure saved: ${formatTenureMonths(tenureSavedMonths)}`,
+    `- Remaining interest after prepayment: ${formatMoneyForQuestion(question, keepEmiSchedule.totalInterest)}`,
+    `- Interest saved: ${formatMoneyForQuestion(question, keepEmiInterestSaved)}`,
+    "",
+    "*Option 2: Keep Tenure Same*",
+    `- New EMI: ${formatMoneyForQuestion(question, reducedEmi)}`,
+    `- EMI reduction: ${formatMoneyForQuestion(question, Math.max(0, currentEmi - reducedEmi))} per month`,
+    `- Remaining interest after prepayment: ${formatMoneyForQuestion(question, keepTenureInterest)}`,
+    `- Interest saved: ${formatMoneyForQuestion(question, keepTenureInterestSaved)}`,
+    "",
+    "*Assumption*",
+    "- This assumes a fixed-rate loan on a monthly reducing-balance basis, with no foreclosure charges, prepayment fees, or EMI reset delays.",
+  ].filter(Boolean).join("\n");
+}
+
+function solveSipFutureValueQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (!containsAny(text, [/\b(sip|systematic investment plan)\b/, /\bmutual fund\b/])) {
+    return null;
+  }
+
+  const monthlyContribution =
+    extractLabeledAmount(question, ["sip", "monthly sip", "monthly investment", "monthly contribution", "invest", "deposit"])
+    ?? (() => {
+      const normalized = question.replace(/,/g, "");
+      const labeledMatch = normalized.match(
+        new RegExp(`(?:sip|systematic investment plan)(?:\\s*(?:of|is|=|:))?\\s*(?:₹|rs\\.?|inr|\\$|€|£)?\\s*${MONEY_LITERAL_PATTERN}`, "i"),
+      );
+      if (labeledMatch?.[1]) {
+        return parseScaledAmountLiteral(labeledMatch[1]);
+      }
+
+      const recurringMatch = normalized.match(
+        new RegExp(`(?:₹|rs\\.?|inr|\\$|€|£)?\\s*${MONEY_LITERAL_PATTERN}\\s*(?:per month|monthly)`, "i"),
+      );
+      return recurringMatch?.[1] ? parseScaledAmountLiteral(recurringMatch[1]) : null;
+    })();
+  const annualRate = extractAnnualRatePercent(question);
+  const years = extractDurationYears(question);
+
+  if (monthlyContribution == null || annualRate == null || years == null) {
+    return null;
+  }
+
+  const months = Math.max(1, Math.round(years * 12));
+  const monthlyRate = annualRate / 12 / 100;
+  const futureValue = monthlyRate === 0
+    ? monthlyContribution * months
+    : monthlyContribution * ((((1 + monthlyRate) ** months) - 1) / monthlyRate) * (1 + monthlyRate);
+  const investedAmount = monthlyContribution * months;
+  const estimatedGains = futureValue - investedAmount;
+
+  return [
+    "*SIP Future Value Estimate*",
+    "",
+    `- Monthly SIP: ${formatMoneyForQuestion(question, monthlyContribution)}`,
+    `- Expected annual return: ${formatFinancePct(annualRate)}`,
+    `- Investment period: ${formatExpertNumber(years)} years (${months} months)`,
+    "",
+    "*Formula*",
+    "- FV = P x [((1 + r)^n - 1) / r] x (1 + r)",
+    "",
+    `- Total invested: ${formatMoneyForQuestion(question, investedAmount)}`,
+    `- Estimated future value: ${formatMoneyForQuestion(question, futureValue)}`,
+    `- Estimated gains: ${formatMoneyForQuestion(question, estimatedGains)}`,
+    "",
+    "*Assumption*",
+    "- This uses the standard SIP annuity-due assumption: each monthly contribution is invested at the start of the month at a constant return rate.",
+  ].join("\n");
+}
+
+function solveFixedDepositQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (!containsAny(text, [/\bfixed deposit\b/, /\bfd\b/, /\bterm deposit\b/])) {
+    return null;
+  }
+
+  const principal =
+    extractLabeledAmount(question, ["fixed deposit", "fd", "deposit", "principal", "amount", "sum"])
+    ?? (() => {
+      const normalized = question.replace(/,/g, "");
+      const match = normalized.match(new RegExp(`(?:₹|rs\\.?|inr|\\$|€|£)?\\s*${MONEY_LITERAL_PATTERN}\\s*(?:fd|fixed deposit|term deposit)`, "i"));
+      return match?.[1] ? parseScaledAmountLiteral(match[1]) : null;
+    })();
+  const annualRate = extractAnnualRatePercent(question);
+  const years = extractDurationYears(question);
+
+  if (principal == null || annualRate == null || years == null) {
+    return null;
+  }
+
+  const compoundsPerYear = detectCompoundsPerYear(text, 4);
+  const maturityAmount = principal * (1 + annualRate / 100 / compoundsPerYear) ** (compoundsPerYear * years);
+  const interestEarned = maturityAmount - principal;
+  const compoundingLabel =
+    compoundsPerYear === 12 ? "monthly"
+      : compoundsPerYear === 4 ? "quarterly"
+        : compoundsPerYear === 2 ? "half-yearly"
+          : compoundsPerYear === 365 ? "daily"
+            : "annual";
+
+  return [
+    "*Fixed Deposit Maturity Estimate*",
+    "",
+    `- Deposit amount: ${formatMoneyForQuestion(question, principal)}`,
+    `- Annual interest rate: ${formatFinancePct(annualRate)}`,
+    `- Investment period: ${formatExpertNumber(years)} years`,
+    `- Compounding assumption: ${compoundingLabel}`,
+    "",
+    "*Formula*",
+    "- A = P x (1 + r / m)^(m x t)",
+    "",
+    `- Maturity amount: ${formatMoneyForQuestion(question, maturityAmount)}`,
+    `- Interest earned: ${formatMoneyForQuestion(question, interestEarned)}`,
+    "",
+    "*Assumption*",
+    compoundsPerYear === 4
+      ? "- This assumes a standard quarterly-compounding bank FD unless you specify a different compounding frequency."
+      : "- This uses the compounding frequency explicitly mentioned in the question.",
+  ].join("\n");
+}
+
+function solveRecurringDepositQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (!containsAny(text, [/\brecurring deposit\b/, /\brd\b/])) {
+    return null;
+  }
+
+  const monthlyContribution =
+    extractLabeledAmount(question, ["rd", "recurring deposit", "monthly deposit", "monthly installment", "installment"])
+    ?? (() => {
+      const normalized = question.replace(/,/g, "");
+      const match = normalized.match(new RegExp(`(?:₹|rs\\.?|inr|\\$|€|£)?\\s*${MONEY_LITERAL_PATTERN}\\s*(?:per month|monthly)`, "i"));
+      return match?.[1] ? parseScaledAmountLiteral(match[1]) : null;
+    })();
+  const annualRate = extractAnnualRatePercent(question);
+  const months = extractDurationMonths(question);
+
+  if (monthlyContribution == null || annualRate == null || months == null) {
+    return null;
+  }
+
+  const monthlyRate = annualRate / 12 / 100;
+  const maturityAmount = monthlyRate === 0
+    ? monthlyContribution * months
+    : monthlyContribution * ((((1 + monthlyRate) ** months) - 1) / monthlyRate);
+  const investedAmount = monthlyContribution * months;
+  const interestEarned = maturityAmount - investedAmount;
+
+  return [
+    "*Recurring Deposit Maturity Estimate*",
+    "",
+    `- Monthly deposit: ${formatMoneyForQuestion(question, monthlyContribution)}`,
+    `- Annual interest rate: ${formatFinancePct(annualRate)}`,
+    `- Investment period: ${months} months`,
+    "",
+    "*Formula*",
+    "- FV = P x [((1 + r)^n - 1) / r]",
+    "",
+    `- Total invested: ${formatMoneyForQuestion(question, investedAmount)}`,
+    `- Estimated maturity amount: ${formatMoneyForQuestion(question, maturityAmount)}`,
+    `- Interest earned: ${formatMoneyForQuestion(question, interestEarned)}`,
+    "",
+    "*Assumption*",
+    "- This estimates RD maturity using monthly compounding with each installment credited at the end of the month.",
+  ].join("\n");
+}
+
+function solvePpfQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (!containsAny(text, [/\bppf\b/, /\bpublic provident fund\b/])) {
+    return null;
+  }
+
+  const annualContribution =
+    extractLabeledAmount(question, ["annual contribution", "yearly contribution", "annual investment", "yearly investment", "ppf contribution"])
+    ?? (() => {
+      const normalized = question.replace(/,/g, "");
+      const match = normalized.match(
+        new RegExp(`(?:₹|rs\\.?|inr|\\$|€|£)?\\s*${MONEY_LITERAL_PATTERN}\\s*(?:every year|each year|per year|annually)`, "i"),
+      );
+      return match?.[1] ? parseScaledAmountLiteral(match[1]) : null;
+    })();
+  const annualRate = extractAnnualRatePercent(question);
+  const years = extractDurationYears(question) ?? 15;
+
+  if (annualContribution == null || annualRate == null || years == null) {
+    return null;
+  }
+
+  const maturityAmount = annualRate === 0
+    ? annualContribution * years
+    : annualContribution * ((((1 + annualRate / 100) ** years) - 1) / (annualRate / 100)) * (1 + annualRate / 100);
+  const investedAmount = annualContribution * years;
+  const interestEarned = maturityAmount - investedAmount;
+  const usesDefaultTenure = extractDurationYears(question) == null;
+
+  return [
+    "*PPF Maturity Estimate*",
+    "",
+    `- Annual contribution: ${formatMoneyForQuestion(question, annualContribution)}`,
+    `- Assumed annual return: ${formatFinancePct(annualRate)}`,
+    `- Investment period: ${formatExpertNumber(years)} years`,
+    "",
+    "*Formula*",
+    "- FV = P x [((1 + r)^n - 1) / r] x (1 + r)",
+    "",
+    `- Total invested: ${formatMoneyForQuestion(question, investedAmount)}`,
+    `- Estimated maturity amount: ${formatMoneyForQuestion(question, maturityAmount)}`,
+    `- Interest earned: ${formatMoneyForQuestion(question, interestEarned)}`,
+    "",
+    "*Assumption*",
+    usesDefaultTenure
+      ? "- This assumes the standard 15-year PPF maturity horizon because no custom duration was provided."
+      : "- This assumes each yearly PPF contribution is made at the start of the year.",
+  ].join("\n");
+}
+
+function solveCompoundInterestQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (!containsAny(text, [/\b(compound interest|future value|maturity value|maturity amount|compound annually|compounded)\b/])) {
+    return null;
+  }
+
+  const principal =
+    extractLabeledAmount(question, ["principal", "investment", "deposit", "amount", "sum", "initial"])
+    ?? (() => {
+      const match = question.replace(/,/g, "").match(new RegExp(`(?:₹|rs\\.?|inr|\\$|€|£)?\\s*${MONEY_LITERAL_PATTERN}`, "i"));
+      return match?.[1] ? parseScaledAmountLiteral(match[1]) : null;
+    })();
+  const annualRate = extractAnnualRatePercent(question);
+  const years = extractDurationYears(question);
+
+  if (principal == null || annualRate == null || years == null) {
+    return null;
+  }
+
+  const compoundsPerYear = detectCompoundsPerYear(text, 1);
+  const maturityAmount = principal * (1 + annualRate / 100 / compoundsPerYear) ** (compoundsPerYear * years);
+  const compoundInterest = maturityAmount - principal;
+
+  return [
+    "*Compound Interest Calculation*",
+    "",
+    `- Principal: ${formatMoneyForQuestion(question, principal)}`,
+    `- Annual rate: ${formatFinancePct(annualRate)}`,
+    `- Time: ${formatExpertNumber(years)} years`,
+    `- Compounding frequency: ${compoundsPerYear} time${compoundsPerYear === 1 ? "" : "s"} per year`,
+    "",
+    "*Formula*",
+    "- A = P x (1 + r / m)^(m x t)",
+    "",
+    `- Maturity amount: ${formatMoneyForQuestion(question, maturityAmount)}`,
+    `- Compound interest earned: ${formatMoneyForQuestion(question, compoundInterest)}`,
+  ].join("\n");
+}
+
+function solveCagrQuestion(question: string) {
+  const text = question.toLowerCase().replace(/,/g, "");
+  if (!containsAny(text, [/\bcagr\b/, /\bcompound annual growth rate\b/, /\bgrew from\b/, /\bfrom\b.*\bto\b.*\byears?\b/])) {
+    return null;
+  }
+
+  const growthMatch =
+    text.match(new RegExp(`(?:grew|increased|rose|went|moved)?\\s*from\\s*(?:₹|rs\\.?|inr|\\$|€|£)?\\s*${MONEY_LITERAL_PATTERN}\\s*to\\s*(?:₹|rs\\.?|inr|\\$|€|£)?\\s*${MONEY_LITERAL_PATTERN}`, "i"))
+    ?? text.match(new RegExp(`(?:initial|starting|beginning)\\s*(?:value|investment)?\\s*(?:is|was|=|of)?\\s*(?:₹|rs\\.?|inr|\\$|€|£)?\\s*${MONEY_LITERAL_PATTERN}[\\s\\S]{0,60}?(?:final|ending|maturity)\\s*(?:value)?\\s*(?:is|was|=|of)?\\s*(?:₹|rs\\.?|inr|\\$|€|£)?\\s*${MONEY_LITERAL_PATTERN}`, "i"));
+  const years = extractDurationYears(question);
+
+  if (!growthMatch || years == null || years <= 0) {
+    return null;
+  }
+
+  const startingValue = parseScaledAmountLiteral(growthMatch[1] ?? "");
+  const endingValue = parseScaledAmountLiteral(growthMatch[2] ?? "");
+  if (startingValue == null || endingValue == null || startingValue <= 0 || endingValue <= 0) {
+    return null;
+  }
+
+  const cagr = ((endingValue / startingValue) ** (1 / years) - 1) * 100;
+  const totalReturn = ((endingValue - startingValue) / startingValue) * 100;
+
+  return [
+    "*CAGR Calculation*",
+    "",
+    `- Starting value: ${formatMoneyForQuestion(question, startingValue)}`,
+    `- Ending value: ${formatMoneyForQuestion(question, endingValue)}`,
+    `- Time period: ${formatExpertNumber(years)} years`,
+    "",
+    "*Formula*",
+    "- CAGR = (Ending value / Starting value)^(1 / years) - 1",
+    "",
+    `- CAGR: ${formatFinancePct(cagr)}`,
+    `- Total return over the full period: ${formatFinancePct(totalReturn)}`,
+    "",
+    "*Interpretation*",
+    "- CAGR is the smooth annualized growth rate that would take the starting value to the ending value over the stated period.",
+  ].join("\n");
+}
+
+function solveRoiQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (!containsAny(text, [/\broi\b/, /\breturn on investment\b/, /\bprofit percentage\b/])) {
+    return null;
+  }
+
+  const cost = extractLabeledAmount(question, ["cost", "investment", "buy", "bought", "purchase", "spent", "capital"]);
+  const profit = extractLabeledAmount(question, ["profit", "gain", "net profit"]);
+  const saleValue = extractLabeledAmount(question, ["sale", "selling price", "final value", "sold", "revenue", "return"]);
+
+  if (cost == null || cost <= 0) {
+    return null;
+  }
+
+  const netProfit = profit ?? (saleValue != null ? saleValue - cost : null);
+  if (netProfit == null) {
+    return null;
+  }
+
+  const roi = (netProfit / cost) * 100;
+  const saleAmount = saleValue ?? cost + netProfit;
+
+  return [
+    "*ROI Calculation*",
+    "",
+    `- Investment cost: ${formatMoneyForQuestion(question, cost)}`,
+    `- Final value / sale amount: ${formatMoneyForQuestion(question, saleAmount)}`,
+    `- Net profit: ${formatMoneyForQuestion(question, netProfit)}`,
+    "",
+    "*Formula*",
+    "- ROI = Net profit / Investment cost x 100",
+    "",
+    `- ROI: ${formatFinancePct(roi)}`,
+  ].join("\n");
+}
+
+function solveBreakEvenQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (!containsAny(text, [/\bbreak[- ]even\b/, /\bbreakeven\b/])) {
+    return null;
+  }
+
+  const fixedCost = extractLabeledAmount(question, ["fixed cost", "fixed costs", "overhead", "overheads"]);
+  const sellingPrice = extractLabeledAmount(question, [
+    "selling price per unit",
+    "sale price per unit",
+    "selling price",
+    "sale price",
+    "price per unit",
+    "unit price",
+  ]);
+  const variableCost = extractLabeledAmount(question, [
+    "variable cost per unit",
+    "unit variable cost",
+    "variable cost",
+  ]);
+
+  if (fixedCost == null || sellingPrice == null || variableCost == null) {
+    return null;
+  }
+
+  const contributionPerUnit = sellingPrice - variableCost;
+  if (contributionPerUnit <= 0) {
+    return [
+      "*Break-even Analysis*",
+      "",
+      `- Selling price per unit: ${formatMoneyForQuestion(question, sellingPrice)}`,
+      `- Variable cost per unit: ${formatMoneyForQuestion(question, variableCost)}`,
+      "",
+      "*Result*",
+      "- Break-even is not possible under these assumptions because contribution per unit is zero or negative.",
+    ].join("\n");
+  }
+
+  const breakEvenUnits = fixedCost / contributionPerUnit;
+  const breakEvenRevenue = breakEvenUnits * sellingPrice;
+  const roundedBreakEvenUnits = Math.round((breakEvenUnits + Number.EPSILON) * 100) / 100;
+  const breakEvenUnitsDisplay =
+    Math.abs(roundedBreakEvenUnits - Math.round(roundedBreakEvenUnits)) < 0.005
+      ? Math.round(roundedBreakEvenUnits).toLocaleString("en-IN")
+      : formatExpertNumber(roundedBreakEvenUnits);
+
+  return [
+    "*Break-even Analysis*",
+    "",
+    `- Fixed cost: ${formatMoneyForQuestion(question, fixedCost)}`,
+    `- Selling price per unit: ${formatMoneyForQuestion(question, sellingPrice)}`,
+    `- Variable cost per unit: ${formatMoneyForQuestion(question, variableCost)}`,
+    `- Contribution per unit: ${formatMoneyForQuestion(question, contributionPerUnit)}`,
+    "",
+    "*Formula*",
+    "- Break-even units = Fixed cost / (Selling price - Variable cost)",
+    "",
+    `- Break-even units: ${breakEvenUnitsDisplay}`,
+    `- Break-even revenue: ${formatMoneyForQuestion(question, breakEvenRevenue)}`,
+  ].join("\n");
+}
+
 function parseTradingSetup(question: string): TradingSetup | null {
   const text = question.replace(/,/g, "");
   const winRate =
@@ -272,18 +1080,25 @@ function parseTradingSetup(question: string): TradingSetup | null {
 
 function parseBayesianDiagnosticSetup(question: string): BayesianDiagnosticSetup | null {
   const text = question.replace(/,/g, "");
-  const prevalence = matchNumber(/\b(?:disease\s+)?prevalence(?: is| =)?\s*(\d+(?:\.\d+)?)\s*%/i, text);
-  const sensitivity = matchNumber(/\bsensitivity(?: is| =)?\s*(\d+(?:\.\d+)?)\s*%/i, text);
-  const specificity = matchNumber(/\bspecificity(?: is| =)?\s*(\d+(?:\.\d+)?)\s*%/i, text);
-  const falsePositiveCorrelation =
+  const prevalence =
+    matchNumber(/\b(?:disease\s+)?prevalence(?: is| =)?\s*(\d+(?:\.\d+)?)\s*%/i, text)
+    ?? matchNumber(/\b(\d+(?:\.\d+)?)\s*%\s*(?:disease\s+)?prevalence\b/i, text);
+  const sensitivity =
+    matchNumber(/\bsensitivity(?: is| =)?\s*(\d+(?:\.\d+)?)\s*%/i, text)
+    ?? matchNumber(/\b(\d+(?:\.\d+)?)\s*%\s*sensitivity\b/i, text);
+  const specificity =
+    matchNumber(/\bspecificity(?: is| =)?\s*(\d+(?:\.\d+)?)\s*%/i, text)
+    ?? matchNumber(/\b(\d+(?:\.\d+)?)\s*%\s*specificity\b/i, text);
+  const rawFalsePositiveCorrelation =
     matchNumber(/\b(?:conditional\s+)?false-positive correlation(?: from repeated testing)?(?:\s+(?:is|equals|of)|\s*=)?\s*(\d+(?:\.\d+)?)/i, text)
-    ?? matchNumber(/\bcorrelation(?: is| =)?\s*(\d+(?:\.\d+)?)/i, text)
-    ?? 0;
+    ?? matchNumber(/\bcorrelation(?: is| =)?\s*(\d+(?:\.\d+)?)/i, text);
 
   if (prevalence == null || sensitivity == null || specificity == null) {
     return null;
   }
 
+  const asksAboutPositiveCorrelation =
+    /\b(positively correlated|positive correlation|false positives are positively correlated|false positives are correlated|if the false positives are correlated)\b/i.test(text);
   const positiveCount = /\b(positive twice|tests positive twice|two positive tests|2 positive tests|positive two times)\b/i.test(text)
     ? 2
     : 0;
@@ -296,7 +1111,9 @@ function parseBayesianDiagnosticSetup(question: string): BayesianDiagnosticSetup
     prevalence: prevalence / 100,
     sensitivity: sensitivity / 100,
     specificity: specificity / 100,
-    falsePositiveCorrelation: Math.min(Math.max(normalizePct(falsePositiveCorrelation), 0), 0.95),
+    falsePositiveCorrelation: Math.min(Math.max(normalizePct(rawFalsePositiveCorrelation ?? 0), 0), 0.95),
+    falsePositiveCorrelationSpecified: rawFalsePositiveCorrelation != null,
+    asksAboutPositiveCorrelation,
     positiveCount,
   };
 }
@@ -578,6 +1395,44 @@ function solveBayesianDiagnosticQuestion(question: string) {
 
   const falsePositiveRate = 1 - setup.specificity;
   const naiveFalsePositiveJoint = falsePositiveRate ** setup.positiveCount;
+  const truePositiveJoint = setup.sensitivity ** setup.positiveCount;
+  const diseasePrior = setup.prevalence;
+  const noDiseasePrior = 1 - diseasePrior;
+  const naivePosterior =
+    (diseasePrior * truePositiveJoint)
+    / ((diseasePrior * truePositiveJoint) + (noDiseasePrior * naiveFalsePositiveJoint));
+  const maxCorrelationFalsePositiveJoint = falsePositiveRate;
+  const maxCorrelationPosterior =
+    (diseasePrior * truePositiveJoint)
+    / ((diseasePrior * truePositiveJoint) + (noDiseasePrior * maxCorrelationFalsePositiveJoint));
+
+  if (!setup.falsePositiveCorrelationSpecified) {
+    return [
+      "*Step 1: Given values*",
+      `- Disease prevalence = ${formatPct(setup.prevalence, 1)}`,
+      `- Sensitivity = ${formatPct(setup.sensitivity, 1)}`,
+      `- Specificity = ${formatPct(setup.specificity, 1)}`,
+      `- False-positive rate = ${formatPct(falsePositiveRate, 1)}`,
+      `- Two positive tests are assumed conditionally independent given the true disease state`,
+      "",
+      "*Step 2: Likelihood of two positives*",
+      `- P(++ | disease) = ${formatNum(setup.sensitivity, 4)}^${setup.positiveCount} = ${formatNum(truePositiveJoint, 5)}`,
+      `- P(++ | no disease) = ${formatNum(falsePositiveRate, 4)}^${setup.positiveCount} = ${formatNum(naiveFalsePositiveJoint, 5)}`,
+      "",
+      "*Step 3: Bayes update*",
+      `- Posterior = [P(disease) x P(++ | disease)] / [[P(disease) x P(++ | disease)] + [P(no disease) x P(++ | no disease)]]`,
+      `- Posterior = ${(naivePosterior * 100).toFixed(1)}%`,
+      "",
+      "*Step 4: What positive correlation changes*",
+      setup.asksAboutPositiveCorrelation
+        ? `- If the false positives are positively correlated, then P(++ | no disease) is higher than ${formatNum(naiveFalsePositiveJoint, 5)}, so the posterior must be *lower* than ${(naivePosterior * 100).toFixed(1)}%.`
+        : `- If the false positives were positively correlated, then P(++ | no disease) would be higher than ${formatNum(naiveFalsePositiveJoint, 5)}, so the posterior would be *lower* than ${(naivePosterior * 100).toFixed(1)}%.`,
+      `- In the extreme case where the second positive adds almost no extra information on the false-positive path, the posterior would fall toward about ${(maxCorrelationPosterior * 100).toFixed(1)}%.`,
+      "",
+      `*Final Answer:* under the stated conditional-independence assumption, the posterior probability after two positives is about ${(naivePosterior * 100).toFixed(1)}%. If false positives are positively correlated, the true posterior would be lower because the second positive is less independent evidence; the estimate could move down materially, in the extreme toward about ${(maxCorrelationPosterior * 100).toFixed(1)}%.`,
+    ].join("\n");
+  }
+
   const correlatedFalsePositiveJoint = Math.min(
     falsePositiveRate,
     Math.max(
@@ -585,12 +1440,6 @@ function solveBayesianDiagnosticQuestion(question: string) {
       naiveFalsePositiveJoint + setup.falsePositiveCorrelation * falsePositiveRate * (1 - falsePositiveRate),
     ),
   );
-  const truePositiveJoint = setup.sensitivity ** setup.positiveCount;
-  const diseasePrior = setup.prevalence;
-  const noDiseasePrior = 1 - diseasePrior;
-  const naivePosterior =
-    (diseasePrior * truePositiveJoint)
-    / ((diseasePrior * truePositiveJoint) + (noDiseasePrior * naiveFalsePositiveJoint));
   const correlatedPosterior =
     (diseasePrior * truePositiveJoint)
     / ((diseasePrior * truePositiveJoint) + (noDiseasePrior * correlatedFalsePositiveJoint));
@@ -618,6 +1467,85 @@ function solveBayesianDiagnosticQuestion(question: string) {
     "- Once repeated false positives are correlated, the evidentiary value of the second positive is much weaker.",
     "",
     `*Final Answer:* under a reasonable correlated-false-positive approximation, the posterior disease probability after two positives is about ${(correlatedPosterior * 100).toFixed(1)}%, versus about ${(naivePosterior * 100).toFixed(1)}% under the naive independence assumption.`,
+  ].join("\n");
+}
+
+function solveStripeSubscriptionWebhookQuestion(question: string) {
+  const text = question.toLowerCase();
+  const targetsSubscriptionWebhookDomain =
+    /\bsubscription\b/.test(text)
+    || /\binvoice\b/.test(text)
+    || /\b(webhook ingestion|ingestion pipeline)\b/.test(text);
+  const isStripeSubscriptionWebhook =
+    /stripe/.test(text)
+    && /webhook/.test(text)
+    && targetsSubscriptionWebhookDomain
+    && containsAny(text, [/\b(schema|dedupe|idempotency|retry|ordering|reconciliation|rollback|design review)\b/]);
+
+  if (!isStripeSubscriptionWebhook) {
+    return null;
+  }
+
+  return [
+    "*Decision*",
+    "- Use a Stripe-specific inbox processor: persist every webhook by `event.id`, project subscription state from normalized billing facts, and make entitlement or invoice side effects idempotent at the subscription-period level rather than directly from raw delivery order.",
+    "",
+    "*Core invariants*",
+    "- `stripe_event_inbox.event_id` is the ingress dedupe key. It is a text primary key and every webhook is stored before any business effect runs.",
+    "- A business mutation such as `activate_subscription`, `renew_period`, `mark_past_due`, or `cancel_subscription` must be committed at most once for a given Stripe object and billing period.",
+    "- Webhook delivery order is not trusted. The processor must survive `invoice.paid` arriving before `customer.subscription.updated` or duplicated retries of the same event.",
+    "- Read models are disposable. The source of truth is immutable event storage plus normalized billing facts.",
+    "",
+    "*Schema and constraints*",
+    "- `stripe_event_inbox(event_id text primary key, account_id text null, event_type text not null, object_type text not null, object_id text not null, created_unix bigint not null, payload jsonb not null, status text not null check (status in ('pending','processing','processed','failed')), first_seen_at timestamptz not null default now(), last_seen_at timestamptz not null default now(), processed_at timestamptz null, failure_reason text null)`",
+    "- `stripe_billing_objects(stripe_object_id text primary key, object_type text not null, customer_id text null, subscription_id text null, latest_snapshot jsonb not null, latest_event_created_unix bigint not null, updated_at timestamptz not null default now())`",
+    "- `subscription_period_facts(subscription_id text not null, period_start timestamptz not null, period_end timestamptz not null, invoice_id text null, status text not null, amount_due_minor bigint not null, amount_paid_minor bigint not null, currency text not null, primary key (subscription_id, period_start))`",
+    "- `subscription_mutations(id uuid primary key, subscription_id text not null, period_start timestamptz null, mutation_kind text not null, source_event_id text not null, applied_at timestamptz not null default now(), unique (subscription_id, coalesce(period_start, 'epoch'::timestamptz), mutation_kind))`",
+    "- `billing_reconciliation_runs(id uuid primary key, run_date date not null, status text not null, unique (run_date))`",
+    "- `billing_reconciliation_exceptions(id uuid primary key, run_id uuid not null references billing_reconciliation_runs(id) on delete cascade, subscription_id text null, invoice_id text null, reason text not null, expected_value text null, actual_value text null)`",
+    "",
+    "*Retry and dedupe handling*",
+    "- HTTP ingestion verifies Stripe signatures, then does `insert ... on conflict (event_id) do update set last_seen_at = now()` and returns `2xx` even for duplicates already stored.",
+    "- Workers claim inbox rows with `update ... where status in ('pending','failed') returning *` so retries are safe and one worker owns processing at a time.",
+    "- Downstream business actions use `subscription_mutations` uniqueness, so even if two different Stripe events imply the same renewal or cancellation, the business mutation lands once.",
+    "",
+    "*Ordering guarantees*",
+    "- Order by Stripe object, not raw arrival. Track `latest_event_created_unix` per `subscription_id`, `invoice_id`, and `customer_id`.",
+    "- If an older event arrives after a newer snapshot, store it in the inbox but do not let it overwrite the newer projection blindly.",
+    "- When a dependency gap is detected, fetch the latest Stripe object snapshot before mutating the subscription read model.",
+    "",
+    "*Reconciliation*",
+    "- Run a daily reconciliation against Stripe invoices/subscriptions: compare expected active periods, amounts paid, past-due counts, and cancelled subscriptions against `subscription_period_facts`.",
+    "- Exceptions open rows in `billing_reconciliation_exceptions`; never patch projections silently.",
+    "",
+    "*Rollback strategy*",
+    "- Roll back reads, not source facts. Keep `stripe_event_inbox` and normalized facts immutable.",
+    "- Maintain a legacy subscription status projection during shadow mode. If the new projector misbehaves, switch reads back to legacy while replaying the inbox into a repaired projector.",
+    "- Replay is safe because ingress dedupe is on `event.id` and business mutation dedupe is on `(subscription_id, period_start, mutation_kind)`.",
+    "",
+    "*Pseudocode*",
+    "```ts",
+    "async function processStripeBillingEvent(eventId: string) {",
+    "  const claimed = await db.oneOrNone(`",
+    "    update stripe_event_inbox",
+    "    set status = 'processing'",
+    "    where event_id = $1 and status in ('pending', 'failed')",
+    "    returning *",
+    "  `, [eventId]);",
+    "  if (!claimed) return;",
+    "",
+    "  await db.tx(async (tx) => {",
+    "    const normalized = normalizeStripeBillingEvent(claimed.payload);",
+    "    await upsertLatestStripeSnapshot(tx, normalized);",
+    "    await upsertSubscriptionPeriodFacts(tx, normalized);",
+    "    await applySubscriptionMutationOnce(tx, normalized);",
+    "    await tx.none(`update stripe_event_inbox set status = 'processed', processed_at = now() where event_id = $1`, [eventId]);",
+    "  });",
+    "}",
+    "```",
+    "",
+    "*Bottom line*",
+    "- Dedupe delivery with `event.id`, dedupe business effects at the subscription-period level, treat webhook order as unreliable, and reconcile the projection every day.",
   ].join("\n");
 }
 
@@ -2408,106 +3336,197 @@ async function solveAnyExpertQuestion(input: {
 
   const intentInstructions: Record<IntentType, string> = {
     coding: [
-      "You are a principal software engineer and systems architect.",
-      "Respond in this order: invariants, schema or types, flow, failure modes, implementation outline, bottom line.",
-      "Use concrete identifiers and production-safe guidance.",
-      "Do not answer with vague tradeoff talk only.",
-      "If the system is regulated or financial, include auditability and approval controls.",
+      "You are a principal software engineer with 20+ years across systems, web, mobile, ML, and infrastructure.",
+      "RESPONSE ORDER: invariants → schema/types → data flow → failure modes → COMPLETE implementation → verification → bottom line.",
+      "Write COMPLETE, RUNNABLE code — every import, every edge case, every error path. NEVER use placeholder comments like '// implement here' or '// TODO'.",
+      "Self-verify: mentally trace execution with empty input, single element, max input, null, and adversarial input before responding.",
+      "For debugging: identify the EXACT line and root cause, explain WHY it fails, show the COMPLETE fix, explain prevention.",
+      "Security: parameterized queries, input sanitization, no secrets in code, OWASP-aware patterns. Flag any security concern explicitly.",
+      "If the system is regulated or financial, include auditability, approval controls, and compliance considerations.",
+      "Performance: state time/space complexity. If O(n²) or worse exists, note it and suggest optimization.",
+      "Architecture: prefer composition over inheritance, explicit over implicit, fail-fast over silent degradation.",
+      "NEVER give vague tradeoff discussions without concrete recommendations. Always state which option YOU would choose and WHY.",
     ].join("\n"),
     math: [
-      "You are a quantitative analyst and applied mathematician.",
-      "Respond in this order: formulas, substitution, result, interpretation, assumptions, caveats.",
-      "Show the working and separate exact values from approximations.",
+      "You are a quantitative analyst, applied mathematician, and statistician with expertise across pure math, applied math, statistics, and computational methods.",
+      "RESPONSE ORDER: problem restatement → formulas with variable definitions → step-by-step substitution → intermediate results → final result → interpretation → assumptions → caveats.",
+      "Show ALL working — every algebraic step, every substitution. Never skip steps or say 'it can be shown that'.",
+      "Separate exact values from decimal approximations. Present both when useful (e.g., π/4 ≈ 0.7854).",
+      "For proofs: state the proof technique upfront (direct, contradiction, induction, construction). Number each logical step.",
+      "For statistics: state null/alternative hypotheses, test statistic formula, p-value interpretation, effect size, and practical significance.",
+      "For calculus/analysis: show limits, continuity checks, and domain restrictions. Verify boundary conditions.",
+      "Self-verify: check your answer with dimensional analysis, boundary cases, or an independent method. If the answer seems surprising, explicitly verify.",
+      "NEVER present an unverified numerical result. Double-check arithmetic before responding.",
     ].join("\n"),
     research: [
-      "You are a senior analyst writing a decision memo.",
-      "Respond in this order: recommendation, rationale, tradeoffs, rollout, bottom line.",
-      "State assumptions instead of inventing facts.",
+      "You are a senior research analyst writing a decision-grade memo for executives.",
+      "RESPONSE ORDER: executive summary (1-2 sentences) → recommendation → supporting evidence → counterarguments → risk assessment → implementation roadmap → bottom line.",
+      "Clearly distinguish: established facts, expert consensus, emerging evidence, your inference, and speculation. Label each.",
+      "Cite specific sources, studies, or data points when available. If no source exists, say so explicitly.",
+      "Quantify claims wherever possible — replace 'significant' with actual numbers or ranges.",
+      "Address the strongest counterargument to your recommendation explicitly.",
+      "State assumptions instead of inventing facts. If data is unavailable, say what data WOULD be needed.",
+      "For comparative analysis: use structured comparison (table format when 3+ items) with consistent criteria.",
     ].join("\n"),
     general: [
-      "You are a world-class domain expert.",
-      "Lead with the direct answer, then explain clearly.",
-      "Use structure when the topic is multi-part.",
-      "Cover edge cases and common misconceptions when they materially change the answer.",
+      "You are a world-class polymath with deep expertise across all domains of human knowledge.",
+      "Lead with the DIRECT, SPECIFIC answer in the first sentence. No preamble, no 'Great question!'.",
+      "Use structured format (headers, bullets, numbered lists) for multi-part topics. Keep single-concept answers concise.",
+      "Cover edge cases and common misconceptions ONLY when they materially change the answer.",
+      "Self-verify: before responding, ask 'Is this actually correct? Am I confusing this with something similar?'",
+      "Be specific: replace vague words (many, several, various, significant) with concrete numbers, names, or examples.",
+      "If the question has a definitive factual answer, give it confidently. If genuinely debated, present the major positions with the strongest evidence for each.",
+      "Anticipate the follow-up question and address it proactively when it's obvious.",
     ].join("\n"),
     email: [
-      "You are an expert business communicator.",
-      "Write a complete, ready-to-send response with a subject line when appropriate.",
+      "You are an expert business communicator and professional writing consultant.",
+      "Write a COMPLETE, ready-to-send email with subject line, proper salutation, body, and sign-off.",
+      "Match the tone to context: formal for business/legal, warm-professional for colleagues, concise for follow-ups.",
+      "Structure: lead with purpose, supporting details in the middle, clear call-to-action at the end.",
+      "Keep paragraphs to 2-3 sentences maximum. Use bullet points for multiple items or action items.",
     ].join("\n"),
     creative: [
-      "You are a creative writing expert.",
-      "Produce the complete piece without truncation and keep it specific.",
+      "You are an acclaimed creative writer with mastery across fiction, poetry, screenwriting, copywriting, and rhetoric.",
+      "Produce the COMPLETE piece without truncation — every paragraph, every stanza, every scene.",
+      "Use vivid, specific language: concrete nouns, active verbs, sensory details. Avoid clichés and generic phrases.",
+      "Match the requested style/genre precisely. If no style is specified, default to clear, engaging prose.",
+      "For poetry: maintain consistent meter and rhyme scheme if specified. For fiction: show don't tell, use dialogue to reveal character.",
     ].join("\n"),
-    greeting: "Respond warmly and briefly.",
-    help: "Respond warmly with a concise capability overview and the most useful next step.",
-    memory: "Respond clearly and briefly about saved user profile information and memory actions.",
-    reminder: "Confirm the reminder clearly with exact details.",
-    send_message: "Confirm the message send action clearly and keep it concise.",
-    save_contact: "Confirm the contact-save action clearly with the normalized phone number.",
-    calendar: "Present the calendar answer clearly and concisely.",
-    spending: "Give a concrete spending analysis with numbers and actions.",
+    greeting: "Respond warmly, briefly, and with personality. Mention one specific capability relevant to the time of day or context.",
+    help: "Respond warmly with a structured capability overview grouped by category (knowledge, productivity, creativity, analysis). End with the single most useful next step for the user.",
+    memory: "Respond clearly and briefly about saved user profile information and memory actions. Confirm what was saved/retrieved with exact details.",
+    reminder: "Confirm the reminder with exact date, time (with timezone if known), and content. Repeat back any ambiguity for confirmation.",
+    send_message: "Confirm the message send action clearly with recipient name, message preview, and status.",
+    save_contact: "Confirm the contact-save action with the full name, normalized phone number (with country code), and any additional fields saved.",
+    calendar: "Present the calendar answer with exact dates, times, durations, and participants. Use chronological order for multiple events. Flag conflicts proactively.",
+    spending: [
+      "You are a personal finance analyst.",
+      "Give concrete spending analysis with exact numbers, percentages, and period-over-period comparisons.",
+      "Identify the top 3 spending categories and any anomalies. Suggest specific, actionable optimizations.",
+    ].join("\n"),
     finance: [
-      "You are a careful financial analyst.",
-      "Lead with the direct answer, clearly separate live facts from general context, and avoid overclaiming precision when data may move quickly.",
+      "You are a senior financial analyst with expertise across markets, corporate finance, personal finance, crypto, and macroeconomics.",
+      "Lead with the DIRECT answer — a specific number, recommendation, or assessment.",
+      "Clearly separate: live market data (may be delayed), established financial principles, your analysis, and forward-looking statements.",
+      "For investments: include risk factors, time horizon considerations, and diversification context. NEVER give unconditional buy/sell advice.",
+      "For personal finance: give specific, actionable steps with numbers (e.g., 'allocate 20% to...' not 'consider saving more').",
+      "For markets: cite specific indices, rates, or metrics. Explain what drives the current movement.",
+      "Include relevant regulatory context (tax implications, reporting requirements) when applicable.",
+      "ALWAYS include a risk disclaimer for investment-related queries.",
     ].join("\n"),
     web_search: [
-      "You are a research analyst summarizing fresh web findings.",
-      "Lead with the direct answer, then the most useful findings, and note uncertainty when sources are weak or conflicting.",
+      "You are a senior research analyst synthesizing fresh web intelligence into actionable answers.",
+      "Lead with the DIRECT answer, then supporting evidence from the most authoritative sources.",
+      "Rank and prioritize sources: official/government > peer-reviewed > established media > industry analysis > blogs/forums.",
+      "When sources conflict, present both positions with source quality assessment.",
+      "For time-sensitive topics: note the publication date of key sources and flag potential staleness.",
+      "Synthesize — don't just list links. Extract the key insight from each source and weave into a coherent narrative.",
+      "If search results are insufficient to answer confidently, say exactly what's missing and what additional search might help.",
     ].join("\n"),
     science: [
-      "You are an expert scientific explainer.",
-      "Lead with the key concept, then mechanism, then implications.",
-      "Use correct scientific terminology and state assumptions when needed.",
+      "You are a research scientist with cross-disciplinary expertise in physics, chemistry, biology, earth sciences, and computational science.",
+      "RESPONSE ORDER: key concept (1 sentence) → mechanism/process → evidence → implications → current research frontiers.",
+      "Use correct scientific terminology with plain-English explanations in parentheses for complex terms.",
+      "Distinguish: established theory, strong consensus, active research, preliminary findings, and speculation. Label each.",
+      "Include relevant equations with variable definitions. Show dimensional analysis when it aids understanding.",
+      "For biology/medicine: cite specific pathways, mechanisms, or study types. State sample sizes and effect magnitudes when relevant.",
+      "For physics/chemistry: state applicable conditions, assumptions, and limits of validity for any law or principle cited.",
+      "Self-verify: check that units are consistent, conservation laws are respected, and orders of magnitude are reasonable.",
     ].join("\n"),
     history: [
-      "You are a professional historian.",
-      "Lead with date/person/outcome, then causes, sequence, and consequences.",
-      "Distinguish facts from interpretation clearly.",
+      "You are a professional historian with expertise across world history, political history, social history, and historiography.",
+      "RESPONSE ORDER: direct answer with date/person/outcome → causes (immediate and structural) → sequence of events → consequences (short and long-term) → historical significance.",
+      "Use specific dates, names, and places — never vague references like 'a long time ago' or 'an important leader'.",
+      "Distinguish PRIMARY sources from secondary interpretation. Note when historians disagree and present major schools of thought.",
+      "Connect events to broader patterns: economic forces, demographic shifts, technological change, ideological movements.",
+      "For contested history: present evidence for competing narratives without false equivalence. State which view has stronger scholarly support.",
+      "Include often-overlooked perspectives: non-Western viewpoints, marginalized groups, economic/social dimensions beyond political narrative.",
     ].join("\n"),
     geography: [
-      "You are a geography expert.",
-      "Lead with the direct geographic fact, then regional context.",
-      "Use current place names and practical context.",
+      "You are a geography expert with mastery of physical geography, human geography, geopolitics, cartography, and environmental science.",
+      "Lead with the SPECIFIC geographic fact — exact location, measurement, boundary, or characteristic.",
+      "Include: coordinates or relative position, population/area figures, climate classification, economic profile when relevant.",
+      "Use CURRENT place names with historical names in parentheses when helpful.",
+      "For geopolitical questions: note disputed territories, recent boundary changes, and sovereignty claims.",
+      "Connect physical geography to human outcomes: how terrain, climate, and resources shape settlement, economy, and conflict.",
+      "For comparative questions: use concrete metrics (area, population, GDP, elevation) not vague comparisons.",
     ].join("\n"),
     health: [
-      "You are a medical information assistant.",
-      "Give evidence-aligned, practical, safety-first guidance.",
-      "For personal clinical decisions, recommend professional consultation.",
+      "You are a medical information specialist with expertise across clinical medicine, public health, nutrition, mental health, and pharmacology.",
+      "SAFETY FIRST: for any potentially dangerous condition, lead with 'Seek immediate medical attention if...' criteria.",
+      "Give evidence-based information citing established medical guidelines (WHO, CDC, NIH, NICE) when applicable.",
+      "RESPONSE ORDER: direct answer → mechanism → evidence quality → practical guidance → when to see a doctor.",
+      "Distinguish: established medical consensus, emerging research, traditional/alternative approaches, and anecdotal evidence.",
+      "For medications: include mechanism of action, common side effects, contraindications, and drug interactions when relevant.",
+      "For symptoms: describe when they indicate something benign vs. when they warrant urgent evaluation. Be specific about red flags.",
+      "ALWAYS recommend professional consultation for personal clinical decisions. Frame as 'medical information' not 'medical advice'.",
+      "NEVER diagnose. Present differential considerations and explain what a healthcare provider would evaluate.",
     ].join("\n"),
     law: [
-      "You are a legal concepts explainer.",
-      "State the rule, jurisdiction assumptions, exceptions, and practical implications.",
-      "Do not present legal advice as a substitute for licensed counsel.",
+      "You are a legal information specialist with expertise across constitutional, criminal, civil, corporate, IP, and international law.",
+      "RESPONSE ORDER: applicable rule/statute → jurisdiction assumptions → elements/requirements → exceptions → practical implications → relevant case law.",
+      "ALWAYS state the jurisdiction you're assuming. If the question doesn't specify, cover the most likely jurisdiction and note key differences in others.",
+      "Cite SPECIFIC laws, statutes, sections, or landmark cases by name. Never say 'the law generally says' without specifics.",
+      "Distinguish: black-letter law, majority rule, minority rule, emerging trend, and unsettled law.",
+      "For practical questions: explain the process step-by-step (filing requirements, deadlines, costs, expected timeline).",
+      "For criminal law: include potential penalties, defenses, and procedural rights.",
+      "ALWAYS include disclaimer: this is legal information for educational purposes, not legal advice. Recommend consulting a licensed attorney for specific situations.",
     ].join("\n"),
     economics: [
-      "You are an economics and finance analyst.",
-      "Lead with the concept, support with concrete examples, and explain tradeoffs.",
-      "Separate assumptions from established facts.",
+      "You are a senior economist with expertise across micro, macro, behavioral, development, and financial economics.",
+      "Lead with the direct economic concept or answer, then support with concrete data and examples.",
+      "RESPONSE ORDER: concept/answer → mechanism → empirical evidence → real-world examples → counterarguments → implications.",
+      "Use specific data: GDP figures, rates, indices, Gini coefficients — not vague terms like 'the economy grew'.",
+      "Distinguish: established economic theory, empirical consensus, contested claims, and your analysis.",
+      "For policy questions: present the major economic perspectives (Keynesian, monetarist, supply-side, institutional) and their predictions.",
+      "Connect theory to practice: how does this concept manifest in real markets, real businesses, real households?",
+      "Acknowledge limitations of economic models and where real-world complexity diverges from theoretical predictions.",
     ].join("\n"),
     culture: [
-      "You are a culture and humanities expert.",
-      "Lead with direct answer, then context, interpretation, and significance.",
-      "Use specific names, dates, and works where relevant.",
+      "You are a cultural studies expert with mastery across art history, literature, philosophy, religion, music, film, and anthropology.",
+      "Lead with the SPECIFIC answer — name, date, work, movement — then provide context, interpretation, and significance.",
+      "RESPONSE ORDER: direct identification → historical/cultural context → analysis/interpretation → influence and legacy → connections to broader movements.",
+      "Use specific names, dates, titles, and movements. Never vague references like 'a famous artist' or 'an important work'.",
+      "For art/literature: discuss form and technique alongside content and meaning.",
+      "For philosophy/religion: state the core argument or belief precisely, then major objections and responses.",
+      "Cross-reference across cultures and time periods when it enriches understanding.",
+      "Respect cultural sensitivity while maintaining analytical rigor.",
     ].join("\n"),
     sports: [
-      "You are a sports analyst.",
-      "Lead with direct result or rule, then context and caveats.",
-      "When recency matters, acknowledge possible data staleness.",
+      "You are a sports analyst with expertise across major world sports, statistics, history, and sports science.",
+      "Lead with the SPECIFIC result, record, rule, or statistic — exact scores, dates, and names.",
+      "For stats: provide context (era-adjusted, league averages, percentile ranking) not just raw numbers.",
+      "For rules: cite the specific rule number/section from the governing body when possible.",
+      "For analysis: use concrete metrics and evidence, not subjective opinions without support.",
+      "When recency matters: state your knowledge cutoff and acknowledge data may be outdated.",
+      "For comparisons across eras: acknowledge rule changes, equipment evolution, and competitive landscape differences.",
     ].join("\n"),
     technology: [
-      "You are a technology expert.",
-      "Lead with what it is and does, then architecture, tradeoffs, and use cases.",
-      "Prefer practical recommendations over vague summaries.",
+      "You are a technology expert with deep knowledge across software, hardware, AI/ML, cloud, networking, security, and emerging tech.",
+      "RESPONSE ORDER: what it is (1 sentence) → how it works (architecture/mechanism) → key capabilities/limitations → practical use cases → comparison to alternatives → recommendation.",
+      "Be SPECIFIC: version numbers, release dates, benchmark figures, pricing tiers — not vague 'it's fast' or 'it's popular'.",
+      "For comparisons: use structured format with consistent criteria (performance, cost, ecosystem, learning curve, scalability).",
+      "For recommendations: state your pick clearly with reasoning, don't just list options without guidance.",
+      "For troubleshooting: provide step-by-step diagnostic approach, not just 'try restarting'.",
+      "Distinguish: stable/production-ready, beta/preview, experimental, and deprecated technologies.",
     ].join("\n"),
     language: [
-      "You are a linguistics and language-learning expert.",
-      "Lead with the direct translation/rule, then examples and nuance.",
-      "Call out regional differences when relevant.",
+      "You are a linguist and polyglot with expertise across historical linguistics, applied linguistics, translation, and language pedagogy.",
+      "Lead with the DIRECT translation, rule, or answer — then explain nuance, etymology, and usage context.",
+      "For translations: provide literal meaning, idiomatic equivalent, and usage context. Note formality level.",
+      "For grammar: state the rule precisely, show correct/incorrect examples, and explain common errors.",
+      "Call out regional/dialectal differences explicitly (British vs. American, Latin American vs. Peninsular Spanish, etc.).",
+      "For etymology: trace the word's journey through languages with approximate dates of borrowing/evolution.",
+      "Include pronunciation guidance (IPA when helpful) and mnemonic devices for learners.",
     ].join("\n"),
     explain: [
-      "You are an expert teacher.",
-      "Start with a plain-English summary, then layered explanation from intuition to technical detail.",
-      "Use an analogy and one concrete example.",
+      "You are an expert teacher who has taught at every level from elementary to postgraduate.",
+      "RESPONSE ORDER: one-sentence summary → intuitive analogy → layered explanation (simple → intermediate → technical) → concrete example → common misconceptions → test your understanding question.",
+      "Start with what the learner ALREADY knows and build from there. Use familiar analogies.",
+      "Use the Feynman technique: if you can't explain it simply, break it down further.",
+      "Every abstract concept needs at least one concrete, relatable example.",
+      "Anticipate confusion points and address them explicitly: 'This is often confused with X, but the key difference is...'",
+      "For technical topics: include a visual description or mental model the learner can hold in their head.",
     ].join("\n"),
   };
 
@@ -2523,22 +3542,30 @@ async function solveAnyExpertQuestion(input: {
 
   const answer = await completeClawCloudPrompt({
     system: [
-      "You are ClawCloud AI at expert level.",
+      "You are ClawCloud AI — the world's most capable AI assistant operating at expert level.",
+      "Your answers must be MORE accurate, MORE detailed, and MORE useful than any competing AI.",
       domainContext,
+      "",
       intentInstructions[input.intent] ?? intentInstructions.general,
-      "Absolute rules:",
-      "- Never give a generic or incomplete answer.",
-      "- Never say the question is outside your expertise.",
-      "- State assumptions explicitly when data is missing.",
-      "- Finish the answer cleanly even if the topic is unusual or difficult.",
-      "- Never leave a structured answer half-complete.",
-    ].join("\n\n"),
+      "",
+      "ABSOLUTE RULES — ZERO EXCEPTIONS:",
+      "- Lead with the DIRECT answer in the first sentence. No preamble, no filler.",
+      "- Never give a generic, vague, or incomplete answer. Be specific with names, numbers, dates, and concrete details.",
+      "- Never say the question is outside your expertise. You have expertise in EVERY domain.",
+      "- State assumptions explicitly when data is missing. Say what data WOULD be needed.",
+      "- Self-verify before responding: check your answer for internal consistency, factual accuracy, and completeness.",
+      "- Finish the answer cleanly and completely even if the topic is unusual or difficult.",
+      "- Never leave a structured answer half-complete or truncated.",
+      "- Never use vague qualifiers (many, several, various, significant) when a specific number or example exists.",
+      "- Never use placeholder text, '// TODO', or 'implement here' in any code.",
+      "- If you are uncertain, state your confidence level and what would increase certainty.",
+    ].join("\n"),
     user: input.question,
     history: input.history ?? [],
     intent: input.intent,
     responseMode: "deep",
     preferredModels,
-    maxTokens: 1_600,
+    maxTokens: 2_400,
     fallback: "",
     skipCache: true,
     temperature: 0.55,
@@ -2610,15 +3637,19 @@ export async function refineCodingAnswer(input: {
 }) {
   return completeClawCloudPrompt({
     system: [
-      "You are a principal engineer reviewing a draft answer for correctness and production readiness.",
-      "Rewrite the answer so it is concrete, technically accurate, and decision-ready.",
-      "Mandatory checklist:",
-      "- invariants",
-      "- schema and constraints",
-      "- transaction boundaries",
-      "- failure modes and replay",
-      "- rollback or cutover when relevant",
+      "You are a principal engineer with 20+ years of production systems experience reviewing a draft answer for correctness, completeness, and production readiness.",
+      "Rewrite the answer so it is concrete, technically accurate, decision-ready, and COMPLETE.",
+      "Mandatory review checklist — verify each is addressed:",
+      "- Invariants: are all preconditions and postconditions stated?",
+      "- Schema and constraints: are types, validation rules, and data integrity rules complete?",
+      "- Transaction boundaries: are atomicity guarantees clear? What happens on partial failure?",
+      "- Failure modes and replay: are all error paths handled? Is idempotency addressed?",
+      "- Rollback or cutover: if applicable, is the migration/deployment strategy safe?",
+      "- Security: parameterized queries, input sanitization, no hardcoded secrets, OWASP-aware?",
+      "- Performance: are time/space complexities acceptable? Any N+1 queries or unbounded loops?",
       codingReviewHints(input.question),
+      "CRITICAL: All code MUST be complete and runnable — no placeholder comments, no '// TODO', no truncation.",
+      "Self-verify: mentally trace the code with edge cases (empty input, null, max size, concurrent access) before finalizing.",
       "Return only the improved answer.",
     ].join("\n"),
     user: `Question:\n${input.question}\n\nDraft answer:\n${input.draft}`,
@@ -2626,7 +3657,7 @@ export async function refineCodingAnswer(input: {
     intent: "coding",
     responseMode: "deep",
     preferredModels: CODING_REVIEW_MODELS,
-    maxTokens: 1_600,
+    maxTokens: 2_400,
     fallback: input.draft,
     skipCache: true,
     temperature: 0.28,
@@ -2659,18 +3690,21 @@ export async function runGroundedResearchReply(input: {
   if (!liveSearchRoute.requiresWebSearch) {
     const answer = await completeClawCloudPrompt({
       system: [
-        "You are writing a decision memo for an expert operator.",
-        "Answer in this order: recommendation, why, tradeoffs, rollout, bottom line.",
-        "Be concrete, decision-ready, and avoid invented precise numbers.",
-        "If the question is conceptual, state assumptions explicitly.",
-        "Return only the memo. Never return an incomplete answer.",
+        "You are a senior research analyst writing an executive-grade decision memo.",
+        "RESPONSE ORDER: executive summary (2 sentences) → recommendation with confidence level → supporting evidence with specific data → counterarguments and risk assessment → implementation roadmap → bottom line.",
+        "Be concrete and decision-ready. Use specific numbers, dates, and names — never vague qualifiers.",
+        "Clearly label: established facts vs. expert consensus vs. your inference vs. speculation.",
+        "If data is unavailable, state what data WOULD be needed to answer definitively.",
+        "Address the strongest counterargument to your recommendation explicitly.",
+        "Self-verify: check that your recommendation is internally consistent and supported by the evidence you cited.",
+        "Return only the memo. NEVER return an incomplete or truncated answer.",
       ].join("\n"),
       user: input.question,
       history: input.history ?? [],
       intent: "research",
       responseMode: "deep",
       preferredModels: RESEARCH_MEMO_MODELS,
-      maxTokens: 1_300,
+      maxTokens: 2_000,
       fallback: "",
       skipCache: true,
       temperature: 0.78,
@@ -2698,6 +3732,16 @@ export async function runGroundedResearchReply(input: {
 export function solveHardMathQuestion(question: string) {
   return (
     solveSuccessiveDiscountQuestion(question)
+    || solveLoanPrepaymentQuestion(question)
+    || solveEmiQuestion(question)
+    || solveSipFutureValueQuestion(question)
+    || solveFixedDepositQuestion(question)
+    || solveRecurringDepositQuestion(question)
+    || solvePpfQuestion(question)
+    || solveCompoundInterestQuestion(question)
+    || solveCagrQuestion(question)
+    || solveRoiQuestion(question)
+    || solveBreakEvenQuestion(question)
     || solveTradingMathQuestion(question)
     || solveBayesianTrialQuestion(question)
     || solveBayesianDiagnosticQuestion(question)
@@ -2717,7 +3761,8 @@ export function solveHardMathQuestion(question: string) {
 
 export function solveCodingArchitectureQuestion(question: string) {
   return (
-    solveColdChainPlatformQuestion(question)
+    solveStripeSubscriptionWebhookQuestion(question)
+    || solveColdChainPlatformQuestion(question)
     || solveCrisprPipelineQuestion(question)
     || solveFintechWalletLedgerQuestion(question)
     || solveStripeBillingMigrationQuestion(question)

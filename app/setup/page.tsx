@@ -9,6 +9,10 @@ export const metadata: Metadata = {
   description: "Connect Gmail, link WhatsApp, and choose your AI tasks for ClawCloud.",
 };
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
+
 export default function SetupRoute() {
   return (
     <Suspense fallback={null}>

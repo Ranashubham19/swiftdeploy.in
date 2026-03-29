@@ -13,12 +13,14 @@ Expected result:
 
 ## 3. Verify the tables
 
-Open `Table Editor` in Supabase and confirm these 14 tables exist:
+Open `Table Editor` in Supabase and confirm these 16 tables exist:
 
 - `users`
 - `connected_accounts`
 - `agent_tasks`
 - `task_runs`
+- `dashboard_journal_threads`
+- `global_lite_connections`
 - `whatsapp_messages`
 - `analytics_daily`
 - `subscriptions`
@@ -30,4 +32,4 @@ Open `Table Editor` in Supabase and confirm these 14 tables exist:
 - `meeting_reminder_log`
 - `cron_health`
 
-If all 14 are present, the migration is complete.
+If all 16 are present, the migration is complete.

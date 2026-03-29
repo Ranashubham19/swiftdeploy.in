@@ -1,7 +1,13 @@
 import type { ConversationThread, PersistenceState } from "@/lib/types";
 
+import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 import { env } from "@/lib/env";
-import { buildSupabaseHeaders } from "@/lib/supabase-headers";
+
+const INTERNAL_THREAD_PREFIXES = [
+  "global-lite:",
+  "dashboard-journal:",
+  "app-access-consent:",
+] as const;
 
 function missingPersistence(reason: string): PersistenceState {
   return {
@@ -12,15 +18,7 @@ function missingPersistence(reason: string): PersistenceState {
 }
 
 function supabaseEnabled() {
-  return Boolean(env.SUPABASE_URL && env.SUPABASE_ANON_KEY && env.SUPABASE_THREADS_TABLE);
-}
-
-async function supabaseFetch(path: string, init?: RequestInit) {
-  return fetch(`${env.SUPABASE_URL}${path}`, {
-    cache: "no-store",
-    ...init,
-    headers: buildSupabaseHeaders(env.SUPABASE_ANON_KEY, init?.headers),
-  });
+  return Boolean(env.SUPABASE_THREADS_TABLE && env.SUPABASE_SERVICE_ROLE_KEY && env.SUPABASE_URL);
 }
 
 type SupabaseThreadRow = {
@@ -52,7 +50,11 @@ function normalizeThread(row: SupabaseThreadRow): ConversationThread {
   };
 }
 
-export async function listConversationThreads(userId: string | null) {
+function isInternalThreadId(threadId: string) {
+  return INTERNAL_THREAD_PREFIXES.some((prefix) => threadId.startsWith(prefix));
+}
+
+export async function listConversationThreads(userId: string) {
   if (!supabaseEnabled()) {
     return {
       threads: [] as ConversationThread[],
@@ -60,26 +62,24 @@ export async function listConversationThreads(userId: string | null) {
     };
   }
 
-  const filters = new URLSearchParams();
-  filters.set("select", "id,title,user_id,updated_at,messages,progress,sources,active_result");
-  filters.set("order", "updated_at.desc");
-  filters.set("limit", "25");
+  const supabaseAdmin = getClawCloudSupabaseAdmin();
+  const { data, error } = await supabaseAdmin
+    .from(env.SUPABASE_THREADS_TABLE)
+    .select("id,title,user_id,updated_at,messages,progress,sources,active_result")
+    .eq("user_id", userId)
+    .order("updated_at", { ascending: false })
+    .limit(25);
 
-  if (userId) {
-    filters.set("user_id", `eq.${userId}`);
-  }
-
-  const response = await supabaseFetch(`/rest/v1/${env.SUPABASE_THREADS_TABLE}?${filters.toString()}`);
-  if (!response.ok) {
+  if (error) {
     return {
       threads: [] as ConversationThread[],
-      persistence: missingPersistence(`Supabase threads query failed with ${response.status}.`),
+      persistence: missingPersistence(`Supabase threads query failed: ${error.message}`),
     };
   }
 
-  const rows = (await response.json()) as SupabaseThreadRow[];
+  const rows = (data ?? []) as SupabaseThreadRow[];
   return {
-    threads: rows.map(normalizeThread),
+    threads: rows.filter((row) => !isInternalThreadId(row.id)).map(normalizeThread),
     persistence: {
       mode: "supabase",
       synced: true,
@@ -88,35 +88,49 @@ export async function listConversationThreads(userId: string | null) {
   };
 }
 
-export async function persistConversationThread(thread: ConversationThread) {
+export async function persistConversationThread(userId: string, thread: ConversationThread) {
   if (!supabaseEnabled()) {
     return missingPersistence("Supabase is not configured.");
   }
 
-  const response = await supabaseFetch(`/rest/v1/${env.SUPABASE_THREADS_TABLE}`, {
-    method: "POST",
-    headers: {
-      Prefer: "resolution=merge-duplicates,return=representation",
-    },
-    body: JSON.stringify([
+  const supabaseAdmin = getClawCloudSupabaseAdmin();
+  const { data: existingRow, error: existingError } = await supabaseAdmin
+    .from(env.SUPABASE_THREADS_TABLE)
+    .select("user_id")
+    .eq("id", thread.id)
+    .maybeSingle();
+
+  if (existingError) {
+    return missingPersistence(`Supabase thread ownership check failed: ${existingError.message}`);
+  }
+
+  if (existingRow?.user_id && existingRow.user_id !== userId) {
+    return missingPersistence("Thread ownership mismatch.");
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from(env.SUPABASE_THREADS_TABLE)
+    .upsert(
       {
         id: thread.id,
         title: thread.title,
-        user_id: thread.userId,
+        user_id: userId,
         updated_at: thread.updatedAt,
         messages: thread.messages,
         progress: thread.progress,
         sources: thread.sources,
         active_result: thread.activeResult,
       },
-    ]),
-  });
+      { onConflict: "id" },
+    )
+    .select("updated_at")
+    .limit(1);
 
-  if (!response.ok) {
-    return missingPersistence(`Supabase thread sync failed with ${response.status}.`);
+  if (error) {
+    return missingPersistence(`Supabase thread sync failed: ${error.message}`);
   }
 
-  const rows = (await response.json().catch(() => [])) as SupabaseThreadRow[];
+  const rows = (data ?? []) as Array<Pick<SupabaseThreadRow, "updated_at">>;
   return {
     mode: "supabase",
     synced: true,

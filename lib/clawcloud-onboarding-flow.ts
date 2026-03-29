@@ -295,7 +295,10 @@ export async function handleOnboardingReply(
       ].join("\n");
     }
 
-    await saveMemoryFact(userId, "name", name, "explicit", 1);
+    await saveMemoryFact(userId, "name", name, "explicit", 1, {
+      createdBy: "onboarding",
+      whySaved: "Saved from the onboarding flow.",
+    });
     await setOnboardingState(userId, { step: 2, name });
     return professionalStep2Message(name);
   }
@@ -310,7 +313,10 @@ export async function handleOnboardingReply(
       ].join("\n");
     }
 
-    await saveMemoryFact(userId, "city", city, "explicit", 1);
+    await saveMemoryFact(userId, "city", city, "explicit", 1, {
+      createdBy: "onboarding",
+      whySaved: "Saved from the onboarding flow.",
+    });
     void autoDetectAndSaveTimezone(userId, city).catch(() => null);
     await setOnboardingState(userId, {
       step: 3,
@@ -325,7 +331,10 @@ export async function handleOnboardingReply(
   const city = state.city ?? "your city";
 
   await setUserLocale(userId, language.locale);
-  await saveMemoryFact(userId, "reply_language", language.label, "explicit", 1);
+  await saveMemoryFact(userId, "reply_language", language.label, "explicit", 1, {
+    createdBy: "onboarding",
+    whySaved: "Saved from the onboarding flow.",
+  });
   await clearOnboardingState(userId);
   await markOnboardingComplete(userId);
 

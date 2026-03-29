@@ -171,7 +171,7 @@ const faqs = [
   {
     question: "Is my email data safe?",
     answer:
-      "Yes. We use read-only OAuth access for Gmail - we never store your emails on our servers. Your agent processes them in real time and only sends you summaries. All connections are end-to-end encrypted and we follow GDPR and Indian IT Act guidelines.",
+      "Yes. We request only the Google permissions needed for the features you enable. ClawCloud processes Gmail and Calendar content in real time, does not store full inbox copies by default, and lets you revoke Google access at any time.",
   },
   {
     question: "Do I need to install anything?",
@@ -376,7 +376,7 @@ export function ClawCloudLanding() {
 
         <div className="trust-row">
           <span className="trust-pill">
-            <span className="icon">{"\u{1F512}"}</span> End-to-end encrypted
+            <span className="icon">{"\u{1F512}"}</span> Encrypted in transit
           </span>
           <span className="trust-divider" />
           <span className="trust-pill">

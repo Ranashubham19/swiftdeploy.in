@@ -1,9 +1,10 @@
 import { runClawCloudTask } from "@/lib/clawcloud-agent";
+import { getClawCloudAnswerObservabilitySummary } from "@/lib/clawcloud-answer-observability";
 import { upsertAnalyticsDaily } from "@/lib/clawcloud-analytics";
 import { listWhatsAppReplyApprovals } from "@/lib/clawcloud-whatsapp-approval";
 import { getWhatsAppSettings } from "@/lib/clawcloud-whatsapp-control";
 import {
-  getWhatsAppInboxSummary,
+  buildWhatsAppInboxSummarySnapshot,
   listWhatsAppContacts,
   listWhatsAppHistory,
 } from "@/lib/clawcloud-whatsapp-inbox";
@@ -12,7 +13,10 @@ import {
   listWhatsAppWorkflows,
 } from "@/lib/clawcloud-whatsapp-workflows";
 import { defaultWhatsAppSettings } from "@/lib/clawcloud-whatsapp-workspace-types";
-import { getClawCloudCalendarEvents } from "@/lib/clawcloud-google";
+import {
+  getClawCloudCalendarEvents,
+  getClawCloudGoogleCapabilityStatus,
+} from "@/lib/clawcloud-google";
 import {
   parseCalendarAttendees,
   sendMeetingBriefing,
@@ -34,8 +38,13 @@ import {
   type ClawCloudTaskConfig,
   type ClawCloudTaskType,
 } from "@/lib/clawcloud-types";
+import { getClawCloudTodayRunCount } from "@/lib/clawcloud-usage";
 import { getClawCloudRuntimeFeatureStatus } from "@/lib/clawcloud-feature-status";
-import { sendClawCloudWhatsAppMessage } from "@/lib/clawcloud-whatsapp";
+import { listGlobalLiteConnections } from "@/lib/clawcloud-global-lite";
+import {
+  getClawCloudWhatsAppRuntimeStatus,
+  sendClawCloudWhatsAppMessage,
+} from "@/lib/clawcloud-whatsapp";
 
 type AgentTaskRow = {
   id: string;
@@ -50,6 +59,105 @@ type AgentTaskRow = {
 };
 
 type SupabaseAdminClient = ReturnType<typeof getClawCloudSupabaseAdmin>;
+type ClawCloudDashboardDataMode = "fast" | "full";
+type ClawCloudDashboardDataOptions = {
+  mode?: ClawCloudDashboardDataMode;
+};
+
+const DASHBOARD_WHATSAPP_WORKSPACE_TIMEOUT_MS = 2_200;
+const DASHBOARD_GOOGLE_CAPABILITY_TIMEOUT_MS = 1_400;
+const DASHBOARD_OBSERVABILITY_TIMEOUT_MS = 1_000;
+const DASHBOARD_TODAY_RUN_TIMEOUT_MS = 1_000;
+
+function createDefaultWhatsAppWorkspace(connected = false) {
+  return {
+    settings: defaultWhatsAppSettings,
+    summary: {
+      connected,
+      contactCount: 0,
+      pendingApprovalCount: 0,
+      awaitingReplyCount: 0,
+      highPriorityCount: 0,
+      recentMessageCount: 0,
+      groupThreadCount: 0,
+      mediaMessageCount: 0,
+      sensitiveMessageCount: 0,
+    },
+    runtime: null,
+    approvals: [],
+    contacts: [],
+    workflows: [],
+    workflow_runs: [],
+    history: [],
+  };
+}
+
+function createDefaultAnswerObservability() {
+  return {
+    windowDays: 7,
+    totalResponses: 0,
+    answeredCount: 0,
+    refusalCount: 0,
+    consentPromptCount: 0,
+    failedCount: 0,
+    fallbackCount: 0,
+    fallbackRate: 0,
+    liveAnswerCount: 0,
+    liveGroundedCount: 0,
+    liveGroundedRate: 0,
+    modelAuditedCount: 0,
+    modelAuditedRate: 0,
+    disagreementCount: 0,
+    disagreementRate: 0,
+    avgLatencyMs: 0,
+    topIntents: [],
+  };
+}
+
+function createDefaultGoogleCapabilities() {
+  return {
+    checked: false,
+    connected: false,
+    reconnectRequired: false,
+    reconnectReason: null,
+    gmailModify: false,
+    gmailCompose: false,
+    gmailSend: false,
+    calendarWrite: false,
+    driveRead: false,
+    sheetsWrite: false,
+  };
+}
+
+function withTimeout<T>(promise: Promise<T>, fallback: T, timeoutMs: number): Promise<T> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(fallback);
+      }
+    }, timeoutMs);
+
+    promise
+      .then((value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeout);
+        resolve(value);
+      })
+      .catch(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeout);
+        resolve(fallback);
+      });
+  });
+}
 
 async function getUserPlan(userId: string) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
@@ -63,16 +171,7 @@ async function getUserPlan(userId: string) {
 }
 
 async function getTodayRunCount(userId: string) {
-  const supabaseAdmin = getClawCloudSupabaseAdmin();
-
-  const { data } = await supabaseAdmin
-    .from("analytics_daily")
-    .select("tasks_run")
-    .eq("user_id", userId)
-    .eq("date", formatDateKey())
-    .maybeSingle();
-
-  return Number(data?.tasks_run ?? 0);
+  return getClawCloudTodayRunCount(userId);
 }
 
 function getCurrentTimeInTz(timeZone: string) {
@@ -196,9 +295,13 @@ export async function completeClawCloudOnboarding(input: {
   taskConfigs: Partial<Record<ClawCloudTaskType, ClawCloudTaskConfig>>;
 }) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
-  const selectedTasks = Array.from(
+  const requestedTasks = Array.from(
     new Set(input.selectedTasks.map((taskType) => normalizeClawCloudTaskType(taskType))),
   );
+  const userPlan = await getUserPlan(input.userId);
+  const taskLimit = clawCloudActiveTaskLimits[userPlan];
+  const selectedTasks = requestedTasks.slice(0, taskLimit);
+  const skippedTasks = requestedTasks.slice(taskLimit);
 
   const normalizedTaskConfigs = Object.fromEntries(
     Object.entries(input.taskConfigs).map(([taskType, config]) => [
@@ -256,66 +359,115 @@ export async function completeClawCloudOnboarding(input: {
   return {
     success: true,
     tasksEnabled: selectedTasks.length,
+    taskLimit,
+    tasksSkipped: skippedTasks.length,
+    skippedTaskTypes: skippedTasks,
   };
 }
 
-export async function getClawCloudDashboardData(userId: string, userEmail?: string | null) {
+export async function getClawCloudDashboardData(
+  userId: string,
+  userEmail?: string | null,
+  options?: ClawCloudDashboardDataOptions,
+) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const today = formatDateKey();
+  const mode = options?.mode === "fast" ? "fast" : "full";
+  const defaultAnswerObservability = createDefaultAnswerObservability();
+  const defaultGoogleCapabilities = createDefaultGoogleCapabilities();
 
-  const whatsappWorkspacePromise = (async () => {
-    try {
-      const [settings, summary, approvals, contacts, workflows, workflowRuns, historySnapshot] =
-        await Promise.all([
-          getWhatsAppSettings(userId),
-          getWhatsAppInboxSummary(userId),
-          listWhatsAppReplyApprovals(userId, 8),
-          listWhatsAppContacts(userId),
-          listWhatsAppWorkflows(userId),
-          listWhatsAppWorkflowRuns(userId, 8),
-          listWhatsAppHistory({
-            userId,
-            limit: 8,
+  const recentRunsPromise = mode === "fast"
+    ? Promise.resolve({ data: [] as Array<Record<string, unknown>> })
+    : supabaseAdmin
+      .from("task_runs")
+      .select("id, task_type, status, duration_ms, started_at")
+      .eq("user_id", userId)
+      .order("started_at", { ascending: false })
+      .limit(20);
+
+  const whatsappWorkspacePromise = mode === "fast"
+    ? Promise.resolve(createDefaultWhatsAppWorkspace(false))
+    : withTimeout((async () => {
+      try {
+        const [settings, runtime, approvals, contacts, workflows, workflowRuns, historySnapshot, recentMessages, connected] =
+          await Promise.all([
+            getWhatsAppSettings(userId),
+            getClawCloudWhatsAppRuntimeStatus(userId).catch(() => null),
+            listWhatsAppReplyApprovals(userId, 8),
+            listWhatsAppContacts(userId),
+            listWhatsAppWorkflows(userId),
+            listWhatsAppWorkflowRuns(userId, 8),
+            listWhatsAppHistory({
+              userId,
+              limit: 8,
+            }),
+            supabaseAdmin
+              .from("whatsapp_messages")
+              .select("id, sent_at, chat_type, message_type, sensitivity, remote_jid")
+              .eq("user_id", userId)
+              .gte("sent_at", new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString())
+              .limit(500)
+              .then(({ data }) => data ?? [])
+              .catch(() => []),
+            supabaseAdmin
+              .from("connected_accounts")
+              .select("id")
+              .eq("user_id", userId)
+              .eq("provider", "whatsapp")
+              .eq("is_active", true)
+              .maybeSingle()
+              .then(({ data }) => Boolean(data))
+              .catch(() => false),
+          ]);
+
+        return {
+          settings,
+          summary: buildWhatsAppInboxSummarySnapshot({
+            contacts,
+            approvals,
+            recentMessages,
+            connected,
+            contactCountOverride: Math.max(runtime?.contactCount ?? 0, contacts.length),
           }),
-        ]);
+          runtime,
+          approvals,
+          contacts,
+          workflows,
+          workflow_runs: workflowRuns,
+          history: historySnapshot.rows,
+        };
+      } catch {
+        return createDefaultWhatsAppWorkspace(false);
+      }
+    })(), createDefaultWhatsAppWorkspace(false), DASHBOARD_WHATSAPP_WORKSPACE_TIMEOUT_MS);
 
-      return {
-        settings,
-        summary,
-        approvals,
-        contacts,
-        workflows,
-        workflow_runs: workflowRuns,
-        history: historySnapshot.rows,
-      };
-    } catch {
-      return {
-        settings: defaultWhatsAppSettings,
-        summary: {
-          connected: false,
-          contactCount: 0,
-          pendingApprovalCount: 0,
-          awaitingReplyCount: 0,
-          highPriorityCount: 0,
-          recentMessageCount: 0,
-          groupThreadCount: 0,
-          mediaMessageCount: 0,
-          sensitiveMessageCount: 0,
-        },
-        approvals: [],
-        contacts: [],
-        workflows: [],
-        workflow_runs: [],
-        history: [],
-      };
-    }
-  })();
+  const globalLiteConnectionsPromise = withTimeout(
+    listGlobalLiteConnections(userId).catch(() => []),
+    [],
+    mode === "fast" ? 600 : 1_000,
+  );
 
-  const [userProfile, userPreferences, connectedAccounts, agentTasks, recentRuns, todayAnalytics, last7Days, subscription, whatsappWorkspace] =
+  const answerObservabilityPromise = mode === "fast"
+    ? Promise.resolve(defaultAnswerObservability)
+    : withTimeout(
+      getClawCloudAnswerObservabilitySummary(userId).catch(() => defaultAnswerObservability),
+      defaultAnswerObservability,
+      DASHBOARD_OBSERVABILITY_TIMEOUT_MS,
+    );
+
+  const googleCapabilitiesPromise = mode === "fast"
+    ? Promise.resolve(defaultGoogleCapabilities)
+    : withTimeout(
+      getClawCloudGoogleCapabilityStatus(userId).catch(() => defaultGoogleCapabilities),
+      defaultGoogleCapabilities,
+      DASHBOARD_GOOGLE_CAPABILITY_TIMEOUT_MS,
+    );
+
+  const [userProfile, userPreferences, connectedAccounts, agentTasks, recentRuns, todayAnalytics, last7Days, subscription, whatsappWorkspaceResult, globalLiteConnections, answerObservability, googleCapabilities] =
     await Promise.all([
       supabaseAdmin
         .from("users")
-        .select("id, email, full_name, avatar_url, plan, onboarding_done, timezone")
+        .select("id, email, full_name, plan, timezone")
         .eq("id", userId)
         .maybeSingle(),
       supabaseAdmin
@@ -325,28 +477,23 @@ export async function getClawCloudDashboardData(userId: string, userEmail?: stri
         .maybeSingle(),
       supabaseAdmin
         .from("connected_accounts")
-        .select("provider, account_email, phone_number, display_name, is_active, connected_at, last_used_at")
+        .select("provider, account_email, phone_number, display_name, is_active")
         .eq("user_id", userId),
       supabaseAdmin
         .from("agent_tasks")
         .select("id, task_type, is_enabled, schedule_time, schedule_days, config, total_runs, last_run_at")
         .eq("user_id", userId)
         .order("created_at"),
-      supabaseAdmin
-        .from("task_runs")
-        .select("id, task_type, status, duration_ms, started_at, completed_at, output_data")
-        .eq("user_id", userId)
-        .order("started_at", { ascending: false })
-        .limit(20),
+      recentRunsPromise,
       supabaseAdmin
         .from("analytics_daily")
-        .select("*")
+        .select("emails_processed, drafts_created, tasks_run, minutes_saved, wa_messages_sent")
         .eq("user_id", userId)
         .eq("date", today)
         .maybeSingle(),
       supabaseAdmin
         .from("analytics_daily")
-        .select("date, tasks_run, emails_processed, drafts_created, minutes_saved")
+        .select("date, tasks_run, emails_processed")
         .eq("user_id", userId)
         .order("date", { ascending: false })
         .limit(7),
@@ -356,10 +503,38 @@ export async function getClawCloudDashboardData(userId: string, userEmail?: stri
         .eq("user_id", userId)
         .maybeSingle(),
       whatsappWorkspacePromise,
+      globalLiteConnectionsPromise,
+      answerObservabilityPromise,
+      googleCapabilitiesPromise,
     ]);
 
   const userPlan = (userProfile.data?.plan ?? "free") as ClawCloudPlan;
-  const todayRuns = await getTodayRunCount(userId);
+  const todayAnalyticsTaskRuns = Number(todayAnalytics.data?.tasks_run ?? 0);
+  const todayRuns = mode === "fast"
+    ? todayAnalyticsTaskRuns
+    : await withTimeout(
+      getTodayRunCount(userId).catch(() => todayAnalyticsTaskRuns),
+      todayAnalyticsTaskRuns,
+      DASHBOARD_TODAY_RUN_TIMEOUT_MS,
+    );
+  const normalizedTodayAnalytics = {
+    ...(todayAnalytics.data ?? {
+      emails_processed: 0,
+      drafts_created: 0,
+      tasks_run: 0,
+      minutes_saved: 0,
+      wa_messages_sent: 0,
+    }),
+    tasks_run: todayRuns,
+  };
+  const normalizedLast7Days = (last7Days.data ?? []).map((row) =>
+    row.date === today
+      ? {
+        ...row,
+        tasks_run: todayRuns,
+      }
+      : row,
+  );
   const dashboardTasks = ((agentTasks.data ?? []) as AgentTaskRow[]).map((task) => ({
     ...task,
     task_type: presentClawCloudTaskType(task.task_type),
@@ -377,18 +552,13 @@ export async function getClawCloudDashboardData(userId: string, userEmail?: stri
       }
       : null,
     connected_accounts: connectedAccounts.data ?? [],
+    global_lite_connections: globalLiteConnections,
     tasks: dashboardTasks,
     recent_activity: recentActivity,
     analytics: {
-      today:
-        todayAnalytics.data ?? {
-          emails_processed: 0,
-          drafts_created: 0,
-          tasks_run: 0,
-          minutes_saved: 0,
-          wa_messages_sent: 0,
-        },
-      last_7_days: last7Days.data ?? [],
+      today: normalizedTodayAnalytics,
+      last_7_days: normalizedLast7Days,
+      answer_observability: answerObservability,
     },
     agent_status: {
       is_active: dashboardTasks.some((task) => task.is_enabled),
@@ -400,7 +570,17 @@ export async function getClawCloudDashboardData(userId: string, userEmail?: stri
     },
     subscription: subscription.data ?? null,
     feature_status: getClawCloudRuntimeFeatureStatus(userEmail ?? userProfile.data?.email ?? null),
-    whatsapp_workspace: whatsappWorkspace,
+    google_capabilities: googleCapabilities,
+    whatsapp_workspace: mode === "fast"
+      ? {
+        ...createDefaultWhatsAppWorkspace(
+          (connectedAccounts.data ?? []).some(
+            (account) => account.provider === "whatsapp" && account.is_active,
+          ),
+        ),
+        settings: whatsappWorkspaceResult.settings,
+      }
+      : whatsappWorkspaceResult,
   };
 }
 

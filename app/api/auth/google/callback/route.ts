@@ -1,15 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import {
+  confirmGoogleWorkspaceScopeAccess,
+  buildGoogleWorkspaceWrongAccountMessage,
+  buildGoogleWorkspaceScopeMismatchMessage,
   exchangeClawCloudGoogleCode,
   exchangeClawCloudGoogleLoginCode,
+  fetchGoogleGrantedScopes,
   fetchClawCloudGoogleProfile,
+  hasRequiredGoogleWorkspaceScopes,
+  matchesExpectedClawCloudGoogleWorkspaceEmail,
+  normalizeGoogleWorkspaceScopeSet,
   parseClawCloudGoogleWorkspaceState,
+  verifyClawCloudGoogleLoginCallbackState,
 } from "@/lib/clawcloud-google";
 import {
   getClawCloudErrorMessage,
   getClawCloudSupabaseAdmin,
 } from "@/lib/clawcloud-supabase";
+import { decryptSecretValue, encryptSecretValue } from "@/lib/clawcloud-secret-box";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,14 +26,32 @@ export const revalidate = 0;
 
 const GOOGLE_LOGIN_STATE_COOKIE = "clawcloud-google-login-state";
 const GOOGLE_LOGIN_SESSION_COOKIE = "clawcloud-google-login-session";
+const GOOGLE_WORKSPACE_SESSION_COOKIE = "clawcloud-google-workspace-session";
+
+type GoogleWorkspaceSessionCookie = {
+  nonce: string;
+  userId: string;
+  scopeSet: "core" | "extended" | "gmail" | "google_calendar" | "google_drive";
+  flow: "default" | "setup_step1" | "setup_unified";
+  expectedEmail: string | null;
+  sourceProvider: "gmail" | "google_calendar" | "google_drive" | null;
+  issuedAt: string;
+};
 
 function isExistingUserError(message: string) {
   return /already (exists|been registered|registered)|duplicate|unique/i.test(message);
 }
 
-function buildWorkspaceRedirectBase(origin: string, scopeSet: "core" | "extended") {
-  const redirectBase = new URL(scopeSet === "extended" ? "/settings" : "/setup", origin);
-  if (scopeSet === "extended") {
+function buildWorkspaceRedirectBase(
+  origin: string,
+  scopeSet: GoogleWorkspaceSessionCookie["scopeSet"],
+  flow: "default" | "setup_step1" | "setup_unified",
+) {
+  const redirectBase = new URL(
+    flow === "setup_unified" || flow === "setup_step1" ? "/setup" : "/settings",
+    origin,
+  );
+  if (flow === "default" && (scopeSet === "extended" || scopeSet === "google_drive")) {
     redirectBase.searchParams.set("tab", "integrations");
   }
   return redirectBase;
@@ -51,15 +78,88 @@ function withNoStoreHeaders(response: NextResponse) {
   return response;
 }
 
+function decodeWorkspaceSessionCookie(value: string | null | undefined): GoogleWorkspaceSessionCookie | null {
+  const encoded = value?.trim() ?? "";
+  if (!encoded) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf-8")) as Partial<GoogleWorkspaceSessionCookie>;
+    const scopeSet = normalizeGoogleWorkspaceScopeSet(parsed.scopeSet, "core");
+    const nonce = String(parsed.nonce ?? "").trim();
+    const userId = String(parsed.userId ?? "").trim();
+
+    if (!nonce || !userId) {
+      return null;
+    }
+
+    return {
+      nonce,
+      userId,
+      scopeSet,
+      flow: parsed.flow === "setup_unified"
+        ? "setup_unified"
+        : parsed.flow === "setup_step1"
+          ? "setup_step1"
+          : "default",
+      expectedEmail: typeof parsed.expectedEmail === "string" ? parsed.expectedEmail : null,
+      sourceProvider: parsed.sourceProvider === "google_calendar"
+        ? "google_calendar"
+        : parsed.sourceProvider === "google_drive"
+          ? "google_drive"
+          : parsed.sourceProvider === "gmail"
+            ? "gmail"
+            : null,
+      issuedAt: String(parsed.issuedAt ?? ""),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function clearWorkspaceSessionCookie(response: NextResponse) {
+  response.cookies.delete(GOOGLE_WORKSPACE_SESSION_COOKIE);
+  return response;
+}
+
+function safeParseWorkspaceState(state: string | null | undefined) {
+  if (!state) {
+    return null;
+  }
+
+  try {
+    return parseClawCloudGoogleWorkspaceState(state);
+  } catch {
+    return null;
+  }
+}
+
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get("code")?.trim();
   const state = request.nextUrl.searchParams.get("state")?.trim();
   const providerError = request.nextUrl.searchParams.get("error");
+  const workspaceSession = decodeWorkspaceSessionCookie(
+    request.cookies.get(GOOGLE_WORKSPACE_SESSION_COOKIE)?.value,
+  );
+  const parsedWorkspaceState = safeParseWorkspaceState(state);
 
-  const fallbackScopeSet = state?.startsWith("workspace:extended:") ? "extended" : "core";
-  const redirectBase = buildWorkspaceRedirectBase(request.nextUrl.origin, fallbackScopeSet);
-  const loginRedirectBase = new URL("/auth", request.nextUrl.origin);
+  const fallbackScopeSet = workspaceSession?.scopeSet
+    ?? parsedWorkspaceState?.scopeSet
+    ?? normalizeGoogleWorkspaceScopeSet(
+      state?.startsWith("workspace:")
+        ? state.split(":")[1]?.trim().toLowerCase()
+        : null,
+      "core",
+    );
+  const redirectBase = buildWorkspaceRedirectBase(
+    request.nextUrl.origin,
+    fallbackScopeSet,
+    workspaceSession?.flow ?? "default",
+  );
   const expectedLoginState = request.cookies.get(GOOGLE_LOGIN_STATE_COOKIE)?.value?.trim() ?? "";
+  const verifiedLoginState = verifyClawCloudGoogleLoginCallbackState(state, expectedLoginState);
+  const loginRedirectBase = new URL("/auth", verifiedLoginState?.origin ?? request.nextUrl.origin);
 
   if (state?.startsWith("login:")) {
     if (providerError) {
@@ -69,7 +169,7 @@ export async function GET(request: NextRequest) {
       return response;
     }
 
-    if (!code || !state || !expectedLoginState || state !== expectedLoginState) {
+    if (!code || !verifiedLoginState) {
       loginRedirectBase.searchParams.set("error", "invalid_google_login_state");
       const response = withNoStoreHeaders(NextResponse.redirect(loginRedirectBase));
       response.cookies.delete(GOOGLE_LOGIN_STATE_COOKIE);
@@ -143,31 +243,69 @@ export async function GET(request: NextRequest) {
 
   if (providerError) {
     redirectBase.searchParams.set("error", "google_denied");
-    return withNoStoreHeaders(NextResponse.redirect(redirectBase));
+    return clearWorkspaceSessionCookie(
+      withNoStoreHeaders(NextResponse.redirect(redirectBase)),
+    );
   }
 
   if (!code || !state) {
-    return withNoStoreHeaders(
-      NextResponse.json(
-        { error: "Missing Google OAuth code or user id." },
-        { status: 400 },
-      ),
+    redirectBase.searchParams.set("error", "missing_google_oauth_code");
+    return clearWorkspaceSessionCookie(
+      withNoStoreHeaders(NextResponse.redirect(redirectBase)),
     );
   }
 
   try {
     const workspaceState = parseClawCloudGoogleWorkspaceState(state);
-    const workspaceRedirectBase = buildWorkspaceRedirectBase(request.nextUrl.origin, workspaceState.scopeSet);
-    const userId = workspaceState.userId;
+    if (
+      !workspaceSession
+      || workspaceSession.nonce !== workspaceState.nonce
+      || workspaceSession.scopeSet !== workspaceState.scopeSet
+    ) {
+      throw new Error("Google connection session expired. Please retry.");
+    }
+
+    const workspaceRedirectBase = buildWorkspaceRedirectBase(
+      request.nextUrl.origin,
+      workspaceState.scopeSet,
+      workspaceSession.flow,
+    );
+    const userId = workspaceSession.userId;
     const exchanged = await exchangeClawCloudGoogleCode(code, request.nextUrl.origin);
+    const grantedScopes = await fetchGoogleGrantedScopes(exchanged.accessToken);
+    let confirmedWorkspaceScopes = hasRequiredGoogleWorkspaceScopes(grantedScopes, workspaceState.scopeSet);
+    if (!confirmedWorkspaceScopes) {
+      confirmedWorkspaceScopes = await confirmGoogleWorkspaceScopeAccess(
+        exchanged.accessToken,
+        workspaceState.scopeSet,
+      );
+    }
+    if (!confirmedWorkspaceScopes) {
+      throw new Error(
+        buildGoogleWorkspaceScopeMismatchMessage(workspaceState.scopeSet, grantedScopes),
+      );
+    }
     const profile = await fetchClawCloudGoogleProfile(exchanged.accessToken);
+    if (!matchesExpectedClawCloudGoogleWorkspaceEmail(workspaceSession.expectedEmail, profile.email)) {
+      throw new Error(buildGoogleWorkspaceWrongAccountMessage(workspaceSession.expectedEmail));
+    }
     const tokenExpiry = new Date(Date.now() + exchanged.expiresIn * 1000).toISOString();
 
     const supabaseAdmin = getClawCloudSupabaseAdmin();
+    const { data: existingGoogleRows } = await supabaseAdmin
+      .from("connected_accounts")
+      .select("refresh_token")
+      .eq("user_id", userId)
+      .in("provider", ["gmail", "google_calendar", "google_drive"]);
+    const existingRefreshToken = ((existingGoogleRows ?? []) as Array<{ refresh_token?: string | null }>)
+      .map((row) => decryptSecretValue(row.refresh_token))
+      .map((value) => String(value ?? "").trim())
+      .find(Boolean)
+      || null;
     const sharedRow = {
       user_id: userId,
-      access_token: exchanged.accessToken,
-      refresh_token: exchanged.refreshToken,
+      access_token: encryptSecretValue(exchanged.accessToken),
+      refresh_token: encryptSecretValue(exchanged.refreshToken ?? existingRefreshToken),
       token_expiry: tokenExpiry,
       account_email: profile.email,
       display_name: profile.name,
@@ -175,60 +313,73 @@ export async function GET(request: NextRequest) {
       connected_at: new Date().toISOString(),
     };
 
-    const { error: gmailError } = await supabaseAdmin
-      .from("connected_accounts")
-      .upsert(
-        {
-          ...sharedRow,
-          provider: "gmail",
-        },
-        { onConflict: "user_id,provider" },
-      );
+    const providersToSave = workspaceState.scopeSet === "extended"
+      ? ["gmail", "google_calendar", "google_drive"]
+      : workspaceState.scopeSet === "core"
+        ? ["gmail", "google_calendar"]
+        : [workspaceState.scopeSet];
 
-    if (gmailError) {
-      throw new Error(gmailError.message);
-    }
-
-    const { error: calendarError } = await supabaseAdmin
-      .from("connected_accounts")
-      .upsert(
-        {
-          ...sharedRow,
-          provider: "google_calendar",
-        },
-        { onConflict: "user_id,provider" },
-      );
-
-    if (calendarError) {
-      throw new Error(calendarError.message);
-    }
-
-    if (workspaceState.scopeSet === "extended") {
+    for (const provider of providersToSave) {
       const { error } = await supabaseAdmin
         .from("connected_accounts")
         .upsert(
           {
             ...sharedRow,
-            provider: "google_drive",
+            provider,
           },
           { onConflict: "user_id,provider" },
         );
 
       if (error) {
-        throw new Error(describeGoogleWorkspaceSaveError(error));
+        throw new Error(
+          provider === "google_drive"
+            ? describeGoogleWorkspaceSaveError(error)
+            : error.message,
+        );
       }
     }
 
-    if (workspaceState.scopeSet === "extended") {
+    if (providersToSave.includes("gmail")) {
+      workspaceRedirectBase.searchParams.set("gmail", "connected");
+    }
+    if (providersToSave.includes("google_calendar")) {
+      workspaceRedirectBase.searchParams.set("calendar", "connected");
+    }
+    if (providersToSave.includes("google_drive")) {
       workspaceRedirectBase.searchParams.set("drive", "connected");
-      return withNoStoreHeaders(NextResponse.redirect(workspaceRedirectBase));
+    }
+    if (workspaceSession.sourceProvider) {
+      workspaceRedirectBase.searchParams.set("source", workspaceSession.sourceProvider);
+    }
+
+    if (workspaceSession.flow === "setup_unified") {
+      workspaceRedirectBase.searchParams.set("step", "2");
+      workspaceRedirectBase.searchParams.set("activation", "all");
+      return clearWorkspaceSessionCookie(
+        withNoStoreHeaders(NextResponse.redirect(workspaceRedirectBase)),
+      );
+    }
+
+    if (workspaceSession.flow === "setup_step1") {
+      return clearWorkspaceSessionCookie(
+        withNoStoreHeaders(NextResponse.redirect(workspaceRedirectBase)),
+      );
+    }
+
+    if (workspaceState.scopeSet === "extended" || workspaceState.scopeSet === "google_drive") {
+      return clearWorkspaceSessionCookie(
+        withNoStoreHeaders(NextResponse.redirect(workspaceRedirectBase)),
+      );
     }
 
     workspaceRedirectBase.searchParams.set("step", "2");
-    workspaceRedirectBase.searchParams.set("gmail", "connected");
-    return withNoStoreHeaders(NextResponse.redirect(workspaceRedirectBase));
+    return clearWorkspaceSessionCookie(
+      withNoStoreHeaders(NextResponse.redirect(workspaceRedirectBase)),
+    );
   } catch (error) {
     redirectBase.searchParams.set("error", getClawCloudErrorMessage(error));
-    return withNoStoreHeaders(NextResponse.redirect(redirectBase));
+    return clearWorkspaceSessionCookie(
+      withNoStoreHeaders(NextResponse.redirect(redirectBase)),
+    );
   }
 }

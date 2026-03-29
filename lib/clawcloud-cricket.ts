@@ -1,5 +1,8 @@
+import { matchesWholeAlias } from "@/lib/clawcloud-intent-match";
+
 const CRICAPI_BASE = "https://api.cricapi.com/v1";
 const CRICKET_TIMEOUT_MS = 8_000;
+const IPL_TEAM_CODES = ["rcb", "csk", "mi", "kkr", "srh", "dc", "rr", "pbks", "gt", "lsg"] as const;
 
 const CRICKET_PATTERNS = [
   /\b(cricket|ipl|t20|odi|test match|bcci)\b/i,
@@ -121,17 +124,23 @@ function formatScore(match: CricMatch): string {
 
 function isIPLMatch(match: CricMatch): boolean {
   const name = (match.name ?? "").toLowerCase();
-  const iplTeams = ["rcb", "csk", "mi", "kkr", "srh", "dc", "rr", "pbks", "gt", "lsg"];
+  const teamShortnames = (match.teamInfo ?? [])
+    .map((team) => team.shortname?.toLowerCase() ?? "")
+    .filter(Boolean);
   return (
-    name.includes("ipl")
-    || name.includes("indian premier league")
-    || iplTeams.some((team) => name.includes(team))
+    matchesWholeAlias(name, "ipl")
+    || matchesWholeAlias(name, "indian premier league")
+    || IPL_TEAM_CODES.some((team) => matchesWholeAlias(name, team))
+    || teamShortnames.some((team) => IPL_TEAM_CODES.some((code) => matchesWholeAlias(team, code)))
   );
 }
 
 function isIndiaMatch(match: CricMatch): boolean {
   const name = (match.name ?? "").toLowerCase();
-  return name.includes("india") || (match.teams ?? []).some((team) => team.toLowerCase().includes("india"));
+  return (
+    matchesWholeAlias(name, "india")
+    || (match.teams ?? []).some((team) => matchesWholeAlias(team, "india"))
+  );
 }
 
 function extractSearchHint(message: string): string {
@@ -150,16 +159,16 @@ function extractSearchHint(message: string): string {
   };
 
   for (const [abbr, full] of Object.entries(iplTeams)) {
-    if (lower.includes(abbr)) {
+    if (matchesWholeAlias(lower, abbr)) {
       return full;
     }
   }
 
-  if (lower.includes("ipl")) {
+  if (matchesWholeAlias(lower, "ipl")) {
     return "IPL";
   }
 
-  if (lower.includes("india")) {
+  if (matchesWholeAlias(lower, "india")) {
     return "India";
   }
 
@@ -210,9 +219,9 @@ export async function answerCricketQuery(message: string): Promise<string> {
   const lower = message.toLowerCase();
   let filtered = allMatches;
 
-  if (lower.includes("ipl") || /\b(rcb|csk|mi|kkr|srh|dc|rr|pbks|gt|lsg)\b/i.test(message)) {
+  if (matchesWholeAlias(lower, "ipl") || IPL_TEAM_CODES.some((team) => matchesWholeAlias(message, team))) {
     filtered = allMatches.filter(isIPLMatch);
-  } else if (lower.includes("india")) {
+  } else if (matchesWholeAlias(lower, "india")) {
     filtered = allMatches.filter(isIndiaMatch);
   }
 

@@ -115,6 +115,86 @@ export interface ResearchSource {
   publishedDate?: string;
 }
 
+export type ClawCloudEvidenceKind =
+  | "search_result"
+  | "official_api"
+  | "official_page"
+  | "weather_provider"
+  | "market_data"
+  | "report"
+  | "inferred";
+
+export interface ClawCloudEvidenceItem {
+  title: string;
+  domain: string;
+  kind: ClawCloudEvidenceKind;
+  url?: string | null;
+  snippet?: string | null;
+  publishedAt?: string | null;
+  observedAt?: string | null;
+}
+
+export interface ClawCloudAnswerBundle {
+  question: string;
+  answer: string;
+  channel: "live";
+  generatedAt: string;
+  badge: string | null;
+  sourceNote: string | null;
+  evidence: ClawCloudEvidenceItem[];
+  sourceSummary: string[];
+  metadata: Record<string, string | number | boolean | null>;
+}
+
+export interface ClawCloudTextAnswerResult {
+  answer: string;
+  liveAnswerBundle?: ClawCloudAnswerBundle | null;
+}
+
+export type ClawCloudModelAuditStrategy = "single_pass" | "collect_and_judge";
+export type ClawCloudModelAuditSelectedBy = "single_success" | "heuristic" | "judge" | "fallback";
+export type ClawCloudModelAuditTier = "fast" | "chat" | "reasoning" | "code";
+export type ClawCloudModelAuditJudgeConfidence = "high" | "medium" | "low";
+
+export interface ClawCloudModelAuditPlanner {
+  strategy: ClawCloudModelAuditStrategy;
+  targetResponses: number;
+  generatorBatchSize: number;
+  judgeEnabled: boolean;
+  judgeMinRemainingMs: number;
+  allowLowConfidenceWinner: boolean;
+  disagreementThreshold: number;
+}
+
+export interface ClawCloudModelAuditCandidate {
+  model: string;
+  tier: ClawCloudModelAuditTier;
+  status: "selected" | "generated" | "failed";
+  latencyMs: number;
+  heuristicScore: number | null;
+  preview: string | null;
+}
+
+export interface ClawCloudModelAuditJudge {
+  used: boolean;
+  model: string | null;
+  winnerModel: string | null;
+  confidence: ClawCloudModelAuditJudgeConfidence | null;
+  materialDisagreement: boolean;
+  needsClarification: boolean;
+  reason: string | null;
+}
+
+export interface ClawCloudModelAuditTrail {
+  intent: string;
+  responseMode: "fast" | "deep";
+  planner: ClawCloudModelAuditPlanner;
+  selectedBy: ClawCloudModelAuditSelectedBy | null;
+  selectedModel: string | null;
+  candidates: ClawCloudModelAuditCandidate[];
+  judge: ClawCloudModelAuditJudge | null;
+}
+
 export type SearchProvider = "tavily" | "serpapi" | "jina";
 
 export interface SearchProviderQueryDiagnostic {
@@ -275,6 +355,7 @@ export interface PublicAppConfig {
     publicSignInEnabled: boolean;
     publicWorkspaceEnabled: boolean;
     publicWorkspaceExtendedEnabled: boolean;
+    setupLiteMode: boolean;
   };
   firebase: {
     apiKey: string;

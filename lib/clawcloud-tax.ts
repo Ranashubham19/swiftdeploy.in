@@ -1,3 +1,5 @@
+import { matchesWholeAlias } from "@/lib/clawcloud-intent-match";
+
 type GstSlab = 0 | 5 | 12 | 18 | 28;
 
 const GST_SLAB_ITEMS: Record<string, { slab: GstSlab; category: string }> = {
@@ -68,7 +70,7 @@ export function detectTaxQuery(message: string): "gst" | "tds" | "income_tax" | 
   if (/\btds\b/.test(normalized) || /tax deducted at source/i.test(normalized)) {
     return "tds";
   }
-  if (/\b(income tax|itr|slab|80c|hra|section 80)\b/.test(normalized)) {
+  if (/\b(income tax|tax regime|new regime|old regime|itr|slab|80c|80d|80ccd|hra|87a|section 80|home loan interest)\b/.test(normalized)) {
     return "income_tax";
   }
   return null;
@@ -102,7 +104,7 @@ function parseGstRate(message: string): GstSlab | null {
   }
 
   for (const [keyword, info] of Object.entries(GST_SLAB_ITEMS)) {
-    if (normalized.includes(keyword)) {
+    if (matchesWholeAlias(normalized, keyword)) {
       return info.slab;
     }
   }
@@ -165,7 +167,7 @@ function calculateGst(amount: number, rate: GstSlab, isInclusive: boolean): stri
 
 function calculateTds(amount: number, message: string): string {
   const normalized = message.toLowerCase();
-  const matched = TDS_RATES.find((item) => item.keywords.some((keyword) => normalized.includes(keyword)))
+  const matched = TDS_RATES.find((item) => item.keywords.some((keyword) => matchesWholeAlias(normalized, keyword)))
     ?? TDS_RATES.find((item) => item.section === "194J");
 
   if (!matched) {
@@ -255,6 +257,360 @@ function calculateIncomeTax(annualIncome: number): string {
   ].filter(Boolean).join("\n");
 }
 
+type IncomeTaxRegime = "new" | "old";
+
+type IncomeTaxDeductions = {
+  section80c: number;
+  nps: number;
+  hra: number;
+  homeLoanInterest: number;
+  section80d: number;
+  other: number;
+  total: number;
+  notes: string[];
+};
+
+type IncomeTaxContext = {
+  annualIncome: number;
+  isMonthly: boolean;
+  isSalaried: boolean;
+  preferredRegime: IncomeTaxRegime | null;
+  wantsComparison: boolean;
+  deductions: IncomeTaxDeductions;
+};
+
+type IncomeTaxComputation = {
+  regime: IncomeTaxRegime;
+  annualIncome: number;
+  standardDeduction: number;
+  allowedDeductions: number;
+  taxableIncome: number;
+  slabTax: number;
+  rebate: number;
+  taxAfterRebate: number;
+  cess: number;
+  totalTax: number;
+  effectiveRate: number;
+  monthlyTds: number;
+  breakdown: string[];
+};
+
+const INCOME_TAX_AMOUNT_PATTERN = "([\\d,]+(?:\\.\\d+)?(?:\\s*(?:lakh|lac|crore|cr))?)";
+
+function parseTaggedTaxAmount(message: string, patterns: RegExp[]): number | null {
+  for (const pattern of patterns) {
+    const match = pattern.exec(message);
+    const raw = match?.[1]?.trim();
+    if (!raw) {
+      continue;
+    }
+    const amount = parseAmount(raw);
+    if (amount != null) {
+      return amount;
+    }
+  }
+
+  return null;
+}
+
+function capTaxDeduction(amount: number | null, cap: number, label: string, notes: string[]) {
+  if (amount == null || amount <= 0) {
+    return 0;
+  }
+  if (amount > cap) {
+    notes.push(`${label} capped at ${formatInr(cap)} for this estimate.`);
+    return cap;
+  }
+  return amount;
+}
+
+function parseIncomeTaxDeductions(message: string): IncomeTaxDeductions {
+  const notes: string[] = [];
+
+  const section80c = capTaxDeduction(
+    parseTaggedTaxAmount(message, [
+      new RegExp(`(?:80c|section 80c)(?:\\s*(?:investment|deduction|is|=|of|:|for|upto|up to))?\\s*(?:â‚¹|rs\\.?|inr)?\\s*${INCOME_TAX_AMOUNT_PATTERN}`, "i"),
+    ]),
+    150_000,
+    "80C",
+    notes,
+  );
+  const nps = capTaxDeduction(
+    parseTaggedTaxAmount(message, [
+      new RegExp(`(?:nps|80ccd(?:\\(1b\\))?)(?:\\s*(?:deduction|is|=|of|:|for|upto|up to))?\\s*(?:â‚¹|rs\\.?|inr)?\\s*${INCOME_TAX_AMOUNT_PATTERN}`, "i"),
+    ]),
+    50_000,
+    "NPS",
+    notes,
+  );
+  const hra = parseTaggedTaxAmount(message, [
+    new RegExp(`(?:hra|house rent allowance)(?:\\s*(?:exemption|deduction|is|=|of|:|for))?\\s*(?:â‚¹|rs\\.?|inr)?\\s*${INCOME_TAX_AMOUNT_PATTERN}`, "i"),
+  ]) ?? 0;
+  const homeLoanInterest = capTaxDeduction(
+    parseTaggedTaxAmount(message, [
+      new RegExp(`(?:home loan interest|housing loan interest|section 24)(?:\\s*(?:deduction|is|=|of|:|for|upto|up to))?\\s*(?:â‚¹|rs\\.?|inr)?\\s*${INCOME_TAX_AMOUNT_PATTERN}`, "i"),
+    ]),
+    200_000,
+    "Home loan interest",
+    notes,
+  );
+  const section80d = capTaxDeduction(
+    parseTaggedTaxAmount(message, [
+      new RegExp(`(?:80d|medical insurance|health insurance)(?:\\s*(?:deduction|is|=|of|:|for|upto|up to))?\\s*(?:â‚¹|rs\\.?|inr)?\\s*${INCOME_TAX_AMOUNT_PATTERN}`, "i"),
+    ]),
+    25_000,
+    "80D",
+    notes,
+  );
+  const other = parseTaggedTaxAmount(message, [
+    new RegExp(`(?:other deductions|additional deductions)(?:\\s*(?:is|=|of|:|for))?\\s*(?:â‚¹|rs\\.?|inr)?\\s*${INCOME_TAX_AMOUNT_PATTERN}`, "i"),
+  ]) ?? 0;
+
+  const total = section80c + nps + hra + homeLoanInterest + section80d + other;
+
+  return {
+    section80c,
+    nps,
+    hra,
+    homeLoanInterest,
+    section80d,
+    other,
+    total,
+    notes,
+  };
+}
+
+function parseIncomeTaxContext(message: string, amount: number): IncomeTaxContext {
+  const normalized = message.toLowerCase();
+  const hasOldRegime = /\bold regime\b/.test(normalized);
+  const hasNewRegime = /\bnew regime\b/.test(normalized);
+  const preferredRegime =
+    hasOldRegime && hasNewRegime ? null : hasOldRegime ? "old" : hasNewRegime ? "new" : null;
+  const deductions = parseIncomeTaxDeductions(message);
+  const wantsComparison =
+    (hasOldRegime && hasNewRegime)
+    || /\b(compare|comparison|vs|versus|better|which regime)\b/.test(normalized)
+    || (preferredRegime === null && deductions.total > 0);
+  const isMonthly =
+    /\b(monthly|per month|a month|month)\b/.test(normalized)
+    && !/\b(annual|annually|yearly|per year|p\.?a\.?|lpa|ctc|package)\b/.test(normalized);
+  const isSalaried = /\b(salary|salaried|ctc|package|pay|payroll|pension)\b/.test(normalized);
+  const annualIncome = isMonthly ? amount * 12 : amount;
+
+  return {
+    annualIncome,
+    isMonthly,
+    isSalaried,
+    preferredRegime,
+    wantsComparison,
+    deductions,
+  };
+}
+
+function calculateProgressiveIncomeTax(
+  taxableIncome: number,
+  slabs: Array<{ upTo: number; rate: number }>,
+): { tax: number; breakdown: string[] } {
+  let tax = 0;
+  let remaining = taxableIncome;
+  let previousLimit = 0;
+  const breakdown: string[] = [];
+
+  for (const slab of slabs) {
+    if (remaining <= 0) {
+      break;
+    }
+
+    const taxablePortion = Math.min(remaining, slab.upTo - previousLimit);
+    const slabTax = (taxablePortion * slab.rate) / 100;
+    if (taxablePortion > 0) {
+      const upperLabel = slab.upTo === Number.POSITIVE_INFINITY ? "above" : formatInr(slab.upTo);
+      breakdown.push(`- ${formatInr(previousLimit)} to ${upperLabel}: ${slab.rate}% on ${formatInr(taxablePortion)} = ${formatInr(slabTax)}`);
+    }
+    tax += slabTax;
+    remaining -= taxablePortion;
+    previousLimit = slab.upTo;
+  }
+
+  return { tax, breakdown };
+}
+
+function computeIncomeTaxRegime(context: IncomeTaxContext, regime: IncomeTaxRegime): IncomeTaxComputation {
+  const standardDeduction = context.isSalaried ? 50_000 : 0;
+  const allowedDeductions =
+    regime === "old"
+      ? context.deductions.section80c
+        + context.deductions.nps
+        + context.deductions.hra
+        + context.deductions.homeLoanInterest
+        + context.deductions.section80d
+        + context.deductions.other
+      : 0;
+  const taxableIncome = Math.max(0, context.annualIncome - standardDeduction - allowedDeductions);
+  const slabs = regime === "new"
+    ? [
+      { upTo: 300_000, rate: 0 },
+      { upTo: 700_000, rate: 5 },
+      { upTo: 1_000_000, rate: 10 },
+      { upTo: 1_200_000, rate: 15 },
+      { upTo: 1_500_000, rate: 20 },
+      { upTo: Number.POSITIVE_INFINITY, rate: 30 },
+    ]
+    : [
+      { upTo: 250_000, rate: 0 },
+      { upTo: 500_000, rate: 5 },
+      { upTo: 1_000_000, rate: 20 },
+      { upTo: Number.POSITIVE_INFINITY, rate: 30 },
+    ];
+  const { tax: slabTax, breakdown } = calculateProgressiveIncomeTax(taxableIncome, slabs);
+  const rebateThreshold = regime === "new" ? 700_000 : 500_000;
+  const rebateCap = regime === "new" ? 25_000 : 12_500;
+  const rebate = taxableIncome <= rebateThreshold ? Math.min(slabTax, rebateCap) : 0;
+  const taxAfterRebate = slabTax - rebate;
+  const cess = taxAfterRebate * 0.04;
+  const totalTax = taxAfterRebate + cess;
+  const effectiveRate = context.annualIncome > 0 ? (totalTax / context.annualIncome) * 100 : 0;
+  const monthlyTds = totalTax / 12;
+
+  return {
+    regime,
+    annualIncome: context.annualIncome,
+    standardDeduction,
+    allowedDeductions,
+    taxableIncome,
+    slabTax,
+    rebate,
+    taxAfterRebate,
+    cess,
+    totalTax,
+    effectiveRate,
+    monthlyTds,
+    breakdown,
+  };
+}
+
+function buildIncomeTaxInputLines(context: IncomeTaxContext): string[] {
+  const lines = [`*Annual gross income:* ${formatInr(context.annualIncome)}`];
+
+  if (context.isMonthly) {
+    lines.push("*Income basis:* Monthly income annualized x 12");
+  }
+  if (context.isSalaried) {
+    lines.push("*Salary treatment:* Standard deduction applied");
+  }
+
+  return lines;
+}
+
+function buildIncomeTaxDeductionLines(deductions: IncomeTaxDeductions): string[] {
+  const lines: string[] = [];
+  if (deductions.section80c > 0) {
+    lines.push(`- 80C: ${formatInr(deductions.section80c)}`);
+  }
+  if (deductions.nps > 0) {
+    lines.push(`- NPS / 80CCD(1B): ${formatInr(deductions.nps)}`);
+  }
+  if (deductions.hra > 0) {
+    lines.push(`- HRA exemption: ${formatInr(deductions.hra)}`);
+  }
+  if (deductions.homeLoanInterest > 0) {
+    lines.push(`- Home loan interest: ${formatInr(deductions.homeLoanInterest)}`);
+  }
+  if (deductions.section80d > 0) {
+    lines.push(`- 80D / medical insurance: ${formatInr(deductions.section80d)}`);
+  }
+  if (deductions.other > 0) {
+    lines.push(`- Other deductions: ${formatInr(deductions.other)}`);
+  }
+  return lines;
+}
+
+function formatIncomeTaxComputation(computation: IncomeTaxComputation, label: string): string[] {
+  return [
+    `*${label}*`,
+    `- Taxable income: ${formatInr(computation.taxableIncome)}`,
+    `- Standard deduction: ${formatInr(computation.standardDeduction)}`,
+    `- Other deductions used: ${formatInr(computation.allowedDeductions)}`,
+    ...computation.breakdown,
+    computation.rebate > 0 ? `- Rebate u/s 87A: -${formatInr(computation.rebate)}` : "- Rebate u/s 87A: Rs 0.00",
+    `- Tax after rebate: ${formatInr(computation.taxAfterRebate)}`,
+    `- Cess (4%): ${formatInr(computation.cess)}`,
+    `- Total Tax Payable: ${formatInr(computation.totalTax)}`,
+    `- Effective Rate: ${computation.effectiveRate.toFixed(2)}%`,
+    `- Monthly TDS: ${formatInr(computation.monthlyTds)}`,
+  ];
+}
+
+function calculateIncomeTaxDetailed(message: string, amount: number): string {
+  const context = parseIncomeTaxContext(message, amount);
+  const inputLines = buildIncomeTaxInputLines(context);
+  const deductionLines = buildIncomeTaxDeductionLines(context.deductions);
+
+  if (context.wantsComparison) {
+    const newRegime = computeIncomeTaxRegime(context, "new");
+    const oldRegime = computeIncomeTaxRegime(context, "old");
+    const savings = Math.abs(newRegime.totalTax - oldRegime.totalTax);
+    const betterLine =
+      savings < 1
+        ? "*Better option:* Both regimes are effectively the same for this input."
+        : oldRegime.totalTax < newRegime.totalTax
+          ? `*Better option:* Old regime saves ${formatInr(savings)} versus new regime.`
+          : `*Better option:* New regime saves ${formatInr(savings)} versus old regime.`;
+
+    return [
+      "📊 *Income Tax Estimate - FY2024-25*",
+      "",
+      "*Comparison:* Old Regime vs New Regime",
+      ...inputLines,
+      ...(deductionLines.length > 0
+        ? [
+          "",
+          "*Reported old-regime deductions considered:*",
+          ...deductionLines,
+        ]
+        : []),
+      "",
+      ...formatIncomeTaxComputation(newRegime, "New Regime Summary"),
+      "",
+      ...formatIncomeTaxComputation(oldRegime, "Old Regime Summary"),
+      "",
+      betterLine,
+      ...(context.deductions.notes.length > 0 ? ["", ...context.deductions.notes.map((note) => `_${note}_`)] : []),
+      "",
+      "_This is a planning estimate. Final tax can change with employer payroll treatment, exemptions, and filing details._",
+    ].filter(Boolean).join("\n");
+  }
+
+  const regime = context.preferredRegime ?? "new";
+  const computation = computeIncomeTaxRegime(context, regime);
+  const label = regime === "new" ? "New Regime" : "Old Regime";
+  const notes: string[] = [];
+
+  if (regime === "new" && context.deductions.total > 0) {
+    notes.push("Old-regime deductions like 80C, HRA, and home-loan interest are not applied in this new-regime estimate.");
+  }
+  if (regime === "old" && context.deductions.total === 0) {
+    notes.push("No old-regime deductions were detected, so only the salary standard deduction is applied where relevant.");
+  }
+  notes.push(...context.deductions.notes);
+
+  return [
+    `📊 *Income Tax Estimate - FY2024-25 (${label})*`,
+    "",
+    ...inputLines,
+    ...(deductionLines.length > 0 && regime === "old"
+      ? [
+        "",
+        "*Reported deductions used:*",
+        ...deductionLines,
+      ]
+      : []),
+    "",
+    ...formatIncomeTaxComputation(computation, `${label} Calculation`),
+    ...(notes.length > 0 ? ["", ...notes.map((note) => `_${note}_`)] : []),
+  ].filter(Boolean).join("\n");
+}
+
 export function answerTaxQuery(message: string): string | null {
   const type = detectTaxQuery(message);
   if (!type) {
@@ -284,9 +640,13 @@ export function answerTaxQuery(message: string): string | null {
       return [
         `🧾 *GST Calculation for ${formatInr(amount)}*`,
         "",
+        "I cannot infer the GST rate from that description alone.",
+        "GST depends on the exact good or service classification.",
+        "",
         "What GST rate applies?",
         "• Reply *GST 5%*, *GST 12%*, *GST 18%*, or *GST 28%*",
-        "• Or mention the item: _'GST on ₹15000 laptop'_",
+        "• Or mention the actual item/service: _'GST on ₹15000 laptop'_",
+        "• If this is a service quote, share the service category or your known GST rate.",
       ].join("\n");
     }
 
@@ -330,5 +690,5 @@ export function answerTaxQuery(message: string): string | null {
     ].join("\n");
   }
 
-  return calculateIncomeTax(amount);
+  return calculateIncomeTaxDetailed(message, amount);
 }

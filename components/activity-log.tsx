@@ -246,21 +246,19 @@ async function fetchActivity(token: string) {
     headers: { Authorization: `Bearer ${token}` },
   });
 
-  if (!response.ok) {
-    return {
-      runs: seedRuns,
-      stats: seedStats,
-    };
-  }
-
-  const data = (await response.json()) as {
+  const data = (await response.json().catch(() => null)) as {
     runs?: TaskRun[];
     stats?: DailyStat[];
-  };
+    error?: string;
+  } | null;
+
+  if (!response.ok) {
+    throw new Error(data?.error || "Unable to load live activity.");
+  }
 
   return {
-    runs: data.runs?.length ? data.runs : seedRuns,
-    stats: data.stats?.length ? data.stats : seedStats,
+    runs: data?.runs ?? [],
+    stats: data?.stats ?? [],
   };
 }
 
@@ -357,12 +355,14 @@ export function ActivityLogPage({ config }: ActivityLogPageProps) {
     supabaseUrl: config.supabaseUrl,
     supabaseAnonKey: config.supabaseAnonKey,
   });
+  const previewMode = !supabase;
 
   const searchRef = useRef<HTMLInputElement | null>(null);
 
-  const [runs, setRuns] = useState<TaskRun[]>(seedRuns);
-  const [stats, setStats] = useState<DailyStat[]>(seedStats);
+  const [runs, setRuns] = useState<TaskRun[]>([]);
+  const [stats, setStats] = useState<DailyStat[]>([]);
   const [loading, setLoading] = useState(true);
+  const [liveError, setLiveError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<FilterStatus>("all");
   const [typeFilter, setTypeFilter] = useState("all");
   const [dateRange, setDateRange] = useState<DateRange>("7d");
@@ -370,6 +370,9 @@ export function ActivityLogPage({ config }: ActivityLogPageProps) {
 
   useEffect(() => {
     if (!supabase) {
+      setRuns(seedRuns);
+      setStats(seedStats);
+      setLiveError(null);
       setLoading(false);
       return;
     }
@@ -388,8 +391,15 @@ export function ActivityLogPage({ config }: ActivityLogPageProps) {
         try {
           const activity = await fetchActivity(accessToken);
           if (!cancelled) {
+            setLiveError(null);
             setRuns(activity.runs);
             setStats(activity.stats);
+          }
+        } catch (loadError) {
+          if (!cancelled) {
+            setLiveError(loadError instanceof Error ? loadError.message : "Unable to load live activity.");
+            setRuns([]);
+            setStats([]);
           }
         } finally {
           if (!cancelled) {
@@ -397,8 +407,11 @@ export function ActivityLogPage({ config }: ActivityLogPageProps) {
           }
         }
       })
-      .catch(() => {
+      .catch((loadError) => {
         if (!cancelled) {
+          setLiveError(loadError instanceof Error ? loadError.message : "Unable to load live activity.");
+          setRuns([]);
+          setStats([]);
           setLoading(false);
         }
       });
@@ -469,6 +482,13 @@ export function ActivityLogPage({ config }: ActivityLogPageProps) {
       minutes_saved: 0,
       wa_messages_sent: 0,
     };
+  const hasActiveFilters =
+    statusFilter !== "all" || typeFilter !== "all" || dateRange !== "7d" || searchQuery.trim().length > 0;
+  const emptyTitle = liveError
+    ? "Live activity is unavailable right now"
+    : runs.length === 0 && !hasActiveFilters
+      ? "No live task runs yet"
+      : "No runs match your filters";
 
   return (
     <div className={styles.shell}>
@@ -539,6 +559,16 @@ export function ActivityLogPage({ config }: ActivityLogPageProps) {
           </button>
         ))}
       </div>
+
+      {previewMode ? (
+        <div className={styles.statusBanner}>
+          Preview mode: showing sample activity because Supabase auth is not configured. Live task runs and analytics are not loaded here.
+        </div>
+      ) : liveError ? (
+        <div className={`${styles.statusBanner} ${styles.statusBannerError}`}>
+          Live activity is unavailable right now. {liveError}
+        </div>
+      ) : null}
 
       <div className={styles.body}>
         <aside className={styles.sidebar}>
@@ -693,19 +723,21 @@ export function ActivityLogPage({ config }: ActivityLogPageProps) {
           ) : filteredRuns.length === 0 ? (
             <div className={styles.emptyState}>
               <div className={styles.emptyIcon}>{"\u{1F4ED}"}</div>
-              <div className={styles.emptyTitle}>No runs match your filters</div>
-              <button
-                type="button"
-                className={styles.emptyReset}
-                onClick={() => {
-                  setStatusFilter("all");
-                  setTypeFilter("all");
-                  setDateRange("7d");
-                  setSearchQuery("");
-                }}
-              >
-                Clear all filters
-              </button>
+              <div className={styles.emptyTitle}>{emptyTitle}</div>
+              {hasActiveFilters && !liveError ? (
+                <button
+                  type="button"
+                  className={styles.emptyReset}
+                  onClick={() => {
+                    setStatusFilter("all");
+                    setTypeFilter("all");
+                    setDateRange("7d");
+                    setSearchQuery("");
+                  }}
+                >
+                  Clear all filters
+                </button>
+              ) : null}
             </div>
           ) : (
             <div className={styles.timeline}>

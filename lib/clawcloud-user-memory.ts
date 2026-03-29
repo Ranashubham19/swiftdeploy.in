@@ -26,6 +26,17 @@ export type MemoryKey =
 
 export type MemorySource = "explicit" | "extracted" | "inferred";
 
+export type MemoryScope = "profile" | "derived_preference";
+
+export type MemoryCreatedBy =
+  | "user_command"
+  | "settings_profile"
+  | "onboarding"
+  | "locale_preference"
+  | "fact_extractor"
+  | "timezone_detector"
+  | "legacy";
+
 export type MemoryRow = {
   id: string;
   user_id: string;
@@ -33,6 +44,11 @@ export type MemoryRow = {
   value: string;
   source: MemorySource;
   confidence: number;
+  scope?: MemoryScope;
+  confirmed?: boolean;
+  created_by?: string | null;
+  why_saved?: string | null;
+  expires_at?: string | null;
   updated_at: string;
   created_at: string;
 };
@@ -48,6 +64,14 @@ type ExplicitMemoryFact = {
   value: string;
 };
 
+type SaveMemoryFactOptions = {
+  scope?: MemoryScope;
+  confirmed?: boolean;
+  createdBy?: MemoryCreatedBy | string;
+  whySaved?: string | null;
+  expiresAt?: string | null;
+};
+
 export type MemoryCommandIntent =
   | { type: "save_explicit"; key: MemoryKey; value: string }
   | { type: "save_multiple"; facts: ExplicitMemoryFact[] }
@@ -55,6 +79,8 @@ export type MemoryCommandIntent =
   | { type: "forget_multiple"; keys: MemoryKey[] }
   | { type: "forget_all" }
   | { type: "show_profile" }
+  | { type: "show_pending" }
+  | { type: "why_key"; key: MemoryKey }
   | { type: "show_suggestions" }
   | { type: "none" };
 
@@ -62,6 +88,12 @@ const EXTRACT_TIMEOUT_MS = 5_000;
 const MAX_MEMORY_KEYS = 30;
 const MIN_CONFIDENCE_TO_SAVE = 0.75;
 const USER_PERSISTENCE_CACHE_TTL_MS = 5 * 60 * 1000;
+const DERIVED_MEMORY_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+const TIMEZONE_DERIVED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const ADVANCED_MEMORY_SELECT =
+  "id,user_id,key,value,source,confidence,scope,confirmed,created_by,why_saved,expires_at,updated_at,created_at";
+const LEGACY_MEMORY_SELECT =
+  "id,user_id,key,value,source,confidence,updated_at,created_at";
 
 const PROFESSION_HINT_RE =
   /\b(doctor|engineer|developer|designer|teacher|student|lawyer|nurse|manager|founder|ceo|cto|freelancer|consultant|analyst|writer|journalist|architect|scientist|marketer|accountant|product manager|salesperson)\b/i;
@@ -126,6 +158,18 @@ const PERSONALIZATION_PROMPTS: Array<{ key: MemoryKey; prompt: string }> = [
   { key: "goals", prompt: "Remember my goals are to grow revenue and stay fit" },
 ];
 
+const AUTO_DERIVED_MEMORY_KEYS = new Set<MemoryKey>([
+  "preferred_tone",
+  "briefing_style",
+  "focus_areas",
+  "goals",
+  "interests",
+  "priorities",
+  "routine",
+  "wake_time",
+  "work_hours",
+]);
+
 const userPersistenceCache = new Map<string, { exists: boolean; checkedAt: number }>();
 
 async function canPersistUserScopedData(userId: string): Promise<boolean> {
@@ -148,12 +192,154 @@ async function canPersistUserScopedData(userId: string): Promise<boolean> {
   return exists;
 }
 
+function isMissingMemorySchemaColumnError(error: { message?: string } | null | undefined) {
+  const message = String(error?.message ?? "");
+  return /column .* does not exist|could not find the .* column|schema cache/i.test(message);
+}
+
+function resolveDefaultMemoryScope(source: MemorySource): MemoryScope {
+  return source === "explicit" ? "profile" : "derived_preference";
+}
+
+function resolveDefaultMemoryConfirmation(source: MemorySource) {
+  return source === "explicit";
+}
+
+function resolveDefaultMemoryCreatedBy(source: MemorySource): string {
+  switch (source) {
+    case "explicit":
+      return "user_command";
+    case "inferred":
+      return "timezone_detector";
+    case "extracted":
+    default:
+      return "fact_extractor";
+  }
+}
+
+function resolveDefaultWhySaved(source: MemorySource, key: MemoryKey) {
+  const label = (KEY_LABELS[key] ?? humanizeKey(key)).toLowerCase();
+  switch (source) {
+    case "explicit":
+      return `Saved because you explicitly asked ClawCloud to remember your ${label}.`;
+    case "inferred":
+      return `Suggested from a recent timezone or location hint about your ${label}.`;
+    case "extracted":
+    default:
+      return `Suggested from a recent self-description about your ${label}.`;
+  }
+}
+
+function normalizeMemoryRow(fact: MemoryRow): MemoryRow {
+  return {
+    ...fact,
+    scope: fact.scope ?? resolveDefaultMemoryScope(fact.source),
+    confirmed: typeof fact.confirmed === "boolean" ? fact.confirmed : resolveDefaultMemoryConfirmation(fact.source),
+    created_by: fact.created_by ?? resolveDefaultMemoryCreatedBy(fact.source),
+    why_saved: fact.why_saved ?? resolveDefaultWhySaved(fact.source, fact.key),
+    expires_at: fact.expires_at ?? null,
+  };
+}
+
+function isMemoryFactExpired(fact: MemoryRow, now = Date.now()) {
+  if (!fact.expires_at) {
+    return false;
+  }
+
+  const expiresAt = Date.parse(fact.expires_at);
+  return Number.isFinite(expiresAt) && expiresAt <= now;
+}
+
+function isDurableMemoryFact(fact: MemoryRow) {
+  if (isMemoryFactExpired(fact)) {
+    return false;
+  }
+
+  const normalized = normalizeMemoryRow(fact);
+  return normalized.scope === "profile" && normalized.confirmed === true;
+}
+
+function isPendingMemoryFact(fact: MemoryRow) {
+  if (isMemoryFactExpired(fact)) {
+    return false;
+  }
+
+  return !isDurableMemoryFact(fact);
+}
+
+async function listRawMemoryFacts(userId: string): Promise<MemoryRow[]> {
+  const db = getClawCloudSupabaseAdmin();
+  const advancedQuery = await db
+    .from("user_memory")
+    .select(ADVANCED_MEMORY_SELECT)
+    .eq("user_id", userId)
+    .order("key", { ascending: true })
+    .limit(MAX_MEMORY_KEYS);
+
+  if (advancedQuery.error && isMissingMemorySchemaColumnError(advancedQuery.error)) {
+    const legacyQuery = await db
+      .from("user_memory")
+      .select(LEGACY_MEMORY_SELECT)
+      .eq("user_id", userId)
+      .order("key", { ascending: true })
+      .limit(MAX_MEMORY_KEYS);
+
+    if (legacyQuery.error) {
+      console.error("[user-memory] getAllMemoryFacts error:", legacyQuery.error.message);
+      return [];
+    }
+
+    return (legacyQuery.data ?? []) as MemoryRow[];
+  }
+
+  if (advancedQuery.error) {
+    console.error("[user-memory] getAllMemoryFacts error:", advancedQuery.error.message);
+    return [];
+  }
+
+  return (advancedQuery.data ?? []) as MemoryRow[];
+}
+
+async function getMemoryFactRecord(userId: string, key: MemoryKey): Promise<MemoryRow | null> {
+  const db = getClawCloudSupabaseAdmin();
+  const advancedQuery = await db
+    .from("user_memory")
+    .select(ADVANCED_MEMORY_SELECT)
+    .eq("user_id", userId)
+    .eq("key", key)
+    .maybeSingle();
+
+  if (advancedQuery.error && isMissingMemorySchemaColumnError(advancedQuery.error)) {
+    const legacyQuery = await db
+      .from("user_memory")
+      .select(LEGACY_MEMORY_SELECT)
+      .eq("user_id", userId)
+      .eq("key", key)
+      .maybeSingle();
+
+    if (legacyQuery.error) {
+      console.error("[user-memory] getMemoryFact error:", legacyQuery.error.message);
+      return null;
+    }
+
+    return legacyQuery.data ? normalizeMemoryRow(legacyQuery.data as MemoryRow) : null;
+  }
+
+  if (advancedQuery.error) {
+    console.error("[user-memory] getMemoryFact error:", advancedQuery.error.message);
+    return null;
+  }
+
+  return advancedQuery.data ? normalizeMemoryRow(advancedQuery.data as MemoryRow) : null;
+}
+
 export async function saveMemoryFact(
   userId: string,
   key: MemoryKey,
   value: string,
   source: MemorySource = "extracted",
   confidence = 1.0,
+  options?: SaveMemoryFactOptions,
 ): Promise<boolean> {
   if (!(await canPersistUserScopedData(userId))) {
     return false;
@@ -163,17 +349,46 @@ export async function saveMemoryFact(
   const normalizedValue = normalizeMemoryValue(key, value).slice(0, 500);
   if (!normalizedValue) return false;
 
-  const { error } = await db.from("user_memory").upsert(
-    {
-      user_id: userId,
-      key,
-      value: normalizedValue,
-      source,
-      confidence,
-      updated_at: new Date().toISOString(),
-    },
+  const scope = options?.scope ?? resolveDefaultMemoryScope(source);
+  const confirmed = options?.confirmed ?? resolveDefaultMemoryConfirmation(source);
+  const createdBy = options?.createdBy ?? resolveDefaultMemoryCreatedBy(source);
+  const whySaved = options?.whySaved ?? resolveDefaultWhySaved(source, key);
+  const expiresAt = options?.expiresAt ?? null;
+  const existing = await getMemoryFactRecord(userId, key);
+
+  if (existing && isDurableMemoryFact(existing) && !confirmed) {
+    return false;
+  }
+
+  const basePayload = {
+    user_id: userId,
+    key,
+    value: normalizedValue,
+    source,
+    confidence,
+    updated_at: new Date().toISOString(),
+  };
+
+  const advancedPayload = {
+    ...basePayload,
+    scope,
+    confirmed,
+    created_by: createdBy,
+    why_saved: whySaved,
+    expires_at: expiresAt,
+  };
+
+  let { error } = await db.from("user_memory").upsert(
+    advancedPayload,
     { onConflict: "user_id,key" },
   );
+
+  if (error && isMissingMemorySchemaColumnError(error)) {
+    ({ error } = await db.from("user_memory").upsert(
+      basePayload,
+      { onConflict: "user_id,key" },
+    ));
+  }
 
   if (error) {
     if (/foreign key constraint/i.test(error.message) && /user_memory_user_id_fkey/i.test(error.message)) {
@@ -188,20 +403,14 @@ export async function saveMemoryFact(
 }
 
 export async function getAllMemoryFacts(userId: string): Promise<MemoryRow[]> {
-  const db = getClawCloudSupabaseAdmin();
-  const { data, error } = await db
-    .from("user_memory")
-    .select("*")
-    .eq("user_id", userId)
-    .order("key", { ascending: true })
-    .limit(MAX_MEMORY_KEYS);
+  const facts = await listRawMemoryFacts(userId);
+  return dedupeCanonicalMemoryFacts(facts.map((fact) => normalizeMemoryRow(fact)))
+    .filter((fact) => !isMemoryFactExpired(fact));
+}
 
-  if (error) {
-    console.error("[user-memory] getAllMemoryFacts error:", error.message);
-    return [];
-  }
-
-  return dedupeCanonicalMemoryFacts((data ?? []) as MemoryRow[]);
+export async function getDurableMemoryFacts(userId: string): Promise<MemoryRow[]> {
+  const facts = await getAllMemoryFacts(userId);
+  return facts.filter((fact) => isDurableMemoryFact(fact));
 }
 
 export async function deleteMemoryFact(userId: string, key: MemoryKey): Promise<boolean> {
@@ -264,10 +473,33 @@ export async function autoExtractAndSaveFacts(
   if (!facts.length) return;
 
   for (const fact of facts) {
-    if (fact.confidence >= MIN_CONFIDENCE_TO_SAVE) {
-      await saveMemoryFact(userId, fact.key, fact.value, "extracted", fact.confidence);
+    const savePlan = buildAutoExtractedMemorySavePlan(fact);
+    if (savePlan) {
+      await saveMemoryFact(userId, fact.key, fact.value, "extracted", fact.confidence, savePlan);
     }
   }
+}
+
+function buildAutoExtractedMemorySavePlan(fact: ExtractedFact): SaveMemoryFactOptions | null {
+  if (fact.confidence < MIN_CONFIDENCE_TO_SAVE) {
+    return null;
+  }
+
+  if (!AUTO_DERIVED_MEMORY_KEYS.has(fact.key)) {
+    return null;
+  }
+
+  return {
+    scope: "derived_preference",
+    confirmed: false,
+    createdBy: "fact_extractor",
+    whySaved: `Suggested from a recent self-description about your ${(KEY_LABELS[fact.key] ?? humanizeKey(fact.key)).toLowerCase()}.`,
+    expiresAt: new Date(Date.now() + DERIVED_MEMORY_TTL_MS).toISOString(),
+  };
+}
+
+export function buildAutoExtractedMemorySavePlanForTest(fact: ExtractedFact) {
+  return buildAutoExtractedMemorySavePlan(fact);
 }
 
 async function extractFactsFromMessage(message: string): Promise<ExtractedFact[]> {
@@ -350,26 +582,18 @@ export async function autoDetectAndSaveTimezone(
   const detected = detectTimezoneFromText(message);
   if (!detected) return;
   if (!(await canPersistUserScopedData(userId))) return;
-
-  await saveMemoryFact(userId, "timezone", detected, "inferred", 0.85);
-
-  const db = getClawCloudSupabaseAdmin();
-
-  const { error: prefsError } = await db.from("user_preferences").upsert(
-    { user_id: userId, timezone: detected, updated_at: new Date().toISOString() },
-    { onConflict: "user_id" },
-  );
-  if (prefsError) {
-    console.error("[user-memory] user_preferences timezone sync error:", prefsError.message);
+  const existing = await getMemoryFactRecord(userId, "timezone");
+  if (existing && isDurableMemoryFact(existing)) {
+    return;
   }
 
-  const { error: userError } = await db
-    .from("users")
-    .update({ timezone: detected })
-    .eq("id", userId);
-  if (userError) {
-    console.error("[user-memory] users timezone sync error:", userError.message);
-  }
+  await saveMemoryFact(userId, "timezone", detected, "inferred", 0.85, {
+    scope: "derived_preference",
+    confirmed: false,
+    createdBy: "timezone_detector",
+    whySaved: "Suggested from an explicit timezone, city, or reminder-time hint in a recent message.",
+    expiresAt: new Date(Date.now() + TIMEZONE_DERIVED_TTL_MS).toISOString(),
+  });
 }
 
 function detectTimezoneFromText(message: string): string | null {
@@ -385,8 +609,8 @@ function detectTimezoneFromText(message: string): string | null {
     [/\bcst\b|\bchicago\b|\bdallas\b|\bhouston\b/, "America/Chicago"],
     [/\bgmt\b|\butc\b|\blondon\b|\bdublin\b/, "Europe/London"],
     [/\bcet\b|\bparis\b|\bberlin\b|\brome\b|\bamsterdam\b/, "Europe/Paris"],
-    [/\bdubai\b|\babu dhabi\b|\bgst\b/, "Asia/Dubai"],
-    [/\bsingapore\b|\bsgt\b|\bsgst\b/, "Asia/Singapore"],
+    [/\bdubai\b|\babu dhabi\b/, "Asia/Dubai"],
+    [/\bsingapore\b|\bsgt\b/, "Asia/Singapore"],
     [/\btokyo\b|\bjapan\b|\bjst\b/, "Asia/Tokyo"],
     [/\bsydney\b|\bmelbourne\b|\baest\b/, "Australia/Sydney"],
     [/\bkarachi\b|\bpakistan\b|\bpkst\b/, "Asia/Karachi"],
@@ -409,6 +633,10 @@ function detectTimezoneFromText(message: string): string | null {
   return null;
 }
 
+export function detectTimezoneFromTextForTest(message: string) {
+  return detectTimezoneFromText(message);
+}
+
 export function detectMemoryCommand(text: string): MemoryCommandIntent {
   const trimmed = text.trim();
   const lower = trimmed.toLowerCase();
@@ -423,6 +651,30 @@ export function detectMemoryCommand(text: string): MemoryCommandIntent {
     /^(memory suggestions|how can i personalize you|what should i tell you about me|what else should i save|how do i make you more personal|how can you know me better)\??$/i.test(lower)
   ) {
     return { type: "show_suggestions" };
+  }
+
+  if (
+    /^(show|list|what are)\s+(?:my\s+)?(?:pending|suggested|inferred)\s+(?:memory|profile|preferences|facts)\??$/i.test(lower)
+  ) {
+    return { type: "show_pending" };
+  }
+
+  const whyRememberMatch = trimmed.match(
+    /^(?:why|how|where)\s+(?:do\s+you\s+)?(?:remember|know|have)\s+my\s+(.+?)\??$/i,
+  );
+  if (whyRememberMatch) {
+    const key = resolveKeyAlias(whyRememberMatch[1]);
+    if (key) {
+      return { type: "why_key", key };
+    }
+  }
+
+  const whySavedMatch = trimmed.match(/^(?:why\s+is|how\s+is)\s+my\s+(.+?)\s+(?:saved|stored)\??$/i);
+  if (whySavedMatch) {
+    const key = resolveKeyAlias(whySavedMatch[1]);
+    if (key) {
+      return { type: "why_key", key };
+    }
   }
 
   if (
@@ -505,6 +757,40 @@ function groupMemoryFacts(facts: MemoryRow[]) {
     .filter((group) => group.facts.length > 0);
 }
 
+function describeMemoryFactStatus(fact: MemoryRow) {
+  if (isDurableMemoryFact(fact)) {
+    return "confirmed profile fact";
+  }
+
+  return "pending suggestion";
+}
+
+function formatMemoryExpiry(fact: MemoryRow) {
+  if (!fact.expires_at) {
+    return "";
+  }
+
+  const parsed = Date.parse(fact.expires_at);
+  if (!Number.isFinite(parsed)) {
+    return "";
+  }
+
+  return new Date(parsed).toISOString().slice(0, 10);
+}
+
+function buildPendingMemoryLine(fact: MemoryRow) {
+  const label = KEY_LABELS[fact.key] ?? humanizeKey(fact.key);
+  const suffix: string[] = ["pending confirmation"];
+  if (fact.why_saved) {
+    suffix.push(fact.why_saved);
+  }
+  const expires = formatMemoryExpiry(fact);
+  if (expires) {
+    suffix.push(`expires ${expires}`);
+  }
+  return `- *${label}:* ${fact.value} _(${suffix.join("; ")})_`;
+}
+
 function buildMissingPersonalizationPrompts(facts: MemoryRow[]) {
   const presentKeys = new Set(facts.map((fact) => fact.key));
   return PERSONALIZATION_PROMPTS
@@ -542,7 +828,10 @@ function legacyFormatProfileReply(facts: MemoryRow[]): string {
 }
 
 export function formatProfileReply(facts: MemoryRow[]): string {
-  if (!facts.length) {
+  const durableFacts = facts.filter((fact) => isDurableMemoryFact(fact));
+  const pendingFacts = facts.filter((fact) => isPendingMemoryFact(fact));
+
+  if (!durableFacts.length && !pendingFacts.length) {
     return [
       "I do not know much about you yet.",
       "",
@@ -556,10 +845,10 @@ export function formatProfileReply(facts: MemoryRow[]): string {
     ].join("\n");
   }
 
-  const grouped = groupMemoryFacts(facts);
-  const missingPrompts = buildMissingPersonalizationPrompts(facts);
+  const grouped = groupMemoryFacts(durableFacts);
+  const missingPrompts = buildMissingPersonalizationPrompts(durableFacts);
   const lines = [
-    `Here is your saved profile (${facts.length} fact${facts.length === 1 ? "" : "s"}).`,
+    `Here is your saved profile (${durableFacts.length} confirmed fact${durableFacts.length === 1 ? "" : "s"}).`,
   ];
 
   for (const group of grouped) {
@@ -571,6 +860,14 @@ export function formatProfileReply(facts: MemoryRow[]): string {
     }
   }
 
+  if (pendingFacts.length) {
+    lines.push("", "*Suggested, not yet confirmed*");
+    for (const fact of pendingFacts) {
+      lines.push(buildPendingMemoryLine(fact));
+    }
+    lines.push("These suggestions stay separate from your durable profile until you confirm them.");
+  }
+
   if (missingPrompts.length) {
     lines.push("", "*Useful things you can still teach me:*");
     for (const suggestion of missingPrompts) {
@@ -578,6 +875,7 @@ export function formatProfileReply(facts: MemoryRow[]): string {
     }
   }
 
+  lines.push("", "Conversation context and workflow state are stored separately from this long-term profile.");
   lines.push("", "To update something: _Update my city to Bangalore_");
   lines.push("To forget something: _Forget my profession_");
   lines.push("To clear everything: _Forget everything about me_");
@@ -585,25 +883,42 @@ export function formatProfileReply(facts: MemoryRow[]): string {
 }
 
 export function formatMemorySuggestionsReply(facts: MemoryRow[]): string {
-  const missingPrompts = buildMissingPersonalizationPrompts(facts);
+  const durableFacts = facts.filter((fact) => isDurableMemoryFact(fact));
+  const pendingFacts = facts.filter((fact) => isPendingMemoryFact(fact));
+  const missingPrompts = buildMissingPersonalizationPrompts(durableFacts);
   if (!missingPrompts.length) {
-    return [
+    const lines = [
       "Your profile is already well personalized.",
       "",
       "You can still fine-tune it with things like:",
       "- _Update my priorities to closing deals and hiring_",
       "- _Remember my preferred tone is concise and direct_",
       "- _Remember my focus areas are product, sales, and hiring_",
-    ].join("\n");
+    ];
+
+    if (pendingFacts.length) {
+      lines.push("", `You also have ${pendingFacts.length} pending memory suggestion${pendingFacts.length === 1 ? "" : "s"} waiting for confirmation.`);
+    }
+
+    return lines.join("\n");
   }
 
-  return [
+  const lines = [
     "Here are the highest-value things you can tell me to make ClawCloud more personal:",
     "",
     ...missingPrompts.map((item) => `- _${item.prompt}_`),
     "",
     "These help me personalize briefings, reusable commands, and follow-up suggestions.",
-  ].join("\n");
+  ];
+
+  if (pendingFacts.length) {
+    lines.push("", "*Pending suggestions*");
+    for (const fact of pendingFacts.slice(0, 4)) {
+      lines.push(buildPendingMemoryLine(fact));
+    }
+  }
+
+  return lines.join("\n");
 }
 
 function legacyFormatMemorySavedReply(key: MemoryKey, value: string): string {
@@ -620,11 +935,11 @@ function legacyFormatMemorySavedReply(key: MemoryKey, value: string): string {
 export function formatMemorySavedReply(key: MemoryKey, value: string): string {
   const label = KEY_LABELS[key] ?? humanizeKey(key);
   return [
-    "Got it. I'll remember that.",
+    "Got it. That's now a confirmed profile fact.",
     "",
     `- *${label}:* ${value}`,
     "",
-    `This will be used in future conversations. To remove it: _Forget my ${label.toLowerCase()}_`,
+    `This can be used in future conversations. To remove it: _Forget my ${label.toLowerCase()}_`,
     "To review everything I know: _Show my memory_",
   ].join("\n");
 }
@@ -635,7 +950,7 @@ export function formatMemorySavedFactsReply(facts: ExplicitMemoryFact[]): string
   }
 
   return [
-    "Got it. I'll remember these.",
+    "Got it. These are now confirmed profile facts.",
     "",
     ...facts.map((fact) => {
       const label = KEY_LABELS[fact.key] ?? humanizeKey(fact.key);
@@ -701,6 +1016,55 @@ export function formatMemoryClearedReply(count: number): string {
   ].join("\n");
 }
 
+export function formatPendingMemoryReply(facts: MemoryRow[]): string {
+  const pendingFacts = facts.filter((fact) => isPendingMemoryFact(fact));
+  if (!pendingFacts.length) {
+    return "I do not have any pending memory suggestions right now.";
+  }
+
+  return [
+    "Here are the memory suggestions waiting for confirmation.",
+    "",
+    ...pendingFacts.map((fact) => buildPendingMemoryLine(fact)),
+    "",
+    "To confirm one, say for example: _Remember my timezone is Asia/Kolkata_",
+    "To forget one, say for example: _Forget my timezone_",
+  ].join("\n");
+}
+
+export function formatMemoryAuditReply(key: MemoryKey, fact: MemoryRow | null): string {
+  const label = KEY_LABELS[key] ?? humanizeKey(key);
+  if (!fact) {
+    return `I do not currently have your ${label.toLowerCase()} saved.`;
+  }
+
+  const expires = formatMemoryExpiry(fact);
+  const lines = [
+    `Here is why I remember your ${label.toLowerCase()}.`,
+    "",
+    `- *Value:* ${fact.value}`,
+    `- *Status:* ${describeMemoryFactStatus(fact)}`,
+    `- *Source:* ${fact.source}`,
+  ];
+
+  if (fact.created_by) {
+    lines.push(`- *Created by:* ${humanizeKey(fact.created_by)}`);
+  }
+  if (fact.why_saved) {
+    lines.push(`- *Why saved:* ${fact.why_saved}`);
+  }
+  if (expires) {
+    lines.push(`- *Expires:* ${expires}`);
+  }
+
+  lines.push("", `To forget it: _Forget my ${label.toLowerCase()}_`);
+  if (!isDurableMemoryFact(fact)) {
+    lines.push(`To confirm it: _Remember my ${label.toLowerCase()} is ${fact.value}_`);
+  }
+
+  return lines.join("\n");
+}
+
 function legacyBuildUserProfileSnippet(facts: MemoryRow[]): string {
   const highConfidence = facts.filter((fact) => fact.confidence >= MIN_CONFIDENCE_TO_SAVE);
   if (!highConfidence.length) return "";
@@ -717,7 +1081,7 @@ function legacyBuildUserProfileSnippet(facts: MemoryRow[]): string {
 }
 
 export function buildUserProfileSnippet(facts: MemoryRow[]): string {
-  const highConfidence = facts.filter((fact) => fact.confidence >= MIN_CONFIDENCE_TO_SAVE);
+  const highConfidence = facts.filter((fact) => isDurableMemoryFact(fact) && fact.confidence >= MIN_CONFIDENCE_TO_SAVE);
   if (!highConfidence.length) return "";
 
   const grouped = groupMemoryFacts(highConfidence);
@@ -731,6 +1095,8 @@ export function buildUserProfileSnippet(facts: MemoryRow[]): string {
     }
   }
 
+  lines.push("- Use only confirmed long-term profile facts from this section.");
+  lines.push("- Ignore pending suggestions unless the user explicitly confirms them.");
   lines.push("- Use saved priorities, tone, and routine details to personalize briefings, reminders, and reusable workflows.");
   lines.push("- Use profile details only when they improve the answer.");
   lines.push("- Do not mention this profile unless the user asks.");
@@ -739,7 +1105,7 @@ export function buildUserProfileSnippet(facts: MemoryRow[]): string {
 
 export async function loadUserProfileSnippet(userId: string): Promise<string> {
   try {
-    const facts = await getAllMemoryFacts(userId);
+    const facts = await getDurableMemoryFacts(userId);
     return buildUserProfileSnippet(facts);
   } catch {
     return "";
@@ -778,6 +1144,7 @@ function resolveKeyAlias(raw: string): MemoryKey | null {
     "programming language": "programming_language",
     "coding language": "programming_language",
     timezone: "timezone",
+    "time zone": "timezone",
     age: "age",
     interests: "interests",
     hobbies: "interests",

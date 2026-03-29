@@ -1,3 +1,5 @@
+import { normalizeRegionalQuestion } from "@/lib/clawcloud-region-context";
+
 type WttrResponse = {
   current_condition?: Array<{
     temp_C?: string;
@@ -38,6 +40,137 @@ type OpenMeteoForecastResponse = {
     precipitation_probability?: number[];
   };
 };
+
+const WEATHER_LOCATION_CORRECTIONS: Record<string, string> = {
+  dehli: "Delhi",
+};
+
+const DIRECT_WEATHER_TERMS = [
+  "weather",
+  "whether",
+  "temperature",
+  "temperatures",
+  "temp",
+  "temprature",
+  "temparature",
+  "tempertature",
+  "temperture",
+  "forecast",
+  "climate",
+  "humidity",
+  "wind",
+  "rain",
+  "rainfall",
+  "feels like",
+  "mausam",
+  "\u092e\u094c\u0938\u092e",
+  "clima",
+  "tiempo",
+  "meteo",
+  "m\u00e9t\u00e9o",
+  "wetter",
+  "temperatura",
+  "temp\u00e9rature",
+  "\u0924\u093e\u092a\u092e\u093e\u0928",
+] as const;
+
+const WEATHER_OR_AIR_QUALITY_TERMS = [
+  ...DIRECT_WEATHER_TERMS,
+  "aqi",
+  "air quality",
+] as const;
+
+const DIRECT_WEATHER_TERM_SOURCE = DIRECT_WEATHER_TERMS.join("|");
+const WEATHER_OR_AIR_QUALITY_TERM_SOURCE = WEATHER_OR_AIR_QUALITY_TERMS.join("|");
+const WEATHER_TIME_REFERENCE_SOURCE = [
+  "today",
+  "now",
+  "right now",
+  "currently",
+  "tonight",
+  "hoy",
+  "ahora",
+  "maintenant",
+  "aujourd'hui",
+  "\u0906\u091c",
+  "\u0905\u092d\u0940",
+].join("|");
+const WEATHER_LOCATION_CONNECTOR_SOURCE = [
+  "in",
+  "at",
+  "of",
+  "for",
+  "en",
+  "de",
+  "del",
+  "da",
+  "do",
+  "mein",
+  "\u092e\u0947\u0902",
+  "ka",
+  "ki",
+  "ke",
+  "\u0915\u093e",
+  "\u0915\u0940",
+  "\u0915\u0947",
+].join("|");
+const WEATHER_CITY_CAPTURE = "([\\p{L}][\\p{L}\\p{M}\\s.'-]{1,40})";
+
+export const DIRECT_WEATHER_KEYWORD_PATTERN = new RegExp(`\\b(?:${DIRECT_WEATHER_TERM_SOURCE})\\b`, "i");
+export const WEATHER_OR_AIR_QUALITY_KEYWORD_PATTERN = new RegExp(`\\b(?:${WEATHER_OR_AIR_QUALITY_TERM_SOURCE})\\b`, "i");
+
+export function looksLikeCreativeWeatherPrompt(text: string) {
+  return (
+    /\b(write|create|compose|generate|draft)\b/.test(text)
+    && /\b(poem|haiku|sonnet|limerick|story|lyrics|song|caption|verse)\b/.test(text)
+  );
+}
+
+export function looksLikeDirectWeatherQuestion(text: string) {
+  const normalized = normalizeRegionalQuestion(text.normalize("NFKC")).toLowerCase().trim();
+  return normalized.length > 0
+    && !looksLikeCreativeWeatherPrompt(normalized)
+    && DIRECT_WEATHER_KEYWORD_PATTERN.test(normalized);
+}
+
+export function looksLikeWeatherOrAirQualityQuestion(text: string) {
+  const normalized = normalizeRegionalQuestion(text.normalize("NFKC")).toLowerCase().trim();
+  return normalized.length > 0
+    && !looksLikeCreativeWeatherPrompt(normalized)
+    && WEATHER_OR_AIR_QUALITY_KEYWORD_PATTERN.test(normalized);
+}
+
+function titleCaseLocation(value: string) {
+  return value
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+export function normalizeWeatherLocationName(value: string, requestedCity?: string) {
+  const normalized = value.trim();
+  if (!normalized) {
+    return requestedCity?.trim() || normalized;
+  }
+
+  const corrected = WEATHER_LOCATION_CORRECTIONS[normalized.toLowerCase()];
+  if (corrected) {
+    return corrected;
+  }
+
+  const requested = requestedCity?.trim();
+  if (!requested) {
+    return normalized;
+  }
+
+  const requestedCorrected = WEATHER_LOCATION_CORRECTIONS[requested.toLowerCase()];
+  if (requestedCorrected && requestedCorrected.toLowerCase() === normalized.toLowerCase()) {
+    return requestedCorrected;
+  }
+
+  return normalized;
+}
 
 function weatherEmoji(desc: string): string {
   const d = desc.toLowerCase();
@@ -106,7 +239,7 @@ async function getWeatherFromOpenMeteo(city: string): Promise<string | null> {
       "&current=temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code",
       "&hourly=precipitation_probability",
       "&forecast_days=1",
-      "&timezone=Asia%2FKolkata",
+      "&timezone=auto",
     ].join("");
     const forecastResponse = await fetch(forecastUrl, {
       headers: { "User-Agent": "ClawCloud-AI/1.0" },
@@ -120,7 +253,8 @@ async function getWeatherFromOpenMeteo(city: string): Promise<string | null> {
     const emoji = weatherEmoji(desc);
     const rainProbabilities = forecast.hourly?.precipitation_probability ?? [];
     const maxRain = rainProbabilities.length ? Math.max(...rainProbabilities) : 0;
-    const location = place.country ? `${place.name}, ${place.country}` : (place.name ?? city);
+    const cityName = normalizeWeatherLocationName(place.name ?? city, city);
+    const location = place.country ? `${cityName}, ${place.country}` : cityName;
 
     const lines = [
       `${emoji} *Weather in ${location}*`,
@@ -173,7 +307,7 @@ export async function getWeather(city: string): Promise<string | null> {
     const maxTemp = today?.maxtempC ?? tempC;
     const minTemp = today?.mintempC ?? tempC;
 
-    const cityName = area?.areaName?.[0]?.value ?? city;
+    const cityName = normalizeWeatherLocationName(area?.areaName?.[0]?.value ?? city, city);
     const country = area?.country?.[0]?.value ?? "";
     const location = country ? `${cityName}, ${country}` : cityName;
 
@@ -207,26 +341,55 @@ export async function getWeather(city: string): Promise<string | null> {
 
 function cleanWeatherCityCandidate(value: string) {
   return value
-    .replace(/\b(right now|currently|now|today|tonight)\b/gi, "")
+    .replace(new RegExp(`\\b(?:${WEATHER_TIME_REFERENCE_SOURCE})\\b`, "giu"), "")
     .replace(/\s+/g, " ")
     .trim()
+    .replace(/\s+(?:\u0915\u093e|\u0915\u0940|\u0915\u0947)$/u, "")
+    .replace(/\s+(?:ka|ki|ke)$/iu, "")
     .replace(/^[,.-\s]+|[,.-\s]+$/g, "");
 }
 
 export function parseWeatherCity(message: string): string | null {
-  const t = message.toLowerCase().trim();
+  const t = message.normalize("NFKC").toLowerCase().trim();
+  const looksLikeCreativeWritingRequest = looksLikeCreativeWeatherPrompt(t);
 
-  const p1 = t.match(/(?:weather|temperature|temp|forecast|climate)\s+(?:in|at|of|for)\s+([a-z][a-z\s]{1,30})/i);
+  if (looksLikeCreativeWritingRequest) {
+    return null;
+  }
+
+  const weatherTerms = `(?:${DIRECT_WEATHER_TERM_SOURCE})`;
+  const hindiWeatherTerms = "(?:\u092e\u094c\u0938\u092e|\u0924\u093e\u092a\u092e\u093e\u0928)";
+
+  const pHindi = t.match(new RegExp(`^${WEATHER_CITY_CAPTURE}\\s+(?:का|की|के)\\s+${hindiWeatherTerms}`, "iu"));
+  if (pHindi) return cleanWeatherCityCandidate(pHindi[1] ?? "") || null;
+
+  const p1 = t.match(new RegExp(`\\b${weatherTerms}\\b\\s+\\b(?:${WEATHER_LOCATION_CONNECTOR_SOURCE})\\b\\s+${WEATHER_CITY_CAPTURE}`, "iu"));
   if (p1) return cleanWeatherCityCandidate(p1[1] ?? "") || null;
 
-  const p2 = t.match(/^([a-z][a-z\s]{1,30})\s+(?:weather|temperature|temp|forecast)/i);
-  if (p2) return cleanWeatherCityCandidate(p2[1] ?? "") || null;
+  const p2 = t.match(new RegExp(`^${WEATHER_CITY_CAPTURE}\\s+\\b${weatherTerms}\\b`, "iu"));
+  if (p2) {
+    const candidate = cleanWeatherCityCandidate(p2[1] ?? "") || "";
+    if (candidate && !/\b(write|create|compose|generate|draft|tell|show|about|poem|haiku|lyrics|story)\b/i.test(candidate)) {
+      return candidate;
+    }
+  }
 
-  const p3 = t.match(/(?:today|now|right now|currently)\s+(?:in|at)\s+([a-z][a-z\s]{1,30})/i);
+  const p2b = t.match(new RegExp(`^${WEATHER_CITY_CAPTURE}\\s+\\b(?:${WEATHER_LOCATION_CONNECTOR_SOURCE})\\b\\s+\\b${weatherTerms}\\b`, "iu"));
+  if (p2b) {
+    const candidate = cleanWeatherCityCandidate(p2b[1] ?? "") || "";
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  const p3 = t.match(new RegExp(`\\b(?:${WEATHER_TIME_REFERENCE_SOURCE})\\b[\\s,]*\\b${weatherTerms}\\b[\\s,]*(?:${WEATHER_LOCATION_CONNECTOR_SOURCE})\\s+${WEATHER_CITY_CAPTURE}`, "iu"));
   if (p3) return cleanWeatherCityCandidate(p3[1] ?? "") || null;
 
-  const p4 = t.match(/(?:in|at)\s+([a-z][a-z\s]{1,30})\s+(?:today|now|right now)/i);
+  const p4 = t.match(new RegExp(`\\b${weatherTerms}\\b[\\s\\S]{0,24}\\b(?:${WEATHER_LOCATION_CONNECTOR_SOURCE})\\b\\s+${WEATHER_CITY_CAPTURE}\\s+\\b(?:${WEATHER_TIME_REFERENCE_SOURCE})\\b`, "iu"));
   if (p4) return cleanWeatherCityCandidate(p4[1] ?? "") || null;
+
+  const p5 = t.match(new RegExp(`${WEATHER_CITY_CAPTURE}\\s+\\b(?:${WEATHER_LOCATION_CONNECTOR_SOURCE})\\b\\s+\\b(?:${WEATHER_TIME_REFERENCE_SOURCE})\\b[\\s,]*\\b${weatherTerms}\\b`, "iu"));
+  if (p5) return cleanWeatherCityCandidate(p5[1] ?? "") || null;
 
   return null;
 }

@@ -20,6 +20,7 @@ type StripeSubscription = {
 };
 
 export type StripeEvent = {
+  id?: string;
   type: string;
   data: { object: StripeSubscription };
 };

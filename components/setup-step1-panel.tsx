@@ -1,18 +1,20 @@
 import styles from "./setup-step1.module.css";
 
 type ConnectionStatus = "idle" | "connecting" | "done";
+type GoogleWorkspaceConnectProvider = "gmail" | "google_calendar" | "google_drive";
 
 type SetupStepOnePanelProps = {
   gmailStatus: ConnectionStatus;
   calendarStatus: ConnectionStatus;
+  driveStatus: ConnectionStatus;
   gmailConnected: boolean;
   calendarConnected: boolean;
+  driveConnected: boolean;
   googleWorkspacePublicEnabled: boolean;
+  googleWorkspaceExtendedEnabled: boolean;
   googleConnecting: boolean;
   stepOneComplete: boolean;
-  onStartGmailConnect: () => void;
-  onStartCalendarConnect: () => void;
-  onConnectGoogle: () => void;
+  onConnectGoogle: (provider: GoogleWorkspaceConnectProvider) => void;
   onSkip: () => void;
   onContinue: () => void;
   onShowHelp: () => void;
@@ -24,7 +26,7 @@ function joinClassNames(...values: Array<string | false | null | undefined>) {
 
 function getStatusLabel(status: ConnectionStatus, googleWorkspacePublicEnabled: boolean) {
   if (!googleWorkspacePublicEnabled && status !== "done") {
-    return "Paused temporarily";
+    return "Unavailable right now";
   }
 
   if (status === "done") {
@@ -52,29 +54,6 @@ function getStatusClass(status: ConnectionStatus, googleWorkspacePublicEnabled: 
   }
 
   return styles.statusIdle;
-}
-
-function GoogleColorIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-      <path
-        fill="#4285F4"
-        d="M19.6 10.227c0-.709-.064-1.39-.182-2.045H10v3.867h5.382a4.6 4.6 0 0 1-1.996 3.018v2.51h3.232c1.891-1.742 2.982-4.305 2.982-7.35Z"
-      />
-      <path
-        fill="#34A853"
-        d="M10 20c2.7 0 4.964-.895 6.618-2.423l-3.232-2.51c-.895.6-2.04.955-3.386.955-2.604 0-4.809-1.759-5.595-4.123H1.064v2.59A9.996 9.996 0 0 0 10 20Z"
-      />
-      <path
-        fill="#FBBC04"
-        d="M4.405 11.9A6.013 6.013 0 0 1 4.091 10c0-.663.114-1.308.314-1.9V5.51H1.064A9.996 9.996 0 0 0 0 10c0 1.614.386 3.14 1.064 4.49l3.34-2.59Z"
-      />
-      <path
-        fill="#EA4335"
-        d="M10 3.977c1.468 0 2.786.505 3.823 1.496l2.868-2.869C14.959.99 12.695 0 10 0A9.996 9.996 0 0 0 1.064 5.51l3.34 2.59C5.192 5.736 7.396 3.977 10 3.977Z"
-      />
-    </svg>
-  );
 }
 
 function GmailIcon() {
@@ -106,6 +85,21 @@ function CalendarIcon() {
   );
 }
 
+function DriveIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+      <path
+        d="M6.1 3.2h5.2l3.35 5.82-2.6 4.48H6.9L3.6 7.78 6.1 3.2Z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+      <path d="M6.1 3.2 3.6 7.78h6.65L12.7 3.2" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+      <path d="M6.9 13.5 10.25 7.78h4.2" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function PrivacyIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
@@ -124,41 +118,55 @@ function PrivacyIcon() {
 export function SetupStepOnePanel({
   gmailStatus,
   calendarStatus,
+  driveStatus,
   gmailConnected,
   calendarConnected,
+  driveConnected,
   googleWorkspacePublicEnabled,
+  googleWorkspaceExtendedEnabled,
   googleConnecting,
   stepOneComplete,
-  onStartGmailConnect,
-  onStartCalendarConnect,
   onConnectGoogle,
   onSkip,
   onContinue,
   onShowHelp,
 }: SetupStepOnePanelProps) {
-  const googleConnected = gmailConnected && calendarConnected;
+  const googleConnected =
+    gmailConnected && calendarConnected && (!googleWorkspaceExtendedEnabled || driveConnected);
+  const workspaceVerificationPending = !googleWorkspacePublicEnabled;
+  const cardActionDisabled = workspaceVerificationPending || googleConnecting || googleConnected;
+  const connectHint = workspaceVerificationPending
+    ? "Google Workspace is unavailable on this deployment right now, so Continue stays available without it."
+    : googleConnected
+      ? "Google Workspace is connected. Continue is now unlocked."
+      : googleConnecting
+        ? "Finishing the Google handoff for the service you selected and verifying the live connection..."
+        : "Tap Gmail, Calendar, or Drive to connect that service with only the scopes ClawCloud needs for it.";
 
   return (
     <div className={styles.step1Panel}>
       <div className={styles.step1Head}>
         <div className={styles.stepTag}>Step 1 of 3</div>
-        <h2>Connect Gmail and Calendar</h2>
+        <h2>
+          {googleWorkspaceExtendedEnabled
+            ? "Connect Google Workspace"
+            : "Connect Gmail and Calendar"}
+        </h2>
         <p>
-          Give ClawCloud secure access to your inbox and schedule so it can draft replies, create
-          briefings, and prepare meeting context professionally. Drive and Sheets access can be
-          added later from Settings when you need it.
+          {googleWorkspaceExtendedEnabled
+            ? "Connect the Google services you want ClawCloud to use. Each card starts its own Google consent flow and asks only for the scopes that service needs."
+            : "Connect Gmail or Calendar separately so ClawCloud can draft replies, create briefings, and prepare meeting context without asking for unnecessary access."}
         </p>
       </div>
 
       <div className={styles.step1Body}>
         {!googleWorkspacePublicEnabled ? (
           <div className={styles.rolloutNotice}>
-            <strong className={styles.rolloutTitle}>Google Workspace verification is pending</strong>
+            <strong className={styles.rolloutTitle}>Google Workspace is unavailable right now</strong>
             <p className={styles.rolloutText}>
-              Gmail and Calendar connect stays behind a rollout gate until Google approves the app
-              for public use. You can continue setup right now, test the rest of ClawCloud, and
-              connect Google later from the dashboard without sending users into the raw
-              unverified-app warning.
+              Gmail, Calendar, and Drive connect is not available on this deployment for the
+              moment. You can continue setup right now, test the rest of ClawCloud, and reconnect
+              Google later from the dashboard once the deployment is fully configured.
             </p>
           </div>
         ) : null}
@@ -168,11 +176,12 @@ export function SetupStepOnePanel({
           className={joinClassNames(
             styles.serviceCard,
             !googleWorkspacePublicEnabled && styles.serviceCardDisabled,
+            googleConnected && styles.serviceCardStatic,
             gmailStatus === "done" && styles.serviceCardConnected,
             gmailStatus === "connecting" && styles.serviceCardConnecting,
           )}
-          onClick={onStartGmailConnect}
-          disabled={!googleWorkspacePublicEnabled && gmailStatus !== "done"}
+          onClick={() => onConnectGoogle("gmail")}
+          disabled={cardActionDisabled}
         >
           <span className={styles.serviceIconWrap} aria-hidden="true">
             <GmailIcon />
@@ -203,11 +212,12 @@ export function SetupStepOnePanel({
           className={joinClassNames(
             styles.serviceCard,
             !googleWorkspacePublicEnabled && styles.serviceCardDisabled,
+            googleConnected && styles.serviceCardStatic,
             calendarStatus === "done" && styles.serviceCardConnected,
             calendarStatus === "connecting" && styles.serviceCardConnecting,
           )}
-          onClick={onStartCalendarConnect}
-          disabled={!googleWorkspacePublicEnabled && calendarStatus !== "done"}
+          onClick={() => onConnectGoogle("google_calendar")}
+          disabled={cardActionDisabled}
         >
           <span className={styles.serviceIconWrap} aria-hidden="true">
             <CalendarIcon />
@@ -235,29 +245,52 @@ export function SetupStepOnePanel({
           </span>
         </button>
 
-        <button
-          type="button"
-          className={joinClassNames(styles.googleBtn, googleConnected && styles.googleBtnConnected)}
-          onClick={onConnectGoogle}
-          disabled={googleConnecting || googleConnected || !googleWorkspacePublicEnabled}
-        >
-          {googleConnecting ? (
-            <span className={styles.googleBtnSpinner} aria-hidden="true" />
-          ) : (
-            <span className={styles.googleBtnIcon} aria-hidden="true">
-              <GoogleColorIcon />
+        {googleWorkspaceExtendedEnabled ? (
+          <button
+            type="button"
+            className={joinClassNames(
+              styles.serviceCard,
+              !googleWorkspacePublicEnabled && styles.serviceCardDisabled,
+              googleConnected && styles.serviceCardStatic,
+              driveStatus === "done" && styles.serviceCardConnected,
+              driveStatus === "connecting" && styles.serviceCardConnecting,
+            )}
+            onClick={() => onConnectGoogle("google_drive")}
+            disabled={cardActionDisabled}
+          >
+            <span className={styles.serviceIconWrap} aria-hidden="true">
+              <DriveIcon />
             </span>
+            <span className={styles.serviceInfo}>
+              <span className={styles.serviceName}>Google Drive</span>
+              <span className={styles.serviceDesc}>
+                Search files, open documents, and power context from Drive and Sheets.
+              </span>
+              <span className={styles.permTags}>
+                <span className={styles.permTag}>Read files</span>
+                <span className={styles.permTag}>Sheets access</span>
+                <span className={styles.permTag}>Workspace search</span>
+              </span>
+            </span>
+            <span
+              className={joinClassNames(
+                styles.serviceStatus,
+                getStatusClass(driveStatus, googleWorkspacePublicEnabled),
+              )}
+            >
+              {getStatusLabel(driveStatus, googleWorkspacePublicEnabled)}
+            </span>
+          </button>
+        ) : null}
+
+        <div
+          className={joinClassNames(
+            styles.continueHint,
+            googleConnected && styles.continueHintReady,
           )}
-          <span>
-            {googleConnecting
-              ? "Connecting to Google..."
-              : googleConnected
-                ? "Gmail and Calendar connected"
-                : googleWorkspacePublicEnabled
-                  ? "Continue with Google"
-                  : "Google Workspace verification pending"}
-          </span>
-        </button>
+        >
+          {connectHint}
+        </div>
 
         <div className={styles.privacyNote}>
           <span className={styles.privacyNoteIcon} aria-hidden="true">
@@ -285,7 +318,15 @@ export function SetupStepOnePanel({
           <button type="button" className={styles.btnSkip} onClick={onSkip}>
             Skip for now
           </button>
-          <button type="button" className={styles.btnContinue} disabled={!stepOneComplete} onClick={onContinue}>
+          <button
+            type="button"
+            className={joinClassNames(
+              styles.btnContinue,
+              stepOneComplete && styles.btnContinueReady,
+            )}
+            disabled={!stepOneComplete}
+            onClick={onContinue}
+          >
             {googleWorkspacePublicEnabled || googleConnected ? "Continue" : "Continue without Google"}
             <span className={styles.btnArrow} aria-hidden="true">
               -&gt;

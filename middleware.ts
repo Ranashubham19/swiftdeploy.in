@@ -19,19 +19,31 @@ function isRecoveryFlow(request: NextRequest) {
   );
 }
 
+function applyFreshEntryHeaders(response: NextResponse) {
+  response.headers.set("Cache-Control", "no-store, no-cache, max-age=0, must-revalidate");
+  response.headers.set("Pragma", "no-cache");
+  response.headers.set("Expires", "0");
+  response.headers.set("Clear-Site-Data", "\"cache\"");
+  return response;
+}
+
 export function middleware(request: NextRequest) {
+  if (request.nextUrl.pathname === "/setup" || request.nextUrl.pathname === "/auth") {
+    return applyFreshEntryHeaders(NextResponse.next());
+  }
+
   if (!looksLikeAuthCallback(request)) {
     return NextResponse.next();
   }
 
   const targetPath = isRecoveryFlow(request) ? "/reset-password" : "/auth";
   if (request.nextUrl.pathname === targetPath) {
-    return NextResponse.next();
+    return applyFreshEntryHeaders(NextResponse.next());
   }
 
   const redirectUrl = request.nextUrl.clone();
   redirectUrl.pathname = targetPath;
-  return NextResponse.redirect(redirectUrl);
+  return applyFreshEntryHeaders(NextResponse.redirect(redirectUrl));
 }
 
 export const config = {

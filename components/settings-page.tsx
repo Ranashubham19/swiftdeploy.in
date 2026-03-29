@@ -7,6 +7,11 @@ import {
   useDashboardData,
   type DashboardRuntimeFeatureState,
 } from "@/hooks/useDashboardData";
+import {
+  describeGlobalLiteConnection,
+  type GlobalLiteConnection,
+  type GlobalLiteProvider,
+} from "@/lib/clawcloud-global-lite";
 import { supportedClawCloudLocaleOptions } from "@/lib/clawcloud-locales";
 import { useUpgrade } from "@/hooks/useUpgrade";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
@@ -16,6 +21,14 @@ import styles from "./settings-page.module.css";
 
 type SettingsPageProps = { config: PublicAppConfig };
 type TabId = "profile" | "notifications" | "integrations" | "agent" | "billing" | "danger";
+type DisconnectResult = {
+  result?: {
+    provider?: "google" | "whatsapp" | "telegram";
+    disconnected?: boolean;
+    revokedTokens?: number;
+    warnings?: string[];
+  };
+};
 
 const tabs = [
   { id: "profile", icon: "\u{1F464}", label: "Profile", title: "\u{1F464} Profile" },
@@ -76,6 +89,11 @@ export function SettingsPage({ config }: SettingsPageProps) {
   const [timezone, setTimezone] = useState("Asia/Kolkata");
   const [language, setLanguage] = useState("en");
   const [saving, setSaving] = useState<Record<string, boolean>>({});
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deleteConfirmation, setDeleteConfirmation] = useState("");
+  const [gmailLiteEmail, setGmailLiteEmail] = useState("");
+  const [calendarLiteIcsUrl, setCalendarLiteIcsUrl] = useState("");
+  const [driveLiteLabel, setDriveLiteLabel] = useState("");
 
   useEffect(() => {
     if (data?.user) {
@@ -84,6 +102,23 @@ export function SettingsPage({ config }: SettingsPageProps) {
       setLanguage(data.user.language ?? "en");
     }
   }, [data?.user]);
+
+  useEffect(() => {
+    const connections = data?.global_lite_connections ?? [];
+    const gmailLite = connections.find((connection) => connection.provider === "gmail");
+    const calendarLite = connections.find((connection) => connection.provider === "google_calendar");
+    const driveLite = connections.find((connection) => connection.provider === "google_drive");
+
+    setGmailLiteEmail(
+      typeof gmailLite?.config?.email === "string"
+        ? gmailLite.config.email
+        : (data?.user?.email ?? ""),
+    );
+    setCalendarLiteIcsUrl(
+      typeof calendarLite?.config?.icsUrl === "string" ? calendarLite.config.icsUrl : "",
+    );
+    setDriveLiteLabel(driveLite?.label ?? "");
+  }, [data?.global_lite_connections, data?.user?.email]);
 
   useEffect(() => {
     return () => {
@@ -145,11 +180,16 @@ export function SettingsPage({ config }: SettingsPageProps) {
     timerRef.current = setTimeout(() => setToastVisible(false), 2600);
   }
 
-  async function authedFetch(path: string, init: RequestInit = {}) {
+  async function getAccessToken() {
     if (!supabase) throw new Error("Supabase is not configured.");
     const { data: sessionData } = await supabase.auth.getSession();
     const token = sessionData.session?.access_token;
     if (!token) throw new Error("Please sign in again.");
+    return token;
+  }
+
+  async function authedFetch(path: string, init: RequestInit = {}) {
+    const token = await getAccessToken();
 
     const response = await fetch(path, {
       ...init,
@@ -163,6 +203,24 @@ export function SettingsPage({ config }: SettingsPageProps) {
     const json = (await response.json().catch(() => ({}))) as { error?: string };
     if (!response.ok) throw new Error(json.error || "Request failed.");
     return json;
+  }
+
+  async function authedDownload(path: string) {
+    const token = await getAccessToken();
+    const response = await fetch(path, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      const json = (await response.json().catch(() => ({}))) as { error?: string };
+      throw new Error(json.error || "Request failed.");
+    }
+
+    return response;
   }
 
   async function saveProfile() {
@@ -189,9 +247,17 @@ export function SettingsPage({ config }: SettingsPageProps) {
   async function disconnect(provider: "google" | "whatsapp" | "telegram") {
     setSaving((current) => ({ ...current, [provider]: true }));
     try {
-      await authedFetch(`/api/settings/integrations/${provider}`, { method: "DELETE" });
+      const payload = (await authedFetch(`/api/settings/integrations/${provider}`, {
+        method: "DELETE",
+      })) as DisconnectResult;
+
       refetch();
-      showToast(`${titleCase(provider)} disconnected.`);
+      const warning = payload.result?.warnings?.[0];
+      showToast(
+        warning
+          ? `${titleCase(provider)} disconnected locally. ${warning}`
+          : `${titleCase(provider)} disconnected.`,
+      );
     } catch (disconnectError) {
       showToast(disconnectError instanceof Error ? disconnectError.message : "Unable to disconnect.");
     } finally {
@@ -202,15 +268,196 @@ export function SettingsPage({ config }: SettingsPageProps) {
   async function disconnectAll() {
     setSaving((current) => ({ ...current, disconnectAll: true }));
     try {
-      await Promise.allSettled([
-        authedFetch("/api/settings/integrations/google", { method: "DELETE" }),
-        authedFetch("/api/settings/integrations/whatsapp", { method: "DELETE" }),
-        authedFetch("/api/settings/integrations/telegram", { method: "DELETE" }),
-      ]);
-      refetch();
+      const providerLabels = ["google", "whatsapp", "telegram"] as const;
+      const results = await Promise.allSettled(
+        providerLabels.map((provider) =>
+          authedFetch(`/api/settings/integrations/${provider}`, { method: "DELETE" }),
+        ),
+      );
+
+      const warnings: string[] = [];
+      const failures: string[] = [];
+      let successCount = 0;
+
+      results.forEach((result) => {
+        if (result.status === "fulfilled") {
+          successCount += 1;
+          const payload = result.value as DisconnectResult;
+          if (payload.result?.warnings?.length) {
+            warnings.push(...payload.result.warnings);
+          }
+          return;
+        }
+
+        failures.push(result.reason instanceof Error ? result.reason.message : "Disconnect failed.");
+      });
+
+      if (successCount > 0) {
+        refetch();
+      }
+
+      if (failures.length > 0) {
+        showToast(
+          `Disconnected ${successCount} of ${providerLabels.length} integrations. ${failures[0]}`,
+        );
+        return;
+      }
+
+      if (warnings.length > 0) {
+        showToast(`All integrations disconnected locally. ${warnings[0]}`);
+        return;
+      }
+
       showToast("All integrations disconnected.");
+    } catch (disconnectError) {
+      showToast(disconnectError instanceof Error ? disconnectError.message : "Unable to disconnect integrations.");
     } finally {
       setSaving((current) => ({ ...current, disconnectAll: false }));
+    }
+  }
+
+  async function exportData() {
+    setSaving((current) => ({ ...current, exportData: true }));
+    try {
+      const response = await authedDownload("/api/settings/export");
+      const blob = await response.blob();
+      const disposition = response.headers.get("content-disposition") ?? "";
+      const filenameMatch = disposition.match(/filename=\"?([^\";]+)\"?/i);
+      const filename = filenameMatch?.[1]?.trim() || `clawcloud-export-${new Date().toISOString().slice(0, 10)}.json`;
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      showToast("Data export downloaded.");
+    } catch (exportError) {
+      showToast(exportError instanceof Error ? exportError.message : "Unable to export your data.");
+    } finally {
+      setSaving((current) => ({ ...current, exportData: false }));
+    }
+  }
+
+  async function deleteAccount() {
+    const target = deleteConfirmationTarget;
+    if (deleteConfirmation.trim() !== target) {
+      showToast(`Type ${target} to confirm account deletion.`);
+      return;
+    }
+
+    setSaving((current) => ({ ...current, deleteAccount: true }));
+
+    try {
+      await authedFetch("/api/settings/account", {
+        method: "DELETE",
+        body: JSON.stringify({ confirmation: deleteConfirmation.trim() }),
+      });
+
+      showToast("Account deleted. Redirecting to sign in...");
+      setDeleteConfirmOpen(false);
+      setDeleteConfirmation("");
+
+      window.setTimeout(() => {
+        void supabase?.auth.signOut().catch(() => null).finally(() => {
+          window.location.assign("/auth");
+        });
+      }, 900);
+    } catch (deleteError) {
+      showToast(deleteError instanceof Error ? deleteError.message : "Unable to delete your account.");
+    } finally {
+      setSaving((current) => ({ ...current, deleteAccount: false }));
+    }
+  }
+
+  async function startGoogleWorkspaceConnect(scopeSet: "core" | "extended") {
+    const workspaceOauthAvailable =
+      scopeSet === "extended"
+        ? Boolean(featureStatus?.google_workspace_extended_connect.available)
+        : Boolean(featureStatus?.google_workspace_connect.available);
+
+    if (config.googleRollout.setupLiteMode !== false && !workspaceOauthAvailable) {
+      showToast("Google is using the safe Lite setup flow right now. Opening setup instead of Google OAuth.");
+      router.push("/setup");
+      return;
+    }
+
+    setSaving((current) => ({ ...current, googleConnect: true }));
+    try {
+      const payload = (await authedFetch(
+        `/api/auth/google?scopeSet=${scopeSet}&ts=${Date.now()}`,
+        { method: "GET" },
+      )) as { url?: string };
+
+      if (!payload.url) {
+        throw new Error("Unable to start Google Workspace connection.");
+      }
+
+      window.location.assign(payload.url);
+    } catch (connectError) {
+      showToast(connectError instanceof Error ? connectError.message : "Unable to start Google connection.");
+    } finally {
+      setSaving((current) => ({ ...current, googleConnect: false }));
+    }
+  }
+
+  async function saveGlobalLiteConnection(provider: GlobalLiteProvider) {
+    setSaving((current) => ({ ...current, [`lite-${provider}`]: true }));
+    try {
+      const body =
+        provider === "gmail"
+          ? { provider, email: gmailLiteEmail }
+          : provider === "google_calendar"
+            ? { provider, icsUrl: calendarLiteIcsUrl }
+            : { provider, label: driveLiteLabel };
+
+      await authedFetch("/api/global-lite/connections", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      refetch();
+      showToast(
+        provider === "gmail"
+          ? "Gmail Lite saved."
+          : provider === "google_calendar"
+            ? "Calendar Lite saved."
+            : "Drive Lite saved.",
+      );
+    } catch (saveError) {
+      showToast(saveError instanceof Error ? saveError.message : "Unable to save Global Lite connection.");
+    } finally {
+      setSaving((current) => ({ ...current, [`lite-${provider}`]: false }));
+    }
+  }
+
+  async function removeGlobalLiteConnection(provider: GlobalLiteProvider) {
+    setSaving((current) => ({ ...current, [`lite-${provider}`]: true }));
+    try {
+      await authedFetch(`/api/global-lite/connections/${provider}`, {
+        method: "DELETE",
+      });
+      refetch();
+      if (provider === "gmail") {
+        setGmailLiteEmail(data?.user?.email ?? "");
+      }
+      if (provider === "google_calendar") {
+        setCalendarLiteIcsUrl("");
+      }
+      if (provider === "google_drive") {
+        setDriveLiteLabel("");
+      }
+      showToast(
+        provider === "gmail"
+          ? "Gmail Lite removed."
+          : provider === "google_calendar"
+            ? "Calendar Lite removed."
+            : "Drive Lite removed.",
+      );
+    } catch (removeError) {
+      showToast(removeError instanceof Error ? removeError.message : "Unable to remove Global Lite connection.");
+    } finally {
+      setSaving((current) => ({ ...current, [`lite-${provider}`]: false }));
     }
   }
 
@@ -219,10 +466,12 @@ export function SettingsPage({ config }: SettingsPageProps) {
   const planLabel = titleCase(plan);
   const displayName = fullName || user?.full_name || "ClawCloud User";
   const displayEmail = user?.email ?? "";
+  const deleteConfirmationTarget = displayEmail || "DELETE MY ACCOUNT";
   const initials = getInitials(displayName, displayEmail);
   const title = tabs.find((tab) => tab.id === activeTab)?.title ?? tabs[0].title;
 
   const accounts = data?.connected_accounts ?? [];
+  const globalLiteConnections = data?.global_lite_connections ?? [];
   const featureStatus = data?.feature_status;
   const tasks = data?.tasks ?? [];
   const subscription = data?.subscription;
@@ -231,9 +480,32 @@ export function SettingsPage({ config }: SettingsPageProps) {
   const gmail = accounts.find((account) => account.provider === "gmail" && account.is_active);
   const calendar = accounts.find((account) => account.provider === "google_calendar" && account.is_active);
   const drive = accounts.find((account) => account.provider === "google_drive" && account.is_active);
+  const gmailLite = globalLiteConnections.find((connection) => connection.provider === "gmail");
+  const calendarLite = globalLiteConnections.find((connection) => connection.provider === "google_calendar");
+  const driveLite = globalLiteConnections.find((connection) => connection.provider === "google_drive");
   const whatsapp = accounts.find((account) => account.provider === "whatsapp" && account.is_active);
   const telegram = accounts.find((account) => account.provider === "telegram" && account.is_active);
-  const needsGoogleReconnect = Boolean((gmail || calendar) && !drive);
+  const googleCapabilities = data?.google_capabilities;
+  const googleConnected = Boolean(gmail || calendar || drive);
+  const needsGoogleWriteReconnect = Boolean(
+    googleConnected
+    && googleCapabilities?.connected
+    && (
+      googleCapabilities.reconnectRequired
+      || (Boolean(gmail) && (!googleCapabilities.gmailModify || !googleCapabilities.gmailCompose || !googleCapabilities.gmailSend))
+      || (Boolean(calendar) && !googleCapabilities.calendarWrite)
+      || (Boolean(drive) && (!googleCapabilities.driveRead || !googleCapabilities.sheetsWrite))
+    ),
+  );
+  const needsGoogleReconnect = needsGoogleWriteReconnect;
+  const googleReconnectScopeSet = Boolean(drive) && featureStatus?.google_workspace_extended_connect.available
+    ? "extended"
+    : "core";
+  const googleReconnectTitle = "Reconnect Google to restore missing Workspace permissions";
+  const googleReconnectDetail = needsGoogleWriteReconnect
+    ? (googleCapabilities?.reconnectReason
+      || "Your saved Google session is missing the permissions needed for the Google services already connected to this account.")
+    : null;
   const telegramBotUsername = (config.telegramBotUsername ?? "").trim();
   const telegramBotLink = telegramBotUsername
     ? `https://t.me/${telegramBotUsername}?start=${encodeURIComponent(user?.id ?? "")}`
@@ -250,6 +522,7 @@ export function SettingsPage({ config }: SettingsPageProps) {
 
   const featureRows: Array<[string, DashboardRuntimeFeatureState]> = featureStatus
     ? [
+        ["Global Lite Connect", featureStatus.global_lite_connect],
         ["Google Workspace connect", featureStatus.google_workspace_connect],
         ["WhatsApp agent backend", featureStatus.whatsapp_agent],
         ["Telegram bot", featureStatus.telegram_bot],
@@ -396,36 +669,54 @@ export function SettingsPage({ config }: SettingsPageProps) {
               <div className={styles.section}>
                 <div className={styles.sectionHead}>
                   <div className={styles.sectionTitle}>Connected accounts</div>
-                  <div className={styles.sectionDescription}>Live status from connected accounts and runtime checks.</div>
+                  <div className={styles.sectionDescription}>Live status from connected accounts, fallback Lite links, and runtime checks.</div>
                 </div>
-                {needsGoogleReconnect ? (
+                {!featureStatus?.google_workspace_connect.available && featureStatus?.global_lite_connect.available ? (
                   <div className={styles.integrationBanner}>
                     <div>
                       <div className={styles.integrationBannerTitle}>
-                        {featureStatus?.google_workspace_extended_connect.available
-                          ? "Reconnect Google to enable Drive & Sheets"
-                          : "Drive & Sheets verification pending"}
+                        Global Lite Connect is active for public users
                       </div>
                       <div className={styles.integrationBannerText}>
-                        {featureStatus?.google_workspace_extended_connect.available
-                          ? "Gmail or Calendar is active, but the newer Drive scopes are still missing."
-                          : (
-                            featureStatus?.google_workspace_extended_connect.reason
-                            || "Drive and Sheets will stay hidden until the extended Google review is approved."
-                          )}
+                        Google Workspace is not available on this deployment right now, so ClawCloud is
+                        using Lite mode for Gmail, Calendar, and Drive until full OAuth is configured.
+                        Lite mode keeps fallback identities and read-only imports ready, but it does
+                        not grant full Gmail, Calendar, or Drive API access.
                       </div>
                     </div>
                     <button
                       type="button"
                       className={styles.secondaryButton}
-                      disabled={!featureStatus?.google_workspace_extended_connect.available}
-                      onClick={() => user?.id
-                        ? window.location.assign(`/api/auth/google?userId=${encodeURIComponent(user.id)}&scopeSet=extended`)
-                        : showToast("User account is not loaded yet.")}
+                      onClick={() => router.push("/setup")}
                     >
-                      {featureStatus?.google_workspace_extended_connect.available
+                      Open setup
+                    </button>
+                  </div>
+                ) : null}
+                {needsGoogleReconnect ? (
+                  <div className={styles.integrationBanner}>
+                    <div>
+                      <div className={styles.integrationBannerTitle}>
+                        {googleReconnectTitle}
+                      </div>
+                      <div className={styles.integrationBannerText}>
+                        {googleReconnectDetail}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className={styles.secondaryButton}
+                      disabled={
+                        !(featureStatus?.google_workspace_connect.available || featureStatus?.google_workspace_extended_connect.available)
+                        || Boolean(saving.googleConnect)
+                      }
+                      onClick={() => void startGoogleWorkspaceConnect(googleReconnectScopeSet)}
+                    >
+                      {saving.googleConnect
+                        ? "Connecting..."
+                        : (featureStatus?.google_workspace_connect.available || featureStatus?.google_workspace_extended_connect.available)
                         ? "Reconnect Google"
-                        : "Awaiting approval"}
+                        : "Unavailable"}
                     </button>
                   </div>
                 ) : null}
@@ -436,18 +727,36 @@ export function SettingsPage({ config }: SettingsPageProps) {
                       <div className={styles.rowTitle}>Google Workspace</div>
                       <div className={styles.rowDescription}>Gmail, Calendar, and Drive access for ClawCloud workflows.</div>
                       <div className={styles.scopeText}>{gmail?.account_email || featureStatus?.google_workspace_connect.reason || "Not connected"}</div>
+                      {googleConnected ? (
+                        <div className={styles.scopeText}>
+                          {needsGoogleWriteReconnect
+                            ? (googleCapabilities?.reconnectReason
+                              || "Reconnect Google once to restore Gmail, Calendar, and Drive permissions.")
+                            : drive
+                              ? "Fully connected for Gmail, Calendar, and Drive."
+                              : "Connected for Gmail and Calendar. Reconnect with Drive if you want file and sheet actions too."}
+                        </div>
+                      ) : null}
                     </div>
                     <div className={styles.integrationActions}>
-                      <span className={(gmail || calendar || drive) ? styles.connectedBadge : styles.statusBadgeMuted}>{(gmail || calendar || drive) ? "Connected" : "Needs setup"}</span>
+                      <span className={(gmail || calendar || drive) && !needsGoogleWriteReconnect ? styles.connectedBadge : styles.statusBadgeMuted}>
+                        {(gmail || calendar || drive)
+                          ? needsGoogleWriteReconnect
+                            ? "Reconnect needed"
+                            : "Connected"
+                          : "Needs setup"}
+                      </span>
                       <button
                         type="button"
                         className={styles.primaryButton}
-                        disabled={!featureStatus?.google_workspace_connect.available}
-                        onClick={() => user?.id
-                          ? window.location.assign(`/api/auth/google?userId=${encodeURIComponent(user.id)}`)
-                          : showToast("User account is not loaded yet.")}
+                        disabled={!featureStatus?.google_workspace_connect.available || Boolean(saving.googleConnect)}
+                        onClick={() => void startGoogleWorkspaceConnect("core")}
                       >
-                        Connect Google
+                        {saving.googleConnect
+                          ? "Connecting..."
+                          : featureStatus?.google_workspace_connect.available
+                            ? "Connect Google"
+                            : "Unavailable"}
                       </button>
                       {(gmail || calendar || drive) ? <button type="button" className={styles.dangerButton} disabled={Boolean(saving.google)} onClick={() => void disconnect("google")}>{saving.google ? "Working..." : "Disconnect"}</button> : null}
                     </div>
@@ -504,6 +813,164 @@ export function SettingsPage({ config }: SettingsPageProps) {
                     </div>
                   </div>
                 </div>
+                {featureStatus?.global_lite_connect.available ? (
+                  <div className={styles.card}>
+                    <div className={styles.sectionHead}>
+                      <div className={styles.sectionTitle}>Global Lite Connect</div>
+                      <div className={styles.sectionDescription}>
+                        Public-safe fallback connections for Gmail, Calendar, and Drive while Google
+                        is still reviewing the sensitive Workspace scopes.
+                      </div>
+                    </div>
+
+                    <div className={styles.liteBlock}>
+                      <div className={styles.liteHeader}>
+                        <div>
+                          <div className={styles.rowTitle}>Gmail Lite</div>
+                          <div className={styles.rowDescription}>
+                            {gmailLite
+                              ? describeGlobalLiteConnection(gmailLite)
+                              : "Save the inbox identity you want ClawCloud to organize under Lite mode."}
+                          </div>
+                        </div>
+                        <span className={gmailLite ? styles.connectedBadge : styles.statusBadgeMuted}>
+                          {gmailLite ? "Lite connected" : "Ready"}
+                        </span>
+                      </div>
+                      <div className={styles.field}>
+                        <div className={styles.label}>Inbox email</div>
+                        <input
+                          className={styles.input}
+                          type="email"
+                          value={gmailLiteEmail}
+                          onChange={(event) => setGmailLiteEmail(event.target.value)}
+                          placeholder="you@example.com"
+                        />
+                        <div className={styles.fieldHint}>
+                          This keeps the Gmail Lite identity ready for imported or forwarded inbox
+                          snapshots until full Gmail OAuth is reopened.
+                        </div>
+                      </div>
+                      <div className={styles.cardFooter}>
+                        <button
+                          type="button"
+                          className={styles.primaryButton}
+                          disabled={Boolean(saving["lite-gmail"])}
+                          onClick={() => void saveGlobalLiteConnection("gmail")}
+                        >
+                          {saving["lite-gmail"] ? "Saving..." : gmailLite ? "Update Gmail Lite" : "Enable Gmail Lite"}
+                        </button>
+                        {gmailLite ? (
+                          <button
+                            type="button"
+                            className={styles.dangerButton}
+                            disabled={Boolean(saving["lite-gmail"])}
+                            onClick={() => void removeGlobalLiteConnection("gmail")}
+                          >
+                            Remove
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div className={styles.liteBlock}>
+                      <div className={styles.liteHeader}>
+                        <div>
+                          <div className={styles.rowTitle}>Calendar Lite</div>
+                          <div className={styles.rowDescription}>
+                            {calendarLite
+                              ? describeGlobalLiteConnection(calendarLite)
+                              : "Paste a private ICS feed so ClawCloud can read agendas and availability without Calendar OAuth."}
+                          </div>
+                        </div>
+                        <span className={calendarLite ? styles.connectedBadge : styles.statusBadgeMuted}>
+                          {calendarLite ? "Lite connected" : "Ready"}
+                        </span>
+                      </div>
+                      <div className={styles.field}>
+                        <div className={styles.label}>Private ICS link</div>
+                        <input
+                          className={styles.input}
+                          value={calendarLiteIcsUrl}
+                          onChange={(event) => setCalendarLiteIcsUrl(event.target.value)}
+                          placeholder="https://calendar.google.com/calendar/ical/.../basic.ics"
+                        />
+                        <div className={styles.fieldHint}>
+                          Calendar Lite is read-only, but it is the strongest global fallback
+                          because it gives ClawCloud real schedule context today.
+                        </div>
+                      </div>
+                      <div className={styles.cardFooter}>
+                        <button
+                          type="button"
+                          className={styles.primaryButton}
+                          disabled={Boolean(saving["lite-google_calendar"])}
+                          onClick={() => void saveGlobalLiteConnection("google_calendar")}
+                        >
+                          {saving["lite-google_calendar"] ? "Saving..." : calendarLite ? "Update Calendar Lite" : "Enable Calendar Lite"}
+                        </button>
+                        {calendarLite ? (
+                          <button
+                            type="button"
+                            className={styles.dangerButton}
+                            disabled={Boolean(saving["lite-google_calendar"])}
+                            onClick={() => void removeGlobalLiteConnection("google_calendar")}
+                          >
+                            Remove
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div className={styles.liteBlock}>
+                      <div className={styles.liteHeader}>
+                        <div>
+                          <div className={styles.rowTitle}>Drive Lite</div>
+                          <div className={styles.rowDescription}>
+                            {driveLite
+                              ? describeGlobalLiteConnection(driveLite)
+                              : "Enable a document vault now so ClawCloud can organize uploads and shared docs whenever Drive OAuth is unavailable on this deployment."}
+                          </div>
+                        </div>
+                        <span className={driveLite ? styles.connectedBadge : styles.statusBadgeMuted}>
+                          {driveLite ? "Lite connected" : "Ready"}
+                        </span>
+                      </div>
+                      <div className={styles.field}>
+                        <div className={styles.label}>Vault label</div>
+                        <input
+                          className={styles.input}
+                          value={driveLiteLabel}
+                          onChange={(event) => setDriveLiteLabel(event.target.value)}
+                          placeholder="My ClawCloud document vault"
+                        />
+                        <div className={styles.fieldHint}>
+                          Drive Lite uses uploads and shared docs whenever full Google Drive OAuth is unavailable on this deployment.
+                        </div>
+                      </div>
+                      <div className={styles.cardFooter}>
+                        <button
+                          type="button"
+                          className={styles.primaryButton}
+                          disabled={Boolean(saving["lite-google_drive"])}
+                          onClick={() => void saveGlobalLiteConnection("google_drive")}
+                        >
+                          {saving["lite-google_drive"] ? "Saving..." : driveLite ? "Update Drive Lite" : "Enable Drive Lite"}
+                        </button>
+                        {driveLite ? (
+                          <button
+                            type="button"
+                            className={styles.dangerButton}
+                            disabled={Boolean(saving["lite-google_drive"])}
+                            onClick={() => void removeGlobalLiteConnection("google_drive")}
+                          >
+                            Remove
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             </div>
           ) : null}
@@ -588,32 +1055,99 @@ export function SettingsPage({ config }: SettingsPageProps) {
               <div className={styles.section}>
                 <div className={styles.sectionHead}>
                   <div className={styles.sectionTitle}>Danger zone</div>
-                  <div className={styles.sectionDescription}>Only real actions are active here. Anything not built is labeled honestly.</div>
+                  <div className={styles.sectionDescription}>These actions run against your live account data. Export excludes provider credentials, and account deletion is permanent.</div>
                 </div>
                 <div className={styles.card}>
                   <div className={styles.dangerRow}>
                     <div>
                       <div className={styles.rowTitle}>Disconnect all integrations</div>
-                      <div className={styles.rowDescription}>Revokes Google, WhatsApp, and Telegram access where connected.</div>
+                      <div className={styles.rowDescription}>Revokes Google tokens, disconnects your WhatsApp session, and unlinks Telegram where connected.</div>
                     </div>
-                    <button type="button" className={styles.dangerButton} disabled={Boolean(saving.disconnectAll)} onClick={() => void disconnectAll()}>
+                    <button
+                      type="button"
+                      className={styles.dangerButton}
+                      disabled={!supabase || Boolean(saving.disconnectAll)}
+                      onClick={() => void disconnectAll()}
+                    >
                       {saving.disconnectAll ? "Disconnecting..." : "Disconnect all"}
                     </button>
                   </div>
                   <div className={styles.dangerRow}>
                     <div>
                       <div className={styles.rowTitle}>Export my data</div>
-                      <div className={styles.rowDescription}>Not implemented yet. This button is intentionally honest.</div>
+                      <div className={styles.rowDescription}>Download your profile, automations, billing, approvals, memory, research, saved live-answer evidence trails, and WhatsApp workspace data as JSON.</div>
                     </div>
-                    <button type="button" className={styles.secondaryButton} onClick={() => showToast("Data export is not implemented yet.")}>Coming soon</button>
+                    <button
+                      type="button"
+                      className={styles.secondaryButton}
+                      disabled={!supabase || Boolean(saving.exportData)}
+                      onClick={() => void exportData()}
+                    >
+                      {saving.exportData ? "Preparing..." : "Download export"}
+                    </button>
                   </div>
                   <div className={styles.dangerRow}>
                     <div>
                       <div className={styles.rowTitle}>Delete account</div>
-                      <div className={styles.rowDescription}>Self-serve account deletion is not implemented yet.</div>
+                      <div className={styles.rowDescription}>Permanently deletes your ClawCloud account, connected sessions, research history, saved memory, and task data.</div>
                     </div>
-                    <button type="button" className={styles.primaryDangerButton} disabled>Not available yet</button>
+                    <button
+                      type="button"
+                      className={styles.primaryDangerButton}
+                      disabled={!supabase || Boolean(saving.deleteAccount)}
+                      onClick={() => {
+                        setDeleteConfirmOpen((current) => !current);
+                        setDeleteConfirmation("");
+                      }}
+                    >
+                      {deleteConfirmOpen ? "Cancel deletion" : "Delete account"}
+                    </button>
                   </div>
+
+                  {deleteConfirmOpen ? (
+                    <div className={styles.confirmBox}>
+                      <div className={styles.confirmTitle}>Delete account permanently</div>
+                      <div className={styles.confirmDescription}>
+                        This permanently removes your ClawCloud account and disconnects your active integrations. Type {deleteConfirmationTarget} below to confirm.
+                      </div>
+                      <div className={styles.field}>
+                        <div className={styles.label}>Confirmation</div>
+                        <input
+                          className={styles.input}
+                          value={deleteConfirmation}
+                          onChange={(event) => setDeleteConfirmation(event.target.value)}
+                          placeholder={deleteConfirmationTarget}
+                          autoComplete="off"
+                        />
+                        <div className={styles.fieldHint}>
+                          If your sign-in email changes, this target updates automatically to match the current account.
+                        </div>
+                      </div>
+                      <div className={styles.confirmButtons}>
+                        <button
+                          type="button"
+                          className={styles.secondaryButton}
+                          onClick={() => {
+                            setDeleteConfirmOpen(false);
+                            setDeleteConfirmation("");
+                          }}
+                        >
+                          Keep account
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.primaryDangerButton}
+                          disabled={
+                            Boolean(saving.deleteAccount)
+                            || deleteConfirmation.trim() !== deleteConfirmationTarget
+                          }
+                          onClick={() => void deleteAccount()}
+                        >
+                          {saving.deleteAccount ? "Deleting..." : "Delete permanently"}
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </div>

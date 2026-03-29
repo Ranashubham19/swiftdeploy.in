@@ -1,12 +1,20 @@
+import { upsertAnalyticsDaily } from "@/lib/clawcloud-analytics";
+import { completeClawCloudPrompt } from "@/lib/clawcloud-ai";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 import { getUserLocale, translateMessage } from "@/lib/clawcloud-i18n";
+import { parseOutboundReviewDecision } from "@/lib/clawcloud-outbound-review";
 import { sendClawCloudWhatsAppToPhone } from "@/lib/clawcloud-whatsapp";
+import {
+  ensureWhatsAppOutboundMessage,
+  transitionWhatsAppOutboundMessage,
+} from "@/lib/clawcloud-whatsapp-outbound";
 import {
   markLatestWhatsAppThreadState,
   writeWhatsAppAuditLog,
 } from "@/lib/clawcloud-whatsapp-control";
 import type {
   WhatsAppContactPriority,
+  WhatsAppOutboundSource,
   WhatsAppReplyApproval,
   WhatsAppSensitivity,
 } from "@/lib/clawcloud-whatsapp-workspace-types";
@@ -28,6 +36,66 @@ type QueueWhatsAppReplyApprovalInput = {
 
 function shortId(id: string) {
   return id.slice(0, 8);
+}
+
+function getApprovalGroupId(approval: WhatsAppReplyApproval) {
+  const candidate = approval.metadata?.approval_group_id;
+  return typeof candidate === "string" && candidate.trim()
+    ? candidate.trim()
+    : approval.id;
+}
+
+function getApprovalConfirmationMode(approval: WhatsAppReplyApproval) {
+  const candidate = approval.metadata?.confirmation_mode;
+  return candidate === "broadcast_explicit" ? "broadcast_explicit" : "always";
+}
+
+function requiresExplicitBroadcastConfirmation(approval: WhatsAppReplyApproval) {
+  return getApprovalConfirmationMode(approval) === "broadcast_explicit";
+}
+
+function getApprovalOutboundSource(metadata: Record<string, unknown> | null | undefined): WhatsAppOutboundSource {
+  const workflowRunId = typeof metadata?.workflow_run_id === "string" ? metadata.workflow_run_id.trim() : "";
+  if (workflowRunId) {
+    return "workflow";
+  }
+
+  return metadata?.approval_origin === "send_command"
+    ? "direct_command"
+    : "approval";
+}
+
+function looksLikeExplicitBroadcastApproval(message: string) {
+  const normalized = message.trim().replace(/\s+/g, " ").toLowerCase();
+  return /^(?:yes|okay|ok|confirm|approve|send)\b/.test(normalized)
+    && /\b(?:all|everyone|broadcast)\b/.test(normalized);
+}
+
+function buildWhatsAppDraftRewritePrompt(
+  draftReply: string,
+  who: string,
+  feedback: string | null,
+) {
+  return completeClawCloudPrompt({
+    system: [
+      "You rewrite WhatsApp messages so they sound polished, natural, and professional.",
+      "Return only the updated WhatsApp message text.",
+      "Preserve the original intent, facts, names, and promised actions.",
+      "Keep the language choice and relationship cues from the current draft.",
+      "If the user gives revision feedback, follow it closely.",
+      "Do not add placeholders or explanations.",
+    ].join("\n"),
+    user: [
+      `Recipient: ${who}`,
+      `Current draft:\n${draftReply}`,
+      feedback
+        ? `Revision request: ${feedback}`
+        : "Revision request: Rewrite this to sound more polished, accurate, and professional while keeping the same meaning.",
+    ].join("\n\n"),
+    intent: "send_message",
+    maxTokens: 220,
+    fallback: draftReply,
+  });
 }
 
 async function findApprovalByShortId(userId: string, candidateId: string) {
@@ -88,8 +156,53 @@ export async function listWhatsAppReplyApprovals(userId: string, limit = 50) {
   return (data ?? []) as WhatsAppReplyApproval[];
 }
 
+export async function getLatestPendingWhatsAppApprovalGroup(userId: string) {
+  const approvals = (await listWhatsAppReplyApprovals(userId, 100))
+    .filter((approval) => approval.status === "pending");
+  const latest = approvals[0] ?? null;
+  if (!latest) {
+    return null;
+  }
+
+  const groupId = getApprovalGroupId(latest);
+  const grouped = approvals
+    .filter((approval) => getApprovalGroupId(approval) === groupId)
+    .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at));
+
+  return {
+    groupId,
+    approvals: grouped,
+    latestCreatedAt: latest.created_at,
+  };
+}
+
+async function updateWhatsAppApprovalDrafts(
+  approvalIds: string[],
+  draftReply: string,
+) {
+  const supabaseAdmin = getClawCloudSupabaseAdmin();
+  const { data, error } = await supabaseAdmin
+    .from("whatsapp_reply_approvals")
+    .update({
+      draft_reply: draftReply,
+      updated_at: new Date().toISOString(),
+    })
+    .in("id", approvalIds)
+    .select("*");
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []) as WhatsAppReplyApproval[];
+}
+
 export async function queueWhatsAppReplyApproval(input: QueueWhatsAppReplyApprovalInput) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
+  const metadata = {
+    ...(input.metadata ?? {}),
+    sensitivity: input.sensitivity,
+  };
   const { data, error } = await supabaseAdmin
     .from("whatsapp_reply_approvals")
     .insert({
@@ -103,7 +216,7 @@ export async function queueWhatsAppReplyApproval(input: QueueWhatsAppReplyApprov
       sensitivity: input.sensitivity,
       confidence: input.confidence,
       reason: input.reason,
-      metadata: input.metadata ?? {},
+      metadata,
     })
     .select("*")
     .single();
@@ -111,6 +224,24 @@ export async function queueWhatsAppReplyApproval(input: QueueWhatsAppReplyApprov
   if (error) {
     throw new Error(error.message);
   }
+
+  const approval = data as WhatsAppReplyApproval;
+
+  await ensureWhatsAppOutboundMessage({
+    userId: input.userId,
+    source: getApprovalOutboundSource(approval.metadata),
+    approvalId: approval.id,
+    workflowRunId:
+      typeof approval.metadata?.workflow_run_id === "string"
+        ? approval.metadata.workflow_run_id
+        : null,
+    remoteJid: input.remoteJid,
+    remotePhone: input.remotePhone,
+    contactName: input.contactName,
+    messageText: input.draftReply,
+    status: "approval_required",
+    metadata,
+  }).catch(() => null);
 
   await markLatestWhatsAppThreadState({
     userId: input.userId,
@@ -141,7 +272,7 @@ export async function queueWhatsAppReplyApproval(input: QueueWhatsAppReplyApprov
     },
   }).catch(() => null);
 
-  return data as WhatsAppReplyApproval;
+  return approval;
 }
 
 export async function updateWhatsAppReplyApproval(
@@ -174,6 +305,22 @@ export async function updateWhatsAppReplyApproval(
   }
 
   if (input.action === "skip") {
+    const outbound = await ensureWhatsAppOutboundMessage({
+      userId,
+      source: getApprovalOutboundSource(approval.metadata),
+      approvalId: approval.id,
+      workflowRunId:
+        typeof approval.metadata?.workflow_run_id === "string"
+          ? approval.metadata.workflow_run_id
+          : null,
+      remoteJid: approval.remote_jid,
+      remotePhone: approval.remote_phone,
+      contactName: approval.contact_name,
+      messageText: approval.draft_reply,
+      status: "approval_required",
+      metadata: approval.metadata ?? {},
+    }).catch(() => null);
+
     const { data: updated, error: updateError } = await supabaseAdmin
       .from("whatsapp_reply_approvals")
       .update({
@@ -212,15 +359,82 @@ export async function updateWhatsAppReplyApproval(
     }).catch(() => null);
 
     await syncWorkflowRunFromApproval(userId, approval, "skip").catch(() => null);
+    if (outbound) {
+      await transitionWhatsAppOutboundMessage({
+        userId,
+        outboundMessageId: outbound.id,
+        nextStatus: "skipped",
+        metadata: {
+          approval_id: approval.id,
+          skipped_via: "approval_review",
+        },
+      }).catch(() => null);
+    }
 
     return updated as WhatsAppReplyApproval;
   }
 
   const draftReply = input.draftReply?.trim() || approval.draft_reply;
+  const outbound = await ensureWhatsAppOutboundMessage({
+    userId,
+    source: getApprovalOutboundSource(approval.metadata),
+    approvalId: approval.id,
+    workflowRunId:
+      typeof approval.metadata?.workflow_run_id === "string"
+        ? approval.metadata.workflow_run_id
+        : null,
+    remoteJid: approval.remote_jid,
+    remotePhone: approval.remote_phone,
+    contactName: approval.contact_name,
+    messageText: draftReply,
+    status: "approval_required",
+    metadata: {
+      ...(approval.metadata ?? {}),
+      sensitivity: approval.sensitivity,
+    },
+  }).catch(() => null);
+
+  if (outbound) {
+    await transitionWhatsAppOutboundMessage({
+      userId,
+      outboundMessageId: outbound.id,
+      nextStatus: "approved",
+      metadata: {
+        approval_id: approval.id,
+        edited_before_send: draftReply !== approval.draft_reply,
+      },
+    }).catch(() => null);
+  }
+
   await sendClawCloudWhatsAppToPhone(approval.remote_phone, draftReply, {
     userId,
     contactName: approval.contact_name,
     jid: approval.remote_jid,
+    source: outbound?.source ?? getApprovalOutboundSource(approval.metadata),
+    approvalId: approval.id,
+    workflowRunId:
+      typeof approval.metadata?.workflow_run_id === "string"
+        ? approval.metadata.workflow_run_id
+        : null,
+    idempotencyKey: outbound?.idempotency_key ?? null,
+    metadata: {
+      ...(approval.metadata ?? {}),
+      sensitivity: approval.sensitivity,
+      edited_before_send: draftReply !== approval.draft_reply,
+    },
+  }).catch(async (error) => {
+    if (outbound) {
+      await transitionWhatsAppOutboundMessage({
+        userId,
+        outboundMessageId: outbound.id,
+        nextStatus: "failed",
+        errorMessage: error instanceof Error ? error.message : "Failed to send approved WhatsApp reply.",
+        metadata: {
+          approval_id: approval.id,
+        },
+      }).catch(() => null);
+    }
+    throw error;
   });
 
   const nextStatus = draftReply === approval.draft_reply ? "sent" : "edited";
@@ -269,8 +483,92 @@ export async function updateWhatsAppReplyApproval(
   return updated as WhatsAppReplyApproval;
 }
 
-export async function handleWhatsAppApprovalCommand(userId: string, message: string) {
+export async function handleLatestWhatsAppApprovalReview(userId: string, message: string) {
+  const decision = parseOutboundReviewDecision(message);
+  if (decision.kind === "none") {
+    return { handled: false, response: "", createdAt: null as string | null };
+  }
+
   const locale = await getUserLocale(userId);
+
+  const group = await getLatestPendingWhatsAppApprovalGroup(userId);
+  if (!group || !group.approvals.length) {
+    return { handled: false, response: "", createdAt: null as string | null };
+  }
+
+  const primary = group.approvals[0]!;
+  const label = group.approvals.length === 1
+    ? primary.contact_name || primary.remote_phone || "that contact"
+    : `${group.approvals.length} contacts`;
+  const requiresBroadcastPhrase = group.approvals.some(requiresExplicitBroadcastConfirmation);
+
+  if (decision.kind === "cancel") {
+    for (const approval of group.approvals) {
+      await updateWhatsAppReplyApproval(userId, approval.id, { action: "skip" });
+    }
+
+    return {
+      handled: true,
+      response: await translateMessage(
+        `Okay, I won't send that WhatsApp draft to ${label}.`,
+        locale,
+      ),
+      createdAt: group.latestCreatedAt,
+    };
+  }
+
+  if (decision.kind === "rewrite") {
+    const rewritten = await buildWhatsAppDraftRewritePrompt(
+      primary.draft_reply,
+      label,
+      decision.feedback,
+    );
+    const updatedApprovals = await updateWhatsAppApprovalDrafts(
+      group.approvals.map((approval) => approval.id),
+      rewritten.trim() || primary.draft_reply,
+    );
+    const previewApproval = updatedApprovals[0] ?? primary;
+    return {
+      handled: true,
+      response: await translateMessage(buildWhatsAppApprovalReviewReply(previewApproval, updatedApprovals.length || group.approvals.length), locale),
+      createdAt: group.latestCreatedAt,
+    };
+  }
+
+  if (decision.kind === "approve" && requiresBroadcastPhrase && !looksLikeExplicitBroadcastApproval(message)) {
+    return {
+      handled: true,
+      response: await translateMessage(
+        [
+          `For safety, this WhatsApp draft targets ${group.approvals.length} contacts.`,
+          "",
+          "Reply `Yes, send to all` to confirm the broadcast, `No` to cancel, or `Rewrite it ...` to change the draft.",
+        ].join("\n"),
+        locale,
+      ),
+      createdAt: group.latestCreatedAt,
+    };
+  }
+
+  for (const approval of group.approvals) {
+    await updateWhatsAppReplyApproval(userId, approval.id, { action: "send" });
+  }
+  await upsertAnalyticsDaily(userId, {
+    tasks_run: 1,
+    wa_messages_sent: group.approvals.length,
+  }).catch(() => null);
+
+  return {
+    handled: true,
+    response: await translateMessage(
+      `Sent the approved WhatsApp ${group.approvals.length === 1 ? "message" : "messages"} to ${label}.`,
+      locale,
+    ),
+    createdAt: group.latestCreatedAt,
+  };
+}
+
+export async function handleWhatsAppApprovalCommand(userId: string, message: string) {
   const sendMatch = message.match(/^WSEND\s+([a-f0-9-]{6,})/i);
   const editMatch = message.match(/^WEDIT\s+([a-f0-9-]{6,})\s+([\s\S]+)/i);
   const skipMatch = message.match(/^WSKIP\s+([a-f0-9-]{6,})/i);
@@ -278,6 +576,8 @@ export async function handleWhatsAppApprovalCommand(userId: string, message: str
   if (!sendMatch && !editMatch && !skipMatch) {
     return { handled: false, response: "" };
   }
+
+  const locale = await getUserLocale(userId);
 
   const approval = await findApprovalByShortId(
     userId,
@@ -320,8 +620,71 @@ export async function handleWhatsAppApprovalCommand(userId: string, message: str
   };
 }
 
+export function buildWhatsAppApprovalReviewReply(approval: WhatsAppReplyApproval, recipientCount = 1) {
+  const who = recipientCount === 1
+    ? approval.contact_name || approval.remote_phone || "contact"
+    : `${recipientCount} contacts`;
+  const explicitBroadcast = requiresExplicitBroadcastConfirmation(approval);
+  return [
+    `📲 *WhatsApp draft ready for review: ${who}*`,
+    "",
+    `*Context:* ${approval.source_message.slice(0, 180)}`,
+    "",
+    "*Draft:*",
+    approval.draft_reply.slice(0, 260),
+    "",
+    explicitBroadcast ? "Should I send this to all now?" : "Should I send this now?",
+    ...(explicitBroadcast
+      ? [
+        `*Safety:* This is a broadcast-style draft for ${recipientCount} contacts.`,
+        "Reply `Yes, send to all` to confirm, `No` to cancel, or `Rewrite it ...` to refine it.",
+      ]
+      : [
+        "Reply `Yes` to confirm, `No` to cancel, or `Rewrite it ...` to refine it.",
+      ]),
+    `Power option: \`WSEND ${shortId(approval.id)}\`, \`WEDIT ${shortId(approval.id)} your new reply\`, \`WSKIP ${shortId(approval.id)}\``,
+  ].join("\n");
+}
+
+export function buildWhatsAppApprovalContextReply(
+  approval: WhatsAppReplyApproval,
+  kind: "review" | "explain" | "target",
+  recipientCount = 1,
+) {
+  const who = recipientCount === 1
+    ? approval.contact_name || approval.remote_phone || "that contact"
+    : `${recipientCount} contacts`;
+  const explicitBroadcast = requiresExplicitBroadcastConfirmation(approval);
+  const confirmLine = explicitBroadcast
+    ? "Reply `Yes, send to all` to confirm, `No` to cancel, or `Rewrite it ...` to change the draft."
+    : "Reply `Yes` to confirm, `No` to cancel, or `Rewrite it ...` to change the draft.";
+
+  if (kind === "review") {
+    return buildWhatsAppApprovalReviewReply(approval, recipientCount);
+  }
+
+  if (kind === "target") {
+    return [
+      `This pending WhatsApp draft is for *${who}*.`,
+      `*Context:* ${approval.source_message.slice(0, 180)}`,
+      explicitBroadcast
+        ? `*Safety:* This is a broadcast-style draft for ${recipientCount} contacts.`
+        : null,
+      confirmLine,
+    ].filter(Boolean).join("\n\n");
+  }
+
+  return [
+    `This WhatsApp draft is waiting because ClawCloud needs approval before sending it${explicitBroadcast ? " to all recipients" : ""}.`,
+    approval.reason ? `*Reason:* ${approval.reason}` : null,
+    `*Target:* ${who}`,
+    confirmLine,
+  ].filter(Boolean).join("\n\n");
+}
+
 export function buildWhatsAppApprovalNotice(approval: WhatsAppReplyApproval) {
   const who = approval.contact_name || approval.remote_phone || "contact";
+  const explicitBroadcast = requiresExplicitBroadcastConfirmation(approval);
   return [
     `📲 *Reply waiting for approval: ${who}*`,
     "",
@@ -330,6 +693,12 @@ export function buildWhatsAppApprovalNotice(approval: WhatsAppReplyApproval) {
     "*Suggested reply:*",
     approval.draft_reply.slice(0, 260),
     "",
+    ...(explicitBroadcast
+      ? [
+        `*Safety:* This broadcast draft needs explicit confirmation.`,
+        "Reply `Yes, send to all` to confirm in chat, or use the power option below after checking the recipient list.",
+      ]
+      : []),
     `Use \`WSEND ${shortId(approval.id)}\` to send`,
     `Use \`WEDIT ${shortId(approval.id)} your new reply\` to edit and send`,
     `Use \`WSKIP ${shortId(approval.id)}\` to ignore`,

@@ -1,8 +1,7 @@
 export type WhatsAppAutomationMode =
   | "read_only"
   | "suggest_only"
-  | "approve_before_send"
-  | "auto_reply";
+  | "approve_before_send";
 
 export type WhatsAppReplyMode =
   | "balanced"
@@ -40,6 +39,27 @@ export type WhatsAppApprovalState =
   | "blocked";
 
 export type WhatsAppReplyApprovalStatus = "pending" | "sent" | "skipped" | "edited";
+
+export type WhatsAppOutboundSource =
+  | "approval"
+  | "workflow"
+  | "direct_command"
+  | "assistant_reply"
+  | "system"
+  | "api_send";
+
+export type WhatsAppOutboundStatus =
+  | "drafted"
+  | "queued"
+  | "approval_required"
+  | "approved"
+  | "retrying"
+  | "sent"
+  | "delivered"
+  | "read"
+  | "failed"
+  | "skipped"
+  | "cancelled";
 
 export type WhatsAppSettings = {
   automationMode: WhatsAppAutomationMode;
@@ -110,6 +130,32 @@ export type WhatsAppWorkflowRun = {
   updated_at: string | null;
 };
 
+export type WhatsAppOutboundMessage = {
+  id: string;
+  user_id: string;
+  source: WhatsAppOutboundSource;
+  approval_id: string | null;
+  workflow_run_id: string | null;
+  remote_jid: string | null;
+  remote_phone: string | null;
+  contact_name: string | null;
+  message_text: string;
+  idempotency_key: string;
+  status: WhatsAppOutboundStatus;
+  attempt_count: number;
+  wa_message_ids: string[];
+  queued_at: string;
+  approved_at: string | null;
+  sent_at: string | null;
+  delivered_at: string | null;
+  read_at: string | null;
+  failed_at: string | null;
+  error_message: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string | null;
+};
+
 export type WhatsAppAuditEntry = {
   id: string;
   event_type: string;
@@ -128,6 +174,7 @@ export type WhatsAppExportBundle = {
   settings: WhatsAppSettings;
   contacts: WhatsAppInboxContact[];
   approvals: WhatsAppReplyApproval[];
+  outbound_messages: WhatsAppOutboundMessage[];
   workflows: WhatsAppWorkflow[];
   workflow_runs: WhatsAppWorkflowRun[];
   history: WhatsAppHistoryEntry[];
@@ -206,11 +253,11 @@ export type WhatsAppInboxSummary = {
 };
 
 export const defaultWhatsAppSettings: WhatsAppSettings = {
-  automationMode: "auto_reply",
+  automationMode: "read_only",
   replyMode: "balanced",
-  groupReplyMode: "mention_only",
+  groupReplyMode: "never",
   requireApprovalForSensitive: true,
-  allowGroupReplies: true,
+  allowGroupReplies: false,
   allowDirectSendCommands: true,
   requireApprovalForNewContacts: true,
   requireApprovalForFirstOutreach: true,

@@ -1,7 +1,12 @@
+import { matchesWholeAlias } from "@/lib/clawcloud-intent-match";
+import { looksLikeCurrentAffairsQuestion } from "@/lib/clawcloud-current-affairs";
+import { inferClawCloudRegionContext, normalizeRegionalQuestion } from "@/lib/clawcloud-region-context";
+
 const FETCH_TIMEOUT_MS = 8_000;
 const YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote";
 const COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3";
 const EXCHANGE_RATE_BASE_URL = "https://open.er-api.com/v6/latest";
+const TROY_OUNCE_TO_GRAMS = 31.1034768;
 
 export type FinanceResult = {
   symbol: string;
@@ -9,6 +14,9 @@ export type FinanceResult = {
   price: number;
   currency: string;
   secondaryPrices?: Array<{ currency: string; price: number }>;
+  regionalNotes?: string[];
+  conversionRate?: { from: string; to: string; rate: number } | null;
+  displayTimeZone?: string;
   change: number;
   changePct: number;
   high24h?: number;
@@ -31,6 +39,7 @@ type FinanceQueryType =
 type FinanceQuery = {
   type: FinanceQueryType;
   query: string;
+  forexPair?: [string, string];
 };
 
 const CRYPTO_IDS: Record<string, string> = {
@@ -117,6 +126,21 @@ const FOREX_PAIRS: Record<string, [string, string]> = {
   "cad to inr": ["CAD", "INR"],
 };
 
+const FOREX_CURRENCY_ALIASES: Array<{ currency: string; aliases: string[] }> = [
+  { currency: "USD", aliases: ["usd", "us dollar", "us dollars", "dollar", "dollars", "$"] },
+  { currency: "INR", aliases: ["inr", "indian rupee", "indian rupees", "rupee", "rupees", "rs", "rs.", "₹"] },
+  { currency: "EUR", aliases: ["eur", "euro", "euros", "€"] },
+  { currency: "GBP", aliases: ["gbp", "pound", "pounds", "sterling", "£"] },
+  { currency: "AED", aliases: ["aed", "dirham", "dirhams", "dhs", "dh"] },
+  { currency: "JPY", aliases: ["jpy", "yen", "¥"] },
+  { currency: "SGD", aliases: ["sgd", "singapore dollar", "singapore dollars"] },
+  { currency: "AUD", aliases: ["aud", "australian dollar", "australian dollars"] },
+  { currency: "CAD", aliases: ["cad", "canadian dollar", "canadian dollars"] },
+  { currency: "CNY", aliases: ["cny", "yuan", "renminbi"] },
+  { currency: "SAR", aliases: ["sar", "riyal", "riyals"] },
+  { currency: "ILS", aliases: ["ils", "shekel", "shekels"] },
+];
+
 const COMMODITY_SYMBOLS: Record<string, string> = {
   gold: "GC=F",
   "gold price": "GC=F",
@@ -160,52 +184,160 @@ const US_STOCK_ALIASES: Record<string, string> = {
 function hasPriceSignal(question: string) {
   return (
     /\b(price|rate|value|worth|cost|trading|nav|market cap|how much is|what is .{0,40} (worth|value|price|rate)|today|current|live|now)\b/i.test(question)
-    || /\b(usd|inr|eur|gbp|dollar|rupee|euro|pound)\b/i.test(question)
+    || /\b(usd|inr|eur|gbp|aed|jpy|cad|aud|sgd|cny|sar|ils|dollar|rupee|euro|pound|dirham|yen|yuan|riyal|shekel)\b/i.test(question)
   );
 }
 
+function hasCommodityMarketSignal(question: string) {
+  const normalized = question.toLowerCase();
+  const hasPreciousMetalTerm = /\b(gold|silver)\b/i.test(normalized);
+  const hasOilTerm = /\b(crude oil|oil|brent|wti)\b/i.test(normalized);
+  const hasPreciousMetalContext = /\b(price|rate|value|worth|cost|per|gram|10g|tola|ounce|mcx|comex|spot|futures?|today|current|live|now)\b/i.test(normalized);
+  const hasOilContext = /\b(price|rate|value|worth|cost|barrel|per barrel|brent|wti|spot|futures?|market|today|current|live|now)\b/i.test(normalized);
+
+  return (hasPreciousMetalTerm && hasPreciousMetalContext) || (hasOilTerm && hasOilContext);
+}
+
+function looksLikeCurrentAffairsCommodityNarrative(question: string) {
+  const normalized = normalizeRegionalQuestion(question).toLowerCase().trim();
+  if (!/\b(oil|crude oil|fuel|gas|diesel|petrol|tanker|vessel|shipment|cargo|port)\b/i.test(normalized)) {
+    return false;
+  }
+
+  if (/\b(stock|share|ticker|symbol|market cap|trading|exchange rate|forex|crypto|bitcoin|ethereum|nasdaq|nyse|sensex|nifty)\b/i.test(normalized)) {
+    return false;
+  }
+
+  return looksLikeCurrentAffairsQuestion(normalized);
+}
+
+type ForexCurrencyMention = {
+  currency: string;
+  index: number;
+};
+
+function extractForexCurrencyMentions(question: string): ForexCurrencyMention[] {
+  const normalized = normalizeRegionalQuestion(question).toLowerCase();
+  const mentions: ForexCurrencyMention[] = [];
+
+  for (const definition of FOREX_CURRENCY_ALIASES) {
+    for (const alias of definition.aliases) {
+      const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+      const matcher = new RegExp(`(^|[^\\p{L}\\p{N}])(${escaped})(?=$|[^\\p{L}\\p{N}])`, "giu");
+      let match: RegExpExecArray | null;
+      while ((match = matcher.exec(normalized)) !== null) {
+        mentions.push({
+          currency: definition.currency,
+          index: match.index + (match[1]?.length ?? 0),
+        });
+      }
+    }
+  }
+
+  return mentions
+    .sort((left, right) => left.index - right.index)
+    .filter((entry, index, list) =>
+      list.findIndex((candidate) => candidate.currency === entry.currency && candidate.index === entry.index) === index,
+    );
+}
+
+function resolveForexPair(question: string): [string, string] | null {
+  const normalized = normalizeRegionalQuestion(question).toLowerCase().trim();
+
+  for (const [label, pair] of Object.entries(FOREX_PAIRS)) {
+    if (matchesWholeAlias(normalized, label)) {
+      return pair;
+    }
+  }
+
+  const hasForexIntent =
+    /\b(exchange rate|forex|currency|convert|conversion|rate|value|worth|how much|price|per)\b/i.test(normalized)
+    || /\b(usd|inr|eur|gbp|aed|jpy|cad|aud|sgd|cny|sar|ils|dollar|rupee|euro|pound|dirham|yen|yuan|riyal|shekel)\b/i.test(normalized);
+  if (!hasForexIntent) {
+    return null;
+  }
+
+  const mentions = extractForexCurrencyMentions(normalized);
+  const uniqueCurrencies = mentions
+    .map((entry) => entry.currency)
+    .filter((currency, index, list) => list.indexOf(currency) === index);
+
+  if (uniqueCurrencies.length < 2) {
+    return null;
+  }
+
+  const firstMention = mentions.find((entry) => entry.currency === uniqueCurrencies[0]);
+  const secondMention = mentions.find((entry) => entry.currency === uniqueCurrencies[1]);
+  if (!firstMention || !secondMention) {
+    return null;
+  }
+
+  const bridge = normalized.slice(firstMention.index, secondMention.index + 12);
+  if (!/\b(to|in|into|against|versus|vs|per|rate|price|value|worth|convert|conversion)\b/i.test(bridge)) {
+    return null;
+  }
+
+  return [uniqueCurrencies[0], uniqueCurrencies[1]];
+}
+
 export function detectFinanceQuery(question: string): FinanceQuery | null {
-  const lower = question.toLowerCase().trim();
+  const lower = normalizeRegionalQuestion(question).toLowerCase().trim();
+  const hasLeadershipSignal = /\b(ceo|cto|cfo|founder|president|prime minister|director|chair(?:man|person|woman)|leadership|who is|who was|who leads)\b/i.test(lower);
+  const hasExplicitFinanceSignal =
+    /\b(price|share|stock|market cap|ticker|symbol|trading|nav|exchange rate|forex|crypto|bitcoin|ethereum|nasdaq|nyse|nse|bse|sensex|nifty|usd|inr|eur|gbp|aed|jpy|cad|aud|sgd|cny|sar|ils|dollar|rupee|euro|pound|dirham|yen|yuan|riyal|shekel)\b/i.test(lower)
+    || hasCommodityMarketSignal(lower);
+
+  if (hasLeadershipSignal && !hasExplicitFinanceSignal) {
+    return null;
+  }
+
+  if (looksLikeCurrentAffairsCommodityNarrative(lower)) {
+    return null;
+  }
 
   if (
     !hasPriceSignal(lower)
-    && !/\b(stock|share|crypto|bitcoin|ethereum|forex|exchange rate|sensex|nifty|nasdaq|dow|gold|silver|oil)\b/i.test(lower)
+    && !/\b(stock|share|crypto|bitcoin|ethereum|forex|exchange rate|sensex|nifty|nasdaq|dow)\b/i.test(lower)
+    && !hasCommodityMarketSignal(lower)
   ) {
     return null;
   }
 
   for (const [name] of Object.entries(INDEX_SYMBOLS)) {
-    if (lower.includes(name)) {
+    if (matchesWholeAlias(lower, name)) {
       return { type: "index", query: name };
     }
   }
 
   for (const name of Object.keys(CRYPTO_IDS)) {
-    if (lower.includes(name)) {
+    if (matchesWholeAlias(lower, name)) {
       return { type: "crypto", query: name };
     }
   }
 
-  for (const pair of Object.keys(FOREX_PAIRS)) {
-    if (lower.includes(pair)) {
-      return { type: "forex", query: pair };
-    }
+  const forexPair = resolveForexPair(lower);
+  if (forexPair) {
+    return {
+      type: "forex",
+      query: `${forexPair[0]} to ${forexPair[1]}`,
+      forexPair,
+    };
   }
 
   for (const [name] of Object.entries(COMMODITY_SYMBOLS)) {
-    if (lower.includes(name)) {
+    if (matchesWholeAlias(lower, name)) {
       return { type: "commodity", query: name };
     }
   }
 
   for (const [name, symbol] of Object.entries(INDIA_STOCK_ALIASES)) {
-    if (lower.includes(name)) {
+    if (matchesWholeAlias(lower, name)) {
       return { type: "stock_india", query: symbol };
     }
   }
 
   for (const [name, symbol] of Object.entries(US_STOCK_ALIASES)) {
-    if (lower.includes(name)) {
+    if (matchesWholeAlias(lower, name)) {
       return { type: "stock_us", query: symbol };
     }
   }
@@ -399,7 +531,7 @@ function expandIndianStockSymbols(symbol: string): string[] {
 
 async function coinGeckoPrice(
   coinId: string,
-  preferredCurrency: "usd" | "inr" = "usd",
+  preferredCurrency = "usd",
 ): Promise<FinanceResult | null> {
   try {
     const response = await fetchWithTimeout(
@@ -434,19 +566,35 @@ async function coinGeckoPrice(
       return null;
     }
 
+    const normalizedPreferredCurrency = preferredCurrency.toLowerCase();
     const fallbackCurrency = marketData.current_price.usd != null ? "usd" : "inr";
-    const key = marketData.current_price[preferredCurrency] != null
-      ? preferredCurrency
+    const key = marketData.current_price[normalizedPreferredCurrency] != null
+      ? normalizedPreferredCurrency
       : fallbackCurrency;
     const currency = key.toUpperCase();
-    const secondaryPrices = [
-      marketData.current_price.usd != null
-        ? { currency: "USD", price: marketData.current_price.usd }
-        : null,
-      marketData.current_price.inr != null
-        ? { currency: "INR", price: marketData.current_price.inr }
-        : null,
-    ].filter((entry): entry is { currency: string; price: number } => Boolean(entry))
+    const secondaryPriceEntries = [
+      key,
+      "usd",
+      "inr",
+      "aed",
+      "jpy",
+      "eur",
+      "gbp",
+      "sgd",
+      "aud",
+      "cad",
+      "cny",
+      "sar",
+      "ils",
+    ];
+    const secondaryPrices = [...new Set(secondaryPriceEntries)]
+      .map((entry) => {
+        const value = marketData.current_price?.[entry];
+        return typeof value === "number"
+          ? { currency: entry.toUpperCase(), price: value }
+          : null;
+      })
+      .filter((entry): entry is { currency: string; price: number } => Boolean(entry))
       .filter((entry) => entry.currency !== currency);
 
     return {
@@ -502,13 +650,234 @@ async function fetchForexRate(from: string, to: string): Promise<FinanceResult |
   }
 }
 
+function dedupeSecondaryPrices(prices: Array<{ currency: string; price: number }>) {
+  const seen = new Set<string>();
+  const deduped: Array<{ currency: string; price: number }> = [];
+
+  for (const price of prices) {
+    const currency = price.currency.toUpperCase();
+    if (seen.has(currency)) {
+      continue;
+    }
+
+    seen.add(currency);
+    deduped.push({ currency, price: price.price });
+  }
+
+  return deduped;
+}
+
+async function convertFinanceResultCurrency(
+  result: FinanceResult,
+  targetCurrency: string,
+): Promise<FinanceResult | null> {
+  const normalizedTargetCurrency = targetCurrency.toUpperCase();
+  if (normalizedTargetCurrency === result.currency.toUpperCase()) {
+    return result;
+  }
+
+  const forex = await fetchForexRate(result.currency.toUpperCase(), normalizedTargetCurrency);
+  if (!forex?.price) {
+    return null;
+  }
+
+  return {
+    ...result,
+    price: result.price * forex.price,
+    currency: normalizedTargetCurrency,
+    secondaryPrices: dedupeSecondaryPrices([
+      { currency: result.currency.toUpperCase(), price: result.price },
+      ...(result.secondaryPrices ?? []),
+    ]),
+    conversionRate: {
+      from: result.currency.toUpperCase(),
+      to: normalizedTargetCurrency,
+      rate: forex.price,
+    },
+    change: result.change * forex.price,
+    high24h: result.high24h != null ? result.high24h * forex.price : undefined,
+    low24h: result.low24h != null ? result.low24h * forex.price : undefined,
+    marketCap: result.marketCap != null ? result.marketCap * forex.price : undefined,
+    source: `${result.source} + ${forex.source}`,
+  };
+}
+
+function buildRegionalCommodityNotes(
+  result: FinanceResult,
+  symbol: string,
+  requestedCountryName?: string,
+  goldDisplayUnit?: "gram" | "10g",
+) {
+  const normalizedSymbol = symbol.toUpperCase();
+  const currencySymbol = symbolForCurrency(result.currency);
+  const notes: string[] = [];
+
+  if (normalizedSymbol === "GC=F") {
+    const pricePerGram = result.price / TROY_OUNCE_TO_GRAMS;
+    if (goldDisplayUnit === "10g") {
+      notes.push(`Approx local gold rate: ${currencySymbol}${formatNumber(pricePerGram * 10, result.currency)} per 10g`);
+    } else {
+      notes.push(`Approx local gold rate: ${currencySymbol}${formatNumber(pricePerGram, result.currency)} per gram`);
+    }
+
+    if (requestedCountryName) {
+      notes.push(`Localized for ${requestedCountryName} using live FX conversion from the international gold futures quote.`);
+    }
+    notes.push("Reference basis: international gold futures, not local jewellery retail quotes.");
+  }
+
+  if (normalizedSymbol === "SI=F") {
+    const pricePerGram = result.price / TROY_OUNCE_TO_GRAMS;
+    notes.push(`Approx local silver rate: ${currencySymbol}${formatNumber(pricePerGram, result.currency)} per gram`);
+  }
+
+  return notes;
+}
+
+function getCommodityDisplayMeta(result: FinanceResult) {
+  const normalizedSymbol = result.symbol.toUpperCase();
+
+  if (normalizedSymbol === "GC=F") {
+    return {
+      name: result.regionalNotes?.length ? "Gold price" : "Gold",
+      symbol: "GOLD",
+    };
+  }
+
+  if (normalizedSymbol === "SI=F") {
+    return {
+      name: result.regionalNotes?.length ? "Silver price" : "Silver",
+      symbol: "SILVER",
+    };
+  }
+
+  if (normalizedSymbol === "CL=F") {
+    return {
+      name: "Crude oil price",
+      symbol: "OIL",
+    };
+  }
+
+  return {
+    name: result.name,
+    symbol: result.symbol,
+  };
+}
+
+async function getLocalizedFinanceData(
+  detected: FinanceQuery,
+  context: ReturnType<typeof inferClawCloudRegionContext>,
+) {
+  const preferredCurrency = context.requestedCurrency?.toLowerCase() ?? null;
+
+  const localizeResult = async (result: FinanceResult | null, symbolOverride?: string) => {
+    if (!result) {
+      return null;
+    }
+
+    const localized = preferredCurrency
+      ? await convertFinanceResultCurrency(result, preferredCurrency.toUpperCase()).catch(() => null) ?? result
+      : result;
+
+    if (context.requestedRegion?.timeZone) {
+      localized.displayTimeZone = context.requestedRegion.timeZone;
+    }
+
+    if (detected.type === "commodity") {
+      const regionalNotes = buildRegionalCommodityNotes(
+        localized,
+        symbolOverride ?? localized.symbol,
+        context.requestedRegion?.countryName,
+        context.requestedRegion?.goldDisplayUnit,
+      );
+      if (regionalNotes.length) {
+        localized.regionalNotes = regionalNotes;
+      }
+    }
+
+    return localized;
+  };
+
+  switch (detected.type) {
+    case "crypto": {
+      const coinId = CRYPTO_IDS[detected.query.toLowerCase()];
+      const crypto = coinId
+        ? await coinGeckoPrice(coinId, preferredCurrency ?? "usd")
+        : null;
+      if (crypto && context.requestedRegion?.timeZone) {
+        crypto.displayTimeZone = context.requestedRegion.timeZone;
+      }
+      return crypto;
+    }
+    case "index": {
+      const symbol = INDEX_SYMBOLS[detected.query.toLowerCase()];
+      const quotes = symbol ? await getBestYahooQuotes([symbol]) : [];
+      return localizeResult(quotes[0] ?? null, symbol);
+    }
+    case "forex": {
+      const pair = detected.forexPair ?? resolveForexPair(detected.query);
+      return pair ? await fetchForexRate(pair[0], pair[1]) : null;
+    }
+    case "commodity": {
+      const symbol = COMMODITY_SYMBOLS[detected.query.toLowerCase()];
+      const quotes = symbol ? await getBestYahooQuotes([symbol]) : [];
+      return localizeResult(quotes[0] ?? null, symbol);
+    }
+    case "stock_india": {
+      const quotes = await getBestYahooQuotes(expandIndianStockSymbols(detected.query));
+      return localizeResult(quotes[0] ?? null);
+    }
+    case "stock_us": {
+      const quotes = await getBestYahooQuotes([detected.query.toUpperCase()]);
+      return localizeResult(quotes[0] ?? null);
+    }
+    default:
+      return null;
+  }
+}
+
 export async function getLiveFinanceData(question: string): Promise<FinanceResult | null> {
+  const context = inferClawCloudRegionContext(question);
   const detected = detectFinanceQuery(question);
   if (!detected) {
     return null;
   }
 
   try {
+    const localized = await getLocalizedFinanceData(detected, context);
+    if (localized) {
+      return localized;
+    }
+
+    const preferredCurrency = context.requestedCurrency?.toLowerCase() ?? null;
+    const localizeResult = async (result: FinanceResult | null, symbolOverride?: string) => {
+      if (!result) {
+        return null;
+      }
+
+      const localized = preferredCurrency
+        ? await convertFinanceResultCurrency(result, preferredCurrency.toUpperCase()).catch(() => null) ?? result
+        : result;
+
+      if (context.requestedRegion?.timeZone) {
+        localized.displayTimeZone = context.requestedRegion.timeZone;
+      }
+
+      if (detected.type === "commodity") {
+        const regionalNotes = buildRegionalCommodityNotes(
+          localized,
+          symbolOverride ?? localized.symbol,
+          context.requestedRegion?.countryName,
+          context.requestedRegion?.goldDisplayUnit,
+        );
+        if (regionalNotes.length) {
+          localized.regionalNotes = regionalNotes;
+        }
+      }
+
+      return localized;
+    };
+
     switch (detected.type) {
       case "crypto": {
         const coinId = CRYPTO_IDS[detected.query.toLowerCase()];
@@ -521,7 +890,7 @@ export async function getLiveFinanceData(question: string): Promise<FinanceResul
         return quotes[0] ?? null;
       }
       case "forex": {
-        const pair = FOREX_PAIRS[detected.query.toLowerCase()];
+        const pair = detected.forexPair ?? resolveForexPair(detected.query);
         return pair ? await fetchForexRate(pair[0], pair[1]) : null;
       }
       case "commodity": {
@@ -549,60 +918,94 @@ export function formatFinanceReply(result: FinanceResult): string {
   const positive = result.changePct >= 0;
   const arrow = positive ? "\u{1F4C8}" : "\u{1F4C9}";
   const sign = positive ? "+" : "";
+  const displayMeta = getCommodityDisplayMeta(result);
+  const moveDirection =
+    result.changePct > 0.15 ? "up" : result.changePct < -0.15 ? "down" : "roughly flat";
+  const displayTimeZone = result.displayTimeZone || "Asia/Kolkata";
+  const timeLabel = result.displayTimeZone ? "local market time" : "IST";
   const asOf = new Date(result.asOf).toLocaleTimeString("en-IN", {
-    timeZone: "Asia/Kolkata",
+    timeZone: displayTimeZone,
     hour: "2-digit",
     minute: "2-digit",
     hour12: true,
   });
   const fetchedAt = new Date();
   const fetchedTime = fetchedAt.toLocaleTimeString("en-IN", {
-    timeZone: "Asia/Kolkata",
+    timeZone: displayTimeZone,
     hour: "2-digit",
     minute: "2-digit",
     hour12: true,
   });
   const fetchedDate = fetchedAt.toLocaleDateString("en-IN", {
-    timeZone: "Asia/Kolkata",
+    timeZone: displayTimeZone,
     day: "2-digit",
     month: "short",
     year: "numeric",
   });
   const currencySymbol = symbolForCurrency(result.currency);
+  const isForex = /^[A-Z]{3}\/[A-Z]{3}$/.test(result.symbol);
+  const [baseCurrency, quoteCurrency] = isForex ? result.symbol.split("/") : [null, null];
+  const quickTake =
+    isForex && baseCurrency && quoteCurrency
+      ? `*1 ${baseCurrency} = ${currencySymbol}${formatNumber(result.price, result.currency)} ${quoteCurrency}*`
+      : moveDirection === "roughly flat"
+        ? `${displayMeta.name} is trading near *${currencySymbol}${formatNumber(result.price, result.currency)}* and is roughly flat today (${sign}${result.changePct.toFixed(2)}%).`
+        : `${displayMeta.name} is trading at *${currencySymbol}${formatNumber(result.price, result.currency)}*, ${moveDirection} *${Math.abs(result.changePct).toFixed(2)}%* today.`;
 
   const lines: string[] = [
-    `${arrow} *${result.name}* (${result.symbol})`,
+    `${arrow} *${displayMeta.name}* (${displayMeta.symbol})`,
     "",
-    `\u{1F4B0} *Price:* ${currencySymbol}${formatNumber(result.price, result.currency)}`,
-    `\u{1F4CA} *Change:* ${sign}${currencySymbol}${formatNumber(Math.abs(result.change), result.currency)} (${sign}${result.changePct.toFixed(2)}%)`,
+    `*Quick take:* ${quickTake}`,
+    "",
+    "*Market snapshot*",
+    `• Price: *${currencySymbol}${formatNumber(result.price, result.currency)}*`,
+    `• Move today: ${sign}${currencySymbol}${formatNumber(Math.abs(result.change), result.currency)} (${sign}${result.changePct.toFixed(2)}%)`,
   ];
 
+  if (isForex && baseCurrency && quoteCurrency) {
+    lines[5] = `- Rate: *1 ${baseCurrency} = ${currencySymbol}${formatNumber(result.price, result.currency)} ${quoteCurrency}*`;
+    lines.splice(6, 1);
+  }
+
   if (result.secondaryPrices?.length) {
+    lines.push("");
+    lines.push("*Cross-currency view*");
     for (const quote of result.secondaryPrices.slice(0, 2)) {
-      lines.push(`\u{1F504} *Also in ${quote.currency}:* ${symbolForCurrency(quote.currency)}${formatNumber(quote.price, quote.currency)}`);
+      lines.push(`• ${quote.currency}: ${symbolForCurrency(quote.currency)}${formatNumber(quote.price, quote.currency)}`);
+    }
+  }
+
+  if (result.regionalNotes?.length) {
+    lines.push("");
+    lines.push("*Local market view*");
+    for (const note of result.regionalNotes) {
+      lines.push(`• ${note}`);
     }
   }
 
   if (result.high24h != null && result.low24h != null) {
-    lines.push(`\u{1F4C8} *Day High:* ${currencySymbol}${formatNumber(result.high24h, result.currency)}`);
-    lines.push(`\u{1F4C9} *Day Low:* ${currencySymbol}${formatNumber(result.low24h, result.currency)}`);
+    lines.push(`• Day range: ${currencySymbol}${formatNumber(result.low24h, result.currency)} to ${currencySymbol}${formatNumber(result.high24h, result.currency)}`);
   }
 
   if (result.volume != null && result.volume > 0) {
-    lines.push(`\u{1F4E6} *Volume:* ${formatVolume(result.volume)}`);
+    lines.push(`• Volume: ${formatVolume(result.volume)}`);
   }
 
   if (result.marketCap != null && result.marketCap > 0) {
-    lines.push(`\u{1F3E6} *Market Cap:* ${formatMarketCap(result.marketCap, result.currency)}`);
+    lines.push(`• Market cap: ${formatMarketCap(result.marketCap, result.currency)}`);
   }
 
+  lines.push("");
+  lines.push("*Source*");
   if (result.exchange) {
-    lines.push("");
-    lines.push(`_Exchange: ${result.exchange}_`);
+    lines.push(`• Exchange: ${result.exchange}`);
   }
-
-  lines.push(`\u{1F4E1} _Live data as of ${asOf} IST - ${result.source}_`);
-  lines.push(`_Data fetched: ${fetchedTime} IST, ${fetchedDate}_`);
+  if (result.conversionRate) {
+    lines.push(`• FX conversion used: 1 ${result.conversionRate.from} = ${formatNumber(result.conversionRate.rate, result.conversionRate.to)} ${result.conversionRate.to}`);
+  }
+  lines.push(`• Live data as of ${asOf} ${timeLabel} via ${result.source}`);
+  lines.push(`• Data fetched: ${fetchedTime}, ${fetchedDate}`);
+  lines.push("");
   lines.push("\u26A0\uFE0F _Not financial advice. Verify before trading on NSE/BSE or other official sources before any financial decision._");
   return lines.join("\n");
 }
@@ -612,10 +1015,21 @@ function symbolForCurrency(currency: string) {
   if (currency === "USD") return "$";
   if (currency === "EUR") return "\u20AC";
   if (currency === "GBP") return "\u00A3";
+  if (currency === "JPY") return "\u00A5";
+  if (currency === "CNY") return "\u00A5";
+  if (currency === "AED") return "AED ";
+  if (currency === "SGD") return "S$";
+  if (currency === "AUD") return "A$";
+  if (currency === "CAD") return "C$";
+  if (currency === "SAR") return "SAR ";
+  if (currency === "ILS") return "\u20AA";
   return `${currency} `;
 }
 
 function formatNumber(value: number, currency: string) {
+  if (currency === "JPY") {
+    return Math.round(value).toLocaleString("en-IN");
+  }
   if (currency === "INR" && value >= 10_000_000) {
     return `${(value / 10_000_000).toFixed(2)} Cr`;
   }

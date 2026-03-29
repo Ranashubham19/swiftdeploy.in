@@ -176,12 +176,16 @@ async function fetchApprovals(token: string): Promise<Approval[]> {
     headers: { Authorization: `Bearer ${token}` },
   });
 
+  const data = (await response.json().catch(() => null)) as {
+    approvals?: Approval[];
+    error?: string;
+  } | null;
+
   if (!response.ok) {
-    return seedApprovals;
+    throw new Error(data?.error || "Unable to load live reply approvals.");
   }
 
-  const data = (await response.json()) as { approvals?: Approval[] };
-  return Array.isArray(data.approvals) ? data.approvals : seedApprovals;
+  return Array.isArray(data?.approvals) ? data.approvals : [];
 }
 
 async function updateApproval(
@@ -220,15 +224,17 @@ export function ApprovalsPage({ config }: ApprovalsPageProps) {
     supabaseUrl: config.supabaseUrl,
     supabaseAnonKey: config.supabaseAnonKey,
   });
+  const previewMode = !supabase;
 
   const toastTimerRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const [approvals, setApprovals] = useState<Approval[]>(seedApprovals);
-  const [selectedId, setSelectedId] = useState<string | null>(seedApprovals[0]?.id ?? null);
+  const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filter, setFilter] = useState<FilterTab>("pending");
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [liveError, setLiveError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<"send" | "skip" | null>(null);
   const [editing, setEditing] = useState(false);
   const [editBody, setEditBody] = useState("");
@@ -247,6 +253,9 @@ export function ApprovalsPage({ config }: ApprovalsPageProps) {
 
   useEffect(() => {
     if (!supabase) {
+      setApprovals(seedApprovals);
+      setSelectedId(seedApprovals[0]?.id ?? null);
+      setLiveError(null);
       setLoading(false);
       return;
     }
@@ -271,8 +280,15 @@ export function ApprovalsPage({ config }: ApprovalsPageProps) {
         try {
           const nextApprovals = await fetchApprovals(accessToken);
           if (!cancelled) {
+            setLiveError(null);
             setApprovals(nextApprovals);
             setSelectedId(nextApprovals[0]?.id ?? null);
+          }
+        } catch (loadError) {
+          if (!cancelled) {
+            setLiveError(loadError instanceof Error ? loadError.message : "Unable to load live reply approvals.");
+            setApprovals([]);
+            setSelectedId(null);
           }
         } finally {
           if (!cancelled) {
@@ -280,8 +296,11 @@ export function ApprovalsPage({ config }: ApprovalsPageProps) {
           }
         }
       })
-      .catch(() => {
+      .catch((loadError) => {
         if (!cancelled) {
+          setLiveError(loadError instanceof Error ? loadError.message : "Unable to load live reply approvals.");
+          setApprovals([]);
+          setSelectedId(null);
           setLoading(false);
         }
       });
@@ -366,10 +385,19 @@ export function ApprovalsPage({ config }: ApprovalsPageProps) {
       return;
     }
 
+    if (!token) {
+      showToast(
+        previewMode
+          ? "Preview mode only - connect Gmail to send or skip real replies."
+          : "Please sign in again.",
+      );
+      return;
+    }
+
     setActionLoading(action);
 
     const draftBody = action === "send" && editing ? editBody.trim() : undefined;
-    const ok = token ? await updateApproval(token, selected.id, action, draftBody) : true;
+    const ok = await updateApproval(token, selected.id, action, draftBody);
 
     if (!ok) {
       setActionLoading(null);
@@ -541,6 +569,17 @@ export function ApprovalsPage({ config }: ApprovalsPageProps) {
           mobileListVisible && styles.listPaneMobileVisible,
         )}
       >
+        {previewMode ? (
+          <div className={styles.statusBanner}>
+            Preview mode: showing sample reply drafts because Supabase auth is not configured.
+            Live Gmail approvals are not loaded here.
+          </div>
+        ) : liveError ? (
+          <div className={cx(styles.statusBanner, styles.statusBannerError)}>
+            Live reply approvals are unavailable right now. {liveError}
+          </div>
+        ) : null}
+
         <div className={styles.listHeader}>
           <span className={styles.listTitle}>
             {filter === "all" ? "All approvals" : `${filter[0]?.toUpperCase()}${filter.slice(1)}`}

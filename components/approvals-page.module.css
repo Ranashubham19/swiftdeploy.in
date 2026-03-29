@@ -365,6 +365,23 @@
   color: var(--text3);
 }
 
+.statusBanner {
+  margin: 12px 12px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 170, 51, 0.22);
+  background: rgba(255, 170, 51, 0.08);
+  color: #ffd08a;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.statusBannerError {
+  border-color: rgba(255, 77, 77, 0.22);
+  background: rgba(255, 77, 77, 0.08);
+  color: #ff9b9b;
+}
+
 .emptyState {
   flex: 1;
   display: flex;

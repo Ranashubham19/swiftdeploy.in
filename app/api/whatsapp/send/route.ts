@@ -18,6 +18,11 @@ export async function POST(request: NextRequest) {
       jid?: string;
       message?: string;
       contactName?: string;
+      source?: "approval" | "workflow" | "direct_command" | "assistant_reply" | "system" | "api_send";
+      approvalId?: string;
+      workflowRunId?: string;
+      idempotencyKey?: string;
+      metadata?: Record<string, unknown> | null;
       _internal?: boolean;
     };
 
@@ -44,6 +49,11 @@ export async function POST(request: NextRequest) {
       userId: resolvedUserId ?? undefined,
       contactName: body.contactName ?? null,
       jid: body.jid ?? null,
+      source: body.source ?? null,
+      approvalId: body.approvalId ?? null,
+      workflowRunId: body.workflowRunId ?? null,
+      idempotencyKey: body.idempotencyKey ?? null,
+      metadata: body.metadata ?? null,
     });
     return NextResponse.json({ success: true });
   } catch (error) {

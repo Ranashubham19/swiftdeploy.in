@@ -48,11 +48,39 @@
 }
 
 .step1Head h2 {
-  margin: 0 0 8px;
+  font-family: var(--font-display), sans-serif;
+  font-size: clamp(20px, 3vw, 26px);
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  line-height: 1.3;
+  margin: 0 0 calc(6px - 0.22em);
+  padding-bottom: 0.22em;
+  overflow: visible;
   color: #ffffff;
-  font-size: 28px;
-  font-weight: 700;
-  letter-spacing: -0.03em;
+}
+
+.step1HeadingWithIcon {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.step1HeadingIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #9bb8ff;
+}
+
+.step1HeadingIconColor {
+  width: 24px;
+  height: 24px;
+  background: rgba(255, 255, 255, 0.12);
+  color: inherit;
 }
 
 .step1Head p {
@@ -140,6 +168,15 @@
   box-shadow: none;
 }
 
+.serviceCardStatic {
+  cursor: default;
+}
+
+.serviceCardStatic:hover {
+  transform: none;
+  box-shadow: none;
+}
+
 .serviceCard:focus-visible,
 .googleBtn:focus-visible,
 .helpLink:focus-visible,
@@ -163,6 +200,20 @@
   background: rgba(251, 191, 36, 0.05);
 }
 
+.serviceCardStack {
+  flex-direction: column;
+  gap: 14px;
+}
+
+.serviceCardTop {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  width: 100%;
+}
+
 .serviceIconWrap {
   position: relative;
   z-index: 1;
@@ -177,9 +228,19 @@
   color: #ffffff;
 }
 
+.serviceIconWrapGoogle {
+  background: rgba(255, 255, 255, 0.14);
+}
+
 .serviceCardConnected .serviceIconWrap {
   background: rgba(34, 197, 94, 0.16);
   color: #d1fae5;
+}
+
+.serviceCardConnected .serviceIconWrapGoogle,
+.serviceCardConnecting .serviceIconWrapGoogle {
+  background: rgba(255, 255, 255, 0.14);
+  color: inherit;
 }
 
 .serviceCardConnecting .serviceIconWrap {
@@ -236,6 +297,14 @@
   color: rgba(255, 255, 255, 0.56);
   font-size: 11px;
   font-weight: 600;
+}
+
+.serviceDetailText {
+  position: relative;
+  z-index: 1;
+  color: rgba(255, 255, 255, 0.46);
+  font-size: 12.8px;
+  line-height: 1.65;
 }
 
 .serviceStatus {
@@ -334,6 +403,22 @@
   background: linear-gradient(135deg, #166534, #16a34a);
 }
 
+.googleBtnStatic {
+  cursor: default;
+}
+
+.googleBtnStatic:hover:not(:disabled) {
+  transform: none;
+  background: #ffffff;
+  box-shadow:
+    0 12px 30px rgba(0, 0, 0, 0.18),
+    0 3px 10px rgba(0, 0, 0, 0.12);
+}
+
+.googleBtnInfo {
+  color: #171717;
+}
+
 .googleBtnIcon {
   display: inline-flex;
   align-items: center;
@@ -356,6 +441,17 @@
   to {
     transform: rotate(360deg);
   }
+}
+
+.continueHint {
+  margin-top: -2px;
+  color: rgba(255, 255, 255, 0.46);
+  font-size: 12.6px;
+  font-weight: 600;
+}
+
+.continueHintReady {
+  color: #86efac;
 }
 
 .privacyNote {
@@ -395,6 +491,102 @@
   display: flex;
   flex-wrap: wrap;
   gap: 14px;
+}
+
+.liteCard {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px 22px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.liteCardHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.liteFieldRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.liteFieldRowWide {
+  align-items: stretch;
+}
+
+.liteInput {
+  min-width: 0;
+  flex: 1;
+  height: 44px;
+  padding: 0 14px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #ffffff;
+  font-size: 13.5px;
+}
+
+.liteFieldRowWide .liteInput {
+  min-width: 280px;
+}
+
+.liteInput::placeholder {
+  color: rgba(255, 255, 255, 0.28);
+}
+
+.liteButton,
+.liteButtonSecondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 92px;
+  height: 44px;
+  padding: 0 16px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    border-color 0.18s ease,
+    background 0.18s ease,
+    color 0.18s ease,
+    transform 0.18s ease;
+}
+
+.liteButton {
+  border: 0;
+  background: #ff6b4a;
+  color: #ffffff;
+}
+
+.liteButton:hover:not(:disabled),
+.liteButtonSecondary:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.liteButton:disabled,
+.liteButtonSecondary:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.liteButtonSecondary {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.liteNote {
+  color: rgba(255, 255, 255, 0.46);
+  font-size: 12.5px;
+  line-height: 1.6;
 }
 
 .trustBadge {
@@ -485,9 +677,17 @@
   cursor: pointer;
 }
 
+.btnContinueReady {
+  background: linear-gradient(135deg, #15803d, #22c55e);
+}
+
 .btnContinue:hover:not(:disabled) {
   transform: translateX(1px);
   background: #ff5a37;
+}
+
+.btnContinueReady:hover:not(:disabled) {
+  background: linear-gradient(135deg, #166534, #16a34a);
 }
 
 .btnContinue:disabled {
@@ -521,8 +721,22 @@
     gap: 14px;
   }
 
+  .serviceCardTop {
+    width: 100%;
+  }
+
   .serviceStatus {
     align-self: flex-start;
+  }
+
+  .liteCardHead,
+  .liteFieldRow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .liteFieldRowWide .liteInput {
+    min-width: 0;
   }
 
   .step1Foot {

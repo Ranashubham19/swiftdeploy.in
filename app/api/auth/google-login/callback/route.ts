@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { exchangeClawCloudGoogleLoginCode } from "@/lib/clawcloud-google";
+import {
+  exchangeClawCloudGoogleLoginCode,
+  verifyClawCloudGoogleLoginCallbackState,
+} from "@/lib/clawcloud-google";
 import { env } from "@/lib/env";
 
 export const runtime = "nodejs";
@@ -21,9 +24,9 @@ export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get("code")?.trim();
   const state = request.nextUrl.searchParams.get("state")?.trim();
   const providerError = request.nextUrl.searchParams.get("error");
-  const redirectBase = new URL("/auth", request.nextUrl.origin);
-
   const expectedState = request.cookies.get(GOOGLE_LOGIN_STATE_COOKIE)?.value?.trim() ?? "";
+  const verifiedLoginState = verifyClawCloudGoogleLoginCallbackState(state, expectedState);
+  const redirectBase = new URL("/auth", verifiedLoginState?.origin ?? request.nextUrl.origin);
 
   if (providerError) {
     redirectBase.searchParams.set("error", providerError);
@@ -32,7 +35,7 @@ export async function GET(request: NextRequest) {
     return response;
   }
 
-  if (!code || !state || !expectedState || state !== expectedState) {
+  if (!code || !verifiedLoginState) {
     redirectBase.searchParams.set("error", "invalid_google_login_state");
     const response = withNoStoreHeaders(NextResponse.redirect(redirectBase));
     response.cookies.delete(GOOGLE_LOGIN_STATE_COOKIE);

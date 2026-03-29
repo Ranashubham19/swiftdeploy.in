@@ -1,4 +1,5 @@
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
+import { matchesWholeAlias } from "@/lib/clawcloud-intent-match";
 import { loadSyncedWhatsAppContactAliases } from "@/lib/clawcloud-whatsapp-contacts";
 
 type ContactMap = Record<string, string>;
@@ -37,6 +38,15 @@ const CANONICAL_CONTACT_ALIASES: Record<string, string> = {
   pitaji: "papa",
 };
 
+const AMBIGUOUS_DIRECT_RECIPIENTS = new Set([
+  "me",
+  "myself",
+  "us",
+  "ourselves",
+  "you",
+  "yourself",
+]);
+
 export type ParsedSendMessageCommand =
   {
     kind: "contacts" | "phone" | "broadcast_all";
@@ -46,6 +56,82 @@ export type ParsedSendMessageCommand =
     phone: string | null;
   };
 
+export type SendMessageCommandSafetyIssue =
+  | "ambiguous_recipient"
+  | "scheduled_send"
+  | "conditional_send";
+
+export type SendMessageCommandSafetyDecision =
+  | {
+    allowed: true;
+    parsed: ParsedSendMessageCommand;
+  }
+  | {
+    allowed: false;
+    parsed: ParsedSendMessageCommand;
+    issue: SendMessageCommandSafetyIssue;
+    ambiguousRecipients?: string[];
+  };
+
+export type ParsedSendMessageAction =
+  | {
+    scope: "single_contact";
+    requestedRecipientLabels: string[];
+    requestedRecipientCount: 1;
+    message: string;
+    reviewLabel: string;
+    requiresHeightenedConfirmation: false;
+    confirmationMode: "always";
+    riskSummary: "single_contact";
+  }
+  | {
+    scope: "multi_contact";
+    requestedRecipientLabels: string[];
+    requestedRecipientCount: number;
+    message: string;
+    reviewLabel: string;
+    requiresHeightenedConfirmation: true;
+    confirmationMode: "always";
+    riskSummary: "multi_recipient";
+  }
+  | {
+    scope: "broadcast_all";
+    requestedRecipientLabels: [];
+    requestedRecipientCount: 0;
+    message: string;
+    reviewLabel: "all contacts";
+    requiresHeightenedConfirmation: true;
+    confirmationMode: "broadcast_explicit";
+    riskSummary: "broadcast_all";
+  }
+  | {
+    scope: "direct_phone";
+    requestedRecipientLabels: string[];
+    requestedRecipientCount: 1;
+    message: string;
+    reviewLabel: string;
+    requiresHeightenedConfirmation: true;
+    confirmationMode: "always";
+    riskSummary: "direct_phone";
+  };
+
+const AMBIGUOUS_RECIPIENT_PLACEHOLDERS = new Set([
+  ...AMBIGUOUS_DIRECT_RECIPIENTS,
+  "him",
+  "her",
+  "them",
+  "someone",
+  "somebody",
+  "anyone",
+  "anybody",
+]);
+
+const CONDITIONAL_SEND_CUE_PATTERN =
+  /\b(?:if|unless|when|once|whenever|as soon as|until|after\s+(?:he|she|they|you|someone|somebody|anyone|anybody|the client|the team|it)|before\s+(?:he|she|they|you|someone|somebody|anyone|anybody|the client|the team|it))\b/i;
+
+const SCHEDULED_SEND_CUE_PATTERN =
+  /\b(?:tomorrow|tonight|later|today|this\s+(?:morning|afternoon|evening|night)|next\s+(?:week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|on\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:at|around|by)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|in\s+\d+\s+(?:minutes?|hours?|days?|weeks?)|after\s+\d+\s+(?:minutes?|hours?|days?|weeks?))\b/i;
+
 function cleanupNamePunctuation(value: string) {
   return value
     .normalize("NFKC")
@@ -53,6 +139,30 @@ function cleanupNamePunctuation(value: string) {
     .replace(/[_]+/g, " ")
     .replace(/[“”"']/g, "")
     .replace(/[^\p{L}\p{N}\s.&+\-/\u0900-\u097F]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function escapeRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function stripFirstMessageOccurrence(text: string, message: string) {
+  const candidates = [`"${message}"`, `'${message}'`, message];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const pattern = new RegExp(escapeRegex(candidate), "i");
+    if (pattern.test(text)) {
+      return text.replace(pattern, " ");
+    }
+  }
+
+  return text;
+}
+
+function buildSendCommandEnvelope(text: string, message: string) {
+  return stripFirstMessageOccurrence(text, message)
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -181,6 +291,10 @@ function buildParsedSendCommand(
     return null;
   }
 
+  if (contactNames.every((name) => AMBIGUOUS_DIRECT_RECIPIENTS.has(normalizeContactName(name)))) {
+    return null;
+  }
+
   return {
     kind: "contacts",
     contactNames,
@@ -268,7 +382,17 @@ export async function lookupContact(userId: string, name: string): Promise<strin
   if (contacts[key]) return contacts[key];
 
   for (const [savedName, phone] of Object.entries(contacts)) {
-    if (savedName.includes(key) || key.includes(savedName)) {
+    if (matchesWholeAlias(savedName, key) || matchesWholeAlias(key, savedName)) {
+      return phone;
+    }
+
+    const savedWords = savedName.split(/\s+/).filter((word) => word.length >= 3);
+    const queryWords = key.split(/\s+/).filter((word) => word.length >= 3);
+
+    if (queryWords.some((queryWord) =>
+      savedWords.some((savedWord) =>
+        savedWord === queryWord || savedWord.startsWith(queryWord) || queryWord.startsWith(savedWord)
+      ))) {
       return phone;
     }
   }
@@ -351,9 +475,14 @@ export function parseSendMessageCommand(text: string): ParsedSendMessageCommand 
     return buildParsedSendCommand(recipientFirst[1] ?? "", recipientFirst[2] ?? "");
   }
 
-  const tellPattern = t.match(/^tell\s+(.+?)\s+(?:that\s+)?(.+)$/i);
+  const tellPattern = t.match(/^tell\s+(.+?)\s+that\s+(.+)$/i);
   if (tellPattern) {
     return buildParsedSendCommand(tellPattern[1] ?? "", tellPattern[2] ?? "");
+  }
+
+  const tellColonPattern = t.match(/^tell\s+(.+?)\s*:\s*(.+)$/i);
+  if (tellColonPattern) {
+    return buildParsedSendCommand(tellColonPattern[1] ?? "", tellColonPattern[2] ?? "");
   }
 
   const messageFirst = t.match(/^(?:please\s+)?send\s+(.{2,160}?)\s+to\s+(.+)$/i);
@@ -374,6 +503,106 @@ export function parseSendMessageCommand(text: string): ParsedSendMessageCommand 
   }
 
   return null;
+}
+
+export function analyzeSendMessageCommandSafety(text: string): SendMessageCommandSafetyDecision | null {
+  const parsed = parseSendMessageCommand(text);
+  if (!parsed) {
+    return null;
+  }
+
+  const recipientNames = parsed.kind === "contacts"
+    ? parsed.contactNames
+    : parsed.kind === "broadcast_all"
+      ? []
+      : [parsed.contactName];
+
+  const ambiguousRecipients = recipientNames
+    .map((name) => cleanupNamePunctuation(name))
+    .filter((name) => AMBIGUOUS_RECIPIENT_PLACEHOLDERS.has(normalizeContactName(name)));
+
+  if (ambiguousRecipients.length) {
+    return {
+      allowed: false,
+      parsed,
+      issue: "ambiguous_recipient",
+      ambiguousRecipients,
+    };
+  }
+
+  const commandEnvelope = buildSendCommandEnvelope(text, parsed.message);
+  if (CONDITIONAL_SEND_CUE_PATTERN.test(commandEnvelope)) {
+    return {
+      allowed: false,
+      parsed,
+      issue: "conditional_send",
+    };
+  }
+
+  if (SCHEDULED_SEND_CUE_PATTERN.test(commandEnvelope)) {
+    return {
+      allowed: false,
+      parsed,
+      issue: "scheduled_send",
+    };
+  }
+
+  return {
+    allowed: true,
+    parsed,
+  };
+}
+
+export function buildParsedSendMessageAction(parsed: ParsedSendMessageCommand): ParsedSendMessageAction {
+  if (parsed.kind === "broadcast_all") {
+    return {
+      scope: "broadcast_all",
+      requestedRecipientLabels: [],
+      requestedRecipientCount: 0,
+      message: parsed.message,
+      reviewLabel: "all contacts",
+      requiresHeightenedConfirmation: true,
+      confirmationMode: "broadcast_explicit",
+      riskSummary: "broadcast_all",
+    };
+  }
+
+  if (parsed.kind === "phone") {
+    return {
+      scope: "direct_phone",
+      requestedRecipientLabels: [parsed.contactName],
+      requestedRecipientCount: 1,
+      message: parsed.message,
+      reviewLabel: parsed.contactName,
+      requiresHeightenedConfirmation: true,
+      confirmationMode: "always",
+      riskSummary: "direct_phone",
+    };
+  }
+
+  if (parsed.contactNames.length > 1) {
+    return {
+      scope: "multi_contact",
+      requestedRecipientLabels: [...parsed.contactNames],
+      requestedRecipientCount: parsed.contactNames.length,
+      message: parsed.message,
+      reviewLabel: `${parsed.contactNames.length} contacts`,
+      requiresHeightenedConfirmation: true,
+      confirmationMode: "always",
+      riskSummary: "multi_recipient",
+    };
+  }
+
+  return {
+    scope: "single_contact",
+    requestedRecipientLabels: [parsed.contactName],
+    requestedRecipientCount: 1,
+    message: parsed.message,
+    reviewLabel: parsed.contactName,
+    requiresHeightenedConfirmation: false,
+    confirmationMode: "always",
+    riskSummary: "single_contact",
+  };
 }
 
 export async function listContactsFormatted(userId: string): Promise<string> {

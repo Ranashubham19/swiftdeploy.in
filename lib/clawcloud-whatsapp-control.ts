@@ -14,7 +14,6 @@ const automationModes = new Set<WhatsAppAutomationMode>([
   "read_only",
   "suggest_only",
   "approve_before_send",
-  "auto_reply",
 ]);
 
 const replyModes = new Set<WhatsAppReplyMode>([
@@ -346,6 +345,12 @@ export function decideWhatsAppReplyAction(input: {
   }
 
   return { action: "send" as const, reason: "Reply can be sent automatically." };
+}
+
+export function shouldRequireExplicitUserCommandForWhatsAppChat(
+  chatType: "direct" | "group" | "self" | "broadcast" | "unknown",
+) {
+  return chatType !== "self";
 }
 
 export function applyWhatsAppReplyMode(reply: string, mode: WhatsAppReplyMode) {
