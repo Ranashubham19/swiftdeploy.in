@@ -5115,125 +5115,11 @@ function buildUniversalDomainFallback(intent: IntentType, message: string): stri
     }
   }
 
-  const domainFallbacks: Record<string, string> = {
-    science: [
-      "🧬 *Science Question*",
-      "",
-      `Topic: _${q}_`,
-      "",
-      "I need a moment to retrieve accurate scientific information for this.",
-      "• For quick facts: rephrase as 'what is [term]'",
-      "• For formulas: specify the exact quantity to calculate",
-      "• For mechanisms: ask 'how does [process] work'",
-      "",
-      "Send your refined question and I'll give you a complete, accurate answer.",
-    ].join("\n"),
-
-    history: [
-      "🏛️ *History Question*",
-      "",
-      `Topic: _${q}_`,
-      "",
-      "I need to retrieve accurate historical information for this.",
-      "For best results, ask:",
-      "• 'What happened in [year]?'",
-      "• 'Who was [person] and what did they do?'",
-      "• 'What caused [event]?'",
-      "",
-      "Rephrase and I'll give you a complete, sourced answer.",
-    ].join("\n"),
-
-    geography: [
-      "🌍 *Geography Question*",
-      "",
-      `Query: _${q}_`,
-      "",
-      "I need to look up the exact geographic details.",
-      "Try asking: 'What is the capital of [country]?' or 'Where is [place] located?'",
-      "",
-      "Rephrase your question and I'll answer immediately.",
-    ].join("\n"),
-
-    health: [
-      "🏥 *Health Question*",
-      "",
-      `Topic: _${q}_`,
-      "",
-      "I can answer health questions on symptoms, conditions, nutrition, fitness, and medications.",
-      "• For symptoms: 'What causes [symptom]?'",
-      "• For conditions: 'What is [condition] and how is it treated?'",
-      "• For nutrition: 'How much [nutrient] do I need daily?'",
-      "",
-      "⚕️ *Always consult a doctor for personal medical advice.*",
-      "",
-      "Rephrase and I'll give you a complete health answer.",
-    ].join("\n"),
-
-    law: [
-      "⚖️ *Legal Question*",
-      "",
-      `Topic: _${q}_`,
-      "",
-      "I can explain legal concepts, rights, and procedures.",
-      "Specify: which country's law (India, US, UK, etc.) for accurate answers.",
-      "",
-      "⚖️ *Consult a qualified lawyer for your specific situation.*",
-    ].join("\n"),
-
-    economics: [
-      "📈 *Economics/Finance Question*",
-      "",
-      `Topic: _${q}_`,
-      "",
-      "I can cover markets, investing, business, macroeconomics, and personal finance.",
-      "Try: 'Explain [term]', 'How does [market/instrument] work?', 'What is [economic concept]?'",
-      "",
-      "Rephrase your question and I'll give you a clear, complete answer.",
-    ].join("\n"),
-
-    sports: [
-      "⚽ *Sports Question*",
-      "",
-      `Query: _${q}_`,
-      "",
-      "I can answer questions on rules, records, players, and tournaments.",
-      "Note: for very recent matches/transfers, my information may be outdated.",
-      "",
-      "Ask your specific question and I'll answer directly.",
-    ].join("\n"),
-
-    culture: [
-      "🎭 *Culture/Arts Question*",
-      "",
-      `Topic: _${q}_`,
-      "",
-      "I can cover literature, philosophy, religion, art, music, film, and mythology.",
-      "Ask: 'Who wrote [book]?', 'What is [philosophy] about?', 'What does [symbol] mean?'",
-      "",
-      "Rephrase and I'll give you a detailed, accurate answer.",
-    ].join("\n"),
-
-    technology: [
-      "💻 *Technology Answer*",
-      "",
-      `Question: _${q}_`,
-      "",
-      "Core explanation: technology topics should be answered as definition -> mechanism -> practical impact.",
-      "I can now continue with either a beginner version or an advanced technical version for this exact topic.",
-    ].join("\n"),
-  };
-
-  if (domainFallbacks[intent]) {
-    return domainFallbacks[intent];
-  }
-
-  return [
-    "I can help with this.",
-    "",
-    `Topic: _${q}_`,
-    "",
-    "Share one specific angle and I will give a complete direct answer.",
-  ].join("\n");
+  // REMOVED all domain placeholder templates ("I can answer...", "I need to retrieve...")
+  // These NEVER actually answer the question — they just ask the user to rephrase.
+  // Return null so the caller knows to try AI model recovery instead.
+  // Only keep multiplication tables (above) which are actually useful deterministic answers.
+  return null as unknown as string;
 }
 
 function bestEffortProfessionalTemplateV2(intent: IntentType, message: string) {
@@ -5364,14 +5250,9 @@ function bestEffortProfessionalTemplateV2(intent: IntentType, message: string) {
     ].join("\n");
   }
 
+  // Research: return null — let AI model handle instead of placeholder template
   if (intent === "research") {
-    return [
-      `🔍 *Analysis: ${q.slice(0, 80)}*`,
-      "",
-      "I'll give you a complete, decision-ready answer with recommendation, rationale, tradeoffs, and bottom line.",
-      "",
-      "For a more precise answer, add: budget, timeline, scale, or region if relevant.",
-    ].join("\n");
+    return null as unknown as string;
   }
 
   if (/^can you/.test(t) || /^do you/.test(t) || /^are you/.test(t)) {
@@ -5383,58 +5264,23 @@ function bestEffortProfessionalTemplateV2(intent: IntentType, message: string) {
     ].join("\n");
   }
 
+  // Science: return null — let AI model generate actual scientific answer
   if (intent === "science") {
-    return [
-      `🧬 *Science: ${q.slice(0, 80)}*`,
-      "",
-      "I can answer any science question — physics, chemistry, biology, astronomy, earth science.",
-      "",
-      "Ask: 'What is [concept]?', 'How does [process] work?', or 'Explain [topic]' — I'll give a complete, accurate answer.",
-    ].join("\n");
+    return null as unknown as string;
   }
 
   // REMOVED: history+code override — let AI handle "history of algorithms" etc.
 
-  if (intent === "history") {
-    return [
-      `🏛️ *History: ${q.slice(0, 80)}*`,
-      "",
-      "I can answer this with clear timeline, causes, major figures, and outcomes.",
-      "",
-      "Ask with one anchor (year, person, or event) for the most accurate response.",
-    ].join("\n");
+  // History, health, law, technology: return null — let AI model handle these
+  // instead of returning "I can answer..." placeholder templates
+  if (intent === "history" || intent === "health" || intent === "law" || intent === "technology") {
+    return null as unknown as string;
   }
 
-  if (intent === "health") {
-    return [
-      `🏥 *Health: ${q.slice(0, 80)}*`,
-      "",
-      "I can provide health information on symptoms, diseases, treatments, nutrition, and fitness.",
-      "",
-      "Ask specifically: 'What are symptoms of X?', 'What is normal Y level?', 'How to treat Z?'",
-      "",
-      "⚕️ *Always consult a doctor for personal medical advice.*",
-    ].join("\n");
-  }
-
-  if (intent === "law") {
-    return [
-      `⚖️ *Legal Question: ${q.slice(0, 80)}*`,
-      "",
-      "I can explain legal concepts, rights, and procedures.",
-      "Specify which country's law (India, US, UK, etc.) for accurate answers.",
-      "",
-      "⚖️ *For your specific situation, consult a qualified lawyer.*",
-    ].join("\n");
-  }
-
-  if (intent === "technology") {
-    return [
-      `💻 *Technology: ${q.slice(0, 80)}*`,
-      "",
-      "Core answer: this is a technology concept that should be explained as definition -> mechanism -> practical use.",
-      "If you share your target level (beginner or advanced), I will tailor the explanation precisely.",
-    ].join("\n");
+  // General fallback: also return null for substantive questions
+  // so the AI model gets a chance to answer
+  if (message.length > 40) {
+    return null as unknown as string;
   }
 
   return [
@@ -5638,7 +5484,7 @@ async function buildProfessionalRecoveryReply(input: {
 
 const FAST_REPLY_TOTAL_BUDGET_MS = 16_000;
 const DEEP_REPLY_TOTAL_BUDGET_MS = 28_000;
-const INBOUND_AGENT_ROUTE_TIMEOUT_MS = DEEP_REPLY_TOTAL_BUDGET_MS + 8_000;
+const INBOUND_AGENT_ROUTE_TIMEOUT_MS = 55_000;
 const INBOUND_AGENT_ROUTE_DIRECT_TIMEOUT_MS = 60_000;
 const INBOUND_AGENT_ROUTE_OPERATIONAL_TIMEOUT_MS = 50_000;
 const INBOUND_AGENT_ROUTE_DEEP_TIMEOUT_MS = 55_000;
@@ -5682,6 +5528,16 @@ function resolveInboundRouteTimeoutPolicy(message: string): InboundRouteTimeoutP
     || solveCodingArchitectureQuestion(trimmed)
     || detectPrimaryDirectAnswerLaneIntent(trimmed, requested.mode)
     || detectNativeLanguageDirectAnswerLaneIntent(trimmed, timeoutReplyLanguageResolution)
+  ) {
+    return { kind: "direct_knowledge", timeoutMs: INBOUND_AGENT_ROUTE_DIRECT_TIMEOUT_MS };
+  }
+
+  // Use confidence classifier to identify knowledge questions that need full timeout
+  const timeoutConfidence = classifyIntentWithConfidence(trimmed);
+  const KNOWLEDGE_TIMEOUT_INTENTS = new Set(["explain", "science", "health", "history", "law", "math", "coding", "technology", "research"]);
+  if (
+    KNOWLEDGE_TIMEOUT_INTENTS.has(timeoutConfidence.primary.intent)
+    && timeoutConfidence.primary.confidence >= 0.4
   ) {
     return { kind: "direct_knowledge", timeoutMs: INBOUND_AGENT_ROUTE_DIRECT_TIMEOUT_MS };
   }
@@ -10152,7 +10008,7 @@ async function routeInboundAgentMessageResultCore(
   });
 }
 
-function buildInboundAgentTimeoutResult(message: string): RouteInboundAgentMessageResult {
+async function buildInboundAgentTimeoutResult(message: string): Promise<RouteInboundAgentMessageResult> {
   const normalizedMessage = normalizeInboundMessageForConsent(message);
   if (!normalizedMessage) {
     return { response: null, liveAnswerBundle: null };
@@ -10168,6 +10024,30 @@ function buildInboundAgentTimeoutResult(message: string): RouteInboundAgentMessa
 
   const detected = detectStrictIntentRoute(normalizedMessage)?.intent ?? detectIntent(normalizedMessage);
   const response = buildTimeboxedProfessionalReply(normalizedMessage, detected.type);
+
+  // If the template response is a fallback/low-quality, attempt a quick AI call
+  // with a 12s budget as last resort before returning template garbage
+  if (!response || isVisibleFallbackReply(response) || isLowQualityTemplateReply(response)) {
+    try {
+      const emergencyReply = await completeClawCloudPrompt({
+        system: `You are ClawCloud AI, the world's most capable AI assistant. Answer the user's question completely, accurately, and directly. Do NOT say you cannot help. Do NOT ask for more details — answer with what you know. Use WhatsApp markdown (*bold*, _italic_, bullet points).`,
+        user: normalizedMessage,
+        intent: detected.type,
+        temperature: 0.15,
+        maxTokens: 2000,
+        fallback: "",
+      });
+      if (emergencyReply?.trim() && !isVisibleFallbackReply(emergencyReply) && !isLowQualityTemplateReply(emergencyReply)) {
+        return {
+          response: emergencyReply.trim(),
+          liveAnswerBundle: null,
+          modelAuditTrail: null,
+        };
+      }
+    } catch {
+      // Emergency call failed — fall through to template
+    }
+  }
 
   return {
     response,
