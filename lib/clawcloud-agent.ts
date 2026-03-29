@@ -10502,33 +10502,52 @@ async function routeInboundAgentMessageCore(
   }
 
   if (earlyMultilingualRoutingBridge.intent) {
-    const multilingualGloss = earlyMultilingualRoutingBridge.gloss || "";
     const nativeLangLabel = earlyReplyLanguageResolution.detectedLocale
       ? localeNames[earlyReplyLanguageResolution.detectedLocale]
       : "the user's language";
-    // Romanize Indic script so the model can understand the content
+    // Romanize Indic script and translate romanized text to get reliable English gloss
     const multilingualRomanized = romanizeIfIndicScript(trimmed, earlyReplyLanguageResolution.detectedLocale);
+    let multilingualGloss = earlyMultilingualRoutingBridge.gloss || "";
+    // If bridge gloss exists but romanized text is available, try romanized translation
+    // as it tends to be more accurate than native script translation
+    if (multilingualRomanized && !multilingualGloss) {
+      multilingualGloss = await withSoftTimeout(
+        completeClawCloudPrompt({
+          system: `You are a translation engine. Translate this romanized ${nativeLangLabel} text to natural English. Return ONLY the English translation.`,
+          user: multilingualRomanized,
+          maxTokens: 500,
+          fallback: "",
+          skipCache: true,
+          temperature: 0.05,
+          preferredModels: [
+            "qwen/qwen3.5-397b-a17b",
+            "meta/llama-3.1-405b-instruct",
+            "deepseek-ai/deepseek-v3.1-terminus",
+          ],
+        }),
+        "",
+        8_000,
+      ).then((g) => g.trim()).catch(() => "");
+    }
     const multilingualInstruction = [
       buildIntentSpecificInstruction(earlyMultilingualRoutingBridge.intent.type, multilingualGloss || multilingualRomanized || trimmed),
       buildConversationStyleInstruction(selectedConversationStyle),
       buildClawCloudReplyLanguageInstruction(earlyReplyLanguageResolution),
       `Original user prompt (in ${nativeLangLabel}): ${trimmed}`,
       multilingualRomanized
-        ? `Romanized reading of the ${nativeLangLabel} text: "${multilingualRomanized}"`
+        ? `Romanized reading: "${multilingualRomanized}"`
         : "",
       multilingualGloss
-        ? `Approximate English meaning (may be inaccurate — trust the original text and romanized reading): ${multilingualGloss}`
+        ? `English meaning: ${multilingualGloss}`
         : "",
-      `CRITICAL: Read and understand the user's original ${nativeLangLabel} text using the romanized reading. Answer the actual question the user asked.`,
-      `Respond in ${nativeLangLabel}. The final answer will be localized to the user's language.`,
+      `Answer the question described by the English meaning. Respond in ${nativeLangLabel}.`,
       "Mirror the user's language, tone, and level of formality naturally.",
       "Answer directly. Do not ask for clarification unless the original prompt is still genuinely ambiguous.",
     ].filter(Boolean).join("\n\n");
 
-    // Send romanized text as user message so model can comprehend it
-    const multilingualUserMessage = multilingualRomanized
-      ? `[${nativeLangLabel}] ${trimmed}\n[Romanized] ${multilingualRomanized}`
-      : trimmed;
+    // Send the English gloss as user message so the model answers the right question,
+    // with full language context in the system prompt
+    const multilingualUserMessage = multilingualGloss || (multilingualRomanized ? multilingualRomanized : trimmed);
     const multilingualReply = await smartReplyDetailed(
       userId,
       multilingualUserMessage,
@@ -10581,17 +10600,34 @@ async function routeInboundAgentMessageCore(
     // Romanize Indic scripts so models can understand the content
     const nativeRomanized = romanizeIfIndicScript(trimmed, earlyReplyLanguageResolution.detectedLocale);
 
-    // If the multilingual bridge failed (timeout / empty gloss), attempt an inline
-    // translation so the model has an English comprehension anchor for non-Latin scripts.
+    // If the multilingual bridge failed (timeout / empty gloss), translate the
+    // ROMANIZED text to English — models translate romanized Indic text far better
+    // than native script.
     const hasNonLatinScript = /[^\u0000-\u024F\u1E00-\u1EFF\u2C60-\u2C7F\uA720-\uA7FF]/u.test(trimmed);
     let inlineGloss = "";
     if (hasNonLatinScript && !earlyMultilingualRoutingBridge.gloss) {
+      // Translate romanized text (much more reliable than translating native script)
+      const textToTranslate = nativeRomanized
+        ? `Translate this romanized ${nativeLanguageLabel} text to English: ${nativeRomanized}`
+        : trimmed;
       inlineGloss = await withSoftTimeout(
-        translateMessage(trimmed, "en", { force: true }),
+        completeClawCloudPrompt({
+          system: `You are a translation engine. The user will give you romanized ${nativeLanguageLabel} text. Translate it to natural English. Return ONLY the English translation, nothing else. Do not add explanations or commentary.`,
+          user: textToTranslate,
+          maxTokens: 500,
+          fallback: "",
+          skipCache: true,
+          temperature: 0.05,
+          preferredModels: [
+            "qwen/qwen3.5-397b-a17b",
+            "meta/llama-3.1-405b-instruct",
+            "deepseek-ai/deepseek-v3.1-terminus",
+          ],
+        }),
         "",
         8_000,
       ).then((g) => g.trim()).catch(() => "");
-      if (inlineGloss.toLowerCase() === trimmed.trim().toLowerCase()) {
+      if (!inlineGloss || inlineGloss.toLowerCase() === trimmed.trim().toLowerCase()) {
         inlineGloss = "";
       }
     }
@@ -10603,22 +10639,19 @@ async function routeInboundAgentMessageCore(
       `The user wrote this request in ${nativeLanguageLabel}.`,
       `Original user prompt (in ${nativeLanguageLabel}): ${trimmed}`,
       nativeRomanized
-        ? `Romanized reading of the ${nativeLanguageLabel} text: "${nativeRomanized}"`
+        ? `Romanized reading: "${nativeRomanized}"`
         : "",
       inlineGloss
-        ? `Approximate English meaning (may be inaccurate — trust the romanized reading): ${inlineGloss}`
+        ? `English meaning: ${inlineGloss}`
         : "",
-      `CRITICAL: Use the romanized reading to understand what the user is asking. Answer the actual question.`,
-      `Respond in ${nativeLanguageLabel}. Do not switch to English unless the user explicitly asked for English.`,
+      `Answer the question described by the English meaning. Respond in ${nativeLanguageLabel}.`,
       "Answer the user's actual request directly instead of asking for extra scope.",
       "If the prompt asks for a story, summary, essay, explanation, list, or comparison, fulfill that exact request completely.",
       "Keep the same tone, warmth, and level of formality as the user's message.",
     ].filter(Boolean).join("\n\n");
 
-    // Send romanized text as user message so model can comprehend the content
-    const nativeUserMessage = nativeRomanized
-      ? `[${nativeLanguageLabel}] ${trimmed}\n[Romanized] ${nativeRomanized}`
-      : trimmed;
+    // Send English gloss as user message so model answers the right question
+    const nativeUserMessage = inlineGloss || (nativeRomanized ? nativeRomanized : trimmed);
     const nativeLanguageReply = await smartReplyDetailed(
       userId,
       nativeUserMessage,
