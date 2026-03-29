@@ -10480,6 +10480,78 @@ async function routeInboundAgentMessageCore(
     return finalizeEarlyRaw(earlyDeterministicMathReply, "math", "math");
   }
 
+  // ── INDIC SCRIPT FAST-PATH ──
+  // For non-Latin Indic scripts (Kannada, Tamil, Telugu, etc.), use a direct
+  // romanize → translate → answer pipeline. This bypasses the complex multilingual
+  // bridge which often fails because models can't read native Indic scripts.
+  const indicRomanized = romanizeIfIndicScript(trimmed);
+  if (indicRomanized) {
+    const indicLocale = inferClawCloudMessageLocale(trimmed);
+    const indicLangName = indicLocale ? (localeNames[indicLocale] ?? "the user's language") : "the user's language";
+
+    // Step 1: Translate romanized text to English using Hindi/Sanskrit cognate hint
+    const indicEnglish = await withSoftTimeout(
+      completeClawCloudPrompt({
+        system: [
+          `You are a translation engine. Translate the romanized ${indicLangName} text below to natural English.`,
+          `${indicLangName} shares many words with Hindi and Sanskrit. Use your Hindi/Sanskrit knowledge to understand the vocabulary.`,
+          "Return ONLY the English translation in one line. Do not add explanations, etymology, or commentary.",
+        ].join(" "),
+        user: indicRomanized,
+        maxTokens: 500,
+        fallback: "",
+        skipCache: true,
+        temperature: 0.05,
+        preferredModels: [
+          "qwen/qwen3.5-397b-a17b",
+          "meta/llama-3.1-405b-instruct",
+          "deepseek-ai/deepseek-v3.1-terminus",
+        ],
+      }),
+      "",
+      12_000,
+    );
+
+    if (indicEnglish?.trim() && indicEnglish.trim().length > 5) {
+      // Step 2: Answer the English translation with instruction to respond in the user's language
+      const indicIntent = detectIntent(indicEnglish.trim());
+      const indicReply = await smartReplyDetailed(
+        userId,
+        indicEnglish.trim(),
+        indicIntent.type,
+        requested.mode ?? "fast",
+        true,
+        [
+          buildIntentSpecificInstruction(indicIntent.type, indicEnglish.trim()),
+          buildConversationStyleInstruction(selectedConversationStyle),
+          `The user originally wrote in ${indicLangName}. Respond in ${indicLangName}, NOT in English.`,
+          `Original ${indicLangName} text: ${trimmed}`,
+          `English meaning: ${indicEnglish.trim()}`,
+          "Answer completely, accurately, and professionally. Use the user's language for the response.",
+        ].filter(Boolean).join("\n\n"),
+        undefined,
+        MULTILINGUAL_DIRECT_ANSWER_PREFERRED_MODELS,
+      );
+
+      if (indicReply.reply?.trim() && indicReply.reply.trim().length > 30
+          && !isVisibleFallbackReply(indicReply.reply)
+          && !isLowQualityTemplateReply(indicReply.reply)) {
+        void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
+        return finalizeAgentReply({
+          userId,
+          locale: indicLocale ?? "en",
+          preserveRomanScript: false,
+          question: indicEnglish.trim(),
+          intent: indicIntent.type,
+          category: indicIntent.category,
+          startedAt: routeStartedAt,
+          reply: indicReply.reply.trim(),
+          modelAuditTrail: indicReply.modelAuditTrail,
+        });
+      }
+    }
+  }
+
   const earlyReplyLanguageResolution = await resolveReplyLocale(trimmed);
   const earlyMultilingualRoutingBridge = await resolveMultilingualRoutingBridge(
     trimmed,
