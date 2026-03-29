@@ -10494,38 +10494,42 @@ async function routeInboundAgentMessageCore(
   }
 
   if (earlyMultilingualRoutingBridge.intent) {
-    const multilingualQuestion = earlyMultilingualRoutingBridge.gloss || trimmed;
+    const multilingualGloss = earlyMultilingualRoutingBridge.gloss || "";
+    const nativeLangLabel = earlyReplyLanguageResolution.detectedLocale
+      ? localeNames[earlyReplyLanguageResolution.detectedLocale]
+      : "the user's language";
     const multilingualInstruction = [
-      buildIntentSpecificInstruction(earlyMultilingualRoutingBridge.intent.type, multilingualQuestion),
+      buildIntentSpecificInstruction(earlyMultilingualRoutingBridge.intent.type, multilingualGloss || trimmed),
       buildConversationStyleInstruction(selectedConversationStyle),
       buildClawCloudReplyLanguageInstruction(earlyReplyLanguageResolution),
-      `Original user prompt: ${trimmed}`,
-      earlyMultilingualRoutingBridge.gloss
-        ? `Internal English routing gloss: ${earlyMultilingualRoutingBridge.gloss}`
+      `Original user prompt (in ${nativeLangLabel}): ${trimmed}`,
+      multilingualGloss
+        ? `Approximate English meaning (may be inaccurate — trust the original text): ${multilingualGloss}`
         : "",
-      "Answer the user's actual request using the English gloss for comprehension support.",
-      "You may reason from the English gloss internally, but the final user-facing answer will be localized later.",
+      `CRITICAL: Answer the ORIGINAL ${nativeLangLabel} text, not any approximate English translation. The user's text is the authoritative source.`,
+      `Respond in ${nativeLangLabel}. The final answer will be localized to the user's language.`,
       "Mirror the user's language, tone, and level of formality naturally.",
       "Answer directly. Do not ask for clarification unless the original prompt is still genuinely ambiguous.",
     ].filter(Boolean).join("\n\n");
 
     const multilingualReply = await smartReplyDetailed(
       userId,
-      multilingualQuestion,
+      trimmed,
       earlyMultilingualRoutingBridge.intent.type,
       requested.mode ?? "fast",
       requested.explicit || requested.mode === "fast",
       multilingualInstruction,
       undefined,
+      MULTILINGUAL_DIRECT_ANSWER_PREFERRED_MODELS,
     );
     const guardedMultilingualReply = await enforceAnswerQuality({
       userId,
-      question: multilingualQuestion,
+      question: multilingualGloss || trimmed,
       intent: earlyMultilingualRoutingBridge.intent.type,
       category: earlyMultilingualRoutingBridge.intent.category,
       reply: postProcessIntentReply(
         earlyMultilingualRoutingBridge.intent.type,
-        multilingualQuestion,
+        multilingualGloss || trimmed,
         multilingualReply.reply ?? "",
       ) ?? "",
       memorySnippet: "",
@@ -10538,7 +10542,7 @@ async function routeInboundAgentMessageCore(
       userId,
       locale: earlyReplyLanguageResolution.locale,
       preserveRomanScript: earlyReplyLanguageResolution.preserveRomanScript,
-      question: multilingualQuestion,
+      question: trimmed,
       intent: earlyMultilingualRoutingBridge.intent.type,
       category: earlyMultilingualRoutingBridge.intent.category,
       startedAt: routeStartedAt,
@@ -10576,23 +10580,23 @@ async function routeInboundAgentMessageCore(
       buildIntentSpecificInstruction(earlyNativeLanguageDirectIntent.type, inlineGloss || trimmed),
       buildConversationStyleInstruction(selectedConversationStyle),
       buildClawCloudReplyLanguageInstruction(earlyReplyLanguageResolution),
-      `The user wrote this request in ${nativeLanguageLabel}. Understand the original prompt directly in that language.`,
-      `Original user prompt: ${trimmed}`,
+      `The user wrote this request in ${nativeLanguageLabel}. Read and understand the original ${nativeLanguageLabel} text directly.`,
+      `Original user prompt (in ${nativeLanguageLabel}): ${trimmed}`,
       inlineGloss
-        ? `Internal English comprehension gloss: ${inlineGloss}`
+        ? `Approximate English meaning (may be inaccurate — trust the original text over this gloss): ${inlineGloss}`
         : "",
-      inlineGloss
-        ? "Use the English gloss to understand the request, but respond in the user's original language."
-        : "",
+      `CRITICAL: Answer the ORIGINAL ${nativeLanguageLabel} text, not any approximate English translation. The user's text is the authoritative source of their question.`,
+      `Respond in ${nativeLanguageLabel}. Do not switch to English unless the user explicitly asked for English.`,
       "Answer the user's actual request directly instead of asking for extra scope.",
       "If the prompt asks for a story, summary, essay, explanation, list, or comparison, fulfill that exact request completely.",
       "Keep the same tone, warmth, and level of formality as the user's message.",
-      "Do not switch to English unless the user explicitly asked for English.",
     ].filter(Boolean).join("\n\n");
 
+    // ALWAYS send the original text as the user message so the model reads
+    // the native script directly. The gloss is only a hint in the system prompt.
     const nativeLanguageReply = await smartReplyDetailed(
       userId,
-      inlineGloss || trimmed,
+      trimmed,
       earlyNativeLanguageDirectIntent.type,
       nativeLanguageMode,
       requested.explicit || nativeLanguageMode === "fast",
