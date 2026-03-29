@@ -2042,7 +2042,7 @@ async function finalizeAgentReply(input: {
   modelAuditTrail?: ClawCloudModelAuditTrail | null;
 }): Promise<FinalizedAgentReplyResult> {
   const sanitizedReply = sanitizeDeprecatedFallbackLeakWithContext(
-    input.reply.replace(/\n{3,}/g, "\n\n").trim(),
+    (input.reply ?? "").replace(/\n{3,}/g, "\n\n").trim(),
     input.question,
     input.intent,
   );
@@ -9391,7 +9391,7 @@ async function enforceAnswerQuality(input: {
     return buildClawCloudLowConfidenceReply(input.question, profile, verification.rationale);
   }
 
-  if (verification?.verdict === "revise" && verification.revisedAnswer.trim()) {
+  if (verification?.verdict === "revise" && verification.revisedAnswer?.trim()) {
     answer = verification.revisedAnswer.trim();
   }
 
