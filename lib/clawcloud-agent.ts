@@ -10513,7 +10513,11 @@ async function routeInboundAgentMessageCore(
     if (multilingualRomanized && !multilingualGloss) {
       multilingualGloss = await withSoftTimeout(
         completeClawCloudPrompt({
-          system: `You are a translation engine. Translate this romanized ${nativeLangLabel} text to natural English. Return ONLY the English translation.`,
+          system: [
+            `You are a translation engine. Translate the romanized ${nativeLangLabel} text below to natural English.`,
+            `${nativeLangLabel} shares many words with Hindi and Sanskrit. Use your Hindi/Sanskrit knowledge to understand the vocabulary.`,
+            "Return ONLY the English translation in one line. Do not add explanations, etymology, or commentary.",
+          ].join(" "),
           user: multilingualRomanized,
           maxTokens: 500,
           fallback: "",
@@ -10602,18 +10606,18 @@ async function routeInboundAgentMessageCore(
 
     // If the multilingual bridge failed (timeout / empty gloss), translate the
     // ROMANIZED text to English — models translate romanized Indic text far better
-    // than native script.
+    // than native script, especially when told to use Hindi/Sanskrit cognates.
     const hasNonLatinScript = /[^\u0000-\u024F\u1E00-\u1EFF\u2C60-\u2C7F\uA720-\uA7FF]/u.test(trimmed);
     let inlineGloss = "";
-    if (hasNonLatinScript && !earlyMultilingualRoutingBridge.gloss) {
-      // Translate romanized text (much more reliable than translating native script)
-      const textToTranslate = nativeRomanized
-        ? `Translate this romanized ${nativeLanguageLabel} text to English: ${nativeRomanized}`
-        : trimmed;
+    if (hasNonLatinScript && !earlyMultilingualRoutingBridge.gloss && nativeRomanized) {
       inlineGloss = await withSoftTimeout(
         completeClawCloudPrompt({
-          system: `You are a translation engine. The user will give you romanized ${nativeLanguageLabel} text. Translate it to natural English. Return ONLY the English translation, nothing else. Do not add explanations or commentary.`,
-          user: textToTranslate,
+          system: [
+            `You are a translation engine. Translate the romanized ${nativeLanguageLabel} text below to natural English.`,
+            `${nativeLanguageLabel} shares many words with Hindi and Sanskrit. Use your Hindi/Sanskrit knowledge to understand the vocabulary.`,
+            "Return ONLY the English translation in one line. Do not add explanations, etymology, or commentary.",
+          ].join(" "),
+          user: nativeRomanized,
           maxTokens: 500,
           fallback: "",
           skipCache: true,
@@ -10627,7 +10631,7 @@ async function routeInboundAgentMessageCore(
         "",
         8_000,
       ).then((g) => g.trim()).catch(() => "");
-      if (!inlineGloss || inlineGloss.toLowerCase() === trimmed.trim().toLowerCase()) {
+      if (!inlineGloss || inlineGloss.toLowerCase() === nativeRomanized.toLowerCase()) {
         inlineGloss = "";
       }
     }

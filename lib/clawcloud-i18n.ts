@@ -527,12 +527,23 @@ export async function translateMessage(
     "mistralai/mistral-large-3-675b-instruct-2512",
   ] : undefined;
 
+  // For Indic→English translation, romanize first and translate the romanized text
+  // (models understand romanized Indic text much better than native scripts)
+  const romanizedForTranslation = (isIndicSource && locale === "en" && options?.force)
+    ? romanizeIndicScript(message)
+    : null;
+  const effectiveMessage = (romanizedForTranslation && romanizedForTranslation !== message)
+    ? romanizedForTranslation
+    : message;
+
   const translated = await completeClawCloudPrompt({
     system: [
       `Translate the user's message into ${localeNames[locale]}. Return only the translated text.`,
-      isIndicSource && sourceLanguageName
-        ? `The source text is written in ${sourceLanguageName} script. Read and understand it as ${sourceLanguageName} text before translating.`
-        : null,
+      isIndicSource && sourceLanguageName && romanizedForTranslation
+        ? `The source text is romanized ${sourceLanguageName}. ${sourceLanguageName} shares many words with Hindi and Sanskrit. Use your Hindi/Sanskrit knowledge to understand the vocabulary.`
+        : isIndicSource && sourceLanguageName
+          ? `The source text is written in ${sourceLanguageName} script. Read and understand it as ${sourceLanguageName} text before translating.`
+          : null,
       "Preserve the original tone, warmth, directness, and level of formality. Make it sound like a natural human reply, not a stiff machine translation.",
       `The source text may already contain some ${localeNames[locale]} words, quoted titles, proper nouns, or mixed-language phrases. Still translate the surrounding prose faithfully.`,
       `Never say the text is already in ${localeNames[locale]}. Never refuse translation for that reason.`,
@@ -547,7 +558,7 @@ export async function translateMessage(
           : "Use natural modern wording for Indian users, prefer the native script for the target language by default (for example, Devanagari for Hindi), and do not over-translate banking, tax, or app terms that are commonly kept in English."
         : "Keep the translation natural and concise.",
     ].filter(Boolean).join(" "),
-    user: message,
+    user: effectiveMessage,
     maxTokens: 1000,
     fallback: message,
     skipCache: true,
