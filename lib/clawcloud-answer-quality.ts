@@ -1033,71 +1033,11 @@ export function buildClawCloudLowConfidenceReply(
   profile: ClawCloudAnswerQualityProfile,
   rationale?: string,
 ): string {
-  const detailHint = buildClawCloudRecoveryDetailHint(question, profile);
-  const safeRationale = rationale?.trim() ?? "";
-  const publicGap =
-    safeRationale
-    && !/(timeout|too long|verify safely|complete reliably|retry|fallback|generic|drifted away|wrong mode|could not verify|cannot verify|live coverage|source batch|grounded support|safe answer)/i.test(safeRationale)
-      ? `What is still unclear: ${safeRationale}`
-      : "";
-
-  if (profile.domain === "health") {
-    return [
-      "I can give general medical guidance, but personal treatment or dosage advice depends on details I do not have yet.",
-      detailHint,
-      "If symptoms are severe, rapidly worsening, or urgent, contact a qualified doctor promptly.",
-      publicGap,
-    ].filter(Boolean).join("\n");
-  }
-
-  if (profile.domain === "mental_health") {
-    return [
-      "I want to handle this carefully and keep the guidance practical.",
-      detailHint,
-      "If you may harm yourself or feel unsafe, contact local emergency services or a trusted person right now.",
-      publicGap,
-    ].filter(Boolean).join("\n");
-  }
-
-  if (profile.domain === "legal") {
-    return [
-      "The general legal answer depends on jurisdiction and the exact facts.",
-      detailHint,
-      "Before acting on a real case, verify the position with a qualified lawyer.",
-      publicGap,
-    ].filter(Boolean).join("\n");
-  }
-
-  if (profile.domain === "tax" || profile.domain === "finance") {
-    return [
-      "The right answer depends on the exact assumptions, dates, and current figures involved.",
-      detailHint,
-      "Before acting on it, verify the final numbers with official sources or a qualified CA/advisor.",
-      publicGap,
-    ].filter(Boolean).join("\n");
-  }
-
-  if (profile.requiresLiveGrounding) {
-    return [
-      "This is a time-sensitive question, so a precise answer depends on the exact live scope.",
-      detailHint,
-      publicGap,
-    ].filter(Boolean).join("\n");
-  }
-
-  if (shouldAttemptDirectAnswerRecovery(question, profile)) {
-    return [
-      "I could not complete a reliable direct answer from the current answer path.",
-      detailHint,
-      publicGap,
-    ].filter(Boolean).join("\n");
-  }
-
-  return [
-    "I want to give you a precise answer, but the question still needs one key detail or clearer scope.",
-    detailHint,
-    publicGap,
-  ].filter(Boolean).join("\n");
+  // Return an empty string to signal that the caller should try AI model
+  // recovery instead of showing a low-confidence placeholder.
+  // The caller (ensureProfessionalReply) will detect this as a fallback and
+  // attempt emergency AI calls (Phases 5-8) before giving up.
+  return "";
 }
 
 export function clawCloudConfidenceBelowFloor(

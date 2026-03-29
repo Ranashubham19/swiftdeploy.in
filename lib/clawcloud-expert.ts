@@ -2402,6 +2402,12 @@ function solveBlackScholesQuestion(question: string) {
     return null;
   }
 
+  // If the user is asking for derivation/proof/explanation, let the AI model
+  // handle it — deterministic solver can only return formulas, not proofs.
+  if (/\b(derive|derivation|proof|prove|ito|itô|first principles|pde|partial differential)\b/i.test(text)) {
+    return null;
+  }
+
   const spotMatch = /(?:stock|spot|s)[:\s=]+\$?(\d+(?:\.\d+)?)/i.exec(question);
   const strikeMatch = /(?:strike|k)[:\s=]+\$?(\d+(?:\.\d+)?)/i.exec(question);
   const maturityMatch = /(?:expiry|maturity|t)[:\s=]+(\d+(?:\.\d+)?)\s*(?:year|yr)?/i.exec(question);

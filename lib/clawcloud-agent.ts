@@ -2534,6 +2534,18 @@ function isLowQualityTemplateReply(reply: string | null | undefined) {
     || normalized.includes("tell me these 3 things and i'll write it completely")
     || normalized.includes("i can answer health questions on symptoms, conditions, nutrition")
     || normalized.includes("i can answer questions on rules, records, players")
+    || normalized.includes("i can solve this completely. for best results")
+    || normalized.includes("i can give general medical guidance")
+    || normalized.includes("the general legal answer depends on jurisdiction")
+    || normalized.includes("the right answer depends on the exact assumptions")
+    || normalized.includes("this is a time-sensitive question")
+    || normalized.includes("i could not complete a reliable direct answer")
+    || normalized.includes("the question still needs one key detail")
+    || normalized.includes("i need a moment to retrieve accurate")
+    || normalized.includes("i did not fully catch that yet")
+    || normalized.includes("creative writing mode is active")
+    || normalized.includes("email writing mode is active")
+    || normalized.includes("core answer: this is a technology concept")
   );
 }
 
@@ -5201,16 +5213,8 @@ function bestEffortProfessionalTemplateV2(intent: IntentType, message: string) {
       const rows = Array.from({ length: 10 }, (_, i) => `${n} × ${i + 1} = ${n * (i + 1)}`);
       return [`📐 *Table of ${n}*`, "", ...rows, "", `*${n} × 1 through 10 complete.*`].join("\n");
     }
-    return [
-      `📐 *Math: ${q.slice(0, 80)}*`,
-      "",
-      "I can solve this completely. For best results:",
-      "• *Equations* — paste the full equation",
-      "• *Tables* — say 'table of 12'",
-      "• *Word problems* — give all values and what to find",
-      "",
-      "Send the exact numbers and I'll return full working + answer.",
-    ].join("\n");
+    // No math template — let AI model solve the actual problem
+    return null as unknown as string;
   }
 
   if (intent === "email") {
@@ -5255,7 +5259,9 @@ function bestEffortProfessionalTemplateV2(intent: IntentType, message: string) {
     return null as unknown as string;
   }
 
-  if (/^can you/.test(t) || /^do you/.test(t) || /^are you/.test(t)) {
+  // Only answer short capability questions ("Can you write code?") with template.
+  // Longer questions starting with "Can you explain..." should go to AI model.
+  if ((/^can you/.test(t) || /^do you/.test(t) || /^are you/.test(t)) && message.length < 60) {
     return [
       "✅ *Yes, I can help with that!*",
       "",
@@ -5353,45 +5359,8 @@ function buildUniversalDomainFallbackV2(intent: IntentType, message: string): st
     }
   }
 
-  const domainFallbacks: Record<string, string> = {
-    creative: [
-      "Creative writing mode is active.",
-      "",
-      `Request: _${q}_`,
-      "",
-      "I can write full articles, blogs, essays, scripts, and stories.",
-      "Send topic + tone + length and I will produce the complete piece in one message.",
-      "",
-      "Need anything else?",
-    ].join("\n"),
-    email: [
-      "Email writing mode is active.",
-      "",
-      `Request: _${q}_`,
-      "",
-      "I can draft a complete email with subject, body, and clear call-to-action.",
-      "Share recipient + purpose + tone + deadline and I will write it now.",
-      "",
-      "Need anything else?",
-    ].join("\n"),
-    general: [
-      asksCanYou ? "Yes - I can do that." : "",
-      "",
-      asksToWrite
-        ? "Share topic, tone, and length and I will write it now."
-        : "Tell me the exact question and I will give a complete direct answer.",
-    ].filter(Boolean).join("\n"),
-  };
-
-  if (domainFallbacks[intent]) {
-    return domainFallbacks[intent];
-  }
-
-  return [
-    "I did not fully catch that yet.",
-    "",
-    "Could you rephrase in one clear line? I will answer directly.",
-  ].join("\n");
+  // Return null for all non-deterministic intents — let AI model handle them
+  return null as unknown as string;
 }
 
 function recoveryMaxTokens(intent: IntentType) {
