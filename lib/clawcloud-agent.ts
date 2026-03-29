@@ -181,6 +181,7 @@ import {
   detectLocalePreferenceCommand,
   enforceClawCloudReplyLanguage,
   getUserLocale,
+  inferClawCloudMessageLocale,
   resolveClawCloudReplyLanguage,
   setUserLocale,
   translateMessage,
@@ -1426,6 +1427,12 @@ const MULTILINGUAL_NATIVE_ANSWER_ALLOWED_INTENTS = new Set<IntentType>([
   "language",
   "economics",
   "research",
+  "math",
+  "coding",
+  "health",
+  "law",
+  "finance",
+  "sports",
 ]);
 
 const MULTILINGUAL_DIRECT_ANSWER_PREFERRED_MODELS = [
@@ -1435,7 +1442,7 @@ const MULTILINGUAL_DIRECT_ANSWER_PREFERRED_MODELS = [
   "mistralai/mistral-large-3-675b-instruct-2512",
 ];
 
-const MULTILINGUAL_ROUTING_BRIDGE_TIMEOUT_MS = 2_500;
+const MULTILINGUAL_ROUTING_BRIDGE_TIMEOUT_MS = 10_000;
 
 function looksLikeStandalonePrimaryAnswerPrompt(message: string) {
   const trimmed = message.trim();
@@ -1544,11 +1551,16 @@ function shouldUseMultilingualRoutingBridge(
     return false;
   }
 
+  // Allow multilingual bridge for stored_preference with non-English locale and non-Latin script
+  const hasNonLatinContent = /[^\u0000-\u024F\u1E00-\u1EFF\u2C60-\u2C7F\uA720-\uA7FF]/u.test(trimmed);
+  const isStoredNonEnglish = resolution.source === "stored_preference" && resolution.locale !== "en" && hasNonLatinContent;
   if (
     resolution.source !== "mirrored_message"
-    || resolution.locale === "en"
-    || resolution.preserveRomanScript
+    && !isStoredNonEnglish
   ) {
+    return false;
+  }
+  if (resolution.locale === "en" || resolution.preserveRomanScript) {
     return false;
   }
 
@@ -1619,8 +1631,13 @@ function detectNativeLanguageDirectAnswerLaneIntent(
   const hasMirroredHinglish =
     resolution.source === "hinglish_message"
     && resolution.preserveRomanScript;
+  // Also handle stored_preference with non-English locale and non-Latin script
+  const hasStoredNonEnglishLocale =
+    resolution.source === "stored_preference"
+    && resolution.locale !== "en"
+    && /[^\u0000-\u024F\u1E00-\u1EFF\u2C60-\u2C7F\uA720-\uA7FF]/u.test(trimmed);
 
-  if (!hasMirroredNativeLanguage && !hasMirroredHinglish) {
+  if (!hasMirroredNativeLanguage && !hasMirroredHinglish && !hasStoredNonEnglishLocale) {
     return null;
   }
 
@@ -1651,7 +1668,7 @@ function detectNativeLanguageDirectAnswerLaneIntent(
 
   // When non-English classification is thin, prefer a direct general answer
   // over dropping into an English clarification fallback.
-  if (hasMirroredNativeLanguage && !isBlockedFromPrimaryDirectAnswerLane(trimmed)) {
+  if ((hasMirroredNativeLanguage || hasStoredNonEnglishLocale) && !isBlockedFromPrimaryDirectAnswerLane(trimmed)) {
     return { type: "general", category: "general" };
   }
 
@@ -10004,9 +10021,21 @@ async function buildInboundAgentTimeoutResult(message: string): Promise<RouteInb
   // with a 12s budget as last resort before returning template garbage
   if (!response || isVisibleFallbackReply(response) || isLowQualityTemplateReply(response)) {
     try {
+      // Detect non-Latin script and translate for the timeout emergency call too
+      const hasNonLatinTimeout = /[^\u0000-\u024F\u1E00-\u1EFF\u2C60-\u2C7F\uA720-\uA7FF]/u.test(normalizedMessage);
+      const timeoutLocale = hasNonLatinTimeout ? inferClawCloudMessageLocale(normalizedMessage) : null;
+      let timeoutUserPrompt = normalizedMessage;
+      let timeoutLanguageHint = "";
+      if (hasNonLatinTimeout && timeoutLocale && timeoutLocale !== "en") {
+        const timeoutGloss = await translateMessage(normalizedMessage, "en", { force: true }).catch(() => "");
+        if (timeoutGloss?.trim() && timeoutGloss.trim().toLowerCase() !== normalizedMessage.trim().toLowerCase()) {
+          timeoutUserPrompt = timeoutGloss.trim();
+          timeoutLanguageHint = `\nIMPORTANT: The user wrote in ${localeNames[timeoutLocale] ?? timeoutLocale}. Original message: ${normalizedMessage}\nAnswer in ${localeNames[timeoutLocale] ?? timeoutLocale}, NOT in English. Use the English translation only to understand the question.`;
+        }
+      }
       const emergencyReply = await completeClawCloudPrompt({
-        system: `You are ClawCloud AI, the world's most capable AI assistant. Answer the user's question completely, accurately, and directly. Do NOT say you cannot help. Do NOT ask for more details — answer with what you know. Use WhatsApp markdown (*bold*, _italic_, bullet points).`,
-        user: normalizedMessage,
+        system: `You are ClawCloud AI, the world's most capable AI assistant. Answer the user's question completely, accurately, and directly. Do NOT say you cannot help. Do NOT ask for more details — answer with what you know. Use WhatsApp markdown (*bold*, _italic_, bullet points).${timeoutLanguageHint}`,
+        user: timeoutUserPrompt,
         intent: detected.type,
         temperature: 0.15,
         maxTokens: 2000,
@@ -10055,10 +10084,22 @@ export async function routeInboundAgentMessageResult(
   const resp = result.response?.trim() ?? "";
   if (!resp || isVisibleFallbackReply(resp) || isLowQualityTemplateReply(resp) || resp.length < 20) {
     try {
+      // Detect non-Latin script and translate for comprehension if needed
+      const hasNonLatinEmergency = /[^\u0000-\u024F\u1E00-\u1EFF\u2C60-\u2C7F\uA720-\uA7FF]/u.test(message);
+      const emergencyLocale = hasNonLatinEmergency ? inferClawCloudMessageLocale(message) : null;
+      let emergencyUserPrompt = message;
+      let emergencyLanguageHint = "";
+      if (hasNonLatinEmergency && emergencyLocale && emergencyLocale !== "en") {
+        const emergencyGloss = await translateMessage(message, "en", { force: true }).catch(() => "");
+        if (emergencyGloss?.trim() && emergencyGloss.trim().toLowerCase() !== message.trim().toLowerCase()) {
+          emergencyUserPrompt = emergencyGloss.trim();
+          emergencyLanguageHint = `\nIMPORTANT: The user wrote in ${localeNames[emergencyLocale] ?? emergencyLocale}. Original message: ${message}\nAnswer in ${localeNames[emergencyLocale] ?? emergencyLocale}, NOT in English. Use the English translation only to understand the question.`;
+        }
+      }
       const emergencyReply = await completeClawCloudPrompt({
-        system: `You are ClawCloud AI, the world's most capable AI assistant. Answer the user's question completely, accurately, and directly. Do NOT say you cannot help. Do NOT ask for more details — answer with what you know. Use WhatsApp markdown (*bold*, _italic_, bullet points). Provide a comprehensive, professional answer.`,
-        user: message,
-        intent: detectIntent(message).type,
+        system: `You are ClawCloud AI, the world's most capable AI assistant. Answer the user's question completely, accurately, and directly. Do NOT say you cannot help. Do NOT ask for more details — answer with what you know. Use WhatsApp markdown (*bold*, _italic_, bullet points). Provide a comprehensive, professional answer.${emergencyLanguageHint}`,
+        user: emergencyUserPrompt,
+        intent: detectIntent(emergencyUserPrompt).type,
         temperature: 0.15,
         maxTokens: 2500,
         fallback: "",
@@ -10515,11 +10556,34 @@ async function routeInboundAgentMessageCore(
       ? localeNames[earlyReplyLanguageResolution.detectedLocale]
       : (earlyReplyLanguageResolution.preserveRomanScript ? "Hinglish" : "the user's language");
     const nativeLanguageMode = requested.explicit ? (requested.mode ?? "fast") : "fast";
+
+    // If the multilingual bridge failed (timeout / empty gloss), attempt an inline
+    // translation so the model has an English comprehension anchor for non-Latin scripts.
+    const hasNonLatinScript = /[^\u0000-\u024F\u1E00-\u1EFF\u2C60-\u2C7F\uA720-\uA7FF]/u.test(trimmed);
+    let inlineGloss = "";
+    if (hasNonLatinScript && !earlyMultilingualRoutingBridge.gloss) {
+      inlineGloss = await withSoftTimeout(
+        translateMessage(trimmed, "en", { force: true }),
+        "",
+        8_000,
+      ).then((g) => g.trim()).catch(() => "");
+      if (inlineGloss.toLowerCase() === trimmed.trim().toLowerCase()) {
+        inlineGloss = "";
+      }
+    }
+
     const nativeLanguageInstruction = [
-      buildIntentSpecificInstruction(earlyNativeLanguageDirectIntent.type, trimmed),
+      buildIntentSpecificInstruction(earlyNativeLanguageDirectIntent.type, inlineGloss || trimmed),
       buildConversationStyleInstruction(selectedConversationStyle),
       buildClawCloudReplyLanguageInstruction(earlyReplyLanguageResolution),
       `The user wrote this request in ${nativeLanguageLabel}. Understand the original prompt directly in that language.`,
+      `Original user prompt: ${trimmed}`,
+      inlineGloss
+        ? `Internal English comprehension gloss: ${inlineGloss}`
+        : "",
+      inlineGloss
+        ? "Use the English gloss to understand the request, but respond in the user's original language."
+        : "",
       "Answer the user's actual request directly instead of asking for extra scope.",
       "If the prompt asks for a story, summary, essay, explanation, list, or comparison, fulfill that exact request completely.",
       "Keep the same tone, warmth, and level of formality as the user's message.",
@@ -10528,7 +10592,7 @@ async function routeInboundAgentMessageCore(
 
     const nativeLanguageReply = await smartReplyDetailed(
       userId,
-      trimmed,
+      inlineGloss || trimmed,
       earlyNativeLanguageDirectIntent.type,
       nativeLanguageMode,
       requested.explicit || nativeLanguageMode === "fast",
