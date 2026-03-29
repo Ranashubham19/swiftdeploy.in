@@ -2546,6 +2546,12 @@ function isLowQualityTemplateReply(reply: string | null | undefined) {
     || normalized.includes("creative writing mode is active")
     || normalized.includes("email writing mode is active")
     || normalized.includes("core answer: this is a technology concept")
+    || normalized.includes("if you want a deep version")
+    || normalized.includes("if you want a deeper version")
+    || normalized.includes("i can expand this with examples")
+    || normalized.includes("should be understood in three parts")
+    || /^.{0,300}is a concept that should be (?:understood|explained)/i.test(normalized)
+    || (normalized.length < 500 && /if you (?:want|need|would like) (?:a |me to )?(?:deep|detail|expand|elaborate)/i.test(normalized))
   );
 }
 
@@ -10035,12 +10041,41 @@ export async function routeInboundAgentMessageResult(
   },
 ): Promise<RouteInboundAgentMessageResult> {
   const timeoutPolicy = resolveInboundRouteTimeoutPolicy(message);
-  return Promise.race([
+  const result = await Promise.race([
     routeInboundAgentMessageResultCore(userId, message, options),
     new Promise<RouteInboundAgentMessageResult>((resolve) => {
       setTimeout(() => resolve(buildInboundAgentTimeoutResult(message)), timeoutPolicy.timeoutMs);
     }),
   ]);
+
+  // Safety net: if the response is empty, falback-like, or too short for a complex question,
+  // make one last emergency AI call rather than sending garbage to the user
+  const resp = result.response?.trim() ?? "";
+  if (!resp || isVisibleFallbackReply(resp) || isLowQualityTemplateReply(resp) || resp.length < 20) {
+    try {
+      const emergencyReply = await completeClawCloudPrompt({
+        system: `You are ClawCloud AI, the world's most capable AI assistant. Answer the user's question completely, accurately, and directly. Do NOT say you cannot help. Do NOT ask for more details — answer with what you know. Use WhatsApp markdown (*bold*, _italic_, bullet points). Provide a comprehensive, professional answer.`,
+        user: message,
+        intent: detectIntent(message).type,
+        temperature: 0.15,
+        maxTokens: 2500,
+        fallback: "",
+      });
+      if (emergencyReply?.trim() && emergencyReply.trim().length > 30
+          && !isVisibleFallbackReply(emergencyReply)
+          && !isLowQualityTemplateReply(emergencyReply)) {
+        return {
+          response: emergencyReply.trim(),
+          liveAnswerBundle: result.liveAnswerBundle ?? null,
+          modelAuditTrail: result.modelAuditTrail ?? null,
+        };
+      }
+    } catch {
+      // Emergency call failed — return original result
+    }
+  }
+
+  return result;
 }
 
 async function routeInboundAgentMessageCore(
