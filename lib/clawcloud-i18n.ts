@@ -508,15 +508,31 @@ export async function translateMessage(
   options?: {
     force?: boolean;
     preserveRomanScript?: boolean;
+    preferredModels?: string[];
   },
 ) {
   if (locale === DEFAULT_CLAW_CLOUD_LOCALE && !options?.force) {
     return message;
   }
 
+  // Detect source language for Indic scripts to provide explicit hints and use better models
+  const detectedSourceLocale = inferClawCloudMessageLocale(message);
+  const isIndicSource = detectedSourceLocale ? INDIAN_LOCALES.has(detectedSourceLocale) : false;
+  const sourceLanguageName = detectedSourceLocale ? (localeNames[detectedSourceLocale] ?? null) : null;
+  const indicModels = isIndicSource ? [
+    "qwen/qwen3.5-397b-a17b",
+    "meta/llama-3.1-405b-instruct",
+    "deepseek-ai/deepseek-v3.1-terminus",
+    "moonshotai/kimi-k2.5",
+    "mistralai/mistral-large-3-675b-instruct-2512",
+  ] : undefined;
+
   const translated = await completeClawCloudPrompt({
     system: [
       `Translate the user's message into ${localeNames[locale]}. Return only the translated text.`,
+      isIndicSource && sourceLanguageName
+        ? `The source text is written in ${sourceLanguageName} script. Read and understand it as ${sourceLanguageName} text before translating.`
+        : null,
       "Preserve the original tone, warmth, directness, and level of formality. Make it sound like a natural human reply, not a stiff machine translation.",
       `The source text may already contain some ${localeNames[locale]} words, quoted titles, proper nouns, or mixed-language phrases. Still translate the surrounding prose faithfully.`,
       `Never say the text is already in ${localeNames[locale]}. Never refuse translation for that reason.`,
@@ -536,17 +552,24 @@ export async function translateMessage(
     fallback: message,
     skipCache: true,
     temperature: 0.1,
+    preferredModels: options?.preferredModels ?? indicModels,
   });
 
   const candidate = looksLikeTranslationFailureReply(translated) ? message : (translated || message);
   const normalizedCandidate = normalizeMessageForLanguageDetection(candidate);
   const candidateLocale = inferClawCloudMessageLocale(normalizedCandidate);
+  const isNonLatinCandidate = !LATIN_SCRIPT_MESSAGE_RE.test(normalizedCandidate);
   const shouldRetryForTargetLocale =
     options?.force
     && normalizedCandidate.length > 24
     && (
       locale === "en"
-        ? (LATIN_SCRIPT_MESSAGE_RE.test(normalizedCandidate) && !looksLikeLikelyEnglishReply(normalizedCandidate))
+        ? (
+          // Retry if result still contains non-Latin characters (translation didn't work)
+          isNonLatinCandidate
+          // OR if result is Latin but not actually English
+          || (LATIN_SCRIPT_MESSAGE_RE.test(normalizedCandidate) && !looksLikeLikelyEnglishReply(normalizedCandidate))
+        )
         : candidateLocale !== locale
     );
 
@@ -556,6 +579,9 @@ export async function translateMessage(
         "You are a translation engine.",
         `Translate the user's text into natural ${localeNames[locale]} only.`,
         `Your entire output must be in ${localeNames[locale]}.`,
+        isIndicSource && sourceLanguageName
+          ? `The source text is in ${sourceLanguageName}. Read and understand the ${sourceLanguageName} script carefully before translating.`
+          : null,
         `The source text may include some ${localeNames[locale]} words, titles, or names already. Do not refuse translation for that reason.`,
         options?.preserveRomanScript
           ? "Use natural Roman script instead of native script."
@@ -570,6 +596,7 @@ export async function translateMessage(
       fallback: candidate,
       skipCache: true,
       temperature: 0.05,
+      preferredModels: options?.preferredModels ?? indicModels,
     });
 
     return looksLikeTranslationFailureReply(retried) ? candidate : (retried || candidate);
@@ -587,15 +614,19 @@ export async function translateMessage(
         "You are a translation engine.",
         "Translate the user's text into natural English only.",
         "Your entire output must be in English.",
+        isIndicSource && sourceLanguageName
+          ? `The source text is in ${sourceLanguageName}. Read the ${sourceLanguageName} script carefully.`
+          : null,
         "Do not leave Spanish, Hindi, Hinglish, or any other language in the answer.",
         "Do not summarize, explain, or add commentary. Translate the full meaning faithfully.",
         "Preserve Markdown, numbers, dates, currencies, URLs, and product names where appropriate.",
-      ].join(" "),
+      ].filter(Boolean).join(" "),
       user: message,
       maxTokens: 1000,
       fallback: candidate,
       skipCache: true,
       temperature: 0.05,
+      preferredModels: options?.preferredModels ?? indicModels,
     });
 
     return looksLikeTranslationFailureReply(retried) ? candidate : (retried || candidate);
