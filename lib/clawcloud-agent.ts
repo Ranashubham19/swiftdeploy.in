@@ -9269,7 +9269,7 @@ async function enforceAnswerQuality(input: {
     isDocumentBound: input.isDocumentBound,
   });
 
-  let answer = input.reply.trim();
+  let answer = (input.reply ?? "").trim();
   let directRecoveryUsed = false;
   const tryDirectRecovery = async (failureReason: string) => {
     if (directRecoveryUsed || !shouldAttemptDirectAnswerRecovery(input.question, profile)) {
@@ -12786,6 +12786,7 @@ function enforceRequestedBrevity(question: string, reply: string) {
 }
 
 function postProcessIntentReply(intent: IntentType, question: string, reply: string) {
+  if (!reply) return reply ?? "";
   const normalizedQuestion = question.toLowerCase();
   const normalizedReply = reply.toLowerCase();
 
