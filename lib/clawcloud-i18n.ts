@@ -690,4 +690,272 @@ export function buildMultilingualBriefingSystem(locale: SupportedLocale) {
   ].join(" ");
 }
 
+// ── INDIC SCRIPT ROMANIZATION ──
+// Converts native Indic scripts (Kannada, Tamil, Telugu, Devanagari, Bengali, Gujarati, Gurmukhi)
+// to romanized text so that AI models which cannot read native scripts can still understand the content.
+
+type IndicScriptConfig = {
+  base: number; // Unicode block start
+  consonants: string[];
+  independentVowels: string[];
+  vowelDiacritics: string[]; // mapped to same indices as independentVowels (minus 'a')
+  virama: number; // offset from base
+  anusvara: number;
+  visarga: number;
+  digits?: number; // offset of digit '0'
+};
+
+// Independent vowels at offsets 0x05-0x14 from script base
+// Covers: a, aa, i, ii, u, uu, ri, lri, candra-e/short-e, short-e, e, ai, candra-o/short-o, short-o, o, au
+const ROMANIZATION_INDEP_VOWELS = ["a", "aa", "i", "ee", "u", "oo", "ru", "lu", "e", "e", "ee", "ai", "o", "o", "oo", "au"];
+// Vowel diacritics (matras) at offsets 0x3E-0x4C from script base
+// Covers: aa, i, ii, u, uu, ri, rii, candra-e/short-e, short-e, ee, ai, candra-o/short-o, short-o, oo, au
+const ROMANIZATION_DIACRITICS = ["aa", "i", "ee", "u", "oo", "ru", "ruu", "e", "e", "ee", "ai", "o", "o", "oo", "au"];
+
+const INDIC_SCRIPTS: Record<string, IndicScriptConfig> = {
+  // Devanagari (Hindi, Marathi, Sanskrit) — U+0900
+  devanagari: {
+    base: 0x0900,
+    independentVowels: ROMANIZATION_INDEP_VOWELS,
+    consonants: [
+      "ka","kha","ga","gha","nga",
+      "cha","chha","ja","jha","nya",
+      "Ta","Tha","Da","Dha","Na",
+      "ta","tha","da","dha","na","nna",
+      "pa","pha","ba","bha","ma",
+      "ya","ra","ra","la","La","lLa","va",
+      "sha","Sha","sa","ha",
+    ],
+    vowelDiacritics: ROMANIZATION_DIACRITICS,
+    virama: 0x4D, anusvara: 0x02, visarga: 0x03, digits: 0x66,
+  },
+  // Kannada — U+0C80
+  kannada: {
+    base: 0x0C80,
+    independentVowels: ROMANIZATION_INDEP_VOWELS,
+    consonants: [
+      "ka","kha","ga","gha","nga",
+      "cha","chha","ja","jha","nya",
+      "Ta","Tha","Da","Dha","Na",
+      "ta","tha","da","dha","na","nna",
+      "pa","pha","ba","bha","ma",
+      "ya","ra","Ra","la","La","lLa","va",
+      "sha","Sha","sa","ha",
+    ],
+    vowelDiacritics: ROMANIZATION_DIACRITICS,
+    virama: 0x4D, anusvara: 0x02, visarga: 0x03, digits: 0x66,
+  },
+  // Tamil — U+0B80
+  tamil: {
+    base: 0x0B80,
+    independentVowels: ROMANIZATION_INDEP_VOWELS,
+    consonants: [
+      "ka","","ga","","nga",
+      "cha","","ja","","nya",
+      "Ta","","Da","","Na",
+      "ta","","da","","na","nna",
+      "pa","","ba","","ma",
+      "ya","ra","Ra","la","La","lLa","va",
+      "sha","Sha","sa","ha",
+    ],
+    vowelDiacritics: ROMANIZATION_DIACRITICS,
+    virama: 0x4D, anusvara: 0x02, visarga: 0x03, digits: 0x66,
+  },
+  // Telugu — U+0C00
+  telugu: {
+    base: 0x0C00,
+    independentVowels: ROMANIZATION_INDEP_VOWELS,
+    consonants: [
+      "ka","kha","ga","gha","nga",
+      "cha","chha","ja","jha","nya",
+      "Ta","Tha","Da","Dha","Na",
+      "ta","tha","da","dha","na","nna",
+      "pa","pha","ba","bha","ma",
+      "ya","ra","Ra","la","La","lLa","va",
+      "sha","Sha","sa","ha",
+    ],
+    vowelDiacritics: ROMANIZATION_DIACRITICS,
+    virama: 0x4D, anusvara: 0x02, visarga: 0x03, digits: 0x66,
+  },
+  // Bengali — U+0980
+  bengali: {
+    base: 0x0980,
+    independentVowels: ROMANIZATION_INDEP_VOWELS,
+    consonants: [
+      "ka","kha","ga","gha","nga",
+      "cha","chha","ja","jha","nya",
+      "Ta","Tha","Da","Dha","Na",
+      "ta","tha","da","dha","na","nna",
+      "pa","pha","ba","bha","ma",
+      "ya","ra","","la","","","va",
+      "sha","Sha","sa","ha",
+    ],
+    vowelDiacritics: ROMANIZATION_DIACRITICS,
+    virama: 0x4D, anusvara: 0x02, visarga: 0x03, digits: 0x66,
+  },
+  // Gujarati — U+0A80
+  gujarati: {
+    base: 0x0A80,
+    independentVowels: ROMANIZATION_INDEP_VOWELS,
+    consonants: [
+      "ka","kha","ga","gha","nga",
+      "cha","chha","ja","jha","nya",
+      "Ta","Tha","Da","Dha","Na",
+      "ta","tha","da","dha","na","nna",
+      "pa","pha","ba","bha","ma",
+      "ya","ra","","la","La","","va",
+      "sha","Sha","sa","ha",
+    ],
+    vowelDiacritics: ROMANIZATION_DIACRITICS,
+    virama: 0x4D, anusvara: 0x02, visarga: 0x03, digits: 0x66,
+  },
+  // Gurmukhi (Punjabi) — U+0A00
+  gurmukhi: {
+    base: 0x0A00,
+    independentVowels: ROMANIZATION_INDEP_VOWELS,
+    consonants: [
+      "ka","kha","ga","gha","nga",
+      "cha","chha","ja","jha","nya",
+      "Ta","Tha","Da","Dha","Na",
+      "ta","tha","da","dha","na","nna",
+      "pa","pha","ba","bha","ma",
+      "ya","ra","","la","La","","va",
+      "sha","Sha","sa","ha",
+    ],
+    vowelDiacritics: ROMANIZATION_DIACRITICS,
+    virama: 0x4D, anusvara: 0x02, visarga: 0x03, digits: 0x66,
+  },
+};
+
+const LOCALE_TO_SCRIPT: Record<string, string> = {
+  hi: "devanagari", mr: "devanagari",
+  kn: "kannada",
+  ta: "tamil",
+  te: "telugu",
+  bn: "bengali",
+  gu: "gujarati",
+  pa: "gurmukhi",
+};
+
+function getScriptForCodepoint(cp: number): IndicScriptConfig | null {
+  for (const script of Object.values(INDIC_SCRIPTS)) {
+    if (cp >= script.base && cp < script.base + 0x80) return script;
+  }
+  return null;
+}
+
+/**
+ * Romanize a string containing Indic script characters.
+ * Returns the original string with Indic characters replaced by romanized equivalents.
+ * ASCII characters, numbers, and punctuation are preserved as-is.
+ */
+export function romanizeIndicScript(text: string): string {
+  const result: string[] = [];
+  const chars = [...text]; // proper Unicode iteration
+
+  for (let i = 0; i < chars.length; i++) {
+    const cp = chars[i].codePointAt(0)!;
+    const script = getScriptForCodepoint(cp);
+
+    if (!script) {
+      result.push(chars[i]);
+      continue;
+    }
+
+    const offset = cp - script.base;
+
+    // Anusvara (nasal)
+    if (offset === script.anusvara) {
+      result.push("m");
+      continue;
+    }
+
+    // Visarga
+    if (offset === script.visarga) {
+      result.push("h");
+      continue;
+    }
+
+    // Independent vowels: typically at offsets 0x05-0x14
+    if (offset >= 0x05 && offset <= 0x14) {
+      const vowelIdx = offset - 0x05;
+      result.push(script.independentVowels[vowelIdx] ?? chars[i]);
+      continue;
+    }
+
+    // Consonants: typically at offsets 0x15-0x39
+    if (offset >= 0x15 && offset <= 0x39) {
+      const consIdx = offset - 0x15;
+      const consonant = script.consonants[consIdx];
+      if (!consonant) {
+        result.push(chars[i]);
+        continue;
+      }
+
+      // Check if next char is a virama (halant) — strips inherent 'a'
+      const nextCp = (i + 1 < chars.length) ? chars[i + 1].codePointAt(0)! : 0;
+      const nextOffset = nextCp - script.base;
+
+      if (nextOffset === script.virama) {
+        // Consonant without inherent vowel
+        result.push(consonant.replace(/a$/, ""));
+        i++; // skip virama
+        continue;
+      }
+
+      // Check if next char is a vowel diacritic (matra): offsets 0x3E-0x4C
+      if (nextOffset >= 0x3E && nextOffset <= 0x4C) {
+        const matraIdx = nextOffset - 0x3E;
+        const matra = script.vowelDiacritics[matraIdx] ?? "a";
+        result.push(consonant.replace(/a$/, "") + matra);
+        i++; // skip matra
+        continue;
+      }
+
+      // Default: consonant with inherent 'a'
+      result.push(consonant);
+      continue;
+    }
+
+    // Vowel diacritics appearing alone (shouldn't normally happen)
+    if (offset >= 0x3E && offset <= 0x4C) {
+      const matraIdx = offset - 0x3E;
+      result.push(script.vowelDiacritics[matraIdx] ?? "");
+      continue;
+    }
+
+    // Virama alone
+    if (offset === script.virama) {
+      continue;
+    }
+
+    // Digits
+    if (script.digits && offset >= script.digits && offset <= script.digits + 9) {
+      result.push(String(offset - script.digits));
+      continue;
+    }
+
+    // Unknown — pass through
+    result.push(chars[i]);
+  }
+
+  return result.join("");
+}
+
+/**
+ * Check if text contains significant non-Latin Indic script characters
+ * and return a romanized version suitable for AI model comprehension.
+ * Returns null if text doesn't contain Indic script.
+ */
+export function romanizeIfIndicScript(text: string, detectedLocale?: SupportedLocale | null): string | null {
+  const scriptName = detectedLocale ? LOCALE_TO_SCRIPT[detectedLocale] : null;
+  if (!scriptName && !/[\u0900-\u0D7F]/u.test(text)) {
+    return null;
+  }
+  const romanized = romanizeIndicScript(text);
+  // Only return if we actually changed something
+  if (romanized === text) return null;
+  return romanized;
+}
+
 export { localeNames };

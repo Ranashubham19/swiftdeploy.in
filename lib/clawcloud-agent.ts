@@ -183,6 +183,7 @@ import {
   getUserLocale,
   inferClawCloudMessageLocale,
   resolveClawCloudReplyLanguage,
+  romanizeIfIndicScript,
   setUserLocale,
   translateMessage,
   type SupportedLocale,
@@ -10084,16 +10085,23 @@ export async function routeInboundAgentMessageResult(
   const resp = result.response?.trim() ?? "";
   if (!resp || isVisibleFallbackReply(resp) || isLowQualityTemplateReply(resp) || resp.length < 20) {
     try {
-      // Detect non-Latin script and translate for comprehension if needed
+      // Detect non-Latin script and use romanization + translation for comprehension
       const hasNonLatinEmergency = /[^\u0000-\u024F\u1E00-\u1EFF\u2C60-\u2C7F\uA720-\uA7FF]/u.test(message);
       const emergencyLocale = hasNonLatinEmergency ? inferClawCloudMessageLocale(message) : null;
+      const emergencyRomanized = hasNonLatinEmergency ? romanizeIfIndicScript(message, emergencyLocale) : null;
       let emergencyUserPrompt = message;
       let emergencyLanguageHint = "";
       if (hasNonLatinEmergency && emergencyLocale && emergencyLocale !== "en") {
-        const emergencyGloss = await translateMessage(message, "en", { force: true }).catch(() => "");
-        if (emergencyGloss?.trim() && emergencyGloss.trim().toLowerCase() !== message.trim().toLowerCase()) {
-          emergencyUserPrompt = emergencyGloss.trim();
-          emergencyLanguageHint = `\nIMPORTANT: The user wrote in ${localeNames[emergencyLocale] ?? emergencyLocale}. Original message: ${message}\nAnswer in ${localeNames[emergencyLocale] ?? emergencyLocale}, NOT in English. Use the English translation only to understand the question.`;
+        const langName = localeNames[emergencyLocale] ?? emergencyLocale;
+        if (emergencyRomanized) {
+          emergencyUserPrompt = `[${langName}] ${message}\n[Romanized] ${emergencyRomanized}`;
+          emergencyLanguageHint = `\nIMPORTANT: The user wrote in ${langName}. Use the romanized reading to understand the question. Answer in ${langName}, NOT in English.`;
+        } else {
+          const emergencyGloss = await translateMessage(message, "en", { force: true }).catch(() => "");
+          if (emergencyGloss?.trim() && emergencyGloss.trim().toLowerCase() !== message.trim().toLowerCase()) {
+            emergencyUserPrompt = emergencyGloss.trim();
+            emergencyLanguageHint = `\nIMPORTANT: The user wrote in ${langName}. Original message: ${message}\nAnswer in ${langName}, NOT in English. Use the English translation only to understand the question.`;
+          }
         }
       }
       const emergencyReply = await completeClawCloudPrompt({
@@ -10498,23 +10506,32 @@ async function routeInboundAgentMessageCore(
     const nativeLangLabel = earlyReplyLanguageResolution.detectedLocale
       ? localeNames[earlyReplyLanguageResolution.detectedLocale]
       : "the user's language";
+    // Romanize Indic script so the model can understand the content
+    const multilingualRomanized = romanizeIfIndicScript(trimmed, earlyReplyLanguageResolution.detectedLocale);
     const multilingualInstruction = [
-      buildIntentSpecificInstruction(earlyMultilingualRoutingBridge.intent.type, multilingualGloss || trimmed),
+      buildIntentSpecificInstruction(earlyMultilingualRoutingBridge.intent.type, multilingualGloss || multilingualRomanized || trimmed),
       buildConversationStyleInstruction(selectedConversationStyle),
       buildClawCloudReplyLanguageInstruction(earlyReplyLanguageResolution),
       `Original user prompt (in ${nativeLangLabel}): ${trimmed}`,
-      multilingualGloss
-        ? `Approximate English meaning (may be inaccurate — trust the original text): ${multilingualGloss}`
+      multilingualRomanized
+        ? `Romanized reading of the ${nativeLangLabel} text: "${multilingualRomanized}"`
         : "",
-      `CRITICAL: Answer the ORIGINAL ${nativeLangLabel} text, not any approximate English translation. The user's text is the authoritative source.`,
+      multilingualGloss
+        ? `Approximate English meaning (may be inaccurate — trust the original text and romanized reading): ${multilingualGloss}`
+        : "",
+      `CRITICAL: Read and understand the user's original ${nativeLangLabel} text using the romanized reading. Answer the actual question the user asked.`,
       `Respond in ${nativeLangLabel}. The final answer will be localized to the user's language.`,
       "Mirror the user's language, tone, and level of formality naturally.",
       "Answer directly. Do not ask for clarification unless the original prompt is still genuinely ambiguous.",
     ].filter(Boolean).join("\n\n");
 
+    // Send romanized text as user message so model can comprehend it
+    const multilingualUserMessage = multilingualRomanized
+      ? `[${nativeLangLabel}] ${trimmed}\n[Romanized] ${multilingualRomanized}`
+      : trimmed;
     const multilingualReply = await smartReplyDetailed(
       userId,
-      trimmed,
+      multilingualUserMessage,
       earlyMultilingualRoutingBridge.intent.type,
       requested.mode ?? "fast",
       requested.explicit || requested.mode === "fast",
@@ -10561,6 +10578,9 @@ async function routeInboundAgentMessageCore(
       : (earlyReplyLanguageResolution.preserveRomanScript ? "Hinglish" : "the user's language");
     const nativeLanguageMode = requested.explicit ? (requested.mode ?? "fast") : "fast";
 
+    // Romanize Indic scripts so models can understand the content
+    const nativeRomanized = romanizeIfIndicScript(trimmed, earlyReplyLanguageResolution.detectedLocale);
+
     // If the multilingual bridge failed (timeout / empty gloss), attempt an inline
     // translation so the model has an English comprehension anchor for non-Latin scripts.
     const hasNonLatinScript = /[^\u0000-\u024F\u1E00-\u1EFF\u2C60-\u2C7F\uA720-\uA7FF]/u.test(trimmed);
@@ -10577,26 +10597,31 @@ async function routeInboundAgentMessageCore(
     }
 
     const nativeLanguageInstruction = [
-      buildIntentSpecificInstruction(earlyNativeLanguageDirectIntent.type, inlineGloss || trimmed),
+      buildIntentSpecificInstruction(earlyNativeLanguageDirectIntent.type, inlineGloss || nativeRomanized || trimmed),
       buildConversationStyleInstruction(selectedConversationStyle),
       buildClawCloudReplyLanguageInstruction(earlyReplyLanguageResolution),
-      `The user wrote this request in ${nativeLanguageLabel}. Read and understand the original ${nativeLanguageLabel} text directly.`,
+      `The user wrote this request in ${nativeLanguageLabel}.`,
       `Original user prompt (in ${nativeLanguageLabel}): ${trimmed}`,
-      inlineGloss
-        ? `Approximate English meaning (may be inaccurate — trust the original text over this gloss): ${inlineGloss}`
+      nativeRomanized
+        ? `Romanized reading of the ${nativeLanguageLabel} text: "${nativeRomanized}"`
         : "",
-      `CRITICAL: Answer the ORIGINAL ${nativeLanguageLabel} text, not any approximate English translation. The user's text is the authoritative source of their question.`,
+      inlineGloss
+        ? `Approximate English meaning (may be inaccurate — trust the romanized reading): ${inlineGloss}`
+        : "",
+      `CRITICAL: Use the romanized reading to understand what the user is asking. Answer the actual question.`,
       `Respond in ${nativeLanguageLabel}. Do not switch to English unless the user explicitly asked for English.`,
       "Answer the user's actual request directly instead of asking for extra scope.",
       "If the prompt asks for a story, summary, essay, explanation, list, or comparison, fulfill that exact request completely.",
       "Keep the same tone, warmth, and level of formality as the user's message.",
     ].filter(Boolean).join("\n\n");
 
-    // ALWAYS send the original text as the user message so the model reads
-    // the native script directly. The gloss is only a hint in the system prompt.
+    // Send romanized text as user message so model can comprehend the content
+    const nativeUserMessage = nativeRomanized
+      ? `[${nativeLanguageLabel}] ${trimmed}\n[Romanized] ${nativeRomanized}`
+      : trimmed;
     const nativeLanguageReply = await smartReplyDetailed(
       userId,
-      trimmed,
+      nativeUserMessage,
       earlyNativeLanguageDirectIntent.type,
       nativeLanguageMode,
       requested.explicit || nativeLanguageMode === "fast",
