@@ -10042,7 +10042,9 @@ export async function routeInboundAgentMessageResult(
 ): Promise<RouteInboundAgentMessageResult> {
   const timeoutPolicy = resolveInboundRouteTimeoutPolicy(message);
   const result = await Promise.race([
-    routeInboundAgentMessageResultCore(userId, message, options),
+    routeInboundAgentMessageResultCore(userId, message, options).catch(
+      (): RouteInboundAgentMessageResult => ({ response: null as unknown as string, liveAnswerBundle: null, modelAuditTrail: null }),
+    ),
     new Promise<RouteInboundAgentMessageResult>((resolve) => {
       setTimeout(() => resolve(buildInboundAgentTimeoutResult(message)), timeoutPolicy.timeoutMs);
     }),
