@@ -6945,7 +6945,7 @@ function looksLikeCultureStoryQuestion(text: string) {
     || /줄거리|스토리|내용|결말|요약|설명해|설명해줘|시즌|에피소드|등장인물/u.test(text);
 
   const hasEntertainmentSurface =
-    /\b(drama|kdrama|k-drama|movie|film|series|show|anime|novel|book|webtoon|character|ending|season)\b/.test(normalized)
+    /\b(drama|kdrama|k-drama|movie|film|series|show|anime|novel|book|webtoon|character|ending|season|avenger|marvel|dc|star\s*wars?|harry\s*potter|lord\s*of\s*the\s*rings|game\s*of\s*thrones|naruto|one\s*piece)\b/.test(normalized)
     || /\b(goblin|alchemy of souls|my demon)\b/.test(normalized)
     || /드라마|영화|시리즈|애니|소설|웹툰|도깨비|환혼/u.test(text);
 
@@ -6953,7 +6953,7 @@ function looksLikeCultureStoryQuestion(text: string) {
   const hasTitleLikeCandidate =
     Boolean(titleCandidate)
     && titleCandidate.split(/\s+/).filter(Boolean).length <= 5
-    && !/\b(price|weather|news|policy|war|economy|market|stock|tax|history|science|math|code|calendar|email|whatsapp|message|problem|question)\b/.test(titleCandidate);
+    && !/\b(price|weather|news|policy|economy|market|stock|tax|science|math|code|calendar|email|whatsapp|message|problem|question)\b/.test(titleCandidate);
 
   return hasStoryIntent && (hasEntertainmentSurface || hasTitleLikeCandidate);
 }
@@ -8740,8 +8740,11 @@ function detectIntent(text: string): DetectedIntent {
   }
 
   if (
-    /^(hi+|hello+|hey+|howdy|good\s*(morning|evening|afternoon|night)|namaste|hola|bonjour|sup|yo|what'?s up|greetings)\b/.test(t)
-    && t.length < 40
+    (
+      /^(hi+|hello+|hey+|howdy|good\s*(morning|evening|afternoon|night)|namaste|hola|bonjour|sup|yo|what'?s up|greetings)\b/.test(t)
+      || /^(आप\s*कैसे\s*ह(ैं|ो|ै)|नमस्ते|नमस्कार|कैसे\s*हो|क्या\s*हाल|सलाम|ಹಲೋ|ನಮಸ್ಕಾರ|வணக்கம்|నమస్కారం|হ্যালো|নমস্কার|ନମସ୍କାର|સલામ|ਸਤ\s*ਸ੍ਰੀ\s*ਅਕਾਲ|안녕|こんにちは|你好|مرحبا|سلام)/u.test(text.trim())
+    )
+    && text.trim().length < 40
   ) {
     return { type: "greeting", category: "greeting" };
   }
@@ -9917,6 +9920,29 @@ async function routeInboundAgentMessageResultCore(
     return { response: null, liveAnswerBundle: null };
   }
 
+  // ── Non-Latin Greeting Fast-Path (before any DB calls) ──
+  const nonLatinGreetRe = /^(आप\s*कैसे\s*ह(ैं|ो|ै)|नमस्ते|नमस्कार|कैसे\s*हो|क्या\s*हाल|सलाम|ಹಲೋ|ನಮಸ್ಕಾರ|ಹೇಗಿದ್ದೀರಿ|வணக்கம்|நலமா|నమస్కారం|ఎలా\s*ఉన్నారు|হ্যালো|নমস্কার|কেমন\s*আছ|ନମସ୍କାର|કેમ\s*છો|ਸਤ\s*ਸ੍ਰੀ\s*ਅਕਾਲ|안녕|こんにちは|你好|مرحبا|سلام|السلام\s*عليكم|привет|здравствуйте)/u;
+  if (nonLatinGreetRe.test(normalizedMessage.trim()) && normalizedMessage.trim().length < 40) {
+    const greetLocale = inferClawCloudMessageLocale(normalizedMessage);
+    const greetLangName = greetLocale ? (localeNames[greetLocale] ?? null) : null;
+    if (greetLangName) {
+      const greetReply = await completeClawCloudPrompt({
+        system: `You are ClawCloud AI, a friendly AI assistant. The user greeted you in ${greetLangName}. Reply naturally in ${greetLangName} — be warm, friendly, and briefly mention that you can help with coding, math, writing, research, and more. Keep it under 3 sentences.`,
+        user: normalizedMessage,
+        maxTokens: 300,
+        fallback: "",
+        temperature: 0.5,
+      }).catch(() => "");
+      if (greetReply?.trim() && greetReply.trim().length > 10) {
+        return {
+          response: greetReply.trim(),
+          liveAnswerBundle: null,
+          modelAuditTrail: null,
+        };
+      }
+    }
+  }
+
   if (looksLikeCurrentAffairsPowerCrisisQuestion(normalizedMessage)) {
     return {
       response: buildCurrentAffairsEvidenceAnswer(normalizedMessage, []),
@@ -10480,75 +10506,89 @@ async function routeInboundAgentMessageCore(
     return finalizeEarlyRaw(earlyDeterministicMathReply, "math", "math");
   }
 
+  // ── Non-Latin Greeting Detection ──
+  // Detect greetings in non-Latin scripts (Hindi, Kannada, Tamil, etc.) before the
+  // Indic fast-path to avoid sending simple greetings to AI models.
+  const nonLatinGreetingMatch = /^(आप\s*कैसे\s*ह(ैं|ो|ै)|नमस्ते|नमस्कार|कैसे\s*हो|क्या\s*हाल|सलाम|ಹಲೋ|ನಮಸ್ಕಾರ|ಹೇಗಿದ್ದೀರಿ|வணக்கம்|நலமா|నమస్కారం|ఎలా\s*ఉన్నారు|হ্যালো|নমস্কার|কেমন\s*আছ|ନମସ୍କାର|સલામ|કેમ\s*છો|ਸਤ\s*ਸ੍ਰੀ\s*ਅਕਾਲ|안녕|こんにちは|你好|مرحبا|سلام|السلام\s*عليكم|привет|здравствуйте)/u.test(trimmed.trim());
+  if (nonLatinGreetingMatch && trimmed.trim().length < 40) {
+    const greetingLocale = inferClawCloudMessageLocale(trimmed);
+    const greetingLangName = greetingLocale ? (localeNames[greetingLocale] ?? "the user's language") : null;
+    const greetingReply = greetingLangName
+      ? await withSoftTimeout(
+          completeClawCloudPrompt({
+            system: `You are ClawCloud AI, a friendly AI assistant. The user greeted you in ${greetingLangName}. Reply naturally in ${greetingLangName} — be warm, friendly, and briefly mention that you can help with coding, math, writing, research, and more. Keep it under 3 sentences.`,
+            user: trimmed,
+            maxTokens: 300,
+            fallback: "",
+            temperature: 0.5,
+          }),
+          "",
+          8_000,
+        )
+      : null;
+    if (greetingReply?.trim() && greetingReply.trim().length > 10) {
+      return finalizeAgentReply({
+        userId,
+        locale: greetingLocale ?? "en",
+        preserveRomanScript: false,
+        question: trimmed,
+        intent: "greeting",
+        category: "greeting",
+        startedAt: routeStartedAt,
+        reply: greetingReply.trim(),
+        alreadyTranslated: true,
+      });
+    }
+  }
+
   // ── INDIC SCRIPT FAST-PATH ──
-  // For non-Latin Indic scripts (Kannada, Tamil, Telugu, etc.), use a direct
-  // romanize → translate → answer pipeline. This bypasses the complex multilingual
-  // bridge which often fails because models can't read native Indic scripts.
+  // For non-Latin Indic scripts (Kannada, Tamil, Telugu, etc.), answer directly
+  // by giving the model the original text + romanized form + language context.
+  // Single-step: the model understands and answers in one call.
   const indicRomanized = romanizeIfIndicScript(trimmed);
   if (indicRomanized) {
     const indicLocale = inferClawCloudMessageLocale(trimmed);
     const indicLangName = indicLocale ? (localeNames[indicLocale] ?? "the user's language") : "the user's language";
 
-    // Step 1: Translate romanized text to English using Hindi/Sanskrit cognate hint
-    const indicEnglish = await withSoftTimeout(
+    // Single-step: answer the question directly with full language context
+    const indicDirectReply = await withSoftTimeout(
       completeClawCloudPrompt({
         system: [
-          `You are a translation engine. Translate the romanized ${indicLangName} text below to natural English.`,
-          `${indicLangName} shares many words with Hindi and Sanskrit. Use your Hindi/Sanskrit knowledge to understand the vocabulary.`,
-          "Return ONLY the English translation in one line. Do not add explanations, etymology, or commentary.",
-        ].join(" "),
-        user: indicRomanized,
-        maxTokens: 500,
+          `You are ClawCloud AI, the world's most knowledgeable AI assistant.`,
+          `The user wrote in ${indicLangName} script. Below you will see their original text and a romanized (Latin alphabet) reading.`,
+          `${indicLangName} shares many words with Hindi and Sanskrit — use your Hindi/Sanskrit knowledge to understand the romanized text.`,
+          `TASK: Understand what the user is asking, then provide a complete, accurate, professional answer.`,
+          `Respond in ${indicLangName} (the same language the user wrote in), NOT in English.`,
+          `Use WhatsApp formatting: *bold* for headings, numbered lists where appropriate.`,
+          `Do NOT say you cannot understand. Do NOT ask for clarification. Answer directly.`,
+        ].join("\n"),
+        user: [
+          `[${indicLangName} original]: ${trimmed}`,
+          `[Romanized reading]: ${indicRomanized}`,
+        ].join("\n"),
+        maxTokens: 3000,
         fallback: "",
         skipCache: true,
-        temperature: 0.05,
-        preferredModels: [
-          "qwen/qwen3.5-397b-a17b",
-          "meta/llama-3.1-405b-instruct",
-          "deepseek-ai/deepseek-v3.1-terminus",
-        ],
+        temperature: 0.15,
       }),
       "",
-      12_000,
+      30_000,
     );
 
-    if (indicEnglish?.trim() && indicEnglish.trim().length > 5) {
-      // Step 2: Answer the English translation with instruction to respond in the user's language
-      const indicIntent = detectIntent(indicEnglish.trim());
-      const indicReply = await smartReplyDetailed(
+    if (indicDirectReply?.trim() && indicDirectReply.trim().length > 30
+        && !isVisibleFallbackReply(indicDirectReply)
+        && !isLowQualityTemplateReply(indicDirectReply)) {
+      void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
+      return finalizeAgentReply({
         userId,
-        indicEnglish.trim(),
-        indicIntent.type,
-        requested.mode ?? "fast",
-        true,
-        [
-          buildIntentSpecificInstruction(indicIntent.type, indicEnglish.trim()),
-          buildConversationStyleInstruction(selectedConversationStyle),
-          `The user originally wrote in ${indicLangName}. Respond in ${indicLangName}, NOT in English.`,
-          `Original ${indicLangName} text: ${trimmed}`,
-          `English meaning: ${indicEnglish.trim()}`,
-          "Answer completely, accurately, and professionally. Use the user's language for the response.",
-        ].filter(Boolean).join("\n\n"),
-        undefined,
-        MULTILINGUAL_DIRECT_ANSWER_PREFERRED_MODELS,
-      );
-
-      if (indicReply.reply?.trim() && indicReply.reply.trim().length > 30
-          && !isVisibleFallbackReply(indicReply.reply)
-          && !isLowQualityTemplateReply(indicReply.reply)) {
-        void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
-        return finalizeAgentReply({
-          userId,
-          locale: indicLocale ?? "en",
-          preserveRomanScript: false,
-          question: indicEnglish.trim(),
-          intent: indicIntent.type,
-          category: indicIntent.category,
-          startedAt: routeStartedAt,
-          reply: indicReply.reply.trim(),
-          modelAuditTrail: indicReply.modelAuditTrail,
-        });
-      }
+        locale: indicLocale ?? "en",
+        preserveRomanScript: false,
+        question: trimmed,
+        intent: "general",
+        category: "general",
+        startedAt: routeStartedAt,
+        reply: indicDirectReply.trim(),
+      });
     }
   }
 

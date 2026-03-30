@@ -96,6 +96,9 @@ const KNOWLEDGE_PATTERNS: RegExp[] = [
   /\b(factorial|fibonacci|prime number|sort|recursion|loop|array|string|integer)\b/i,
   /\b(difference between|formula for|how many (bones|planets|countries|continents|elements))\b/i,
   /\b(largest|smallest|tallest|deepest)\s+(country|city|ocean|mountain|river|desert|building)\b/i,
+  // Entertainment / fiction — story requests about movies, shows, books, games
+  /\b(story|plot|storyline|synopsis)\b.*\b(avenger|marvel|dc|star\s*wars?|harry\s*potter|naruto|one\s*piece|game\s*of\s*thrones|lord\s*of\s*the\s*rings|infinity\s*war|end\s*game|endgame|civil\s*war|anime|movie|film|series|drama|kdrama)\b/i,
+  /\b(avenger|marvel|dc|star\s*wars?|harry\s*potter|naruto|one\s*piece|game\s*of\s*thrones|lord\s*of\s*the\s*rings|infinity\s*war|end\s*game|endgame|civil\s*war)\b.*\b(story|plot|storyline|synopsis)\b/i,
 ];
 
 const REALTIME_CONTEXT_CUE = /\b(right now|today|live|currently|as of now|just now|breaking|latest|recent)\b/i;

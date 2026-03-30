@@ -126,6 +126,14 @@ export function looksLikeCurrentAffairsQuestion(question: string): boolean {
     return false;
   }
 
+  // Entertainment / fiction queries should not be routed to current affairs
+  if (
+    /\b(story|plot|storyline|synopsis|movie|film|series|anime|drama|novel|avenger|marvel|dc|star\s*wars?|harry\s*potter|game\s*of\s*thrones|naruto|one\s*piece|lord\s*of\s*the\s*rings|infinity\s*war|end\s*game|endgame|civil\s*war)\b/.test(text)
+    && /\b(story|plot|tell\s*me|explain|summary|synopsis)\b/.test(text)
+  ) {
+    return false;
+  }
+
   const hasActor = CURRENT_AFFAIRS_ACTOR_PATTERN.test(text);
   const hasEvent = CURRENT_AFFAIRS_EVENT_PATTERN.test(text);
   const hasStatus = CURRENT_AFFAIRS_STATUS_PATTERN.test(text);
