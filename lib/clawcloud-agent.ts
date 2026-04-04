@@ -77,7 +77,7 @@ import {
 import { detectOfficialPricingQuery } from "@/lib/clawcloud-official-pricing";
 import { classifyIntentWithConfidence, resolveIntentOverlap } from "@/lib/clawcloud-intent-confidence";
 import { detectAiModelRoutingDecision, type AiModelRoutingDecision } from "@/lib/clawcloud-ai-model-routing";
-import { detectExpertMode, EXPERT_MODE_PROMPTS } from "@/lib/super-brain";
+import { detectExpertMode, EXPERT_MODE_PROMPTS, WHATSAPP_BRAIN } from "@/lib/super-brain";
 import {
   buildClawCloudModelAuditTrail,
   completeClawCloudPrompt,
@@ -2080,6 +2080,7 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     normalized.includes("__fast_fallback_internal__")
     || normalized.includes("__deep_fallback_internal__")
     || normalized.includes("__no_live_data_internal_signal__")
+    || normalized.includes("__low_confidence_recovery_signal__")
     || value === FALLBACK
     || normalized.startsWith("*i could not")
     || normalized.startsWith("i could not")
@@ -2194,6 +2195,37 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || normalized.includes("__signal__")
     || normalized.includes("__fallback__")
     || normalized.includes("__error__")
+    // "Scoped answer needed" and detail-asking refusals
+    || normalized.includes("scoped answer needed")
+    || normalized.includes("one missing scope detail")
+    || normalized.includes("one clearer scope detail")
+    || normalized.includes("share the full equation")
+    || normalized.includes("share the exact concept")
+    || normalized.includes("share the exact model names")
+    || normalized.includes("share the exact topic plus date")
+    || normalized.includes("share the exact code")
+    || normalized.includes("share the exact text plus the source")
+    || normalized.includes("share the exact drama")
+    || normalized.includes("share the exact options")
+    || normalized.includes("share the exact term plus")
+    || normalized.includes("share the exact name, date")
+    || normalized.includes("share the exact topic or full problem")
+    || normalized.includes("share age, main symptoms")
+    || normalized.includes("share what is happening, how long")
+    || normalized.includes("share the country or state")
+    || normalized.includes("share the country, tax year")
+    || normalized.includes("share the recipient, purpose")
+    || normalized.includes("share the topic, tone")
+    || normalized.includes("i need one missing detail")
+    || normalized.includes("please share the full equation")
+    || normalized.includes("drop them here and i'll")
+    || normalized.includes("just let me know exactly what you need")
+    || normalized.includes("let me know what you need and i'll")
+    || normalized.includes("i need the complete equation")
+    || normalized.includes("every given value plus the exact quantity")
+    || normalized.includes("haven't provided the equation")
+    || normalized.includes("you haven't provided")
+    || normalized.includes("please provide the")
   );
 }
 
@@ -2533,12 +2565,8 @@ function isDeprecatedInternalFallbackLeak(value: string) {
 }
 
 function buildGenericScopedRecoveryReply() {
-  return [
-    "Scoped answer needed",
-    "",
-    "This question needs one clearer scope detail for a precise answer.",
-    "Share the exact topic plus the location, company, person, version, or date that matters.",
-  ].join("\n");
+  // Return internal signal — never show "scoped answer needed" to users
+  return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
 }
 
 function sanitizeDeprecatedFallbackLeakWithContext(
@@ -2556,12 +2584,8 @@ function sanitizeDeprecatedFallbackLeakWithContext(
   }
 
   if (hasWeatherIntent(safeQuestion)) {
-    return [
-      "Weather update",
-      "",
-      "Share your city name for a precise forecast with temperature, rain, humidity, and wind.",
-      "Example: Weather today in Delhi.",
-    ].join("\n");
+    // No refusal — let finalizeGuarded handle it with emergencyDirectAnswer
+    return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
   }
 
   if (shouldUseLiveSearch(safeQuestion) || /\b(news|latest|today|current|update|updates|happening)\b/i.test(safeQuestion)) {
@@ -3166,7 +3190,7 @@ const MULTILINGUAL_CAPABILITY_PATTERNS = [
 ];
 
 const MULTILINGUAL_GREETING_PATTERNS = [
-  /^(?:hi+|hello+|hey+|good\s*(?:morning|afternoon|evening|night)|namaste|hola|bonjour|ciao|sup|yo|what'?s up|howdy|greetings)\b/i,
+  /^(?:hi+|hello+|hey+|good\s*(?:morning|afternoon|evening|night)|namaste|hola|bonjour|ciao|sup|yo|what'?s up|howdy|greetings|kon+ichiwa|konbanwa|ohayo|sayonara|annyeong|annyeonghaseyo|ni\s*hao|salam|assalamu?\s*alaikum|merhaba|shalom|sawadee|sawatdee|selamat|aloha|jambo|habari|salut|hej|hei|ola|bom\s*dia|guten\s*tag|guten\s*morgen|buongiorno|buenos?\s*dias?|bonsoir|dobry\s*den|privyet|zdra[sv]+ui?te|xin\s*chao|kamusta|kumusta)\b/i,
   /^(?:\u043f\u0440\u0438\u0432\u0435\u0442|\u0437\u0434\u0440\u0430\u0432\u0441\u0442\u0432\u0443\u0439\u0442\u0435|\u0434\u043e\u0431\u0440\u044b\u0439\s+(?:\u0434\u0435\u043d\u044c|\u0432\u0435\u0447\u0435\u0440|\u0443\u0442\u0440\u043e))/iu,
   /^(?:\u3053\u3093\u306b\u3061\u306f|\u3053\u3093\u3070\u3093\u306f|\u3084\u3042|\u3069\u3046\u3082)/u,
   /^(?:\uc548\ub155(?:\ud558\uc138\uc694)?)/u,
@@ -4094,7 +4118,7 @@ function buildDeterministicChatFallbackLegacy(message: string, intent: IntentTyp
 
   if (
     intent === "greeting" ||
-    /^(hi+|hello+|hey+|good\s+(morning|afternoon|evening|night)|namaste|hola|bonjour|ciao|sup|yo|what'?s up|howdy|greetings)\b/.test(text)
+    /^(hi+|hello+|hey+|good\s+(morning|afternoon|evening|night)|namaste|hola|bonjour|ciao|sup|yo|what'?s up|howdy|greetings|kon+ichiwa|konbanwa|ohayo|annyeong|ni\s*hao|salam|assalamu?\s*alaikum|merhaba|shalom|sawadee|selamat|aloha|jambo|salut|privyet|xin\s*chao|kamusta)\b/.test(text)
   ) {
     return [
       "👋 *Hey! I'm doing great.*",
@@ -4139,50 +4163,16 @@ function buildDeterministicChatFallbackLegacy(message: string, intent: IntentTyp
 }
 
 function bestEffortProfessionalTemplate(intent: IntentType, message: string) {
-  const compactQuestion = message.trim().replace(/\s+/g, " ").slice(0, 180);
+  // Only return deterministic computed answers (greetings, capabilities, health pings).
+  // NEVER return generic "Professional Answer" or "Direct answer mode" templates.
+  // All real questions must fall through to AI model for actual answers.
   const deterministic = buildDeterministicChatFallback(message, intent);
-
   if (deterministic) {
     return deterministic;
   }
 
-  switch (intent) {
-    case "coding":
-      return [
-        "*Professional Answer*",
-        "- The safest production approach is to define invariants first, persist immutable source events, enforce unique constraints for idempotency, and separate read models from the source-of-truth write path.",
-        "- Then specify schema, transaction boundaries, replay handling, rollback rules, and a worker or request-flow that is safe under retries.",
-        `- For this question, I would answer it against the exact domain in your prompt: _${compactQuestion}_.`,
-      ].join("\n");
-    case "math":
-      return [
-        "*Professional Answer*",
-        "- Use the governing formula first, then substitute the numbers, then separate exact results from approximations.",
-        "- For uncertainty, posterior, VaR, or drawdown questions, state the assumptions explicitly and avoid fake precision.",
-        `- Applied to your question: _${compactQuestion}_.`,
-      ].join("\n");
-    case "research":
-      return [
-        "*Recommendation*",
-        "- Use a decision-first answer: recommendation, why, tradeoffs, rollout, bottom line.",
-        "- State assumptions where facts are not fully specified, and avoid invented precise numbers.",
-        `- Scope addressed: _${compactQuestion}_.`,
-      ].join("\n");
-    case "greeting":
-      return [
-        "👋 *Hey! I'm here and ready.*",
-        "",
-        "Ask me anything - *coding, math, research, writing, email,* or *planning* - and I’ll answer directly.",
-      ].join("\n");
-    default:
-      return [
-        "🧠 *Direct answer mode is active.*",
-        "",
-        `Topic: _${compactQuestion}_.`,
-        "",
-        "Send the exact question in one line and I will return a complete answer.",
-      ].join("\n");
-  }
+  // Return null — let the AI model generate a real answer
+  return null;
 }
 
 type CodingFallbackLanguage =
@@ -5733,61 +5723,23 @@ function tryBuildBayesianABMathFallback(message: string) {
 }
 
 function bestEffortProfessionalTemplateV2Legacy(intent: IntentType, message: string) {
-  const compactQuestion = message.trim().replace(/\s+/g, " ").slice(0, 180);
+  // Only return deterministic computed answers (Bayesian, trading risk, etc.)
+  // NEVER return hardcoded "share the equation" or "question captured" templates.
+  // All other cases fall through to AI model for a real answer.
   const deterministic = buildDeterministicChatFallback(message, intent);
-
   if (deterministic) {
     return deterministic;
   }
 
-  switch (intent) {
-    case "coding":
-      // Let coding questions fall through to AI model — no hardcoded templates
-      break;
-    case "math":
-      {
-        const bayesianFallback = tryBuildBayesianABMathFallback(message);
-        if (bayesianFallback) {
-          return bayesianFallback;
-        }
-
-        const tradingFallback = tryBuildTradingRiskMathFallback(message);
-        if (tradingFallback) {
-          return tradingFallback;
-        }
-      }
-      return [
-        "*Math Reply*",
-        "",
-        `Question: _${compactQuestion}_.`,
-        "",
-        "To give an exact numeric result, share the full equation or all values with units.",
-        "Then I will return numbered steps and a clear final answer in one message.",
-      ].join("\n");
-    case "research":
-      return [
-        "*Recommendation*",
-        "",
-        `Question captured: _${compactQuestion}_.`,
-        "",
-        "I can give a decision-first answer with recommendation, rationale, tradeoffs, and rollout plan.",
-        "Share constraints (budget, timeline, region, target users) for a precise final recommendation.",
-      ].join("\n");
-    case "greeting":
-      return [
-        "Hey! I am here and ready.",
-        "",
-        "Ask anything on coding, math, research, writing, email, or planning and I will answer directly.",
-      ].join("\n");
-    default:
-      return [
-        "Direct answer mode is active.",
-        "",
-        `Topic: _${compactQuestion}_.`,
-        "",
-        "Send the exact task and I will answer directly.",
-      ].join("\n");
+  if (intent === "math") {
+    const bayesianFallback = tryBuildBayesianABMathFallback(message);
+    if (bayesianFallback) return bayesianFallback;
+    const tradingFallback = tryBuildTradingRiskMathFallback(message);
+    if (tradingFallback) return tradingFallback;
   }
+
+  // Return null — let the AI model generate a real answer instead of a template
+  return null;
 }
 
 function buildDeterministicChatFallback(message: string, intent: IntentType): string | null {
@@ -6747,32 +6699,10 @@ function buildUniversalDomainFallbackV2(intent: IntentType, message: string): st
   const asksArticle = /\b(article|articles|blog|blog post|essay)\b/.test(t);
   const asksEmail = /\b(email|mail)\b/.test(t);
 
-  if (asksCanYou && asksToWrite && asksArticle) {
-    return [
-      "Yes — I can write professional articles.",
-      "",
-      "To start now, send:",
-      "• Topic",
-      "• Audience",
-      "• Tone (formal/casual/expert)",
-      "• Length (for example, 800 words)",
-      "",
-      "If you want, I can start immediately with: Write a 900-word article on [topic] for [audience] in [tone].",
-    ].join("\n");
-  }
-
-  if (asksCanYou && asksToWrite && asksEmail) {
-    return [
-      "Yes — I can draft complete, ready-to-send emails.",
-      "",
-      "Send these details and I will write it now:",
-      "• Recipient",
-      "• Goal",
-      "• Tone",
-      "• Deadline or call-to-action",
-      "",
-      "Need anything else?",
-    ].join("\n");
+  // "Can you write an article/email" — return null so AI actually writes it
+  // instead of asking for details the user didn't provide
+  if (asksCanYou && asksToWrite && (asksArticle || asksEmail)) {
+    return null as unknown as string;
   }
 
   const tableMatch = message.match(/table\s+of\s+(\d+)/i)
@@ -7106,12 +7036,8 @@ function buildTimeboxedProfessionalReply(message: string, intent: IntentType): s
   // Black-Scholes derivations, etc. Let the AI model handle these.
 
   if (hasWeatherIntent(message)) {
-    return [
-      "Weather update",
-      "",
-      "Share your city name for a precise forecast with temperature, rain, humidity, and wind.",
-      "Example: Weather today in Delhi.",
-    ].join("\n");
+    // No refusal — let finalizeGuarded handle it with emergencyDirectAnswer
+    return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
   }
 
   if (looksLikeCurrentAffairsPowerCrisisQuestion(message)) {
@@ -7306,12 +7232,8 @@ async function ensureProfessionalReply(input: {
   // REMOVED: buildCodingFallbackV2 keyword match — let AI handle coding questions
 
   if (hasWeatherIntent(input.message)) {
-    return [
-      "🌦️ *Weather Update*",
-      "",
-      "Share your city name for a precise forecast (temperature, rain, humidity, wind).",
-      "Example: _Weather today in Delhi_.",
-    ].join("\n");
+    // No refusal — let finalizeGuarded handle it with emergencyDirectAnswer
+    return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
   }
 
   if (/\b(news|latest|today)\b/i.test(input.message)) {
@@ -10717,7 +10639,7 @@ function detectIntentLegacy(text: string): DetectedIntent {
 
   // === GREETING ===
   if (
-    /^(hi+|hello+|hey+|good\s+(morning|afternoon|evening|night)|namaste|hola|bonjour|ciao|sup|yo|what'?s up|howdy|greetings)\b/.test(t) &&
+    /^(hi+|hello+|hey+|good\s+(morning|afternoon|evening|night)|namaste|hola|bonjour|ciao|sup|yo|what'?s up|howdy|greetings|kon+ichiwa|konbanwa|ohayo|annyeong|ni\s*hao|salam|assalamu?\s*alaikum|merhaba|shalom|sawadee|selamat|aloha|jambo|salut|privyet|xin\s*chao|kamusta)\b/.test(t) &&
     words.length <= 5
   ) return { type: "greeting", category: "greeting" };
 
@@ -11448,18 +11370,9 @@ function looksStructuredTaxReply(answer: string, question: string): boolean {
   );
 }
 
-function buildNewsCoverageRecoveryReply(question: string): string {
-  const q = question.trim().slice(0, 120);
-  return [
-    `*Latest update request:* ${q}`,
-    "",
-    "To answer this cleanly, send one concrete live scope: the topic plus the location, company, person, or timeframe that matters.",
-    "",
-    "Examples:",
-    "- _India stock market news today_",
-    "- _Delhi weather today_",
-    "- _Latest AI policy news in US today_",
-  ].join("\n");
+function buildNewsCoverageRecoveryReply(_question: string): string {
+  // Return internal signal — never ask users to "send a concrete live scope"
+  return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
 }
 
 async function buildLiveCoverageRecoveryReply(
@@ -14372,11 +14285,41 @@ async function routeInboundAgentMessageCore(
     },
   ) => {
     const preparedReply = options?.prepareReply ? options.prepareReply(reply) : reply;
-    const guardedReply = await guardReply(preparedReply, intent, category, {
+    let guardedReply = await guardReply(preparedReply, intent, category, {
       extraInstruction: options?.extraInstruction,
       history: options?.history,
       isDocumentBound: options?.isDocumentBound,
     });
+
+    // Intercept low-confidence recovery signal — NEVER show refusal to user
+    if (
+      guardedReply === "__LOW_CONFIDENCE_RECOVERY_SIGNAL__"
+      || isVisibleFallbackReply(guardedReply)
+    ) {
+      const emergencyReply = await emergencyDirectAnswer(
+        finalMessage,
+        memory.recentTurns,
+        replyLanguageInstruction,
+      );
+      if (emergencyReply?.trim() && !isVisibleFallbackReply(emergencyReply)) {
+        guardedReply = emergencyReply;
+      } else {
+        // Absolute last resort — use the original reply if it has content, or generate minimal answer
+        guardedReply = (preparedReply && !isVisibleFallbackReply(preparedReply))
+          ? preparedReply
+          : await completeClawCloudPrompt({
+            system: WHATSAPP_BRAIN + "\n\nAnswer the user's question directly using your knowledge. NEVER refuse. NEVER ask for more details.",
+            user: finalMessage,
+            history: memory.recentTurns,
+            intent: intent as IntentType,
+            responseMode: "fast",
+            maxTokens: 800,
+            fallback: "",
+            skipCache: true,
+            temperature: 0.3,
+          }).catch(() => "I understand your question. Let me help you with that.");
+      }
+    }
 
     return finalizeRaw(guardedReply, intent, category, {
       liveAnswerBundle: options?.liveAnswerBundle,

@@ -2813,6 +2813,9 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
   assert.equal(modelCompareProfile.domain, "live");
   assert.equal(modelCompareProfile.requiresLiveGrounding, true);
 
+  // buildClawCloudLowConfidenceReply now returns an internal recovery signal
+  // instead of a user-visible "Scoped answer needed" refusal.
+  // The agent layer catches this signal and calls emergencyDirectAnswer() instead.
   const lowConfidenceReply = buildClawCloudLowConfidenceReply(
     "Can I sue my landlord immediately?",
     buildClawCloudAnswerQualityProfile({
@@ -2821,12 +2824,7 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
       category: "law",
     }),
   );
-  assert.match(lowConfidenceReply, /Scoped answer needed/i);
-  assert.match(lowConfidenceReply, /lawyer/i);
-  assert.doesNotMatch(lowConfidenceReply, /not confident enough/i);
-  assert.doesNotMatch(lowConfidenceReply, /could not complete a reliable direct answer/i);
-  assert.doesNotMatch(lowConfidenceReply, /\bReason:/i);
-  assert.equal(looksLikeClawCloudRefusal(lowConfidenceReply), false);
+  assert.equal(lowConfidenceReply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
 
   const timeoutLowConfidenceReply = buildClawCloudLowConfidenceReply(
     "why cuba is all blackout",
@@ -2837,9 +2835,7 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
     }),
     "The answer path took too long to complete reliably.",
   );
-  assert.doesNotMatch(timeoutLowConfidenceReply, /without better grounding/i);
-  assert.doesNotMatch(timeoutLowConfidenceReply, /too long to complete reliably/i);
-  assert.doesNotMatch(timeoutLowConfidenceReply, /\bReason:/i);
+  assert.equal(timeoutLowConfidenceReply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
 
   const comparisonLowConfidenceReply = buildClawCloudLowConfidenceReply(
     "difference between nginx vs apache vs caddy",
@@ -2849,8 +2845,7 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
       category: "general",
     }),
   );
-  assert.match(comparisonLowConfidenceReply, /exact options/i);
-  assert.doesNotMatch(comparisonLowConfidenceReply, /exact two options/i);
+  assert.equal(comparisonLowConfidenceReply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
 
   const definitionLowConfidenceReply = buildClawCloudLowConfidenceReply(
     "what is rag",
@@ -2860,8 +2855,7 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
       category: "general",
     }),
   );
-  assert.match(definitionLowConfidenceReply, /Scoped answer needed/i);
-  assert.match(definitionLowConfidenceReply, /exact term plus the domain/i);
+  assert.equal(definitionLowConfidenceReply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
 
   const storyLowConfidenceReply = buildClawCloudLowConfidenceReply(
     "tell me the story of my demon in korean",
@@ -2871,11 +2865,7 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
       category: "culture_story",
     }),
   );
-  assert.match(storyLowConfidenceReply, /multiple works with the title/i);
-  assert.doesNotMatch(storyLowConfidenceReply, /topic, tone, and target length/i);
-  assert.match(storyLowConfidenceReply, /Scoped answer needed/i);
-  assert.doesNotMatch(storyLowConfidenceReply, /could not complete a reliable direct answer/i);
-  assert.doesNotMatch(storyLowConfidenceReply, /needs one key detail or clearer scope/i);
+  assert.equal(storyLowConfidenceReply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
 
   const kalkiLowConfidenceReply = buildClawCloudLowConfidenceReply(
     "what is the story of kalki as is it based on true events",
@@ -2885,8 +2875,7 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
       category: "culture_story",
     }),
   );
-  assert.doesNotMatch(kalkiLowConfidenceReply, /kalki as is it based on true events/i);
-  assert.match(kalkiLowConfidenceReply, /title "kalki"/i);
+  assert.equal(kalkiLowConfidenceReply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
 
   const technicalLowConfidenceReply = buildClawCloudLowConfidenceReply(
     "Explain the difference between idempotency and deduplication in event-driven systems.",
@@ -2896,10 +2885,7 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
       category: "general",
     }),
   );
-  assert.match(technicalLowConfidenceReply, /Scoped answer needed/i);
-  assert.match(technicalLowConfidenceReply, /clearer scope detail|direct comparison/i);
-  assert.doesNotMatch(technicalLowConfidenceReply, /could not complete a reliable direct answer/i);
-  assert.doesNotMatch(technicalLowConfidenceReply, /needs one key detail or clearer scope/i);
+  assert.equal(technicalLowConfidenceReply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
 
   assert.equal(
     isClawCloudGroundedLiveAnswer({
@@ -7769,8 +7755,8 @@ test("formal orbital and abstract computability prompts stay out of weather and 
     abstractPrompt,
     abstractProfile,
   );
-  assert.match(abstractLowConfidenceReply, /concept, assumptions, model, or theorem/i);
-  assert.doesNotMatch(abstractLowConfidenceReply, /country or state|lawyer|legal position/i);
+  // buildClawCloudLowConfidenceReply now returns internal signal — never user-visible refusals
+  assert.equal(abstractLowConfidenceReply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
 
   const abstractResearchFallback = buildClawCloudLowConfidenceReply(
     abstractPrompt,
@@ -7780,8 +7766,7 @@ test("formal orbital and abstract computability prompts stay out of weather and 
       category: "web_search",
     }),
   );
-  assert.match(abstractResearchFallback, /concept, assumptions, model, or theorem/i);
-  assert.doesNotMatch(abstractResearchFallback, /date, location, company, person, or ticker/i);
+  assert.equal(abstractResearchFallback, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
 });
 
 test("hard science computability prompts answer directly across the full inbound route", async () => {
@@ -8005,30 +7990,22 @@ test("reply display normalization preserves numbered lists and keeps follow-up b
   );
 });
 
-test("reply display normalization rewrites the legacy timeout fallback into a professional recovery", () => {
+test("reply display normalization rewrites the legacy timeout fallback into a recovery signal", () => {
   const normalized = normalizeReplyForClawCloudDisplay([
     "I'm not confident enough to answer that safely without better grounding.",
     "",
     "Reason: The answer path took too long to complete reliably.",
   ].join("\n"));
 
-  assert.equal(
-    normalized,
-    [
-      "Scoped answer needed",
-      "",
-      "This question needs one clearer scope detail for a precise answer.",
-      "Share the exact topic plus the location, company, person, version, or date that matters.",
-    ].join("\n"),
-  );
+  // Legacy timeout text is sanitized to internal recovery signal — finalizeGuarded intercepts it
+  assert.equal(normalized, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
 });
 
-test("timeboxed reply fails closed for direct knowledge instead of inventing a generic answer", () => {
+test("timeboxed reply fails closed with recovery signal instead of inventing a generic answer", () => {
   const reply = buildTimeboxedProfessionalReplyForTest("what is rag", "general");
 
-  assert.match(reply, /precise answer/i);
-  assert.match(reply, /exact term plus the domain/i);
-  assert.doesNotMatch(reply, /how it works, and why it matters/i);
+  // No user-visible refusal — returns internal signal for finalizeGuarded to handle
+  assert.equal(reply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
 });
 
 test("timeboxed reply still returns deterministic explain answers when one is available", () => {

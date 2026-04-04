@@ -1172,128 +1172,19 @@ export async function verifyClawCloudAnswer(input: {
   return parseVerificationBlock(answer);
 }
 
-function buildClawCloudRecoveryDetailHint(
-  question: string,
-  profile: ClawCloudAnswerQualityProfile,
-): string {
-  const normalizedQuestion = question.toLowerCase();
-
-  if (
-    profile.intent === "science"
-    || profile.category === "science"
-    || looksLikeScienceOrResearchQuestion(question, profile.intent, profile.category)
-  ) {
-    return "Share the exact concept, assumptions, model, or theorem you want analyzed and the level of depth or proof you want, and I will answer it directly.";
-  }
-
-  if (detectAiModelRoutingDecision(question)?.mode === "web_search") {
-    return "Share the exact model names plus the axis you care about most — coding, price, latency, context window, or release timing — and I will give a source-backed comparison.";
-  }
-
-  if (profile.requiresLiveGrounding) {
-    return "Share the exact topic plus date, location, company, person, or ticker so I can return a source-backed answer.";
-  }
-
-  if (
-    profile.intent === "coding"
-    || /\b(code|program|script|function|api|bug|error|exception|stack trace|traceback|algorithm)\b/i.test(question)
-  ) {
-    return "Share the exact code, error message, expected behavior, and language/runtime so I can fix it precisely.";
-  }
-
-  if (
-    profile.intent === "math"
-    || /\b(equation|integral|derivative|probability|calculate|solve|find x|simplify|table of)\b/i.test(question)
-  ) {
-    return "Share the full equation or all given values and what you want solved, and I will work it through step by step.";
-  }
-
-  if (profile.domain === "health") {
-    return "Share age, main symptoms, duration, current medicines, and any known conditions for a more precise health answer.";
-  }
-
-  if (profile.domain === "mental_health") {
-    return "Share what is happening, how long it has been going on, and whether there is any immediate safety risk so I can give focused next steps.";
-  }
-
-  if (profile.domain === "legal") {
-    return "Share the country or state, what happened, any notice or contract involved, and the timeline so I can explain the safest general legal position clearly.";
-  }
-
-  if (profile.domain === "tax" || profile.domain === "finance") {
-    return "Share the country, tax year or date, amount, and any assumptions that matter so I can break the answer down clearly.";
-  }
-
-  if (/\b(compare|difference between|vs\.?|versus)\b/i.test(question)) {
-    return "Share the exact options you want compared and the criterion that matters most, and I will give a direct comparison.";
-  }
-
-  if (profile.intent === "language" || /\b(?:translate|translation)\b/i.test(question)) {
-    return "Share the exact text plus the source and target language, and I will translate it directly.";
-  }
-
-  if (looksLikeExistingStorySummaryQuestion(question)) {
-    const workCandidate = extractExistingStoryWorkCandidate(question);
-    if (workCandidate) {
-      return `If there are multiple works with the title "${workCandidate}", name the exact one. Otherwise I should answer the story directly.`;
-    }
-    return "Share the exact drama, movie, series, anime, or book title, and I will summarize the story directly.";
-  }
-
-  if (profile.intent === "email" || /\b(?:email|reply|mail|message draft)\b/i.test(question)) {
-    return "Share the recipient, purpose, tone, and any deadline or call-to-action, and I will draft it cleanly.";
-  }
-
-  if (profile.intent === "creative" || /\b(article|essay|story|poem|speech|caption|post)\b/i.test(question)) {
-    return "Share the topic, tone, and target length, and I will write the complete piece directly.";
-  }
-
-  if (/^(?:what(?:'s| is| are)|define|explain|describe|meaning of)\b/.test(normalizedQuestion)) {
-    return "Share the exact term plus the domain, version, timeframe, or use case that matters, and I will explain it directly.";
-  }
-
-  if (/\b(?:who|what|when|where|which)\b/.test(normalizedQuestion)) {
-    return "Share the exact name, date, version, or location that matters, and I will answer directly.";
-  }
-
-  return "Share the exact topic or full problem statement, and I will answer directly and professionally.";
-}
-
+/**
+ * NEVER returns a "share more details" refusal. Instead, returns an internal
+ * signal that triggers the emergency direct answer path in the agent layer.
+ * This ensures the user ALWAYS gets a substantive answer, never a "scoped answer needed" refusal.
+ */
 export function buildClawCloudLowConfidenceReply(
-  question: string,
-  profile: ClawCloudAnswerQualityProfile,
-  rationale?: string,
+  _question: string,
+  _profile: ClawCloudAnswerQualityProfile,
+  _rationale?: string,
 ): string {
-  const detailHint = buildClawCloudRecoveryDetailHint(question, profile);
-  const needsScopedPrecisionLead =
-    !profile.isHighStakes
-    && profile.domain === "general"
-    && /^(?:what(?:'s| is| are)|define|explain|describe|meaning of|difference between|compare|vs\.?|versus)\b/i.test(question.trim());
-  const scopeLead = needsScopedPrecisionLead
-    ? "This question needs one clearer scope detail for a precise answer."
-    : "One missing scope detail will let me answer this directly and accurately.";
-  const lines = [
-    "Scoped answer needed",
-    "",
-    scopeLead,
-    detailHint,
-  ];
-
-  if (profile.domain === "legal") {
-    lines.push(
-      "",
-      "If this could affect deadlines, liability, eviction, arrest, money, or formal rights, a qualified local lawyer can tell you the exact legal position.",
-    );
-  } else if (profile.domain === "health" || profile.domain === "mental_health") {
-    lines.push(
-      "",
-      "If this is urgent, severe, or safety-related, contact a qualified clinician or emergency service right away.",
-    );
-  }
-
-  void rationale;
-
-  return lines.join("\n");
+  // Return internal signal — the agent layer will catch this and generate
+  // a real answer via emergencyDirectAnswer() instead of showing a refusal.
+  return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
 }
 
 export function clawCloudConfidenceBelowFloor(
