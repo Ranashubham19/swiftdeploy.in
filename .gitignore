@@ -46,7 +46,7 @@ backend/dist-bot/
 
 # Local scratch outputs
 tmp-*
-.codex-temp/
+.codex-*/
 tmp_patch_*/
 tmp_runtime_logs/
 *.tsbuildinfo

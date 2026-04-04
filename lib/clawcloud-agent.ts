@@ -12883,7 +12883,18 @@ async function routeInboundAgentMessageCore(
   }
 
   const whatsAppSettings = await getWhatsAppSettings(userId).catch(() => null);
-  const activeContactSession = whatsAppSettings?.activeContactSession ?? null;
+  // Auto-expire active contact sessions after 30 minutes of inactivity
+  const ACTIVE_CONTACT_SESSION_TTL_MS = 30 * 60_000;
+  const rawActiveContactSession = whatsAppSettings?.activeContactSession ?? null;
+  const activeContactSession =
+    rawActiveContactSession?.startedAt
+    && Date.now() - new Date(rawActiveContactSession.startedAt).getTime() > ACTIVE_CONTACT_SESSION_TTL_MS
+      ? (() => {
+        void clearWhatsAppActiveContactSession(userId).catch(() => null);
+        console.log(`[agent] Auto-expired active contact session for ${userId} (${rawActiveContactSession.contactName})`);
+        return null;
+      })()
+      : rawActiveContactSession;
   const activeContactSessionCommand = parseWhatsAppActiveContactSessionCommand(trimmed);
   const forceRomanHinglishActiveContactReply = activeContactSessionCommand.type !== "none"
     && looksLikeRomanHinglishActiveContactCommand(trimmed);
@@ -18683,6 +18694,14 @@ async function sendWhatsAppMessageThroughActiveContactSession(input: {
   locale: SupportedLocale;
   conversationStyle: ClawCloudConversationStyle;
 }) {
+  // SAFETY: ensure no internal routing metadata ever reaches a real contact
+  const cleanMessage = stripWhatsAppRoutingContextPrefix(input.message);
+  if (!cleanMessage) {
+    return "I received an empty message after processing. Please try again.";
+  }
+  // Override input.message with cleaned version for all downstream use
+  input = { ...input, message: cleanMessage };
+
   if (!input.session.phone && !input.session.jid) {
     await clearWhatsAppActiveContactSession(input.userId).catch(() => null);
     return [

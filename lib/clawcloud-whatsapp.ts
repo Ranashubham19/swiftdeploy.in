@@ -478,9 +478,23 @@ export async function disconnectClawCloudWhatsApp(userId: string) {
   return true;
 }
 
+/**
+ * Strip internal routing metadata that must never reach a real WhatsApp contact.
+ */
+function sanitizeWhatsAppOutbound(raw: string): string {
+  let text = raw;
+  if (text.startsWith("[WhatsApp workspace context]")) {
+    const sep = text.indexOf("\n\n");
+    text = sep === -1 ? "" : text.slice(sep + 2);
+  }
+  text = text.replace(/^\[WhatsApp workspace context\][^\n]*(?:\n- [^\n]*)*\n{0,2}/i, "");
+  text = text.replace(/^\[Group message[^\]]*\]\s*/i, "");
+  return text.trim();
+}
+
 export async function sendClawCloudWhatsAppToPhone(
   phone: string | null,
-  message: string,
+  rawMessage: string,
   options?: {
     userId?: string;
     contactName?: string | null;
@@ -494,6 +508,11 @@ export async function sendClawCloudWhatsAppToPhone(
     requireRegisteredNumber?: boolean | null;
   },
 ) {
+  const message = sanitizeWhatsAppOutbound(rawMessage);
+  if (!message) {
+    throw new Error("Outbound message was empty after sanitization.");
+  }
+
   if (!getAgentServerBaseUrl() || !env.AGENT_SECRET) {
     if (localWhatsAppRuntime?.send) {
       const ok = await localWhatsAppRuntime.send({

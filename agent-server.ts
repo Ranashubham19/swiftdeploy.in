@@ -1463,8 +1463,35 @@ async function discardSession(
   }
 }
 
+/**
+ * GLOBAL SAFETY GUARD — strip internal routing metadata that must NEVER appear
+ * in a WhatsApp message sent to any contact.  Applied at the last mile before
+ * every `sock.sendMessage` call so that even if upstream code fails to strip
+ * the prefix it can never leak to a real conversation.
+ */
+function sanitizeOutboundWhatsAppMessage(raw: string): string {
+  let text = raw;
+
+  // Strip [WhatsApp workspace context] block
+  if (text.startsWith("[WhatsApp workspace context]")) {
+    const sep = text.indexOf("\n\n");
+    text = sep === -1 ? "" : text.slice(sep + 2);
+  }
+
+  // Also catch mangled single-line variants (e.g. collapsed newlines)
+  text = text.replace(
+    /^\[WhatsApp workspace context\][^\n]*(?:\n- [^\n]*)*\n{0,2}/i,
+    "",
+  );
+
+  // Strip [Group message …] wrappers
+  text = text.replace(/^\[Group message[^\]]*\]\s*/i, "");
+
+  return text.replace(/\n{3,}/g, "\n\n").trim();
+}
+
 async function sendStreamingMessage(sock: WASocket, jid: string, fullText: string) {
-  const trimmed = fullText.replace(/\n{3,}/g, "\n\n").trim();
+  const trimmed = sanitizeOutboundWhatsAppMessage(fullText);
   const chunks = splitWhatsAppStreamChunks(trimmed);
   const messageIds: string[] = [];
 
@@ -4450,7 +4477,8 @@ async function sendReply(
     return false;
   }
 
-  const cleaned = message.replace(/\n{3,}/g, "\n\n").trim();
+  const cleaned = sanitizeOutboundWhatsAppMessage(message);
+  if (!cleaned) return false;
   const messageExcerpt = cleaned.slice(0, 200);
   const assistantTracking: TrackedWhatsAppSendInput = {
     userId,
@@ -4568,7 +4596,8 @@ async function sendReplyLegacy(
     return false;
   }
 
-  const cleaned = message.replace(/\n{3,}/g, "\n\n").trim();
+  const cleaned = sanitizeOutboundWhatsAppMessage(message);
+  if (!cleaned) return false;
   let waMessageIds: string[] = [];
 
   if (shouldStageWhatsAppReply(cleaned, STREAM_REPLY_MIN_LENGTH)) {
@@ -4581,7 +4610,7 @@ async function sendReplyLegacy(
     }
   }
 
-  void logOutbound(userId, message, jid, null, waMessageIds);
+  void logOutbound(userId, cleaned, jid, null, waMessageIds);
   if (isGroupChatJid(jid)) {
     markGroupReplied(jid);
   }
@@ -6410,7 +6439,7 @@ app.delete("/wa/session/:userId", auth, async (req, res) => {
 app.post("/wa/send", auth, async (req, res) => {
   const phone = String(req.body.phone ?? "").trim();
   const jid = toReplyableJid(req.body.jid);
-  const message = String(req.body.message ?? "").trim();
+  const message = sanitizeOutboundWhatsAppMessage(String(req.body.message ?? ""));
   const userId = String(req.body.userId ?? "").trim() || null;
   const contactName = sanitizeContactName(req.body.contactName);
   const source = (
