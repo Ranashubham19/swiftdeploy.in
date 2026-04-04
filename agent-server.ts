@@ -4301,13 +4301,106 @@ function getBuiltinFallbackResponse(message: string) {
   ].join("\n");
 }
 
-function isEmptyOrFallback(reply: string | null | undefined) {
+function looksLikeAssistantPreferenceRequest(message: string) {
+  const normalized = String(message ?? "").toLowerCase().trim();
+  if (!normalized) {
+    return false;
+  }
+
+  const hasPreferenceKeyword =
+    /\b(?:fast|faster|slow|detailed|detail|brief|short|concise|accurate|accuracy|professional|formal|direct|hallucinat(?:e|ing)|perfect)\b/.test(normalized);
+  const hasReplyKeyword =
+    /\b(?:reply|respond|response|answer|answers|be|keep|make|write|talk)\b/.test(normalized);
+
+  return hasPreferenceKeyword && hasReplyKeyword;
+}
+
+function looksLikeAssistantParametersQuestion(message: string) {
+  const normalized = String(message ?? "").toLowerCase().trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    /\b(?:what|which|tell me|show me|explain)\b.{0,18}\byour\b.{0,18}\b(?:parameter|parameters|setting|settings|configuration|config|limits)\b/.test(normalized)
+    || /\bhow\s+are\s+you\s+(?:configured|set\s*up)\b/.test(normalized)
+  );
+}
+
+function looksLikeWeatherQuestionWithoutLocation(message: string) {
+  const normalized = String(message ?? "").toLowerCase().trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return /\b(?:weather|whether|temperature|forecast|rain|humidity|wind|aqi)\b/.test(normalized);
+}
+
+function looksLikePromptLeakReply(reply: string | null | undefined) {
+  const normalized = String(reply ?? "").toLowerCase().trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    normalized.includes("you are being asked to")
+    || normalized.includes("original user prompt")
+    || normalized.includes("romanized reading")
+    || normalized.includes("english meaning")
+    || normalized.includes("answer the question described by the english meaning")
+    || normalized.includes("the user wrote in")
+    || normalized.includes("return only the english translation")
+    || normalized.includes("preserving the original tone and formatting")
+    || normalized.includes("no exceptions or refusals based on the text's content or language")
+    || normalized.includes("task: understand what the user is asking")
+  );
+}
+
+function mismatchesSourceMessage(sourceMessage: string | null | undefined, reply: string | null | undefined) {
+  const source = String(sourceMessage ?? "").toLowerCase().trim();
+  const normalizedReply = String(reply ?? "").toLowerCase().trim();
+  if (!source || !normalizedReply) {
+    return false;
+  }
+
+  if (looksLikePromptLeakReply(reply)) {
+    return true;
+  }
+
+  if (
+    looksLikeAssistantPreferenceRequest(source)
+    && !/\b(?:faster|fast|direct|detail|detailed|brief|concise|accurate|guess|professional|routine questions)\b/.test(normalizedReply)
+  ) {
+    return true;
+  }
+
+  if (
+    looksLikeAssistantParametersQuestion(source)
+    && !/\b(?:parameter|parameters|setting|settings|configuration|config|capabilit|how i operate|raw internal)\b/.test(normalizedReply)
+  ) {
+    return true;
+  }
+
+  if (
+    looksLikeWeatherQuestionWithoutLocation(source)
+    && !/\b(?:weather|temperature|forecast|humidity|wind|rain|city|location)\b/.test(normalizedReply)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function isEmptyOrFallback(reply: string | null | undefined, sourceMessage?: string | null) {
   if (!reply?.trim()) {
     return true;
   }
 
   const lower = reply.trim().toLowerCase();
   return (
+    looksLikePromptLeakReply(reply)
+    || mismatchesSourceMessage(sourceMessage, reply)
+    ||
     lower.includes("__fast_fallback") ||
     lower.includes("__deep_fallback") ||
     lower.includes("could not produce a reliable answer") ||
@@ -4342,6 +4435,25 @@ function isEmptyOrFallback(reply: string | null | undefined) {
 
 function buildEmergencyProfessionalFallback(message: string) {
   const text = message.toLowerCase().trim();
+
+  if (looksLikeAssistantPreferenceRequest(text)) {
+    return [
+      "Understood. I'll keep replies more direct and better grounded from here.",
+      "",
+      "Routine questions will get a faster answer. If something is uncertain, I'll say that briefly instead of guessing.",
+      "Short prompts will stay concise, and deeper questions will get fuller answers when needed.",
+    ].join("\n");
+  }
+
+  if (looksLikeAssistantParametersQuestion(text)) {
+    return [
+      "If you mean how I operate: I do not expose raw internal model parameters in chat.",
+      "",
+      "Practically, I can answer questions, explain concepts, write, code, summarize, translate, and help with connected tools when they are linked.",
+      "",
+      "If you want a specific behavior, tell me directly, for example: be faster, be more detailed, or be more professional.",
+    ].join("\n");
+  }
 
   if (/\bn[-\s]?queen\b/.test(text)) {
     return [
@@ -4844,7 +4956,7 @@ async function handleInbound(
 
   console.log(`[agent] PATH A direct reply for ${userId}`);
   const directReply = await runDirectAgentReply(userId, routedText);
-  if (directReply?.trim() && !isEmptyOrFallback(directReply)) {
+  if (directReply?.trim() && !isEmptyOrFallback(directReply, text)) {
     finalReply = directReply.trim();
     console.log(`[agent] PATH A success for ${userId} (${finalReply.length} chars)`);
   } else {
@@ -4860,7 +4972,7 @@ async function handleInbound(
 
       if (response?.ok) {
         const json = (await response.json().catch(() => ({}))) as { response?: string | null };
-        if (json.response?.trim() && !isEmptyOrFallback(json.response)) {
+        if (json.response?.trim() && !isEmptyOrFallback(json.response, text)) {
           finalReply = json.response.trim();
           console.log(`[agent] PATH B success for ${userId} (${finalReply.length} chars)`);
         } else {
@@ -4879,7 +4991,7 @@ async function handleInbound(
     }
   }
 
-  if (!finalReply || isEmptyOrFallback(finalReply)) {
+  if (!finalReply || isEmptyOrFallback(finalReply, text)) {
     console.warn(`[agent] Using builtin fallback for ${userId}`);
     finalReply = buildEmergencyProfessionalFallback(text);
   }

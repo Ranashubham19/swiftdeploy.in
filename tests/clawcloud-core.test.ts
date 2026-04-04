@@ -8,6 +8,7 @@ import {
   buildClawCloudAnswerQualityProfile,
   buildClawCloudLowConfidenceReply,
   isClawCloudGroundedLiveAnswer,
+  looksLikeInstructionLeakReply,
   looksLikeQuestionTopicMismatch,
   looksLikeWrongModeAnswer,
   scoreClawCloudAnswerConfidence,
@@ -156,6 +157,7 @@ import {
 import { detectHinglish } from "@/lib/clawcloud-hinglish";
 import {
   buildUnhandledWhatsAppOperationalClarificationForTest,
+  buildDeterministicAssistantMetaReplyForTest,
   buildDeterministicConversationReplyForTest,
   buildLocalizedCapabilityReplyForTest,
   buildLocalizedCapabilityReplyFromMessageForTest,
@@ -173,6 +175,7 @@ import {
   maybeBuildDeterministicProfessionalGreetingDraftForTest,
   maybeBuildDeterministicStructuredWhatsAppDraftForTest,
   autoCorrectWhatsAppOutgoingMessageForTest,
+  looksLikeAssistantReplyRepairRequestForTest,
   parseWhatsAppActiveContactSessionCommandForTest,
   resolveWhatsAppPendingContactSelectionForTest,
   resolveWhatsAppActiveContactDraftLanguageForTest,
@@ -446,8 +449,8 @@ test("whatsapp workspace bootstrap runs for newly linked accounts with missing c
   }), false);
 });
 
-test("whatsapp security defaults stay passive unless the user explicitly commands the assistant", () => {
-  assert.equal(defaultWhatsAppSettings.automationMode, "read_only");
+test("whatsapp defaults allow direct auto-replies while keeping outbound guardrails in place", () => {
+  assert.equal(defaultWhatsAppSettings.automationMode, "auto_reply");
   assert.equal(defaultWhatsAppSettings.allowGroupReplies, false);
   assert.equal(defaultWhatsAppSettings.groupReplyMode, "never");
   assert.equal(defaultWhatsAppSettings.allowWorkflowAutoSend, false);
@@ -3623,6 +3626,22 @@ test("inbound agent route answers Russian name-exchange prompts in Russian", asy
   assert.match(result.response ?? "", /ClawCloud/i);
   assert.match(result.response ?? "", /Шубхам/u);
   assert.match(result.response ?? "", /Привет|Меня зовут|Я ClawCloud/u);
+});
+
+test("assistant meta prompts get deterministic professional acknowledgements", () => {
+  const speedReply = buildDeterministicAssistantMetaReplyForTest("respond fast from now onward");
+  assert.match(speedReply ?? "", /faster direct reply|faster answer/i);
+  assert.match(speedReply ?? "", /instead of guessing/i);
+
+  const parametersReply = buildDeterministicAssistantMetaReplyForTest("what is your parameters");
+  assert.match(parametersReply ?? "", /raw internal model parameters/i);
+  assert.match(parametersReply ?? "", /specific behavior/i);
+});
+
+test("assistant repair follow-up detection catches bad-answer callbacks", () => {
+  assert.equal(looksLikeAssistantReplyRepairRequestForTest("what is this now"), true);
+  assert.equal(looksLikeAssistantReplyRepairRequestForTest("that previous answer is wrong"), true);
+  assert.equal(looksLikeAssistantReplyRepairRequestForTest("what is the capital of France"), false);
 });
 
 test("multilingual routing bridge promotes native-language prompts onto direct answer lanes", () => {
@@ -7126,6 +7145,16 @@ test("topic mismatch detection flags menu-style clarification answers for clear 
       "Explain the difference between idempotency and deduplication in event-driven systems, and give one concrete payment example where deduplication alone is insufficient.",
       menuAnswer,
     ),
+    true,
+  );
+});
+
+test("instruction-style prompt leaks are treated as topic mismatches", () => {
+  const leaked = "You are being asked to translate text from any language into English, preserving the original tone and formatting.";
+
+  assert.equal(looksLikeInstructionLeakReply(leaked), true);
+  assert.equal(
+    looksLikeQuestionTopicMismatch("what is your parameters", leaked),
     true,
   );
 });

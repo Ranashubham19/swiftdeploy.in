@@ -220,6 +220,23 @@ const IRRELEVANT_ASSISTANT_LEAK_PATTERNS = [
   /\bwhat's your question\b/i,
 ];
 
+const PROMPT_LEAK_PATTERNS = [
+  /\byou are being asked to\b/i,
+  /\boriginal user prompt\b/i,
+  /\bromanized reading\b/i,
+  /\benglish meaning\b/i,
+  /\banswer the question described by the english meaning\b/i,
+  /\bthe user wrote in\b/i,
+  /\brespond in [a-z][a-z\s-]*, not in english\b/i,
+  /\breturn only the english translation\b/i,
+  /\bpreserving the original tone and formatting\b/i,
+  /\bno exceptions or refusals based on the text'?s content or language\b/i,
+  /\btask:\s*understand what the user is asking\b/i,
+  /\bdo not ask for clarification\b/i,
+  /\buse the english translation only to understand the question\b/i,
+  /\btranslate the romanized\b/i,
+];
+
 const WRONG_MODE_TRANSLATION_PATTERNS = [
   /\bhere(?:'s| is) the translation\b/i,
   /\bdirect translation\b/i,
@@ -231,6 +248,7 @@ const WRONG_MODE_TRANSLATION_PATTERNS = [
   /\bif you'd like, i can help\b/i,
   /\bprovide more context\b/i,
   /\bplease let me know how i can assist\b/i,
+  ...PROMPT_LEAK_PATTERNS,
 ];
 
 const WRONG_MODE_STORY_CLARIFICATION_PATTERNS = [
@@ -447,7 +465,12 @@ function looksLikeIrrelevantAssistantLeak(question: string, answer: string) {
     return false;
   }
 
-  return matchesAny(answer, IRRELEVANT_ASSISTANT_LEAK_PATTERNS);
+  return matchesAny(answer, IRRELEVANT_ASSISTANT_LEAK_PATTERNS)
+    || looksLikeInstructionLeakReply(answer);
+}
+
+export function looksLikeInstructionLeakReply(answer: string) {
+  return answer.trim() ? matchesAny(answer.trim(), PROMPT_LEAK_PATTERNS) : false;
 }
 
 export function looksLikePlaceholderTemplateReply(answer: string) {

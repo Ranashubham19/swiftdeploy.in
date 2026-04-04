@@ -3884,6 +3884,210 @@ export function buildDeterministicConversationReplyForTest(message: string) {
     : null;
 }
 
+type AssistantMetaPreferenceSignal = {
+  wantsFaster: boolean;
+  wantsMoreDetail: boolean;
+  wantsBriefer: boolean;
+  wantsProfessional: boolean;
+  wantsAccuracy: boolean;
+};
+
+function detectAssistantMetaPreferenceSignal(message: string): AssistantMetaPreferenceSignal | null {
+  const normalized = normalizeClawCloudUnderstandingMessage(message).toLowerCase().trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const wantsFaster =
+    /\b(?:respond|reply|answer|be|keep)\b.{0,18}\bfaster\b/.test(normalized)
+    || /\bfast(?:er)?\s+from\s+now(?:\s+onward)?\b/.test(normalized)
+    || /\bfrom\s+now(?:\s+onward)?\b.{0,18}\bfast(?:er)?\b/.test(normalized)
+    || /\b(?:1|one)\s+to\s+(?:2|two)\s+seconds?\b/.test(normalized)
+    || (
+      /\b(?:slow|slowly|delay|delayed)\b/.test(normalized)
+      && /\b(?:reply|response|respond|answer)\b/.test(normalized)
+    );
+  const wantsMoreDetail =
+    /\b(?:answer|reply|respond|explain|write|make)\b.{0,24}\b(?:in\s+detail|detailed|detailled|step\s+by\s+step|fully|more\s+detail|full\s+answer|complete\s+answer|long\s+answer|longer\s+answer)\b/.test(normalized)
+    || /\b(?:give|need|want)\b.{0,16}\b(?:a\s+)?(?:detailed|full|complete|long)\s+answer\b/.test(normalized);
+  const wantsBriefer =
+    /\b(?:keep|make|be|answer|reply|respond|write)\b.{0,20}\b(?:brief|short|shorter|concise|direct)\b/.test(normalized)
+    || /\b(?:one line|two lines)\b/.test(normalized);
+  const wantsProfessional =
+    /\b(?:be|sound|write|reply|respond|answer|keep|make)\b.{0,20}\b(?:professional|professionally|formal|polished)\b/.test(normalized);
+  const wantsAccuracy =
+    /\b(?:be|stay|keep|answer|reply|respond|make)\b.{0,20}\b(?:accurate|accuracy|correct|precise)\b/.test(normalized)
+    || /\b(?:don't|do not|stop)\s+hallucinat(?:e|ing)\b/.test(normalized)
+    || /\bno\s+hallucinat(?:ion|ing)\b/.test(normalized);
+
+  if (!wantsFaster && !wantsMoreDetail && !wantsBriefer && !wantsProfessional && !wantsAccuracy) {
+    return null;
+  }
+
+  if (
+    !/\b(?:respond|reply|answer|be|keep|make|talk|write|hallucinat|accurate|accuracy|detail|detailed|brief|short|concise|professional|formal|polished|fast|faster|slow)\b/.test(normalized)
+  ) {
+    return null;
+  }
+
+  return {
+    wantsFaster,
+    wantsMoreDetail,
+    wantsBriefer,
+    wantsProfessional,
+    wantsAccuracy,
+  };
+}
+
+function buildAssistantPreferenceReply(signal: AssistantMetaPreferenceSignal) {
+  const lines = ["Understood. I will keep replies more disciplined from here."];
+
+  if (signal.wantsAccuracy || signal.wantsFaster) {
+    lines.push("If something is uncertain, I will say that briefly instead of guessing.");
+  }
+
+  if (signal.wantsFaster) {
+    lines.push("Routine questions will get a faster direct reply. Deep, live, or tool-based requests can still take longer.");
+  }
+
+  if (signal.wantsMoreDetail && signal.wantsBriefer) {
+    lines.push("I will match the depth to the question: short when the prompt is simple, detailed when the topic needs it.");
+  } else if (signal.wantsMoreDetail) {
+    lines.push("When the topic needs depth, I will give a fuller structured answer instead of a shallow one.");
+  } else if (signal.wantsBriefer) {
+    lines.push("For simple prompts, I will keep the answer concise and direct.");
+  }
+
+  if (signal.wantsProfessional) {
+    lines.push("I will keep the tone polished and professional.");
+  }
+
+  return lines.join("\n\n");
+}
+
+async function rememberAssistantMetaPreferences(
+  userId: string,
+  signal: AssistantMetaPreferenceSignal,
+) {
+  const facts: Array<{ key: string; value: string }> = [];
+
+  if (signal.wantsFaster) {
+    facts.push({ key: "reply_speed_preference", value: "fast" });
+  }
+
+  if (signal.wantsMoreDetail && signal.wantsBriefer) {
+    facts.push({ key: "reply_length_preference", value: "adaptive" });
+  } else if (signal.wantsMoreDetail) {
+    facts.push({ key: "reply_length_preference", value: "detailed" });
+  } else if (signal.wantsBriefer) {
+    facts.push({ key: "reply_length_preference", value: "brief" });
+  }
+
+  if (signal.wantsProfessional) {
+    facts.push({ key: "reply_style_preference", value: "professional" });
+  }
+
+  if (signal.wantsAccuracy) {
+    facts.push({ key: "answer_quality_preference", value: "high_accuracy" });
+  }
+
+  await Promise.all(
+    facts.map((fact) =>
+      saveMemoryFact(userId, fact.key, fact.value, "explicit", 1.0).catch(() => false)),
+  );
+}
+
+function looksLikeAssistantParametersQuestion(message: string) {
+  const normalized = normalizeClawCloudUnderstandingMessage(message).toLowerCase().trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    /\b(?:what|which|tell me|show me|explain)\b.{0,18}\byour\b.{0,18}\b(?:parameter|parameters|setting|settings|configuration|config|limits)\b/.test(normalized)
+    || /\bhow\s+are\s+you\s+(?:configured|set\s*up)\b/.test(normalized)
+  );
+}
+
+function buildAssistantParametersReply() {
+  return [
+    "If you mean how I operate: I do not expose raw internal model parameters in chat.",
+    "",
+    "Practically, I can answer questions, explain concepts, write, code, summarize, translate, and help with connected tools when they are linked.",
+    "",
+    "If you want a specific behavior, tell me the preference directly, for example: *be faster*, *be more detailed*, *be brief*, or *be more formal*.",
+  ].join("\n");
+}
+
+function buildDeterministicAssistantMetaReply(message: string) {
+  const preferenceSignal = detectAssistantMetaPreferenceSignal(message);
+  if (preferenceSignal) {
+    return {
+      kind: "preference" as const,
+      reply: buildAssistantPreferenceReply(preferenceSignal),
+      preferenceSignal,
+    };
+  }
+
+  if (looksLikeAssistantParametersQuestion(message)) {
+    return {
+      kind: "parameters" as const,
+      reply: buildAssistantParametersReply(),
+      preferenceSignal: null,
+    };
+  }
+
+  return null;
+}
+
+function looksLikeAssistantReplyRepairRequest(message: string) {
+  const normalized = normalizeClawCloudUnderstandingMessage(message).toLowerCase().trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    /^(?:what is this(?: now)?|what was that|why this(?: answer)?|why that(?: answer)?|wrong answer|off[- ]topic|answer correctly|answer properly)\b/.test(normalized)
+    || /\b(?:this|that|previous|last)\s+(?:reply|answer|message)\s+(?:is|was)\s+wrong\b/.test(normalized)
+    || /\b(?:this|that)\s+(?:makes no sense|is nonsense)\b/.test(normalized)
+    || /\bthat(?:'s| is)\s+not\s+what\s+i\s+asked\b/.test(normalized)
+    || /\bwhy\s+are\s+you\s+hallucinat(?:ing|e)\b/.test(normalized)
+  );
+}
+
+function extractLatestAssistantRepairContext(
+  recentTurns: Array<{ role: "user" | "assistant"; content: string }>,
+) {
+  for (let index = recentTurns.length - 1; index >= 0; index -= 1) {
+    const assistantTurn = recentTurns[index];
+    if (!assistantTurn || assistantTurn.role !== "assistant" || !assistantTurn.content.trim()) {
+      continue;
+    }
+
+    for (let userIndex = index - 1; userIndex >= 0; userIndex -= 1) {
+      const userTurn = recentTurns[userIndex];
+      if (!userTurn || userTurn.role !== "user" || !userTurn.content.trim()) {
+        continue;
+      }
+
+      return {
+        assistantReply: assistantTurn.content.trim(),
+        userQuestion: userTurn.content.trim(),
+      };
+    }
+  }
+
+  return null;
+}
+
+export function buildDeterministicAssistantMetaReplyForTest(message: string) {
+  return buildDeterministicAssistantMetaReply(message)?.reply ?? null;
+}
+
+export function looksLikeAssistantReplyRepairRequestForTest(message: string) {
+  return looksLikeAssistantReplyRepairRequest(message);
+}
+
 function buildDeterministicChatFallbackLegacy(message: string, intent: IntentType) {
   const text = message.toLowerCase().trim();
 
@@ -13188,6 +13392,26 @@ async function routeInboundAgentMessageCore(
     );
   }
 
+  const deterministicAssistantMetaReply = buildDeterministicAssistantMetaReply(trimmed);
+  if (deterministicAssistantMetaReply) {
+    if (deterministicAssistantMetaReply.preferenceSignal) {
+      await rememberAssistantMetaPreferences(userId, deterministicAssistantMetaReply.preferenceSignal)
+        .catch(() => null);
+    }
+
+    const replyLanguage = await resolveReplyLocale(trimmed);
+    return finalizeAgentReply({
+      userId,
+      locale: replyLanguage.locale,
+      preserveRomanScript: replyLanguage.preserveRomanScript,
+      question: trimmed,
+      intent: "general",
+      category: "general",
+      startedAt: routeStartedAt,
+      reply: deterministicAssistantMetaReply.reply,
+    });
+  }
+
   // Keep exact arithmetic and known simple coding prompts off the slow path so
   // production latency cannot push them into generic fallback answers.
   const ultraFastDeterministicCodingReply = buildDeterministicCodingPromptReply(trimmed);
@@ -13787,6 +14011,89 @@ async function routeInboundAgentMessageCore(
     ),
     resolveStoredLocaleQuickly(),
   ]);
+  if (looksLikeAssistantReplyRepairRequest(trimmed)) {
+    const repairContext = extractLatestAssistantRepairContext(memory.recentTurns);
+    const previousQuestion = repairContext
+      ? (
+        normalizeInboundMessageForConsent(
+          stripWhatsAppRoutingContextPrefix(repairContext.userQuestion),
+        ) || stripWhatsAppRoutingContextPrefix(repairContext.userQuestion).trim()
+      )
+      : "";
+
+    if (
+      repairContext
+      && previousQuestion
+      && previousQuestion.toLowerCase() !== trimmed.toLowerCase()
+      && !looksLikeAssistantReplyRepairRequest(previousQuestion)
+    ) {
+      const previousIntent = detectStrictIntentRoute(previousQuestion)?.intent ?? detectIntent(previousQuestion);
+      const repairedReply = await recoverDirectAnswer({
+        question: previousQuestion,
+        answer: repairContext.assistantReply,
+        intent: previousIntent.type,
+        failureReason: "The previous reply was off-topic or leaked internal instruction text. Answer the user's last real question directly.",
+        history: memory.recentTurns,
+      }).catch(() => "");
+
+      const cleanedRepair = repairedReply.trim();
+      if (
+        cleanedRepair
+        && !isVisibleFallbackReply(cleanedRepair)
+        && !isLowQualityTemplateReply(cleanedRepair)
+        && !looksLikeQuestionTopicMismatch(previousQuestion, cleanedRepair)
+        && !looksLikeWrongModeAnswer(previousQuestion, cleanedRepair)
+      ) {
+        const repairReplyLanguage = resolveClawCloudReplyLanguage({
+          message: trimmed,
+          preferredLocale: locale,
+          recentUserMessages: memory.recentTurns
+            .filter((turn) => turn.role === "user")
+            .map((turn) => turn.content)
+            .slice(-4),
+        });
+
+        return finalizeAgentReply({
+          userId,
+          locale: repairReplyLanguage.locale,
+          preserveRomanScript: repairReplyLanguage.preserveRomanScript,
+          question: previousQuestion,
+          intent: previousIntent.type,
+          category: previousIntent.category,
+          startedAt: routeStartedAt,
+          reply: [
+            "That previous reply was off-topic.",
+            "",
+            cleanedRepair,
+          ].join("\n"),
+        });
+      }
+    }
+
+    const repairReplyLanguage = resolveClawCloudReplyLanguage({
+      message: trimmed,
+      preferredLocale: locale,
+      recentUserMessages: memory.recentTurns
+        .filter((turn) => turn.role === "user")
+        .map((turn) => turn.content)
+        .slice(-4),
+    });
+
+    return finalizeAgentReply({
+      userId,
+      locale: repairReplyLanguage.locale,
+      preserveRomanScript: repairReplyLanguage.preserveRomanScript,
+      question: trimmed,
+      intent: "general",
+      category: "general",
+      startedAt: routeStartedAt,
+      reply: [
+        "That previous reply was off-topic.",
+        "",
+        "Send the same question again in one line and I will answer it directly.",
+      ].join("\n"),
+    });
+  }
   const memorySnippet = buildMemorySystemSnippet(memory, userProfileSnippet);
   const finalMessage = resolveRoutingMessage(trimmed, memory.resolvedQuestion);
   const replyLanguageResolution = resolveClawCloudReplyLanguage({

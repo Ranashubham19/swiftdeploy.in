@@ -718,10 +718,10 @@ export function parseSendMessageCommand(text: string): ParsedSendMessageCommand 
   );
   const understood = normalizeClawCloudUnderstandingMessage(raw).trim();
   const candidates = Array.from(new Set([
-    raw,
-    understood,
     repairSendMessageCommandCandidate(raw),
     repairSendMessageCommandCandidate(understood),
+    raw,
+    understood,
   ].filter(Boolean)));
 
   if (candidates.some((candidate) => looksLikeActiveContactHandoffCommand(candidate))) {
