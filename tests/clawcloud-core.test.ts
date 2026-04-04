@@ -154,6 +154,7 @@ import {
   resolveClawCloudReplyLanguage,
   buildClawCloudReplyLanguageInstruction,
 } from "@/lib/clawcloud-i18n";
+import { resolveSupportedLocale } from "@/lib/clawcloud-locales";
 import { detectHinglish } from "@/lib/clawcloud-hinglish";
 import {
   buildUnhandledWhatsAppOperationalClarificationForTest,
@@ -194,6 +195,7 @@ import {
   isAcceptableAiModelWebAnswerForTest,
   isLikelyWhatsAppSelfLabelForTest,
   getInboundRouteTimeoutPolicyForTest,
+  looksOverlyThinDirectDefinitionReplyForTest,
   normalizeReplyForClawCloudDisplay,
   polishClawCloudAnswerStyleForTest,
   routeInboundAgentMessageResult,
@@ -250,6 +252,7 @@ import {
 } from "@/lib/clawcloud-casual-talk";
 import {
   answerShortDefinitionLookup,
+  buildCountryDefinitionAnswerForTest,
   buildDefinitionLookupQueriesForTest,
   buildNamedEntityIdentityAnswerForTest,
   buildClawCloudLiveAnswerBundle,
@@ -279,6 +282,7 @@ import {
   buildAiModelEvidenceOnlyAnswer,
   buildEvidenceOnlyAnswer,
   buildNewsQueries,
+  buildTopHeadlineDigestAnswerForTest,
   detectNewsQuestion,
   extractAiModelEvidenceMentions,
   filterAiModelEvidenceSources,
@@ -3163,6 +3167,8 @@ test("primary direct-answer lane catches standalone knowledge prompts beyond wh-
   assert.equal(shouldUseSimpleKnowledgeFastLaneForTest("overview of photosynthesis"), false);
   assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("overview of photosynthesis"), true);
   assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("photosynthesis process"), true);
+  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("what is cuba"), true);
+  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("ok then what is cuba"), true);
   assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("latest stock market news"), false);
   assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("who is the richest person of the world"), false);
   assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("show my gmail inbox"), false);
@@ -3293,6 +3299,7 @@ test("locale preference commands are explicit and do not depend on email domains
 
 test("reply language resolver mirrors the user's current message language when it is clear", () => {
   assert.equal(inferClawCloudMessageLocale("Necesito ayuda con esto hoy, por favor."), "es");
+  assert.equal(inferClawCloudMessageLocale("¿Qué es Cuba?"), "es");
   assert.equal(inferClawCloudMessageLocale("Bonjour, explique-moi ça clairement."), "fr");
   assert.equal(inferClawCloudMessageLocale("Can you explain this clearly today?"), "en");
   assert.equal(extractExplicitReplyLocaleRequest("tell me the story of my demon in korean"), "ko");
@@ -3304,6 +3311,12 @@ test("reply language resolver mirrors the user's current message language when i
     extractExplicitReplyLocaleRequests("tell me the story of avannger infinity war in korean and chinese"),
     ["ko", "zh"],
   );
+  assert.deepEqual(
+    extractExplicitReplyLocaleRequests("give me the story of 365 days in brazalian and chinese"),
+    ["pt", "zh"],
+  );
+  assert.equal(resolveSupportedLocale("brazalian"), "pt");
+  assert.equal(resolveSupportedLocale("chineese"), "zh");
   assert.equal(
     extractExplicitReplyLocaleRequest("\u8acb\u7528\u82f1\u6587\u66ff\u6211\u8ddf\u7238\u7238\u8aaa\u3002"),
     "en",
@@ -3369,6 +3382,31 @@ test("reply language resolver mirrors the user's current message language when i
   });
   assert.equal(chineseExplicitEnglish.locale, "en");
   assert.equal(chineseExplicitEnglish.source, "explicit_request");
+
+  const explicitPortugueseAndChinese = resolveClawCloudReplyLanguage({
+    message: "give me the story of 365 days in brazalian and chinese",
+    preferredLocale: "en",
+  });
+  assert.equal(explicitPortugueseAndChinese.locale, "pt");
+  assert.equal(explicitPortugueseAndChinese.source, "explicit_request");
+  assert.deepEqual(explicitPortugueseAndChinese.additionalLocales, ["zh"]);
+
+  const explicitHinglish = resolveClawCloudReplyLanguage({
+    message: "reply in hinglish",
+    preferredLocale: "en",
+  });
+  assert.equal(explicitHinglish.locale, "hi");
+  assert.equal(explicitHinglish.source, "explicit_request");
+  assert.equal(explicitHinglish.preserveRomanScript, true);
+  assert.match(buildClawCloudReplyLanguageInstruction(explicitHinglish), /Roman script/i);
+
+  const midSentenceHinglish = resolveClawCloudReplyLanguage({
+    message: "send message to maa in hinglish",
+    preferredLocale: "en",
+  });
+  assert.equal(midSentenceHinglish.locale, "hi");
+  assert.equal(midSentenceHinglish.source, "explicit_request");
+  assert.equal(midSentenceHinglish.preserveRomanScript, true);
 });
 
 test("reply language resolver keeps Hinglish in Roman script instead of forcing pure Hindi", () => {
@@ -3634,6 +3672,12 @@ test("assistant meta prompts get deterministic professional acknowledgements", (
   const parametersReply = buildDeterministicAssistantMetaReplyForTest("what is your parameters");
   assert.match(parametersReply ?? "", /raw internal model parameters/i);
   assert.match(parametersReply ?? "", /specific behavior/i);
+});
+
+test("full inbound route keeps assistant-parameters prompts out of the short-definition lane", async () => {
+  const result = await routeInboundAgentMessageResult("test-user", "what is your parameters");
+  assert.match(result.response ?? "", /raw internal model parameters/i);
+  assert.doesNotMatch(result.response ?? "", /refers to specific values or constraints/i);
 });
 
 test("assistant repair follow-up detection catches bad-answer callbacks", () => {
@@ -4500,6 +4544,12 @@ test("send-message parsing survives soft prefixes and understanding-layer typo c
   assert.equal(normalizeContactName(repairedGlueTypo?.contactName ?? ""), "maa");
   assert.equal(repairedGlueTypo?.message, "good morning in professional way in hinglish");
 
+  const conversationalLeadIn = parseSendMessageCommand("ok now send hii to priyanshu");
+  assert.ok(conversationalLeadIn);
+  assert.equal(conversationalLeadIn?.kind, "contacts");
+  assert.equal(normalizeContactName(conversationalLeadIn?.contactName ?? ""), "priyanshu");
+  assert.equal(conversationalLeadIn?.message, "hii");
+
   const corrected = parseSendMessageCommand("telll maa that call me when free");
   assert.ok(corrected);
   assert.equal(corrected?.kind, "contacts");
@@ -4684,6 +4734,10 @@ test("active contact mode parses professional handoff commands and only proxies 
   assert.deepEqual(
     parseWhatsAppActiveContactSessionCommandForTest("from now onward you will talk with hansraj lpu on my behalf"),
     { type: "start", contactName: "hansraj lpu" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("ok nw from now onward you will speak to jaideep on my behalf"),
+    { type: "start", contactName: "jaideep" },
   );
   assert.deepEqual(
     parseWhatsAppActiveContactSessionCommandForTest("ab se app mere behalf mai maa se baat karange"),
@@ -5292,6 +5346,30 @@ test("routing keeps explicit tool commands out of follow-up topic rewrites", () 
 test("direct-answer recovery only activates for clear low-risk prompts", () => {
   assert.equal(
     shouldAttemptDirectAnswerRecovery(
+      "what is cuba",
+      buildClawCloudAnswerQualityProfile({
+        question: "what is cuba",
+        intent: "general",
+        category: "general",
+      }),
+    ),
+    true,
+  );
+
+  assert.equal(
+    shouldAttemptDirectAnswerRecovery(
+      "ok then what is cuba",
+      buildClawCloudAnswerQualityProfile({
+        question: "ok then what is cuba",
+        intent: "general",
+        category: "general",
+      }),
+    ),
+    true,
+  );
+
+  assert.equal(
+    shouldAttemptDirectAnswerRecovery(
       "tell me the story of my demon in korean",
       buildClawCloudAnswerQualityProfile({
         question: "tell me the story of my demon in korean",
@@ -5450,6 +5528,15 @@ test("deterministic known-story replies handle Bhool Bhulaiyaa 2 prompts", () =>
   assert.match(answer, /Ruhaan/i);
   assert.match(answer, /Reet/i);
   assert.match(answer, /Manjulika/i);
+});
+
+test("deterministic known-story replies handle 365 Days prompts", () => {
+  const answer = resolveDeterministicKnownStoryReplyForTest(
+    "give me the story of 365 days in brazalian and chinese",
+  ) ?? "";
+  assert.match(answer, /Laura Biel/i);
+  assert.match(answer, /Massimo Torricelli/i);
+  assert.match(answer, /365 days to fall in love/i);
 });
 
 test("localized deterministic known-story replies can answer My Demon directly in Korean", () => {
@@ -5827,6 +5914,44 @@ test("vague live news requests build headline-focused queries", () => {
   const caseQueries = buildNewsQueries("tarun holi delhi case");
   assert.ok(caseQueries.some((query) => /case explained/i.test(query)));
   assert.ok(caseQueries.some((query) => /incident/i.test(query)));
+});
+
+test("broad world-news prompts get a clean deterministic headline digest from live sources", () => {
+  const answer = buildTopHeadlineDigestAnswerForTest(
+    "what is the current news of the world of todays",
+    [
+      {
+        title: "Global markets steady as oil prices cool",
+        url: "https://reuters.com/world/markets-one",
+        snippet: "Investors watched oil and bond yields.",
+        domain: "reuters.com",
+        publishedDate: "2026-04-05T13:30:00.000Z",
+        score: 0.91,
+      },
+      {
+        title: "EU leaders discuss new security package",
+        url: "https://apnews.com/world/europe-two",
+        snippet: "Leaders met in Brussels on Sunday.",
+        domain: "apnews.com",
+        publishedDate: "2026-04-05T12:10:00.000Z",
+        score: 0.86,
+      },
+      {
+        title: "Asian tech stocks rebound after policy signals",
+        url: "https://bbc.com/news/business-three",
+        snippet: "Tech shares rose across major exchanges.",
+        domain: "bbc.com",
+        publishedDate: "2026-04-05T10:45:00.000Z",
+        score: 0.82,
+      },
+    ],
+  );
+
+  assert.match(answer, /\*Top world headlines right now\*/i);
+  assert.match(answer, /1\. Global markets steady as oil prices cool/i);
+  assert.match(answer, /reuters\.com/i);
+  assert.match(answer, /These are the strongest recent world-news headlines/i);
+  assert.doesNotMatch(answer, /could not verify|scoped live answer needed|low confidence/i);
 });
 
 test("current-affairs verification requests build stronger event queries", () => {
@@ -7234,6 +7359,14 @@ test("whatsapp history hint extraction understands natural contact-conversation 
     extractWhatsAppHistoryHintsForTest("just read the message of me with hansraj"),
     {
       contactHint: "hansraj",
+      queryHint: null,
+      direction: null,
+    },
+  );
+  assert.deepEqual(
+    extractWhatsAppHistoryHintsForTest("ok now see the conversation of me with jaideep"),
+    {
+      contactHint: "jaideep",
       queryHint: null,
       direction: null,
     },
@@ -9081,6 +9214,7 @@ test("public affairs meetings and prefixed country metrics avoid old routing mis
   assert.equal(detectWorldBankCountryMetricQuestion("what is the population of tokyo"), null);
   assert.deepEqual(detectShortDefinitionLookup("what is semparo"), { term: "semparo" });
   assert.deepEqual(detectShortDefinitionLookup("define 'semparo'"), { term: "semparo" });
+  assert.deepEqual(detectShortDefinitionLookup("ok then what is cuba"), { term: "cuba" });
   assert.equal(detectShortDefinitionLookup("what is the gdp of china"), null);
   assert.equal(detectShortDefinitionLookup("what is the latest iPhone"), null);
 });
@@ -9096,6 +9230,25 @@ test("curated short definition fallbacks answer common mythology terms directly"
   assert.match(answer ?? "", /Narasimha/i);
   assert.match(answer ?? "", /half-man, half-lion avatar of Vishnu/i);
   assert.doesNotMatch(answer ?? "", /without more context/i);
+});
+
+test("country definition formatter builds clean direct answers for country lookups", () => {
+  const answer = buildCountryDefinitionAnswerForTest({
+    name: { common: "Cuba", official: "Republic of Cuba" },
+    capital: ["Havana"],
+    population: 11_300_000,
+    region: "Americas",
+    subregion: "Caribbean",
+    languages: { spa: "Spanish" },
+    currencies: { CUP: { name: "Cuban peso", symbol: "$" } },
+  });
+
+  assert.match(answer, /^Cuba is a country in the Caribbean\./i);
+  assert.match(answer, /official name is Republic of Cuba/i);
+  assert.match(answer, /capital is Havana/i);
+  assert.match(answer, /main language is Spanish/i);
+  assert.doesNotMatch(answer, /population/i);
+  assert.doesNotMatch(answer, /currency/i);
 });
 
 test("short definition lookup queries search the raw named entity before lexical meaning prompts", () => {
@@ -9162,6 +9315,31 @@ test("direct definition answer polishing removes awkward hedging and keeps the r
   assert.doesNotMatch(polished, /i would need to know/i);
   assert.match(polished, /^Narsimha usually refers to Narasimha, the half-man, half-lion avatar of Vishnu\./i);
   assert.doesNotMatch(polished, /If you provide more details/i);
+});
+
+test("thin direct-definition replies are rejected so richer answers can take over", () => {
+  assert.equal(
+    looksOverlyThinDirectDefinitionReplyForTest("what is cuba", "Cuba is an island country."),
+    true,
+  );
+  assert.equal(
+    looksOverlyThinDirectDefinitionReplyForTest("ok then what is cuba", "Cuba is an island country."),
+    true,
+  );
+  assert.equal(
+    looksOverlyThinDirectDefinitionReplyForTest(
+      "what is cuba",
+      "Cuba is an island country in the Caribbean. It is the largest island in the Caribbean, and Havana is its capital.",
+    ),
+    false,
+  );
+  assert.equal(
+    looksOverlyThinDirectDefinitionReplyForTest(
+      "what is narsimha",
+      "Narsimha, more commonly spelled Narasimha, is the half-man, half-lion avatar of Vishnu in Hindu tradition.",
+    ),
+    false,
+  );
 });
 
 test("final reply polishing trims unrelated richest-people sections from city-only answers", () => {

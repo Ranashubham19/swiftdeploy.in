@@ -1045,6 +1045,42 @@ const NEWS_PATTERNS: RegExp[] = [
   /\b(ipl|cricket|nba|nfl|premier league|champions league|f1|formula 1|tennis|world cup|oscars?|grammys?|box office|bollywood|hollywood)\b/i,
 ];
 
+function looksLikeVagueWorldNewsRequest(question: string) {
+  const normalizedQuestion = normalizeRegionalQuestion(question);
+  const lower = normalizedQuestion.toLowerCase();
+  return (
+    /\b(update|updates?|latest|news|headlines?|top stories)\b/.test(lower)
+    && /\b(today|todays|today's|current|right now|as of now)\b/.test(lower)
+    && !/\b(?:about|on|for)\b\s+[a-z]/.test(lower)
+  );
+}
+
+function buildTopHeadlineDigestAnswer(question: string, sources: NewsSource[]) {
+  if (!sources.length || !looksLikeVagueWorldNewsRequest(question)) {
+    return "";
+  }
+
+  const lines = [
+    "*Top world headlines right now*",
+    "",
+  ];
+
+  for (const [index, source] of sources.slice(0, 4).entries()) {
+    const published = formatPublishedDate(source.publishedDate);
+    const detailParts = [
+      source.domain || "",
+      published || "",
+    ].filter(Boolean);
+    lines.push(
+      `${index + 1}. ${source.title}${detailParts.length ? ` - ${detailParts.join(" | ")}` : ""}`,
+    );
+  }
+
+  lines.push("");
+  lines.push("These are the strongest recent world-news headlines from the live source batch.");
+  return lines.join("\n").trim();
+}
+
 const WEB_SEARCH_PATTERNS: RegExp[] = [
   /^(?:search|search for|find|look up|lookup|google|bing|fetch)\s+/i,
   /\b(?:search the web(?: for)?|search online(?: for)?|web search(?: for)?|find online|look it up|look this up|check online)\b/i,
@@ -1246,10 +1282,7 @@ function inferSearchLocale(question: string): SearchLocaleHint {
 export function buildNewsQueries(question: string): string[] {
   const normalizedQuestion = normalizeRegionalQuestion(question);
   const lower = normalizedQuestion.toLowerCase();
-  const isVagueUpdateRequest =
-    /\b(update|updates?|latest|news)\b/.test(lower)
-    && /\b(today|todays|today's|current|right now|as of now)\b/.test(lower)
-    && !/\b(?:about|on|for)\b\s+[a-z]/.test(lower);
+  const isVagueUpdateRequest = looksLikeVagueWorldNewsRequest(normalizedQuestion);
   const topic = isVagueUpdateRequest ? "top world news" : (cleanedTopic(normalizedQuestion) || normalizedQuestion.trim());
   const queries = new Set<string>();
 
@@ -2688,6 +2721,11 @@ async function synthesiseNewsAnswer(question: string, sources: NewsSource[]) {
     ].join("\n") + buildFreshnessLabel(sources);
   }
 
+  const headlineDigest = buildTopHeadlineDigestAnswer(question, sources);
+  if (headlineDigest) {
+    return `${headlineDigest}${buildFreshnessLabel(sources)}`;
+  }
+
   const staleCurrentAffairsReply = buildStaleCurrentAffairsCoverageReply(question, sources);
   if (staleCurrentAffairsReply) {
     return `${staleCurrentAffairsReply}${buildFreshnessLabel(sources)}`;
@@ -2789,6 +2827,10 @@ async function synthesiseNewsAnswer(question: string, sources: NewsSource[]) {
 
 export async function synthesiseNewsAnswerForTest(question: string, sources: NewsSource[]) {
   return synthesiseNewsAnswer(question, sources);
+}
+
+export function buildTopHeadlineDigestAnswerForTest(question: string, sources: NewsSource[]) {
+  return buildTopHeadlineDigestAnswer(question, sources);
 }
 
 async function synthesiseAiModelComparisonAnswer(
@@ -3051,4 +3093,3 @@ export function hasNewsProviders(): boolean {
   return true;
 }
 import { buildNoLiveDataProfessionalReply } from "@/lib/clawcloud-professional-copy";
-

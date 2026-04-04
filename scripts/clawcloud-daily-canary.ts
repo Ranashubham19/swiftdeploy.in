@@ -124,7 +124,7 @@ async function main() {
       notes: [
         "Dry-run mode skipped network calls.",
         "Set NEXT_PUBLIC_APP_URL and CRON_SECRET or AGENT_SECRET to run the live canary.",
-        "The script auto-resolves a valid shared QA user from CLAWCLOUD_AUDIT_USER_ID, WHATSAPP_AUTO_TEST_USER_ID, or the dedicated audit user.",
+        "The script pins to the configured shared QA user from CLAWCLOUD_AUDIT_USER_ID or WHATSAPP_AUTO_TEST_USER_ID unless you override it with --user.",
       ],
     };
     writeJsonReport(reportPath, report);

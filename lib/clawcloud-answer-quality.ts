@@ -15,6 +15,7 @@ import {
 } from "@/lib/clawcloud-live-search";
 import { detectAiModelRoutingDecision } from "@/lib/clawcloud-ai-model-routing";
 import { extractExplicitQuestionYear, hasPastYearScope } from "@/lib/clawcloud-time-scope";
+import { stripClawCloudConversationalLeadIn } from "@/lib/clawcloud-query-understanding";
 import {
   buildClawCloudReplyLanguageInstruction,
   inferClawCloudMessageLocale,
@@ -611,24 +612,38 @@ export function looksLikeWrongModeAnswer(question: string, answer: string) {
 }
 
 function looksLikeClearDirectQuestion(question: string) {
-  const normalized = question.trim().toLowerCase();
+  const normalizedQuestion = stripClawCloudConversationalLeadIn(question).trim();
+  const normalized = normalizedQuestion.toLowerCase();
   if (!normalized) {
     return false;
   }
 
-  const detectedLocale = inferClawCloudMessageLocale(question);
+  const detectedLocale = inferClawCloudMessageLocale(normalizedQuestion);
   if (detectedLocale && detectedLocale !== "en") {
-    return question.trim().split(/\s+/).filter(Boolean).length >= 4;
+    return normalizedQuestion.split(/\s+/).filter(Boolean).length >= 4;
   }
 
-  if (looksLikeExistingStorySummaryQuestion(question)) {
+  if (looksLikeExistingStorySummaryQuestion(normalizedQuestion)) {
     return true;
   }
 
   if (
-    /\b(compare|difference between|vs\.?|versus|translate|translation|summarize|summary of|story of|plot of|solve|calculate|design)\b/i.test(question)
+    /\b(compare|difference between|vs\.?|versus|translate|translation|summarize|summary of|story of|plot of|solve|calculate|design)\b/i.test(normalizedQuestion)
   ) {
     return true;
+  }
+
+  if (
+    /^(?:what(?:'s| is| are)?|who(?:'s| is| are)?|define|meaning of|tell me about|explain)\s+.+$/i.test(normalized)
+    && !/\b(compare|difference|latest|today|current|price|weather|score|news|history of|how to|how do|why)\b/i.test(normalized)
+  ) {
+    const subject = normalized
+      .replace(/^(?:what(?:'s| is| are)?|who(?:'s| is| are)?|define|meaning of|tell me about|explain)\s+/i, "")
+      .replace(/[?!.,;:]+$/g, "")
+      .trim();
+    if (subject && subject.split(/\s+/).filter(Boolean).length <= 6) {
+      return true;
+    }
   }
 
   if (

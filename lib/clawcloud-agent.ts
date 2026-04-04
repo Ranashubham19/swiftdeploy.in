@@ -200,7 +200,10 @@ import {
   type SupportedLocale,
 } from "@/lib/clawcloud-i18n";
 import { localeNames, resolveSupportedLocale } from "@/lib/clawcloud-locales";
-import { normalizeClawCloudUnderstandingMessage } from "@/lib/clawcloud-query-understanding";
+import {
+  normalizeClawCloudUnderstandingMessage,
+  stripClawCloudConversationalLeadIn,
+} from "@/lib/clawcloud-query-understanding";
 import { sendClawCloudTelegramMessage } from "@/lib/clawcloud-telegram";
 import {
   clawCloudActiveTaskLimits,
@@ -1318,6 +1321,9 @@ async function emergencyDirectAnswer(
   history: Array<{ role: "user" | "assistant"; content: string }>,
   languageHint: string,
 ): Promise<string> {
+  // No more early-exit for news — fall through to the knowledge-based answer below
+  const isNewsQ = detectNewsQuestion(question);
+
   const reply = await completeClawCloudPrompt({
     system: [
       PROFESSIONAL_RESPONSE_BRAIN,
@@ -1326,16 +1332,21 @@ async function emergencyDirectAnswer(
       "EMERGENCY DIRECT ANSWER MODE:",
       "All live web search attempts have failed. You MUST answer this question using your training knowledge.",
       "Give the best, most accurate, and most complete answer you can.",
+      isNewsQ
+        ? "This is a news/current-events question. Give the most recent facts you know from training. Note the knowledge cutoff date briefly at the end."
+        : "",
       "RULES:",
       "- NEVER say 'I could not verify', 'live search unavailable', or 'try again later'.",
       "- NEVER ask for clarification — answer the most likely interpretation directly.",
       "- Silently repair obvious misspellings, shorthand, and incomplete phrasing before answering.",
       "- NEVER return a placeholder, template, or generic handoff.",
+      "- NEVER say 'I will answer this directly' or any meta-statement. Just give the answer.",
+      "- NEVER ask the user to 'name the topic' or 'specify the question'. Just answer what they asked.",
       "- If data might be slightly outdated, briefly note it at the end (e.g., 'Note: figures are as of [date]').",
       "- Format for WhatsApp: *bold* for key terms, • bullets, emoji headers for sections.",
       "- Keep the answer professional, accurate, and helpful.",
       languageHint,
-    ].join("\n"),
+    ].filter(Boolean).join("\n"),
     user: question,
     history,
     intent: "research",
@@ -1356,8 +1367,84 @@ async function emergencyDirectAnswer(
     return normalizeResearchMarkdownForWhatsApp(trimmed);
   }
 
-  // Absolute last resort: return a minimal but non-empty answer
-  return `I've researched this topic. Here's what I know:\n\nThis is a complex question that touches on current events. Based on available information, the situation is evolving. For the most up-to-date details, I recommend checking Reuters, AP, or BBC News for the latest coverage.\n\nWould you like me to help with a specific aspect of this topic?`;
+  const deterministicAssistantMetaReply = buildDeterministicAssistantMetaReply(question);
+  if (deterministicAssistantMetaReply?.reply) {
+    return deterministicAssistantMetaReply.reply;
+  }
+
+  if (looksLikeClawCloudCapabilityQuestion(question)) {
+    return buildLocalizedCapabilityReply(question, "en", {
+      preserveRomanScript: false,
+    });
+  }
+
+  // News questions already handled by the main prompt above — no separate news fallback needed
+
+  if (hasWeatherIntent(question)) {
+    // Instead of a generic English request, generate a real weather answer from knowledge
+    const weatherKnowledgeReply = await completeClawCloudPrompt({
+      system: [
+        PROFESSIONAL_RESPONSE_BRAIN,
+        "",
+        "The user asked a weather question. Live weather data is unavailable right now.",
+        "RULES:",
+        "- If the user named a city or location, give a general climate/typical weather description for this time of year.",
+        "- If no city was named, ask for their city name naturally in ONE short sentence — do NOT refuse or give templates.",
+        "- NEVER say 'weather data unavailable', 'live search failed', or 'try again later'.",
+        "- Keep it short and helpful. Format for WhatsApp.",
+        languageHint,
+      ].join("\n"),
+      user: question,
+      history,
+      intent: "general",
+      responseMode: "fast",
+      maxTokens: 400,
+      fallback: "",
+      skipCache: true,
+      temperature: 0.3,
+    }).catch(() => "");
+    if (weatherKnowledgeReply?.trim() && !isVisibleFallbackReply(weatherKnowledgeReply)) {
+      return normalizeResearchMarkdownForWhatsApp(weatherKnowledgeReply.trim());
+    }
+  }
+
+  const deterministicExplain = buildDeterministicExplainReply(question);
+  if (deterministicExplain) {
+    return deterministicExplain;
+  }
+
+  const deterministicChatFallback = buildDeterministicChatFallback(question, "research");
+  if (deterministicChatFallback && !isLowQualityTemplateReply(deterministicChatFallback)) {
+    return deterministicChatFallback;
+  }
+
+  // Absolute last resort — make one more attempt with a simpler prompt
+  const lastResortReply = await completeClawCloudPrompt({
+    system: [
+      "You are a professional AI assistant. Answer the user's question directly and accurately.",
+      "Use your training knowledge. NEVER refuse. NEVER say you cannot answer.",
+      "NEVER say 'I will answer this directly' or any meta-statement. Just answer.",
+      "Format for WhatsApp: *bold* for key terms, bullet points where helpful.",
+      languageHint,
+    ].join("\n"),
+    user: question,
+    history,
+    intent: "general",
+    responseMode: "fast",
+    maxTokens: 800,
+    fallback: "",
+    skipCache: true,
+    temperature: 0.4,
+  }).catch(() => "");
+
+  if (lastResortReply?.trim() && !isVisibleFallbackReply(lastResortReply)) {
+    return normalizeResearchMarkdownForWhatsApp(lastResortReply.trim());
+  }
+
+  // If even this fails, return the deterministic reply or a minimal but real answer
+  return deterministicExplain
+    || deterministicChatFallback
+    || "This topic requires more context. Share the specific detail and I will give a precise answer right away.";
 }
 
 function buildSmartSystem(
@@ -1434,7 +1521,7 @@ const HISTORY_OPTIONAL_INTENTS = new Set<string>([
 ]);
 
 function looksLikeStandaloneFreshQuestion(message: string) {
-  const trimmed = message.trim();
+  const trimmed = stripClawCloudConversationalLeadIn(message);
   if (!trimmed) {
     return false;
   }
@@ -1650,7 +1737,7 @@ function detectPrimaryDirectAnswerLaneIntent(
     return null;
   }
 
-  if (!looksLikeStandalonePrimaryAnswerPrompt(trimmed) || detectShortDefinitionLookup(trimmed)) {
+  if (!looksLikeStandalonePrimaryAnswerPrompt(trimmed)) {
     return null;
   }
 
@@ -2069,6 +2156,24 @@ function autoDeepFastHeadstartMs(intent: IntentType) {
   return AUTO_DEEP_FAST_HEADSTART_MS[intent] ?? 1_000;
 }
 
+function isInternalRecoverySignalReply(reply: string | null | undefined) {
+  const value = reply?.trim();
+  if (!value) {
+    return false;
+  }
+
+  const normalized = value.toLowerCase();
+  const collapsed = normalized.replace(/\s+/g, " ").trim();
+  return (
+    normalized.includes("__fast_fallback_internal__")
+    || normalized.includes("__deep_fallback_internal__")
+    || normalized.includes("__no_live_data_internal_signal__")
+    || normalized.includes("__low_confidence_recovery_signal__")
+    || /^__[\p{L}\p{N}\s-]{0,96}__$/iu.test(value)
+    && /(?:signal|fallback|recovery|confidence|error|विश्वास|पुनर्प्राप्ति|संकेत|erro|señal|sinal|segnale|сигнал|错误|信号)/iu.test(collapsed)
+  );
+}
+
 function isVisibleFallbackReply(reply: string | null | undefined) {
   const value = reply?.trim();
   if (!value) return true;
@@ -2076,11 +2181,7 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
   const normalized = value.toLowerCase();
   return (
     isDeprecatedInternalFallbackLeak(value)
-    || 
-    normalized.includes("__fast_fallback_internal__")
-    || normalized.includes("__deep_fallback_internal__")
-    || normalized.includes("__no_live_data_internal_signal__")
-    || normalized.includes("__low_confidence_recovery_signal__")
+    || isInternalRecoverySignalReply(value)
     || value === FALLBACK
     || normalized.startsWith("*i could not")
     || normalized.startsWith("i could not")
@@ -2226,6 +2327,38 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || normalized.includes("haven't provided the equation")
     || normalized.includes("you haven't provided")
     || normalized.includes("please provide the")
+    // Meta-statement and self-referencing patterns that are NOT real answers
+    || normalized.startsWith("i will answer this directly")
+    || normalized.startsWith("i understand your question")
+    || normalized.includes("let me help you with that")
+    || normalized.includes("this is a live news question")
+    || normalized.includes("this is a live world-news request")
+    || normalized.includes("i should answer it from current")
+    || normalized.includes("rather than guess from memory")
+    || normalized.includes("give a cleaner current update")
+    || normalized.includes("current headline coverage")
+    || normalized.includes("this topic requires more context")
+    // Patterns asking users for details instead of answering
+    || normalized.includes("share your city name to get")
+    || normalized.includes("confirm this location:")
+    || normalized.includes("i can provide a precise weather update")
+    // Generic self-capability listing that doesn't answer
+    || (normalized.includes("ask me anything") && normalized.includes("coding") && normalized.includes("math") && value.length < 400)
+    || normalized.includes("just ask your question and i'll answer")
+    || normalized.startsWith("this is a live")
+    || normalized.includes("ask for a topic, region")
+    || normalized.includes("if you name the topic")
+    // Live source diagnostic leaks
+    || normalized.includes("i could not get a clean live source")
+    || normalized.includes("name the exact topic plus")
+    || normalized.includes("having trouble fetching live sources")
+    || normalized.includes("i'm having trouble fetching")
+    || normalized.includes("live-source limitations")
+    || normalized.includes("i cannot access the internet")
+    || normalized.includes("i don't have internet access")
+    || normalized.includes("i do not have internet access")
+    || normalized.includes("i can't browse the web")
+    || normalized.includes("i cannot browse the web")
   );
 }
 
@@ -2305,18 +2438,59 @@ async function finalizeAgentReply(input: {
   liveAnswerBundle?: ClawCloudAnswerBundle | null;
   modelAuditTrail?: ClawCloudModelAuditTrail | null;
 }): Promise<FinalizedAgentReplyResult> {
+  let replyForFinalization = (input.reply ?? "").replace(/\n{3,}/g, "\n\n").trim();
+
+  if (isInternalRecoverySignalReply(replyForFinalization)) {
+    const emergencyLanguageResolution = {
+      locale: input.locale,
+      source: "stored_preference" as const,
+      detectedLocale: input.locale,
+      preserveRomanScript: Boolean(input.preserveRomanScript),
+    };
+    const deterministicAssistantMetaReply = buildDeterministicAssistantMetaReply(input.question);
+
+    if (looksLikeClawCloudCapabilityQuestion(input.question)) {
+      replyForFinalization = buildLocalizedCapabilityReply(input.question, "en", {
+        preserveRomanScript: false,
+      });
+    } else if (deterministicAssistantMetaReply?.reply) {
+      replyForFinalization = deterministicAssistantMetaReply.reply;
+    } else {
+      const emergencyReply = await emergencyDirectAnswer(
+        input.question,
+        [],
+        buildClawCloudReplyLanguageInstruction(emergencyLanguageResolution),
+      ).catch(() => "");
+
+      if (
+        emergencyReply.trim()
+        && !isInternalRecoverySignalReply(emergencyReply)
+        && !isVisibleFallbackReply(emergencyReply)
+      ) {
+        replyForFinalization = emergencyReply.trim();
+      } else {
+        // All live + emergency paths failed — use deterministic fallback chain
+        replyForFinalization =
+          buildDeterministicExplainReply(input.question)
+          || buildDeterministicChatFallback(input.question, input.intent as IntentType)
+          || "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
+      }
+    }
+  }
+
   const sanitizedReply = sanitizeDeprecatedFallbackLeakWithContext(
-    (input.reply ?? "").replace(/\n{3,}/g, "\n\n").trim(),
+    replyForFinalization,
     input.question,
     input.intent,
   );
+
   const shouldPreserveOperationalWhatsAppReply =
     (
       input.category === "whatsapp_history"
       || input.category === "send_message"
       || input.category === "whatsapp_contacts_sync"
     )
-    && /\b(?:exact whatsapp contact|right chat|option number|active contact mode|stop talking to|talk to .+ on my behalf|whatsapp history lane|whatsapp send lane|whatsapp contact-mode lane|synced whatsapp messages)\b/i.test(sanitizedReply);
+    && /\b(?:exact whatsapp contact|exact contact name|right chat|option number|full number|active contact mode|stop talking to|talk to .+ on my behalf|which .+ should i use|strong whatsapp match|reply with the exact contact name|whatsapp history lane|whatsapp send lane|whatsapp contact-mode lane|synced whatsapp messages)\b/i.test(sanitizedReply);
   const polishedReply = shouldPreserveOperationalWhatsAppReply
     ? sanitizedReply
     : polishClawCloudAnswerStyle(
@@ -2346,19 +2520,33 @@ async function finalizeAgentReply(input: {
       answer: replyWithSuggestion,
     }).combined;
   const specialReplyLanguage = resolveClawCloudSpecialReplyLanguage(input.question);
+  const finalReplyLanguageResolution = resolveClawCloudReplyLanguage({
+    message: input.question,
+    preferredLocale: input.locale,
+  });
 
-  const translatedReply = input.alreadyTranslated
+  let translatedReply = input.alreadyTranslated
     ? replyWithSuggestion
-    : await translateMessage(replyWithDisclaimer, input.locale, {
+    : await translateMessage(replyWithDisclaimer, finalReplyLanguageResolution.locale, {
+      preserveRomanScript: finalReplyLanguageResolution.preserveRomanScript,
       targetLanguageName: specialReplyLanguage?.targetLanguageName,
     }).catch(() => buildClawCloudReplyLanguageFallback(
       specialReplyLanguage?.targetLanguageName,
       replyWithDisclaimer,
     ));
+
+  if (isInternalRecoverySignalReply(translatedReply)) {
+    // If the translated reply is still an internal signal, fall back to the
+    // pre-translation reply which should already be a real answer
+    translatedReply = (replyForFinalization && !isInternalRecoverySignalReply(replyForFinalization))
+      ? replyForFinalization
+      : replyWithDisclaimer;
+  }
+
   const finalReply = await enforceClawCloudReplyLanguage({
     message: translatedReply,
-    locale: input.locale,
-    preserveRomanScript: input.preserveRomanScript,
+    locale: finalReplyLanguageResolution.locale,
+    preserveRomanScript: finalReplyLanguageResolution.preserveRomanScript,
     targetLanguageName: specialReplyLanguage?.targetLanguageName,
   }).catch(() => buildClawCloudReplyLanguageFallback(
     specialReplyLanguage?.targetLanguageName,
@@ -2731,7 +2919,8 @@ function formatDirectAnswerSubject(subject: string) {
 }
 
 function extractDirectDefinitionSubject(question: string) {
-  const match = question.trim().match(
+  const normalizedQuestion = stripClawCloudConversationalLeadIn(question).trim();
+  const match = normalizedQuestion.match(
     /^(?:what(?:'s| is| are)|who(?:'s| is| are)|define|meaning of|tell me about|explain)\s+(.+?)(?:\?|$)/i,
   );
   return match?.[1]
@@ -2840,6 +3029,48 @@ function polishDirectDefinitionReply(question: string, reply: string) {
   }
 
   return cleaned.trim();
+}
+
+function looksOverlyThinDirectDefinitionReply(question: string, reply: string) {
+  const subject = extractDirectDefinitionSubject(question);
+  if (!subject) {
+    return false;
+  }
+
+  const cleaned = stripLeadingMetaSentences(reply)
+    .replace(/[`*_]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned || /```/.test(cleaned) || !answerContainsDirectDefinition(cleaned, subject)) {
+    return false;
+  }
+
+  const wordCount = cleaned.split(/\s+/).filter(Boolean).length;
+  const sentenceCount = Math.max(1, cleaned.match(/[.!?](?=\s|$)/g)?.length ?? 0);
+  const escapedSubject = escapeRegexLiteral(subject);
+  const displaySubject = formatDirectAnswerSubject(subject);
+  const subjectLeadPattern = new RegExp(
+    `^(?:${escapedSubject}|${escapeRegexLiteral(displaySubject)})\\b\\s+(?:is|are|was|were|means?|refers to|stands for|usually refers to)\\b`,
+    "i",
+  );
+  const hasUsefulAnchor = /\b(?:capital|located|largest|known for|used for|used to|part of|from\b|founded|developed|mainly|especially|where|which|that|avatar of|symboli[sz]ing|means|stands for)\b/i.test(cleaned);
+  const hasBareGenericLabel =
+    subjectLeadPattern.test(cleaned)
+    && /\b(?:a|an|the)\s+(?:country|island country|city|company|brand|platform|service|tool|software|app|website|language|concept|framework|method|theory|religion|planet|continent|organ|vitamin|disease|drug|university|college|school)\b/i.test(cleaned);
+
+  if (sentenceCount === 1 && wordCount <= 7) {
+    return true;
+  }
+
+  if (sentenceCount === 1 && wordCount <= 14 && hasBareGenericLabel && !hasUsefulAnchor) {
+    return true;
+  }
+
+  if (sentenceCount === 1 && cleaned.length <= 90 && !hasUsefulAnchor) {
+    return true;
+  }
+
+  return false;
 }
 
 function trimRichestRankingReplyToRequestedScope(question: string, reply: string) {
@@ -2970,6 +3201,10 @@ export function polishClawCloudAnswerStyleForTest(
   reply: string,
 ) {
   return polishClawCloudAnswerStyle(question, intent, category, reply);
+}
+
+export function looksOverlyThinDirectDefinitionReplyForTest(question: string, reply: string) {
+  return looksOverlyThinDirectDefinitionReply(question, reply);
 }
 
 function stripClawCloudTrailingFollowUp(reply: string) {
@@ -5812,24 +6047,9 @@ function buildDeterministicChatFallback(message: string, intent: IntentType): st
   }
 
   if (hasWeatherIntent(routingMessage)) {
-    const city = parseWeatherCity(routingMessage) || parseWeatherCity(normalizeRegionalQuestion(routingMessage));
-    if (city) {
-      return [
-        `🌦️ *Weather for ${toTitle(city)}*`,
-        "",
-        "I can provide a precise weather update with temperature, rain chance, humidity, and wind.",
-        "",
-        `Confirm this location: *${toTitle(city)}* and I’ll return the latest forecast in a clean format.`,
-      ].join("\n");
-    }
-
-    return [
-      "🌦️ *Weather Update*",
-      "",
-      "Share your *city name* to get an accurate forecast.",
-      "",
-      "Example: _Weather today in Delhi_ or _Temperature in Mumbai now_.",
-    ].join("\n");
+    // Return null so the caller falls through to the AI-powered weather answer
+    // instead of showing a template that asks users for details
+    return null;
   }
 
   if (
@@ -8901,7 +9121,8 @@ function detectStrictIntentRoute(text: string): StrictIntentRoute | null {
 }
 
 function looksLikeWhatsAppHistoryQuestion(text: string) {
-  const lower = text.toLowerCase().trim();
+  const normalizedText = stripClawCloudConversationalLeadIn(text);
+  const lower = normalizedText.toLowerCase().trim();
   const explicitSurfaces = detectExplicitPersonalSurfaces(lower);
   const contactConversationLookup = looksLikeWhatsAppContactConversationLookup(lower);
   const sendCommandSafety = analyzeSendMessageCommandSafety(lower);
@@ -8936,7 +9157,9 @@ type UnhandledWhatsAppOperationalIntent =
 function detectUnhandledWhatsAppOperationalIntent(
   text: string,
 ): UnhandledWhatsAppOperationalIntent | null {
-  const normalized = normalizeClawCloudUnderstandingMessage(String(text ?? "")).trim();
+  const normalized = stripClawCloudConversationalLeadIn(
+    normalizeClawCloudUnderstandingMessage(String(text ?? "")).trim(),
+  );
   if (!normalized) {
     return null;
   }
@@ -9108,6 +9331,7 @@ function normalizePersonalLookupHint(value: string | null | undefined) {
 }
 
 function extractWhatsAppHistoryContactHint(raw: string) {
+  const normalizedRaw = stripClawCloudConversationalLeadIn(raw);
   const patterns = [
     /\b(?:show|tell me|read|check|see|summari[sz]e|review|dikhao|dikhado|batao|btado)\s+(?:mujhe\s+)?(?:meri\s+)?(?:conversation|chat|history|messages?|texts?)\s+(?:with|ke\s+saath)\s+(.+?)(?=\s+\b(?:about|regarding|today|yesterday|this week|last week|last \d+\s+days?|in|on|ka|ki|ke)\b|$)/i,
     /\b(?:show|tell me|read|check|see|summari[sz]e|review)(?:\s+and\s+tell me)?\s+(?:the\s+)?(?:message|messages?|msg|msgs|chat|conversation|history|texts?)\s+of\s+(?:me|myself)\s+with\s+(.+?)(?=\s+\b(?:about|regarding|today|yesterday|this week|last week|last \d+\s+days?|in|on)\b|$)/i,
@@ -9139,7 +9363,7 @@ function extractWhatsAppHistoryContactHint(raw: string) {
   ];
 
   for (const pattern of patterns) {
-    const match = raw.match(pattern);
+    const match = normalizedRaw.match(pattern);
     const candidate = normalizePersonalLookupHint(match?.[1]);
     if (candidate) {
       return candidate;
@@ -10282,17 +10506,10 @@ async function buildWhatsAppHistoryReply(
       }
 
       if (fuzzyResult.type === "not_found") {
-        await clearWhatsAppPendingContactResolution(userId).catch(() => null);
-        const suggestionLine = fuzzyResult.suggestions.length
-          ? `Closest synced contacts: ${fuzzyResult.suggestions.join(", ")}`
-          : "Tell me the exact contact name and I will check the right chat.";
-        return translateHistoryReply(
-          [
-            `I couldn't match "${contactHint}" in your synced WhatsApp contacts.`,
-            "",
-            suggestionLine,
-          ].join("\n"),
-        );
+        // Fall back to stored WhatsApp history label search before giving up.
+        // This keeps history lookups usable even when live synced contacts are stale.
+        resolvedContactName = contactHint;
+        contactSearchValue = contactHint;
       }
 
       if (fuzzyResult.type === "found") {
@@ -11375,20 +11592,30 @@ function buildNewsCoverageRecoveryReply(_question: string): string {
   return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
 }
 
+function buildProfessionalLiveNewsRecoveryReply(question: string) {
+  // Instead of asking for more details, return the recovery signal so the
+  // agent layer generates a knowledge-based answer. NEVER show meta-statements
+  // like "this is a live news request" to users.
+  return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
+}
+
 async function buildLiveCoverageRecoveryReply(
   userId: string,
   question: string,
   history: Array<{ role: "user" | "assistant"; content: string }> = [],
   memorySnippet?: string,
 ): Promise<string> {
-  if (shouldUseLiveSearch(question)) {
-    const scopedQuestion = question.trim().slice(0, 100);
-    return [
-      `*Scoped live answer needed:* ${scopedQuestion}`,
-      "",
-      "This needs a tighter live scope for a precise source-backed answer.",
-      "Send the exact topic plus the location, company, person, or date window that matters.",
-    ].join("\n");
+  if (detectNewsQuestion(question)) {
+    const newsRecovery = await answerNewsQuestionResult(question).catch(() => null);
+    const candidateAnswer = normalizeResearchMarkdownForWhatsApp(newsRecovery?.answer?.trim() ?? "");
+    if (
+      candidateAnswer
+      && !isInternalRecoverySignalReply(candidateAnswer)
+      && !isVisibleFallbackReply(candidateAnswer)
+      && !isLowQualityTemplateReply(candidateAnswer)
+    ) {
+      return candidateAnswer;
+    }
   }
 
   const knowledgeReply = await completeClawCloudPrompt({
@@ -11453,14 +11680,9 @@ async function buildLiveCoverageRecoveryReply(
     return forced;
   }
 
-  const scopedQuestion = question.trim().slice(0, 100);
-  return [
-    `*Live answer recovery:* ${scopedQuestion}`,
-    "",
-    "I do not have a clean enough live source set to answer this precisely yet.",
-    "Resend it with the exact topic plus the location, company, person, or date window for a source-backed update.",
-    "If you prefer a stable overview instead of a live update, ask for an overview and I will answer directly.",
-  ].join("\n");
+  // All paths exhausted — return internal recovery signal so the caller
+  // can trigger emergencyDirectAnswer instead of showing a refusal
+  return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
 
   if (false) {
   const q = question.trim().slice(0, 100);
@@ -11639,6 +11861,21 @@ async function enforceAnswerQuality(input: {
     }
   }
 
+  if (looksOverlyThinDirectDefinitionReply(input.question, answer)) {
+    const repairedAnswer = await tryDirectRecovery(
+      "The draft answer was technically correct but too thin. Rewrite it into 2 to 3 crisp sentences: what it is, the core context, and one useful anchor fact.",
+    );
+
+    if (
+      repairedAnswer
+      && !looksOverlyThinDirectDefinitionReply(input.question, repairedAnswer)
+      && !looksLikeQuestionTopicMismatch(input.question, repairedAnswer)
+      && !looksLikeWrongModeAnswer(input.question, repairedAnswer)
+    ) {
+      answer = repairedAnswer;
+    }
+  }
+
   const verification = await verifyClawCloudAnswer({
     question: input.question,
     answer,
@@ -11749,7 +11986,7 @@ function normalizeInboundMessageForConsent(message: string) {
     trimmed = trimmed.replace(/^\[Group message[^\]]*\]\s*/i, "").trim();
   }
 
-  return trimmed;
+  return stripClawCloudConversationalLeadIn(trimmed);
 }
 
 function looksLikeStandaloneDriveWriteRequest(message: string) {
@@ -12582,6 +12819,48 @@ export async function finalizeAgentReplyForTest(input: {
   });
 }
 
+async function buildExplicitMultilingualReplySections(input: {
+  message: string;
+  resolution: ClawCloudReplyLanguageResolution;
+}) {
+  const requestedLocales = [
+    input.resolution.locale,
+    ...(input.resolution.additionalLocales ?? []),
+  ].filter((locale, index, array) => array.indexOf(locale) === index);
+  const pivotBaseMessage = requestedLocales.length > 1
+    ? await translateMessage(input.message, "en", { force: true }).catch(() => input.message)
+    : input.message;
+  const translationBaseMessage = pivotBaseMessage.trim() || input.message;
+
+  const sections: string[] = [];
+  for (const locale of requestedLocales) {
+    const localized = await enforceClawCloudReplyLanguage({
+      message: translationBaseMessage,
+      locale,
+      preserveRomanScript:
+        locale === input.resolution.locale
+          ? input.resolution.preserveRomanScript
+          : false,
+      targetLanguageName:
+        locale === input.resolution.locale
+          ? input.resolution.targetLanguageName
+          : undefined,
+    }).catch(async () => translateMessage(translationBaseMessage, locale, { force: true }).catch(() => ""));
+
+    const trimmed = normalizeReplyForClawCloudDisplay(localized).trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    sections.push(`*${localeNames[locale] ?? locale}*`);
+    sections.push("");
+    sections.push(trimmed);
+    sections.push("");
+  }
+
+  return sections.join("\n").trim();
+}
+
 async function applyEndToEndReplyLanguageLock(input: {
   userId: string;
   message: string;
@@ -12611,24 +12890,86 @@ async function applyEndToEndReplyLanguageLock(input: {
         message: normalizedMessage,
         preferredLocale,
       });
+  let responseForLanguageLock = rawResponse;
+
+  if (isInternalRecoverySignalReply(responseForLanguageLock)) {
+    const deterministicAssistantMetaReply = buildDeterministicAssistantMetaReply(normalizedMessage);
+    const deterministicStoryReply = resolveDeterministicKnownStoryReply(normalizedMessage);
+
+    if (looksLikeClawCloudCapabilityQuestion(normalizedMessage)) {
+      responseForLanguageLock = buildLocalizedCapabilityReply(normalizedMessage, "en", {
+        preserveRomanScript: false,
+      });
+    } else if (deterministicAssistantMetaReply?.reply) {
+      responseForLanguageLock = deterministicAssistantMetaReply.reply;
+    } else if (deterministicStoryReply) {
+      responseForLanguageLock = deterministicStoryReply;
+    } else {
+      const emergencyReply = await emergencyDirectAnswer(
+        normalizedMessage,
+        [],
+        buildClawCloudReplyLanguageInstruction(replyLanguageResolution),
+      ).catch(() => "");
+
+      if (
+        emergencyReply.trim()
+        && !isInternalRecoverySignalReply(emergencyReply)
+        && !isVisibleFallbackReply(emergencyReply)
+      ) {
+        responseForLanguageLock = emergencyReply.trim();
+      } else {
+        responseForLanguageLock =
+          buildDeterministicExplainReply(normalizedMessage)
+          || buildDeterministicChatFallback(normalizedMessage, detectIntent(normalizedMessage).type)
+          || "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
+      }
+    }
+  }
 
   if (isLockedGmailReadIntentMessage(normalizedMessage) && replyLanguageResolution.locale === "en") {
     return input.result;
   }
 
   if (replyLanguageResolution.additionalLocales?.length) {
-    return input.result;
+    const multilingualLockedResponse = await buildExplicitMultilingualReplySections({
+      message: responseForLanguageLock,
+      resolution: replyLanguageResolution,
+    }).catch(() => "");
+    if (multilingualLockedResponse) {
+      return {
+        ...input.result,
+        response: multilingualLockedResponse,
+        liveAnswerBundle: input.result.liveAnswerBundle
+          ? {
+            ...input.result.liveAnswerBundle,
+            answer: multilingualLockedResponse,
+          }
+          : null,
+        consentRequest: input.result.consentRequest
+          ? {
+            ...input.result.consentRequest,
+            prompt: multilingualLockedResponse,
+          }
+          : null,
+        styleRequest: input.result.styleRequest
+          ? {
+            ...input.result.styleRequest,
+            prompt: multilingualLockedResponse,
+          }
+          : null,
+      };
+    }
   }
 
   const lockedResponse = normalizeReplyForClawCloudDisplay(
     await enforceClawCloudReplyLanguage({
-      message: rawResponse,
+      message: responseForLanguageLock,
       locale: replyLanguageResolution.locale,
       preserveRomanScript: replyLanguageResolution.preserveRomanScript,
       targetLanguageName: replyLanguageResolution.targetLanguageName,
     }).catch(() => buildClawCloudReplyLanguageFallback(
       replyLanguageResolution.targetLanguageName,
-      rawResponse,
+      responseForLanguageLock,
     )),
   );
 
@@ -12934,10 +13275,61 @@ async function routeInboundAgentMessageCore(
     });
   }
 
+  const earlyAssistantMetaReply = buildDeterministicAssistantMetaReply(trimmed);
+  if (looksLikeClawCloudCapabilityQuestion(rawUserMessage) || earlyAssistantMetaReply) {
+    const storedLocale = await withSoftTimeout(
+      getUserLocale(userId).catch(() => "en" as SupportedLocale),
+      "en" as SupportedLocale,
+      NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS,
+    );
+    const replyLanguage = resolveClawCloudReplyLanguage({
+      message: trimmed,
+      preferredLocale: storedLocale,
+    });
+
+    if (looksLikeClawCloudCapabilityQuestion(rawUserMessage)) {
+      return finalizeAgentReply({
+        userId,
+        locale: replyLanguage.locale,
+        preserveRomanScript: replyLanguage.preserveRomanScript,
+        question: trimmed,
+        intent: "help",
+        category: "help",
+        startedAt: routeStartedAt,
+        reply: buildLocalizedCapabilityReply(trimmed, replyLanguage.locale, {
+          preserveRomanScript: replyLanguage.preserveRomanScript,
+        }),
+        alreadyTranslated: true,
+      });
+    }
+
+    if (earlyAssistantMetaReply) {
+      if (earlyAssistantMetaReply.preferenceSignal) {
+        await rememberAssistantMetaPreferences(userId, earlyAssistantMetaReply.preferenceSignal)
+          .catch(() => null);
+      }
+
+      return finalizeAgentReply({
+        userId,
+        locale: replyLanguage.locale,
+        preserveRomanScript: replyLanguage.preserveRomanScript,
+        question: trimmed,
+        intent: "general",
+        category: "general",
+        startedAt: routeStartedAt,
+        reply: earlyAssistantMetaReply.reply,
+      });
+    }
+  }
+
   const ultraFastDefinitionLookup = requested.mode === "deep" || shouldBypassEarlyKnowledgeLanes
     ? null
     : await answerShortDefinitionLookup(trimmed).catch(() => null);
-  if (ultraFastDefinitionLookup?.trim()) {
+  const normalizedUltraFastDefinitionLookup = ultraFastDefinitionLookup?.trim() ?? "";
+  if (
+    normalizedUltraFastDefinitionLookup
+    && !looksOverlyThinDirectDefinitionReply(trimmed, normalizedUltraFastDefinitionLookup)
+  ) {
     return finalizeAgentReply({
       userId,
       locale: "en",
@@ -12946,7 +13338,7 @@ async function routeInboundAgentMessageCore(
       intent: "explain",
       category: "explain",
       startedAt: routeStartedAt,
-      reply: normalizeResearchMarkdownForWhatsApp(ultraFastDefinitionLookup),
+      reply: normalizeResearchMarkdownForWhatsApp(normalizedUltraFastDefinitionLookup),
       alreadyTranslated: true,
     });
   }
@@ -13862,18 +14254,22 @@ async function routeInboundAgentMessageCore(
 
   const primaryDirectAnswerIntent = detectPrimaryDirectAnswerLaneIntent(trimmed, requested.mode);
   if (primaryDirectAnswerIntent) {
+    const directAnswerQuestion = stripClawCloudConversationalLeadIn(trimmed).trim() || trimmed;
     const directAnswerInstruction = [
-      buildIntentSpecificInstruction(primaryDirectAnswerIntent.type, trimmed),
+      buildIntentSpecificInstruction(primaryDirectAnswerIntent.type, directAnswerQuestion),
       buildConversationStyleInstruction(selectedConversationStyle),
       buildClawCloudReplyLanguageInstruction(earlyReplyLanguageResolution),
       "Treat this as a standalone knowledge prompt.",
       "Prefer a direct, professional answer from model knowledge.",
+      looksLikeDirectDefinitionQuestion(directAnswerQuestion)
+        ? "For a short 'what is X' question, answer in 2 to 3 crisp sentences: first identify what it is, then add the core context, then include one useful anchor fact if it fits naturally. Do not stop at a bare label like 'X is a country.'"
+        : "",
       "Do not route into live search, personal tools, workflow actions, or retrieval unless the user explicitly asked for current information or connected-account data.",
     ].filter(Boolean).join("\n\n");
 
     const directAnswerReply = await smartReplyDetailed(
       userId,
-      trimmed,
+      directAnswerQuestion,
       primaryDirectAnswerIntent.type,
       "fast",
       requested.explicit || requested.mode === "fast",
@@ -13882,12 +14278,12 @@ async function routeInboundAgentMessageCore(
     );
     const guardedDirectAnswerReply = await enforceAnswerQuality({
       userId,
-      question: trimmed,
+      question: directAnswerQuestion,
       intent: primaryDirectAnswerIntent.type,
       category: primaryDirectAnswerIntent.category,
       reply: postProcessIntentReply(
         primaryDirectAnswerIntent.type,
-        trimmed,
+        directAnswerQuestion,
         directAnswerReply.reply ?? "",
       ) ?? "",
       memorySnippet: "",
@@ -14305,10 +14701,18 @@ async function routeInboundAgentMessageCore(
         guardedReply = emergencyReply;
       } else {
         // Absolute last resort — use the original reply if it has content, or generate minimal answer
-        guardedReply = (preparedReply && !isVisibleFallbackReply(preparedReply))
-          ? preparedReply
-          : await completeClawCloudPrompt({
-            system: WHATSAPP_BRAIN + "\n\nAnswer the user's question directly using your knowledge. NEVER refuse. NEVER ask for more details.",
+        if (preparedReply && !isVisibleFallbackReply(preparedReply)) {
+          guardedReply = preparedReply;
+        } else {
+          const lastChanceReply = await completeClawCloudPrompt({
+            system: [
+              WHATSAPP_BRAIN,
+              "",
+              "Answer the user's question directly using your knowledge.",
+              "NEVER refuse. NEVER ask for more details. NEVER say 'I understand your question'.",
+              "NEVER output meta-statements about yourself. Just give the answer.",
+              replyLanguageInstruction,
+            ].join("\n"),
             user: finalMessage,
             history: memory.recentTurns,
             intent: intent as IntentType,
@@ -14317,7 +14721,14 @@ async function routeInboundAgentMessageCore(
             fallback: "",
             skipCache: true,
             temperature: 0.3,
-          }).catch(() => "I understand your question. Let me help you with that.");
+          }).catch(() => "");
+          if (lastChanceReply?.trim() && !isVisibleFallbackReply(lastChanceReply)) {
+            guardedReply = lastChanceReply.trim();
+          } else {
+            // Use deterministic fallback chain — never a generic meta-statement
+            guardedReply = preparedReply || finalMessage;
+          }
+        }
       }
     }
 
@@ -16189,6 +16600,20 @@ function buildDeterministicKnownStoryReply(question: string): string | null {
       "Ruhaan and Reet uncover the real motive behind the killings and expose the person carrying out the revenge plot under the shadow of Manjulika's legend.",
       "The climax combines horror and comedy as Ruhaan confronts the truth in the haveli, protects Reet, and helps end the cycle of fear.",
       "The film closes with Ruhaan and Reet's relationship resolved and the mansion's darkest secret finally brought to light.",
+    ].join("\n\n");
+  }
+
+  if (
+    /\b(365\s*(?:days|dias|dni)|365\u5929)\b/i.test(question)
+    && /\b(story|plot|summary|synopsis|movie|film|book|novel)\b/i.test(question)
+  ) {
+    return [
+      "365 Days follows Laura Biel, a Polish woman whose life changes after she is abducted during a trip to Sicily by Massimo Torricelli, the heir to a powerful mafia family.",
+      "Massimo tells Laura that years earlier he saw her during a traumatic event and became obsessed with finding her again, and he now gives her 365 days to fall in love with him.",
+      "Much of the story centers on Laura being held in Massimo's world of wealth, danger, control, and intense attraction while she resists him, challenges him, and slowly becomes entangled in his life.",
+      "Their relationship develops through a mix of coercion, luxury, jealousy, family-business violence, and explicit romance, making the story highly controversial.",
+      "As Laura begins to return Massimo's feelings, outside threats from rival criminal groups and the violent reality of Massimo's world make their future unstable.",
+      "The story ends on a cliffhanger, setting up the continuation of Laura and Massimo's relationship in the later books.",
     ].join("\n\n");
   }
 
@@ -18156,12 +18581,14 @@ const ACTIVE_CONTACT_STOP_PATTERNS = [
 ];
 
 function parseWhatsAppActiveContactSessionCommand(text: string): WhatsAppActiveContactSessionCommand {
-  const trimmed = String(text ?? "").trim();
+  const trimmed = stripClawCloudConversationalLeadIn(String(text ?? "").trim());
   if (!trimmed) {
     return { type: "none" };
   }
 
-  const understood = normalizeClawCloudUnderstandingMessage(trimmed).trim();
+  const understood = stripClawCloudConversationalLeadIn(
+    normalizeClawCloudUnderstandingMessage(trimmed).trim(),
+  );
   const candidates = Array.from(new Set([trimmed, understood].filter(Boolean)));
 
   for (const candidate of candidates) {
@@ -18260,7 +18687,9 @@ function isFreshWhatsAppPendingContactResolution(
 }
 
 function normalizeWhatsAppPendingContactSelectionText(value: string) {
-  return normalizeClawCloudUnderstandingMessage(String(value ?? ""))
+  return stripClawCloudConversationalLeadIn(
+    normalizeClawCloudUnderstandingMessage(String(value ?? "")),
+  )
     .replace(/^[\s"'`]+|[\s"'`]+$/g, "")
     .replace(/[.?!]+$/g, "")
     .trim();

@@ -17,6 +17,7 @@ import {
   inferClawCloudRegionContext,
   normalizeRegionalQuestion,
 } from "@/lib/clawcloud-region-context";
+import { stripClawCloudConversationalLeadIn } from "@/lib/clawcloud-query-understanding";
 import { extractExplicitQuestionYear, hasPastYearScope } from "@/lib/clawcloud-time-scope";
 import { getWeather, looksLikeDirectWeatherQuestion, parseWeatherCity } from "@/lib/clawcloud-weather";
 import { searchInternetWithDiagnostics } from "@/lib/search";
@@ -302,6 +303,16 @@ type WorldBankMetricSnapshot = {
   year: string;
 };
 
+type RestCountryDefinitionRecord = {
+  name?: { common?: string; official?: string };
+  capital?: string[];
+  population?: number;
+  region?: string;
+  subregion?: string;
+  languages?: Record<string, string>;
+  currencies?: Record<string, { name?: string; symbol?: string }>;
+};
+
 const WORLD_BANK_METRIC_CONFIG: Record<ClawCloudCountryMetricKind, WorldBankMetricConfig> = {
   gdp_nominal: {
     indicator: "NY.GDP.MKTP.CD",
@@ -366,7 +377,7 @@ function cleanShortDefinitionTerm(raw: string) {
 }
 
 export function detectShortDefinitionLookup(question: string): ClawCloudShortDefinitionLookup | null {
-  const normalized = question.trim().replace(/\s+/g, " ");
+  const normalized = stripClawCloudConversationalLeadIn(question).trim().replace(/\s+/g, " ");
   if (!normalized) {
     return null;
   }
@@ -408,6 +419,58 @@ function normalizeLookupKey(value: string) {
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function buildCountryDefinitionAnswer(country: RestCountryDefinitionRecord | null | undefined) {
+  const displayName = country?.name?.common?.trim() ?? "";
+  if (!displayName) {
+    return "";
+  }
+
+  const officialName = country?.name?.official?.trim() ?? "";
+  const subregion = country?.subregion?.trim() ?? "";
+  const region = country?.region?.trim() ?? "";
+  const capital = country?.capital?.find(Boolean)?.trim() ?? "";
+  const languageList = Object.values(country?.languages ?? {}).map((value) => value.trim()).filter(Boolean);
+  const primaryLanguage = languageList[0] ?? "";
+
+  const location = subregion ? `the ${subregion}` : region;
+  const firstSentenceCore = location
+    ? `${displayName} is a country in ${location}`
+    : `${displayName} is a country`;
+  const firstSentence = officialName && officialName.toLowerCase() !== displayName.toLowerCase()
+    ? `${firstSentenceCore}. Its official name is ${officialName}.`
+    : `${firstSentenceCore}.`;
+  const detailParts = [
+    capital ? `its capital is ${capital}` : "",
+    primaryLanguage ? `its main language is ${primaryLanguage}` : "",
+  ].filter(Boolean);
+  const detailSentence = detailParts.length
+    ? `${detailParts.join(", ")}.`.replace(/^its/i, "Its")
+    : "";
+
+  return [
+    firstSentence,
+    detailSentence,
+  ].filter(Boolean).join(" ");
+}
+
+async function fetchCountryDefinitionAnswer(term: string) {
+  const data = await fetchJsonWithTimeout<RestCountryDefinitionRecord[]>(
+    `https://restcountries.com/v3.1/name/${encodeURIComponent(term)}?fields=name,capital,population,currencies,languages,region,subregion`,
+    5_000,
+  );
+  if (!Array.isArray(data) || !data.length) {
+    return "";
+  }
+
+  const normalizedTerm = normalizeLookupKey(term);
+  const exact = data.find((entry) =>
+    normalizeLookupKey(entry.name?.common ?? "") === normalizedTerm
+    || normalizeLookupKey(entry.name?.official ?? "") === normalizedTerm,
+  );
+  const candidate = exact ?? (data.length === 1 ? data[0] : null);
+  return buildCountryDefinitionAnswer(candidate);
 }
 
 function formatUsdValue(value: number) {
@@ -2071,6 +2134,10 @@ export function buildNamedEntityIdentityAnswerForTest(term: string, sources: Res
   return buildNamedEntityIdentityAnswer(term, sources);
 }
 
+export function buildCountryDefinitionAnswerForTest(country: RestCountryDefinitionRecord | null | undefined) {
+  return buildCountryDefinitionAnswer(country);
+}
+
 const CURATED_SHORT_DEFINITION_FALLBACKS: Record<string, string> = {
   semparo: 'Semparo appears to be a Quenya term that means "for a few reasons."',
   narasimha: "Narasimha is the half-man, half-lion avatar of Vishnu in Hindu tradition. He is known for protecting Prahlada and defeating Hiranyakashipu, symbolizing the victory of dharma over tyranny.",
@@ -2432,6 +2499,11 @@ export async function answerShortDefinitionLookup(question: string): Promise<str
   const curated = CURATED_SHORT_DEFINITION_FALLBACKS[lookup.term.toLowerCase()];
   if (curated) {
     return curated;
+  }
+
+  const countryDefinition = await fetchCountryDefinitionAnswer(lookup.term).catch(() => "");
+  if (countryDefinition.trim()) {
+    return countryDefinition.trim();
   }
 
   const keyedSearch = await searchInternetWithDiagnostics(buildDefinitionLookupQueries(lookup.term), {

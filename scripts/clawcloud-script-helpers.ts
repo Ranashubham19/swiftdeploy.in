@@ -20,6 +20,7 @@ type ResolveSharedUserOptions = {
   auditEmail?: string | null;
   auditName?: string | null;
   allowCreateAuditUser?: boolean;
+  requireActiveWhatsApp?: boolean;
 };
 
 export type ResolvedClawCloudSharedUser = {
@@ -201,6 +202,7 @@ export async function resolveClawCloudSharedUser(
   const envKeys = options.envKeys?.length
     ? options.envKeys
     : ["CLAWCLOUD_AUDIT_USER_ID", "WHATSAPP_AUTO_TEST_USER_ID"];
+  const requireActiveWhatsApp = options.requireActiveWhatsApp === true;
   const staleConfiguredKeys: string[] = [];
   const cliUserId = options.cliUserId?.trim() ?? "";
   const auditEmail = (
@@ -252,7 +254,6 @@ export async function resolveClawCloudSharedUser(
     );
   }
 
-  let fallbackConfiguredUserId: string | null = null;
   for (const key of envKeys) {
     const configuredId = (process.env[key] ?? "").trim();
     if (!configuredId) {
@@ -266,6 +267,15 @@ export async function resolveClawCloudSharedUser(
 
     const resolvedConfiguredId = await findPublicUserById(configuredId);
     if (resolvedConfiguredId) {
+      if (!requireActiveWhatsApp) {
+        return {
+          userId: resolvedConfiguredId,
+          source: "env",
+          staleConfiguredKeys,
+          auditEmail,
+        };
+      }
+
       if (await hasActiveWhatsAppAccount(resolvedConfiguredId).catch(() => false)) {
         return {
           userId: resolvedConfiguredId,
@@ -275,7 +285,6 @@ export async function resolveClawCloudSharedUser(
         };
       }
 
-      fallbackConfiguredUserId ??= resolvedConfiguredId;
       staleConfiguredKeys.push(key);
       continue;
     }
@@ -294,27 +303,9 @@ export async function resolveClawCloudSharedUser(
       };
     }
 
-    if (fallbackConfiguredUserId) {
-      return {
-        userId: fallbackConfiguredUserId,
-        source: "env",
-        staleConfiguredKeys,
-        auditEmail,
-      };
-    }
-
     return {
       userId: existingAuditUserId,
       source: "audit_email",
-      staleConfiguredKeys,
-      auditEmail,
-    };
-  }
-
-  if (fallbackConfiguredUserId) {
-    return {
-      userId: fallbackConfiguredUserId,
-      source: "env",
       staleConfiguredKeys,
       auditEmail,
     };

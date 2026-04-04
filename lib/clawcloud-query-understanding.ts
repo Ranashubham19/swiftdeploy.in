@@ -38,6 +38,7 @@ const DIRECT_QUERY_CORRECTIONS: Record<string, string> = {
   mesage: "message",
   moive: "movie",
   movi: "movie",
+  nw: "now",
   pythn: "python",
   pyhton: "python",
   profestional: "professional",
@@ -344,6 +345,24 @@ function applyContextualPhraseRepairs(input: string) {
   }
 
   return repaired;
+}
+
+const CONVERSATIONAL_LEAD_IN_RE =
+  /^(?:(?:ok(?:ay)?|alright|all\s+right|fine|cool|hmm|hm|haan|han|ha|acha|achha|accha|ab|so|then|now|please|pls|plz)\s+){1,4}/i;
+
+export function stripClawCloudConversationalLeadIn(value: string) {
+  let trimmed = String(value ?? "").trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  let previous = "";
+  while (trimmed && trimmed !== previous) {
+    previous = trimmed;
+    trimmed = trimmed.replace(CONVERSATIONAL_LEAD_IN_RE, "").trim();
+  }
+
+  return trimmed;
 }
 
 export function normalizeClawCloudUnderstandingMessage(value: string) {

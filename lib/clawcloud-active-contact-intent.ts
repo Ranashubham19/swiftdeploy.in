@@ -1,4 +1,7 @@
-import { normalizeClawCloudUnderstandingMessage } from "@/lib/clawcloud-query-understanding";
+import {
+  normalizeClawCloudUnderstandingMessage,
+  stripClawCloudConversationalLeadIn,
+} from "@/lib/clawcloud-query-understanding";
 
 const ACTIVE_CONTACT_TRAILING_PUNCTUATION = "[\\u3002.!?\\uFF01\\uFF1F\\u061F\\u06D4]*$";
 
@@ -38,6 +41,8 @@ export const ACTIVE_CONTACT_START_PATTERNS = [
     "iu",
   ),
   /^(?:kya\s+)?(?:(?:aap|app|tum|tu)\s+)?(?:ab\s+se\s+)?(?:meri|mere)\s+(?:taraf\s+se|behalf\s+(?:me|mai|mein))\s+(.+?)\s+se\s+(?:baat|chat|reply)\s+kar(?:o|iye|na|oge|enge|ange|ega|egi)?[\u3002.!?\uFF01\uFF1F]*$/iu,
+  /^(?:kya\s+)?(?:ab\s+se\s+)?(?:(?:aap|app|tum|tu)\s+)?(?:meri|mere)\s+(?:taraf\s+se|behalf\s+(?:me|mai|mein))\s+(.+?)\s+se\s+(?:baat|chat|reply)\s+kar(?:o|iye|na|oge|enge|ange|ega|egi)?[\u3002.!?\uFF01\uFF1F]*$/iu,
+  /^(?:kya\s+)?(?:se\s+)?(?:(?:aap|app|tum|tu)\s+)?(?:meri|mere)\s+(?:taraf\s+se|behalf\s+(?:me|mai|mein))\s+(.+?)\s+se\s+(?:baat|chat|reply)\s+kar(?:o|iye|na|oge|enge|ange|ega|egi)?[\u3002.!?\uFF01\uFF1F]*$/iu,
   /^(?:kya\s+)?(?:(?:aap|app|tum|tu)\s+)?(?:ab\s+)?(?:meri|mere)\s+(?:taraf\s+se|behalf\s+(?:me|mai|mein|par|pe))\s+(?:(?:aap|app|tum|tu)\s+)?(.+?)\s+se\s+(?:baat|chat|reply)\s+kar(?:o|iye|na|oge|enge|ange|ega|egi)?[\u3002.!?\uFF01\uFF1F]*$/iu,
   /^(?:kya\s+)?(?:ab\s+se\s+)?(.+?)\s+se\s+(?:meri|mere)\s+(?:taraf\s+se|behalf\s+(?:me|mai|mein))\s+(?:baat|chat|reply)\s+kar(?:o|iye|na|oge|enge|ange|ega|egi)?[\u3002.!?\uFF01\uFF1F]*$/iu,
   /^(?:kya\s+)?(?:ab\s+se\s+)?(?:(?:aap|app|tum|tu)\s+)?(.+?)\s+se\s+(?:baat|chat|reply)\s+kar(?:o|iye|oge|enge|ange|ega|egi)[\u3002.!?\uFF01\uFF1F]*$/iu,
@@ -109,12 +114,14 @@ function normalizeActiveContactStartTarget(value: string) {
 }
 
 export function extractActiveContactStartCommand(value: string) {
-  const trimmed = String(value ?? "").trim();
+  const trimmed = stripClawCloudConversationalLeadIn(String(value ?? "").trim());
   if (!trimmed) {
     return null;
   }
 
-  const understood = normalizeClawCloudUnderstandingMessage(trimmed).trim();
+  const understood = stripClawCloudConversationalLeadIn(
+    normalizeClawCloudUnderstandingMessage(trimmed).trim(),
+  );
   const candidates = Array.from(new Set([trimmed, understood].filter(Boolean)));
 
   for (const candidate of candidates) {

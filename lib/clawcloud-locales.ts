@@ -184,6 +184,17 @@ const localeAliasMap: Record<string, SupportedLocale> = {
   "\u0e40\u0e01\u0e32\u0e2b\u0e25\u0e35": "ko",
   "\u0e20\u0e32\u0e29\u0e32\u0e40\u0e01\u0e32\u0e2b\u0e25\u0e35": "ko",
   portuguese: "pt",
+  brazilian: "pt",
+  brazilian_portuguese: "pt",
+  brazilianportuguese: "pt",
+  portuguese_brazil: "pt",
+  portuguese_brasil: "pt",
+  portuguese_brazilian: "pt",
+  portugues_brasil: "pt",
+  portugues_brasileiro: "pt",
+  brasileiro: "pt",
+  brasileira: "pt",
+  pt_br: "pt",
   portuguese_br: "pt",
   pt: "pt",
   "\u8461\u8404\u7259\u8bed": "pt",
@@ -255,6 +266,10 @@ const localeAliasMap: Record<string, SupportedLocale> = {
   "\ud55c\uad6d\uc5b4": "ko",
   "\ud55c\uad6d\ub9d0": "ko",
   chinese: "zh",
+  chinese_simplified: "zh",
+  simplified_chinese: "zh",
+  traditional_chinese: "zh",
+  mandarin_chinese: "zh",
   cince: "zh",
   çince: "zh",
   mandarin: "zh",
@@ -366,6 +381,36 @@ const localeAliasMap: Record<string, SupportedLocale> = {
   as: "as",
 };
 
+const localeAliasRepairMap: Record<string, SupportedLocale> = {
+  brazalian: "pt",
+  brazillian: "pt",
+  brasilian: "pt",
+  brazilan: "pt",
+  portugese: "pt",
+  portugeese: "pt",
+  protugeuse: "pt",
+  portuguese: "pt",
+  chineese: "zh",
+  chinease: "zh",
+  chiness: "zh",
+  chines: "zh",
+  japnese: "ja",
+  japenese: "ja",
+  koren: "ko",
+  russain: "ru",
+  ukranian: "uk",
+  gujrati: "gu",
+  bengla: "bn",
+  malyalam: "ml",
+};
+
+const fuzzyLocaleAliasCandidates = Object.keys(localeAliasMap)
+  .filter((key) => /^[a-z_]+$/i.test(key) && key.length >= 4)
+  .map((key) => ({
+    locale: localeAliasMap[key]!,
+    collapsed: key.replace(/_/g, "").toLowerCase(),
+  }));
+
 export const supportedClawCloudLocaleOptions = supportedClawCloudLocales.map((locale) => ({
   value: locale,
   label: localeNames[locale],
@@ -387,6 +432,68 @@ export function normalizeLocaleAlias(value: string) {
     .replace(/[+\s-]+/g, "_");
 }
 
+function levenshteinDistance(a: string, b: string) {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+
+  const matrix: number[][] = [];
+  for (let row = 0; row <= b.length; row += 1) {
+    matrix[row] = [row];
+  }
+  for (let column = 0; column <= a.length; column += 1) {
+    matrix[0]![column] = column;
+  }
+
+  for (let row = 1; row <= b.length; row += 1) {
+    for (let column = 1; column <= a.length; column += 1) {
+      const cost = a[column - 1] === b[row - 1] ? 0 : 1;
+      matrix[row]![column] = Math.min(
+        matrix[row - 1]![column]! + 1,
+        matrix[row]![column - 1]! + 1,
+        matrix[row - 1]![column - 1]! + cost,
+      );
+    }
+  }
+
+  return matrix[b.length]![a.length]!;
+}
+
+function resolveFuzzyLocaleAlias(value: string): SupportedLocale | null {
+  const collapsed = value.replace(/_/g, "").toLowerCase();
+  if (!collapsed || collapsed.length < 4 || collapsed.length > 28 || !/^[a-z]+$/i.test(collapsed)) {
+    return null;
+  }
+
+  const repaired = localeAliasRepairMap[collapsed];
+  if (repaired) {
+    return repaired;
+  }
+
+  const maxDistance = collapsed.length <= 6 ? 1 : 2;
+  let bestMatch: { locale: SupportedLocale; distance: number } | null = null;
+  let tieCount = 0;
+
+  for (const candidate of fuzzyLocaleAliasCandidates) {
+    const distance = levenshteinDistance(collapsed, candidate.collapsed);
+    if (distance > maxDistance) {
+      continue;
+    }
+
+    if (!bestMatch || distance < bestMatch.distance) {
+      bestMatch = { locale: candidate.locale, distance };
+      tieCount = 1;
+      continue;
+    }
+
+    if (distance === bestMatch.distance && candidate.locale !== bestMatch.locale) {
+      tieCount += 1;
+    }
+  }
+
+  return bestMatch && tieCount === 1 ? bestMatch.locale : null;
+}
+
 export function resolveSupportedLocale(value: string): SupportedLocale | null {
   const normalized = normalizeLocaleAlias(value);
   if (!normalized) {
@@ -404,6 +511,21 @@ export function resolveSupportedLocale(value: string): SupportedLocale | null {
 
   if (localeAliasMap[accentInsensitive]) {
     return localeAliasMap[accentInsensitive];
+  }
+
+  const collapsed = normalized.replace(/_/g, "");
+  if (localeAliasMap[collapsed]) {
+    return localeAliasMap[collapsed];
+  }
+
+  const accentInsensitiveCollapsed = accentInsensitive.replace(/_/g, "");
+  if (localeAliasMap[accentInsensitiveCollapsed]) {
+    return localeAliasMap[accentInsensitiveCollapsed];
+  }
+
+  const fuzzyResolved = resolveFuzzyLocaleAlias(accentInsensitiveCollapsed);
+  if (fuzzyResolved) {
+    return fuzzyResolved;
   }
 
   return isSupportedLocale(normalized) ? normalized : null;

@@ -1,7 +1,10 @@
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 import { looksLikeActiveContactStartCommand } from "@/lib/clawcloud-active-contact-intent";
 import { matchesWholeAlias } from "@/lib/clawcloud-intent-match";
-import { normalizeClawCloudUnderstandingMessage } from "@/lib/clawcloud-query-understanding";
+import {
+  normalizeClawCloudUnderstandingMessage,
+  stripClawCloudConversationalLeadIn,
+} from "@/lib/clawcloud-query-understanding";
 import { loadSyncedWhatsAppContactAliases } from "@/lib/clawcloud-whatsapp-contacts";
 
 type ContactMap = Record<string, string>;
@@ -713,8 +716,10 @@ function repairSendMessageCommandCandidate(value: string) {
 }
 
 export function parseSendMessageCommand(text: string): ParsedSendMessageCommand | null {
-  const raw = stripClawCloudInternalCommandPrefixes(
-    text.trim().replace(/^ok\s+/i, "").trim(),
+  const raw = stripClawCloudConversationalLeadIn(
+    stripClawCloudInternalCommandPrefixes(
+      text.trim().replace(/^ok\s+/i, "").trim(),
+    ),
   );
   const understood = normalizeClawCloudUnderstandingMessage(raw).trim();
   const candidates = Array.from(new Set([

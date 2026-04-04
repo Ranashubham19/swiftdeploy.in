@@ -5,6 +5,7 @@ import {
   DEFAULT_CLAW_CLOUD_LOCALE,
   getLocaleLabel,
   localeNames,
+  normalizeLocaleAlias,
   resolveSupportedLocale,
   type SupportedLocale,
 } from "@/lib/clawcloud-locales";
@@ -81,6 +82,8 @@ function looksLikeTranslationFailureReply(value: string) {
 }
 const TRAILING_REPLY_LANGUAGE_REQUEST_RE =
   /\b(?:in|into)\s+([\p{L}][\p{L}\p{M}\s()+-]{1,48})[.!?]*$/iu;
+const MID_SENTENCE_REPLY_LANGUAGE_REQUEST_RE =
+  /\b(?:in|into)\s+([\p{L}][\p{L}\p{M}\s()+-]{1,48}?)(?=\s+\b(?:to|for|with)\b\s+[\p{L}\p{M}]|[.!?]*$)/iu;
 
 const EXPLICIT_REPLY_LANGUAGE_CONTEXT_RE =
   /\b(?:story|plot|summary|synopsis|ending|tell me|explain|describe|summari[sz]e|overview|message|messages?|chat|conversation|history|texts?|reply|send|draft|compose|write|note|wish|greeting|text|email|mail|read|show|check|get|find|list)\b/i;
@@ -95,8 +98,46 @@ const MULTILINGUAL_EXPLICIT_REPLY_LANGUAGE_PATTERNS = [
 const MULTI_LOCALE_SEPARATOR_RE =
   /\s*(?:,|\/|&|\+|\band\b|\by\b|\bet\b|\bund\b|\be\b|\bve\b|\u548c|\u8207|\u4e0e|\u3068|\ubc0f|\uadf8\ub9ac\uace0)\s*/iu;
 
+const EXPLICIT_LOCALE_NOISE_TOKENS = new Set([
+  "a",
+  "an",
+  "the",
+  "answer",
+  "answers",
+  "reply",
+  "replies",
+  "response",
+  "responses",
+  "translate",
+  "translated",
+  "translation",
+  "translations",
+  "language",
+  "languages",
+  "lang",
+  "text",
+  "message",
+  "messages",
+  "story",
+  "plot",
+  "summary",
+  "synopsis",
+  "version",
+  "format",
+  "only",
+  "just",
+  "professional",
+  "professionally",
+  "accurate",
+  "accurately",
+  "natural",
+  "fluently",
+  "please",
+]);
+
 const SANSKRIT_EXPLICIT_LANGUAGE_RE =
   /\b(?:sanskrit|sanskritam|samskrit|samskritam|saṃskṛta(?:m)?|संस्कृत(?:म्|म)?|संस्कृतेन)\b/iu;
+const HINGLISH_EXPLICIT_LANGUAGE_RE = /\b(?:hinglish|roman_hindi|romanized_hindi|roman_hinglish)\b/iu;
 const SANSKRIT_SCRIPT_RE = /[\u0900-\u097f]/u;
 const SANSKRIT_MARKER_RE =
   /(?:अस्ति|तर्हि|तथा|यदि|यदा|कथं|कथम्|कुत्र|भवति|भवन्ति|विशेषतः|व्यवहारिक|समय-जटिलता|स्थान-जटिलता|वितरित|प्रणालीषु|कार्यक्षमता|एल्गोरिद्मस्य|कस्यचित्|एतादृशस्य|उत्तरं|भाषायाम्|कृपया|कथय|वद|इति|[ः॥])/u;
@@ -132,6 +173,14 @@ function extractExplicitReplyLocaleCandidate(message: string) {
     return match[1].trim();
   }
 
+  const embeddedMatch =
+    EXPLICIT_REPLY_LANGUAGE_CONTEXT_RE.test(normalized)
+      ? normalized.match(MID_SENTENCE_REPLY_LANGUAGE_REQUEST_RE)
+      : null;
+  if (embeddedMatch?.[1]?.trim()) {
+    return embeddedMatch[1].trim();
+  }
+
   for (const pattern of MULTILINGUAL_EXPLICIT_REPLY_LANGUAGE_PATTERNS) {
     const localizedMatch = normalized.match(pattern);
     if (localizedMatch?.[1]?.trim()) {
@@ -146,9 +195,50 @@ function extractExplicitReplyLocaleCandidate(message: string) {
   return localizedOutputLanguageMatch?.[1]?.trim() ?? "";
 }
 
+function normalizeExplicitLocaleToken(value: string) {
+  const normalized = normalizeLocaleAlias(value);
+  if (!normalized) {
+    return "";
+  }
+
+  const trimmed = normalized
+    .replace(/^in_/, "")
+    .replace(/^into_/, "")
+    .replace(/_only$/, "")
+    .replace(/_please$/, "");
+
+  const tokens = trimmed
+    .split("_")
+    .filter(Boolean)
+    .filter((token) => !EXPLICIT_LOCALE_NOISE_TOKENS.has(token));
+
+  return tokens.join("_");
+}
+
+function resolveExplicitReplyLocaleToken(value: string): SupportedLocale | null {
+  const direct = resolveSupportedLocale(value);
+  if (direct) {
+    return direct;
+  }
+
+  const normalized = normalizeExplicitLocaleToken(value);
+  if (!normalized) {
+    return null;
+  }
+
+  const cleanedDirect = resolveSupportedLocale(normalized);
+  if (cleanedDirect) {
+    return cleanedDirect;
+  }
+
+  const collapsed = normalized.replace(/_/g, "");
+  return resolveSupportedLocale(collapsed);
+}
+
 function extractSpecialExplicitReplyLanguage(message: string): {
   locale: SupportedLocale;
   targetLanguageName: string;
+  preserveRomanScript?: boolean;
 } | null {
   const candidate = extractExplicitReplyLocaleCandidate(message);
   if (!candidate) {
@@ -159,6 +249,14 @@ function extractSpecialExplicitReplyLanguage(message: string): {
     return {
       locale: "hi",
       targetLanguageName: "Sanskrit",
+    };
+  }
+
+  if (HINGLISH_EXPLICIT_LANGUAGE_RE.test(normalizeLocaleAlias(candidate))) {
+    return {
+      locale: "hi",
+      targetLanguageName: "Hinglish",
+      preserveRomanScript: true,
     };
   }
 
@@ -379,6 +477,7 @@ export function resolveClawCloudSpecialReplyLanguage(message: string): {
   locale: SupportedLocale;
   targetLanguageName: string;
   source: "explicit_request" | "mirrored_message";
+  preserveRomanScript?: boolean;
 } | null {
   const normalized = normalizeMessageForLanguageDetection(message);
   if (!normalized) {
@@ -474,7 +573,7 @@ export function extractExplicitReplyLocaleRequests(message: string): SupportedLo
     return [];
   }
 
-  const singleLocale = resolveSupportedLocale(cleaned);
+  const singleLocale = resolveExplicitReplyLocaleToken(cleaned);
   if (singleLocale) {
     return [singleLocale];
   }
@@ -490,9 +589,9 @@ export function extractExplicitReplyLocaleRequests(message: string): SupportedLo
 
   const locales: SupportedLocale[] = [];
   for (const part of parts) {
-    const resolved = resolveSupportedLocale(part);
+    const resolved = resolveExplicitReplyLocaleToken(part);
     if (!resolved) {
-      return [];
+      continue;
     }
 
     if (!locales.includes(resolved)) {
@@ -500,7 +599,7 @@ export function extractExplicitReplyLocaleRequests(message: string): SupportedLo
     }
   }
 
-  return locales;
+  return locales.length >= 2 ? locales : [];
 }
 
 function looksLikeEnglishMessage(normalized: string) {
@@ -553,6 +652,13 @@ export function inferClawCloudMessageLocale(message: string): SupportedLocale | 
     return "pa";
   }
 
+  if (
+    /^[¿¡?]?\s*qu[\p{L}\p{M}?]{0,2}\s+es\b/iu.test(normalized)
+    || /^[¿¡]?\s*(?:qu[eé]|c[oó]mo|por qu[eé]|d[oó]nde|cu[aá]ndo|qui[eé]n)\b/i.test(normalized)
+  ) {
+    return "es";
+  }
+
   // CRITICAL: Check English FIRST before other Latin languages to prevent
   // false positives from homonym words (e.g., German "was" = English "what").
   // English is the dominant language on WhatsApp and should take priority
@@ -582,7 +688,7 @@ export function resolveClawCloudReplyLanguage(input: {
       locale: specialReplyLanguage.locale,
       source: "explicit_request",
       detectedLocale: specialReplyLanguage.locale,
-      preserveRomanScript: false,
+      preserveRomanScript: Boolean(specialReplyLanguage.preserveRomanScript),
       targetLanguageName: specialReplyLanguage.targetLanguageName,
     };
   }
@@ -688,6 +794,10 @@ export function buildClawCloudReplyLanguageInstruction(resolution: ClawCloudRepl
 
     if (resolution.detectedLocale === "en") {
       return "The user explicitly asked for the answer in English. Reply fully in natural English.";
+    }
+
+    if (resolution.preserveRomanScript) {
+      return `The user explicitly asked for the answer in ${detectedLanguageName}. Reply fully in natural ${detectedLanguageName} using Roman script only. Do not switch into a native script.`;
     }
 
     return `The user explicitly asked for the answer in ${detectedLanguageName}. Reply fully in that language and keep the answer natural and fluent.`;
@@ -1232,6 +1342,39 @@ export async function enforceClawCloudReplyLanguage(input: {
       }
 
       return buildSanskritLanguageFallback(input.message);
+    }
+  }
+
+  const normalizedSecondAttempt = normalizeMessageForLanguageDetection(secondAttempt);
+  const secondAttemptLocale = inferClawCloudMessageLocale(normalizedSecondAttempt);
+  if (
+    input.locale !== "en"
+    && secondAttempt.trim()
+    && secondAttemptLocale
+    && secondAttemptLocale !== input.locale
+  ) {
+    const englishPivot = await translateMessage(input.message, "en", {
+      force: true,
+    }).catch(() => "");
+
+    if (englishPivot.trim()) {
+      const pivotAttempt = await translateMessage(englishPivot, input.locale, {
+        force: true,
+        preserveRomanScript: input.preserveRomanScript,
+        targetLanguageName: input.targetLanguageName,
+      }).catch(() => secondAttempt);
+      const normalizedPivotAttempt = normalizeMessageForLanguageDetection(pivotAttempt);
+      const pivotAttemptLocale = inferClawCloudMessageLocale(normalizedPivotAttempt);
+      if (
+        pivotAttempt.trim()
+        && (
+          input.preserveRomanScript
+          || !pivotAttemptLocale
+          || pivotAttemptLocale === input.locale
+        )
+      ) {
+        return pivotAttempt;
+      }
     }
   }
 
