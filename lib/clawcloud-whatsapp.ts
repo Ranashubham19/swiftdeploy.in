@@ -454,6 +454,7 @@ export async function requestClawCloudWhatsAppQr(
     qr?: string;
     status?: string;
     phone?: string | null;
+    qr_age_seconds?: number | null;
     poll_after_ms?: number | null;
     error?: string;
   };

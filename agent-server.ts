@@ -136,6 +136,9 @@ const STALE_MS = 60_000;
 const QR_WAIT_TIMEOUT_MS = 1_500;
 const QR_WAIT_POLL_MS = 120;
 const QR_CONNECTING_RESET_MS = 2_000;
+const WHATSAPP_QR_STALE_AFTER_MS = 75_000;
+const WHATSAPP_QR_RENDER_WIDTH = 640;
+const WHATSAPP_QR_RENDER_MARGIN = 4;
 const WA_VERSION_CACHE_MS = 30 * 60_000;
 const DIRECT_REPLY_TIMEOUT_MS = 25_000;
 const HTTP_REPLY_TIMEOUT_MS = 30_000;
@@ -168,6 +171,20 @@ const SESSION_HISTORY_PERSIST_DEBOUNCE_MS = 1_500;
 const SESSION_HISTORY_CONTACT_BACKFILL_DEBOUNCE_MS = 2_000;
 const SESSION_RECOVERY_CHECKPOINT_FILE = ".clawcloud-runtime.json";
 const SESSION_SYNC_CHECKPOINT_FILE = ".clawcloud-sync-runtime.json";
+
+async function renderWhatsAppQrDataUrl(value: string) {
+  return QRCode.toDataURL(value, {
+    width: WHATSAPP_QR_RENDER_WIDTH,
+    margin: WHATSAPP_QR_RENDER_MARGIN,
+    color: {
+      dark: "#000000",
+      light: "#FFFFFFFF",
+    },
+    rendererOpts: {
+      quality: 1,
+    },
+  });
+}
 const SESSION_SYNC_CHECKPOINT_PERSIST_DEBOUNCE_MS = 900;
 const SESSION_HISTORY_EXPANSION_FOLLOWUP_DELAY_MS = 3_000;
 const SESSION_RECONNECT_BASE_DELAY_MS = 3_000;
@@ -5304,7 +5321,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
 
     if (qr) {
       console.log(`[agent] QR generated for ${userId}`);
-      current.qr = await QRCode.toDataURL(qr, { width: 360, margin: 2 });
+      current.qr = await renderWhatsAppQrDataUrl(qr);
       current.qrIssuedAt = Date.now();
       current.status = "waiting";
       current.lastSyncError = null;
@@ -6119,7 +6136,7 @@ function shouldRegenerateQr(session: SessionRecord, forceRefresh: boolean) {
   }
 
   // WhatsApp pairing QR turns stale quickly; rotate before users hit hard-expiry.
-  return Date.now() - session.qrIssuedAt > 75_000;
+  return Date.now() - session.qrIssuedAt > WHATSAPP_QR_STALE_AFTER_MS;
 }
 
 function isSelfChat(message: { key?: { remoteJid?: string | null } }, session: SessionRecord) {

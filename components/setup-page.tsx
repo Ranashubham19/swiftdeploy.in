@@ -39,6 +39,7 @@ type WhatsAppQrPayload = {
   qr?: string;
   phone?: string | null;
   error?: string;
+  qr_age_seconds?: number | null;
   poll_after_ms?: number | null;
 };
 
@@ -77,6 +78,8 @@ type TaskDefinition = {
   badge: "free" | "starter";
   hasSchedule?: boolean;
 };
+
+const WHATSAPP_QR_DISPLAY_TTL_SECONDS = 75;
 
 const onboardingTasks: readonly TaskDefinition[] = [
   {
@@ -574,7 +577,7 @@ export function SetupPage({ config }: SetupPageProps) {
   const [waForceRefreshRequested, setWaForceRefreshRequested] = useState(false);
   const [stepTwoComplete, setStepTwoComplete] = useState(false);
   const [qrSeed, setQrSeed] = useState(1);
-  const [qrSeconds, setQrSeconds] = useState(299);
+  const [qrSeconds, setQrSeconds] = useState(WHATSAPP_QR_DISPLAY_TTL_SECONDS);
   const [scanPhase, setScanPhase] = useState<ScanPhase>("waiting");
   const [selectedTasks, setSelectedTasks] = useState<TaskId[]>(["morning", "drafts"]);
   const [driveConnected, setDriveConnected] = useState(false);
@@ -1005,20 +1008,12 @@ export function SetupPage({ config }: SetupPageProps) {
       return;
     }
 
-    setQrSeconds(299);
+    setQrSeconds(WHATSAPP_QR_DISPLAY_TTL_SECONDS);
     setQrSeed((seed) => seed + 1);
     setScanPhase("waiting");
     setWaQrError("");
     setWaForceRefreshRequested(false);
   }, [currentStep, stepTwoComplete, waConnected]);
-
-  useEffect(() => {
-    if (currentStep !== 2 || !waQrImage) {
-      return;
-    }
-
-    setQrSeconds(299);
-  }, [currentStep, waQrImage]);
 
   useEffect(() => {
     if (currentStep !== 2 || waConnected || stepTwoComplete || scanPhase !== "waiting") {
@@ -1032,7 +1027,7 @@ export function SetupPage({ config }: SetupPageProps) {
           setScanPhase("waiting");
           setWaForceRefreshRequested(true);
           showToastRef.current("Refreshing live QR...");
-          return 299;
+          return WHATSAPP_QR_DISPLAY_TTL_SECONDS;
         }
 
         return current - 1;
@@ -1125,9 +1120,18 @@ export function SetupPage({ config }: SetupPageProps) {
         }
 
         const nextScanPhase: ScanPhase = payload?.phone ? "verifying" : "waiting";
+        const qrAgeSeconds =
+          typeof payload?.qr_age_seconds === "number" && Number.isFinite(payload.qr_age_seconds)
+            ? Math.max(0, Math.trunc(payload.qr_age_seconds))
+            : null;
+        const qrRemainingSeconds =
+          payload?.qr && qrAgeSeconds !== null
+            ? Math.max(1, WHATSAPP_QR_DISPLAY_TTL_SECONDS - qrAgeSeconds)
+            : WHATSAPP_QR_DISPLAY_TTL_SECONDS;
 
         setScanPhase(nextScanPhase);
         setWaQrImage(payload?.qr ?? null);
+        setQrSeconds(qrRemainingSeconds);
         setWaLoading(false);
         if (refreshNow) {
           setWaForceRefreshRequested(false);
@@ -2884,6 +2888,10 @@ export function SetupPage({ config }: SetupPageProps) {
                                 src={waQrImage}
                                 alt="WhatsApp QR code"
                                 className={styles.qrImage}
+                                loading="eager"
+                                decoding="sync"
+                                fetchPriority="high"
+                                draggable={false}
                               />
                             ) : (
                               <div className={styles.qrPlaceholder}>

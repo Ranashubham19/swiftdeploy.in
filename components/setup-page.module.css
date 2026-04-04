@@ -931,17 +931,18 @@
 }
 
 .qrCode {
-  width: 200px;
-  height: 200px;
+  width: min(320px, 78vw);
+  height: min(320px, 78vw);
   background: #fff;
-  border-radius: 12px;
-  padding: 12px;
+  border-radius: 18px;
+  padding: 18px;
   display: flex;
   align-items: center;
   justify-content: center;
   position: relative;
   flex-shrink: 0;
   transition: opacity 0.4s ease;
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.18);
 }
 
 .qrCodeFaded {
@@ -953,8 +954,9 @@
   height: 100%;
   display: block;
   object-fit: contain;
+  image-rendering: crisp-edges;
   image-rendering: pixelated;
-  border-radius: 8px;
+  border-radius: 0;
 }
 
 .qrPlaceholder {
