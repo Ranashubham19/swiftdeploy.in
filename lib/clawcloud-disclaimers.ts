@@ -65,6 +65,12 @@ const LEGAL_PATTERNS = [
   /\b(am i liable|who is responsible|what are my rights|what is the law)\b/i,
 ];
 
+const SCIENTIFIC_LAW_CONTEXT_PATTERNS = [
+  /\b(?:physical|scientific|natural|fundamental)\s+laws?\b/i,
+  /\blaws?\s+of\s+(?:physics|nature|motion|thermodynamics|the universe|quantum mechanics|general relativity)\b/i,
+  /\bgoverning the universe\b/i,
+];
+
 const FINANCE_RECOMMENDATION_PATTERNS = [
   /\b(should i invest|where should i invest|which mutual fund|which stock|stock pick|portfolio advice|best fund|sip recommendation|should i buy|should i sell)\b/i,
   /\b(good investment|investment advice|tax advice|retirement plan)\b/i,
@@ -119,6 +125,18 @@ function looksLikePersonalHealthAdviceQuestion(ctx: DisclaimerContext, question:
     && PERSONAL_HEALTH_ADVICE_PATTERNS.some((pattern) => pattern.test(question));
 }
 
+function looksLikeLegalQuestion(ctx: DisclaimerContext, question: string): boolean {
+  if (LEGAL_INTENTS.has(ctx.intent) || LEGAL_INTENTS.has(ctx.category)) {
+    return true;
+  }
+
+  if (SCIENTIFIC_LAW_CONTEXT_PATTERNS.some((pattern) => pattern.test(question))) {
+    return false;
+  }
+
+  return LEGAL_PATTERNS.some((pattern) => pattern.test(question));
+}
+
 function firstMatchingDisclaimer(ctx: DisclaimerContext): string | null {
   const question = ctx.question.toLowerCase();
 
@@ -135,7 +153,7 @@ function firstMatchingDisclaimer(ctx: DisclaimerContext): string | null {
     !isBlockedIntent(ctx.intent)
     && !isBlockedIntent(ctx.category)
     && !alreadyHasEquivalentDisclaimer(ctx.answer, "legal")
-    && LEGAL_PATTERNS.some((pattern) => pattern.test(question))
+    && looksLikeLegalQuestion(ctx, question)
   ) {
     return LEGAL_DISCLAIMER;
   }

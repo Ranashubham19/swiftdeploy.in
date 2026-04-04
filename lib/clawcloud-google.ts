@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import { env } from "@/lib/env";
+import { pickAuthoritativeClawCloudGoogleAccount } from "@/lib/clawcloud-google-account-selection";
 import { decryptSecretValue, encryptSecretValue } from "@/lib/clawcloud-secret-box";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 import type { ClawCloudProvider } from "@/lib/clawcloud-types";
@@ -138,6 +139,11 @@ type ConnectedGoogleAccount = {
   access_token: string | null;
   refresh_token: string | null;
   token_expiry: string | null;
+  account_email?: string | null;
+  display_name?: string | null;
+  is_active?: boolean | null;
+  connected_at?: string | null;
+  last_used_at?: string | null;
 };
 
 function decryptConnectedGoogleAccount(account: ConnectedGoogleAccount): ConnectedGoogleAccount {
@@ -680,9 +686,16 @@ export function buildClawCloudGoogleAuthUrl(
   return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
 }
 
-export function buildClawCloudGoogleLoginAuthUrl(state: string, requestOrigin?: string) {
+export function buildClawCloudGoogleLoginAuthUrl(
+  state: string,
+  requestOrigin?: string,
+  options?: {
+    loginHint?: string | null;
+  },
+) {
   assertGoogleLoginOAuthConfigured(requestOrigin);
   const redirectUri = getGoogleLoginRedirectUri(requestOrigin);
+  const normalizedLoginHint = normalizeClawCloudGoogleWorkspaceEmail(options?.loginHint);
 
   const params = new URLSearchParams({
     client_id: env.GOOGLE_CLIENT_ID,
@@ -690,10 +703,15 @@ export function buildClawCloudGoogleLoginAuthUrl(state: string, requestOrigin?: 
     response_type: "code",
     access_type: "online",
     include_granted_scopes: "true",
-    prompt: "select_account",
     scope: googleLoginScopes.join(" "),
     state,
   });
+
+  if (normalizedLoginHint) {
+    params.set("login_hint", normalizedLoginHint);
+  } else {
+    params.set("prompt", "select_account");
+  }
 
   return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
 }
@@ -804,17 +822,23 @@ async function getConnectedGoogleAccount(
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const { data, error } = await supabaseAdmin
     .from("connected_accounts")
-    .select("access_token, refresh_token, token_expiry")
+    .select("access_token, refresh_token, token_expiry, account_email, display_name, is_active, connected_at, last_used_at")
     .eq("user_id", userId)
     .eq("provider", provider)
-    .eq("is_active", true)
-    .single();
+    .eq("is_active", true);
 
-  if (error || !data) {
+  if (error) {
     throw new Error(`${provider} is not connected for this user.`);
   }
 
-  return decryptConnectedGoogleAccount(data as ConnectedGoogleAccount);
+  const authoritativeAccount = pickAuthoritativeClawCloudGoogleAccount(
+    (data ?? []) as ConnectedGoogleAccount[],
+  );
+  if (!authoritativeAccount) {
+    throw new Error(`${provider} is not connected for this user.`);
+  }
+
+  return decryptConnectedGoogleAccount(authoritativeAccount);
 }
 
 function buildGoogleOauthErrorMessage(errorCode?: string, errorDescription?: string) {

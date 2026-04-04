@@ -45,7 +45,7 @@ export async function POST(request: NextRequest) {
       resolvedUserId = auth.user.id;
     }
 
-    await sendClawCloudWhatsAppToPhone(body.phone ?? null, body.message, {
+    const result = await sendClawCloudWhatsAppToPhone(body.phone ?? null, body.message, {
       userId: resolvedUserId ?? undefined,
       contactName: body.contactName ?? null,
       jid: body.jid ?? null,
@@ -55,7 +55,7 @@ export async function POST(request: NextRequest) {
       idempotencyKey: body.idempotencyKey ?? null,
       metadata: body.metadata ?? null,
     });
-    return NextResponse.json({ success: true });
+    return NextResponse.json(result);
   } catch (error) {
     return NextResponse.json(
       { error: getClawCloudErrorMessage(error) },

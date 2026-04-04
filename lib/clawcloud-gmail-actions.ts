@@ -2,16 +2,21 @@ import { completeClawCloudPrompt } from "@/lib/clawcloud-ai";
 import {
   buildGoogleNotConnectedReply,
   buildGoogleReconnectRequiredReply,
+  createClawCloudGmailDraft,
   getClawCloudGmailMessages,
   isClawCloudGoogleNotConnectedError,
   isClawCloudGoogleReconnectRequiredError,
   modifyClawCloudGmailMessage,
+  sendClawCloudGmailReply,
 } from "@/lib/clawcloud-google";
-import {
-  buildReplyApprovalReviewReply,
-  queueReplyApproval,
-} from "@/lib/clawcloud-reply-approval";
+import { shouldSkipEmailForReply } from "@/lib/clawcloud-reply-approval";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
+import {
+  enforceClawCloudReplyLanguage,
+  resolveClawCloudReplyLanguage,
+  type SupportedLocale,
+} from "@/lib/clawcloud-i18n";
+import { localeNames } from "@/lib/clawcloud-locales";
 import {
   looksLikeEmailWritingKnowledgeQuestion,
   looksLikeGmailKnowledgeQuestion,
@@ -78,6 +83,42 @@ type GmailReplyTarget = {
 
 function normalizeText(value: string) {
   return value.replace(/\s+/g, " ").trim();
+}
+
+type EmailLanguageGuard = {
+  locale: SupportedLocale;
+  preserveRomanScript: boolean;
+  instruction: string;
+};
+
+function buildEmailLanguageGuard(prompt: string): EmailLanguageGuard {
+  const resolution = resolveClawCloudReplyLanguage({
+    message: prompt,
+    preferredLocale: "en",
+  });
+  const languageLabel = localeNames[resolution.locale] ?? "English";
+  const instruction = resolution.preserveRomanScript && resolution.locale !== "en"
+    ? `Write the email in ${languageLabel} using natural Roman script only.`
+    : `Write the email in ${languageLabel}.`;
+
+  return {
+    locale: resolution.locale,
+    preserveRomanScript: resolution.preserveRomanScript,
+    instruction,
+  };
+}
+
+async function enforceEmailLanguage(body: string, guard: EmailLanguageGuard) {
+  const candidate = normalizeText(body);
+  if (!candidate) {
+    return "";
+  }
+
+  return enforceClawCloudReplyLanguage({
+    message: candidate,
+    locale: guard.locale,
+    preserveRomanScript: guard.preserveRomanScript,
+  }).catch(() => candidate);
 }
 
 function extractRequestedCount(text: string) {
@@ -450,6 +491,7 @@ async function generateComposedEmail(input: {
 }) {
   const fallbackSubject = input.subjectHint || "Quick follow-up";
   const fallbackBody = normalizeText(input.instruction);
+  const languageGuard = buildEmailLanguageGuard(input.prompt);
   const draft = await completeClawCloudPrompt({
     system: [
       "You write polished, professional emails.",
@@ -459,6 +501,8 @@ async function generateComposedEmail(input: {
       "Do not sign as the recipient, vendor, or company mentioned in the request.",
       "If no sender identity is provided, end with a neutral sign-off like `Best regards,` and no sender name.",
       "Keep the body concise, practical, and ready to send.",
+      "If the user explicitly asks for a specific output language, follow that exactly.",
+      languageGuard.instruction,
     ].join("\n"),
     user: [
       `Recipient: ${input.toLabel}`,
@@ -471,7 +515,13 @@ async function generateComposedEmail(input: {
     fallback: `Subject: ${fallbackSubject}\nBody: ${fallbackBody}`,
   });
 
-  return parseStructuredEmailDraft(draft, fallbackSubject);
+  const parsed = parseStructuredEmailDraft(draft, fallbackSubject);
+  const languageLockedBody = await enforceEmailLanguage(parsed.body, languageGuard);
+
+  return {
+    subject: parsed.subject,
+    body: languageLockedBody || parsed.body,
+  };
 }
 
 async function generateReplyEmail(input: {
@@ -482,6 +532,7 @@ async function generateReplyEmail(input: {
   const fallbackBody = input.instruction
     ? normalizeText(input.instruction)
     : "Thank you for your email. I understand your message and will move forward accordingly.";
+  const languageGuard = buildEmailLanguageGuard(input.prompt);
   const draft = await completeClawCloudPrompt({
     system: [
       "You write concise, professional email replies.",
@@ -490,6 +541,8 @@ async function generateReplyEmail(input: {
       "Do not sign as the recipient, vendor, or company from the email you are replying to.",
       "If the user does not specify the sender identity, end with a neutral sign-off like `Best regards,` and no sender name.",
       "Keep it under 120 words unless the user explicitly asks for more detail.",
+      "If the user explicitly asks for a specific output language, follow that exactly.",
+      languageGuard.instruction,
     ].join("\n"),
     user: [
       `User request: ${input.prompt}`,
@@ -503,7 +556,9 @@ async function generateReplyEmail(input: {
     fallback: fallbackBody,
   });
 
-  return normalizeText(draft) || fallbackBody;
+  const candidateBody = normalizeText(draft) || fallbackBody;
+  const languageLockedBody = await enforceEmailLanguage(candidateBody, languageGuard);
+  return languageLockedBody || candidateBody;
 }
 
 function buildDraftCreatedReply(to: string, subject: string, body: string, replyMode = false) {
@@ -538,6 +593,105 @@ function buildModifiedReply(actionLabel: string, target: GmailReplyTarget) {
     `*From:* ${target.from || "Unknown sender"}`,
     `*Subject:* ${target.subject || "(No subject)"}`,
   ].join("\n");
+}
+
+function buildReplySearchQuery() {
+  return [
+    "is:unread",
+    "is:inbox",
+    "-from:noreply",
+    "-from:no-reply",
+    "-from:donotreply",
+    "-from:notifications",
+    "-from:newsletter",
+    "-from:alerts",
+    "-from:mailer",
+    "-from:updates",
+    "-from:billing",
+    "-subject:unsubscribe",
+    "-subject:newsletter",
+    "-subject:otp",
+    "-subject:(job alert)",
+    "-subject:(transaction alert)",
+    "-subject:(order confirmed)",
+    "-category:promotions",
+    "-category:social",
+    "-category:updates",
+    "-category:forums",
+  ].join(" ");
+}
+
+export async function sendLatestGmailRepliesOnCommand(userId: string, maxEmails = 3) {
+  const requestedCount = Math.min(Math.max(maxEmails, 1), 10);
+  const emails = await getClawCloudGmailMessages(userId, {
+    query: buildReplySearchQuery(),
+    maxResults: Math.max(requestedCount * 4, requestedCount),
+  });
+
+  const actionableEmails = emails.filter(
+    (email) => !shouldSkipEmailForReply(email.from ?? "", email.subject ?? ""),
+  );
+
+  if (!actionableEmails.length) {
+    return {
+      sent: 0,
+      reply: "No human emails need replies right now.\n\nI did not find any new actionable messages to answer.",
+    };
+  }
+
+  let sent = 0;
+  const targets: string[] = [];
+
+  for (const email of actionableEmails.slice(0, requestedCount)) {
+    const to = extractEmailAddress(email.replyTo || email.from);
+    if (!to) {
+      continue;
+    }
+
+    const body = await generateReplyEmail({
+      prompt: `Reply professionally to the latest email from ${email.from || to}.`,
+      original: {
+        id: email.id,
+        from: email.from ?? to,
+        subject: email.subject ?? "Quick follow-up",
+        body: email.body ?? "",
+        snippet: email.snippet ?? "",
+        replyTo: email.replyTo ?? email.from ?? to,
+        messageId: email.messageId ?? "",
+        date: email.date ?? "",
+      },
+      instruction: null,
+    });
+
+    await sendClawCloudGmailReply(userId, {
+      to,
+      subject: cleanReplySubject(email.subject || "Quick follow-up"),
+      body,
+      inReplyTo: email.messageId || null,
+    });
+
+    sent += 1;
+    targets.push(email.from || to);
+  }
+
+  if (!sent) {
+    return {
+      sent: 0,
+      reply: "No new Gmail replies were sent.\n\nI could not find a reply-ready email with a usable sender address.",
+    };
+  }
+
+  return {
+    sent,
+    reply: [
+      "Gmail replies sent",
+      "",
+      `I sent ${sent} professional ${sent === 1 ? "reply" : "replies"} from the latest actionable emails you asked me to handle.`,
+      "",
+      "Handled senders:",
+      ...targets.slice(0, 5).map((target) => `- ${target}`),
+    ].join("\n"),
+  };
 }
 
 export async function handleGmailActionRequest(userId: string, text: string) {
@@ -577,17 +731,21 @@ export async function handleGmailActionRequest(userId: string, text: string) {
         subjectHint: action.subjectHint,
       });
 
-      const approval = await queueReplyApproval({
-        userId,
-        action: action.kind === "draft" ? "compose_draft" : "compose_send",
+      if (action.kind === "draft") {
+        await createClawCloudGmailDraft(userId, {
+          to: recipient,
+          subject: composed.subject,
+          body: composed.body,
+        });
+        return buildDraftCreatedReply(recipient, composed.subject, composed.body);
+      }
+
+      await sendClawCloudGmailReply(userId, {
         to: recipient,
         subject: composed.subject,
         body: composed.body,
-        originalPrompt: text,
-        targetLabel: recipient,
       });
-
-      return buildReplyApprovalReviewReply(approval);
+      return buildSentReply(recipient, composed.subject, composed.body);
     }
 
     if (action.kind === "reply_draft" || action.kind === "reply_send") {
@@ -610,19 +768,23 @@ export async function handleGmailActionRequest(userId: string, text: string) {
         instruction: action.contentInstruction,
       });
 
-      const approval = await queueReplyApproval({
-        userId,
-        action: action.kind === "reply_draft" ? "reply_draft" : "reply_send",
+      if (action.kind === "reply_draft") {
+        await createClawCloudGmailDraft(userId, {
+          to,
+          subject,
+          body,
+          inReplyTo: target.messageId || null,
+        });
+        return buildDraftCreatedReply(target.from || to, subject, body, true);
+      }
+
+      await sendClawCloudGmailReply(userId, {
         to,
         subject,
         body,
         inReplyTo: target.messageId || null,
-        originalEmailId: target.id,
-        originalPrompt: text,
-        targetLabel: target.from,
       });
-
-      return buildReplyApprovalReviewReply(approval);
+      return buildSentReply(target.from || to, subject, body, true);
     }
 
     const modifyAction = action as Extract<

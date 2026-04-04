@@ -58,20 +58,18 @@ function buildSettingsSummary(settings: Awaited<ReturnType<typeof getWhatsAppSet
     "Autonomous actions in other chats: Off - ClawCloud only reads or sends there after your explicit command.",
     `Reply tone: ${titleCase(settings.replyMode)}`,
     `Group replies: ${settings.allowGroupReplies ? titleCase(settings.groupReplyMode) : "Disabled"}`,
-    `Sensitive approval: ${settings.requireApprovalForSensitive ? "On" : "Off"}`,
     `Quiet hours: ${
       settings.quietHoursStart && settings.quietHoursEnd
         ? `${settings.quietHoursStart} - ${settings.quietHoursEnd}`
         : "Not set"
     }`,
     `Direct send commands: ${settings.allowDirectSendCommands ? "On" : "Off"}`,
-    `First outreach approval: ${settings.requireApprovalForFirstOutreach ? "On" : "Off"}`,
+    "Manual approval gates: Off",
   ].join("\n");
 }
 
 function parseAutomationMode(text: string) {
   const normalized = text.toLowerCase();
-  if (/\bapprove(?:\s+before\s+send)?\b/.test(normalized)) return "approve_before_send" as const;
   if (/\bsuggest(?:\s+only)?\b/.test(normalized)) return "suggest_only" as const;
   if (/\bread(?:\s+only)?\b/.test(normalized)) return "read_only" as const;
   return null;
@@ -189,9 +187,12 @@ export async function handleWhatsAppSettingsCommand(userId: string, text: string
   }
 
   if (/\b(automation mode|whatsapp mode|mode)\b/.test(normalized)) {
+    if (/\bapprove(?:\s+before\s+send)?\b/.test(normalized)) {
+      return "Approve-before-send mode is retired. ClawCloud now sends only when you explicitly ask, and autonomous outbound actions stay off by default.";
+    }
     const automationMode = parseAutomationMode(text);
     if (!automationMode) {
-      return "Tell me the WhatsApp mode you want: approve before send, suggest only, or read only. Autonomous replies in other chats stay off.";
+      return "Tell me the WhatsApp mode you want: suggest only or read only. Autonomous replies in other chats stay off.";
     }
     patch.automationMode = automationMode;
   }
@@ -232,11 +233,7 @@ export async function handleWhatsAppSettingsCommand(userId: string, text: string
   }
 
   if (/\bsensitive approval\b/.test(normalized)) {
-    const toggle = parseBooleanToggle(text);
-    if (toggle === null) {
-      return "Tell me whether to enable or disable sensitive approval.";
-    }
-    patch.requireApprovalForSensitive = toggle;
+    return "Sensitive approval is retired. Direct user commands already run without a Yes/No gate, and autonomous outbound actions stay off until you explicitly ask for them.";
   }
 
   if (/\bdirect send\b/.test(normalized)) {
@@ -248,11 +245,7 @@ export async function handleWhatsAppSettingsCommand(userId: string, text: string
   }
 
   if (/\bfirst outreach\b/.test(normalized)) {
-    const toggle = parseBooleanToggle(text);
-    if (toggle === null) {
-      return "Tell me whether to require approval for first outreach.";
-    }
-    patch.requireApprovalForFirstOutreach = toggle;
+    return "First-outreach approval is retired. ClawCloud will not start outbound contact on its own, and direct sends only happen when you explicitly ask for them.";
   }
 
   if (!Object.keys(patch).length) {
@@ -260,7 +253,8 @@ export async function handleWhatsAppSettingsCommand(userId: string, text: string
       "I can update your WhatsApp assistant settings.",
       "",
       "Examples:",
-      "_Set WhatsApp mode to approve before send_",
+      "_Set WhatsApp mode to suggest only_",
+      "_Set WhatsApp mode to read only_",
       "_Set reply tone to professional_",
       "_Turn off group replies_",
       "_Set quiet hours from 10pm to 7am_",

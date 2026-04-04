@@ -1,5 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
+import { buildClawCloudSupabaseAuthStorageKey } from "@/lib/clawcloud-email-auth";
+
 type SupabaseBrowserConfig = {
   supabaseUrl: string;
   supabaseAnonKey: string;
@@ -12,6 +14,50 @@ let cachedKey = "";
 
 function isBrowser() {
   return typeof window !== "undefined" && typeof document !== "undefined";
+}
+
+function generatePkceVerifier() {
+  const verifierLength = 56;
+
+  if (typeof crypto === "undefined" || typeof crypto.getRandomValues !== "function") {
+    const charSet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+    let verifier = "";
+    for (let index = 0; index < verifierLength; index += 1) {
+      verifier += charSet.charAt(Math.floor(Math.random() * charSet.length));
+    }
+    return verifier;
+  }
+
+  const array = new Uint32Array(verifierLength);
+  crypto.getRandomValues(array);
+  return Array.from(array, (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+function bytesToBase64Url(bytes: Uint8Array) {
+  let binary = "";
+  bytes.forEach((value) => {
+    binary += String.fromCharCode(value);
+  });
+
+  return window
+    .btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+async function generatePkceChallenge(verifier: string) {
+  const hasWebCrypto =
+    typeof crypto !== "undefined"
+    && typeof crypto.subtle !== "undefined"
+    && typeof TextEncoder !== "undefined";
+
+  if (!hasWebCrypto) {
+    return verifier;
+  }
+
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  return bytesToBase64Url(new Uint8Array(hash));
 }
 
 function isPkceVerifierKey(key: string) {
@@ -132,6 +178,36 @@ const pkceBackedStorage = {
     }
   },
 };
+
+export function getSupabaseBrowserAuthStorageKey(supabaseUrl: string) {
+  return buildClawCloudSupabaseAuthStorageKey(supabaseUrl);
+}
+
+export async function prepareSupabaseBrowserPkce(
+  config: Pick<SupabaseBrowserConfig, "supabaseUrl">,
+  options?: {
+    isPasswordRecovery?: boolean;
+  },
+) {
+  if (!isBrowser()) {
+    throw new Error("PKCE preparation requires a browser environment.");
+  }
+
+  const storageKey = getSupabaseBrowserAuthStorageKey(config.supabaseUrl);
+  const codeVerifier = generatePkceVerifier();
+  const storedCodeVerifier = options?.isPasswordRecovery
+    ? `${codeVerifier}/PASSWORD_RECOVERY`
+    : codeVerifier;
+
+  pkceBackedStorage.setItem(`${storageKey}-code-verifier`, storedCodeVerifier);
+
+  const codeChallenge = await generatePkceChallenge(codeVerifier);
+  return {
+    storageKey,
+    codeChallenge,
+    codeChallengeMethod: codeChallenge === codeVerifier ? "plain" : "s256",
+  } as const;
+}
 
 export function getSupabaseBrowserClient(config: SupabaseBrowserConfig) {
   const { supabaseUrl, supabaseAnonKey } = config;

@@ -196,7 +196,7 @@ const faqs = [
   {
     question: "Will it send emails without my approval?",
     answer:
-      "By default, ClawCloud saves drafts only - you always review and hit send yourself. If you want, you can enable auto-send on the Pro plan for specific trusted contacts. This is always opt-in, never on by default.",
+      "ClawCloud only sends when you explicitly ask it to send or reply. It does not start autonomous outbound messages on its own, and background workflows stay read-only until you trigger them directly.",
   },
 ] as const;
 

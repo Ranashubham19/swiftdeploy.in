@@ -52,6 +52,12 @@ function recordAgentChatRunLater(input: Parameters<typeof recordClawCloudChatRun
   void recordClawCloudChatRun(input).catch(() => undefined);
 }
 
+function jsonUtf8(body: unknown, init?: ResponseInit) {
+  const response = NextResponse.json(body, init);
+  response.headers.set("Content-Type", "application/json; charset=utf-8");
+  return response;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as {
@@ -64,17 +70,17 @@ export async function POST(request: NextRequest) {
 
     if (body._internal) {
       if (!isValidSharedSecret(request, env.CRON_SECRET, env.AGENT_SECRET)) {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        return jsonUtf8({ error: "Unauthorized" }, { status: 401 });
       }
 
       if (!body.userId) {
-        return NextResponse.json({ error: "userId is required" }, { status: 400 });
+        return jsonUtf8({ error: "userId is required" }, { status: 400 });
       }
 
       if (body.consentToken) {
         const verified = verifyAppAccessConsentToken(body.consentToken, body.userId);
         if (!verified) {
-          return NextResponse.json(
+          return jsonUtf8(
             {
               success: false,
               error: buildAppAccessExpiredReply(),
@@ -116,7 +122,7 @@ export async function POST(request: NextRequest) {
               },
             },
           });
-          return NextResponse.json({
+          return jsonUtf8({
             success: true,
             response: deniedResponse,
             consentResolved: {
@@ -142,7 +148,7 @@ export async function POST(request: NextRequest) {
           result,
         });
 
-        return NextResponse.json({
+        return jsonUtf8({
           success: true,
           response: result.response,
           liveAnswerBundle: result.liveAnswerBundle ?? null,
@@ -155,7 +161,7 @@ export async function POST(request: NextRequest) {
       }
 
       if (!body.message?.trim()) {
-        return NextResponse.json({ error: "message is required" }, { status: 400 });
+        return jsonUtf8({ error: "message is required" }, { status: 400 });
       }
 
       const result = await routeInboundAgentMessageResult(body.userId, body.message);
@@ -181,7 +187,7 @@ export async function POST(request: NextRequest) {
           char_count: result.response?.length ?? 0,
         },
       });
-      return NextResponse.json({
+      return jsonUtf8({
         success: true,
         response: result.response,
         liveAnswerBundle: result.liveAnswerBundle ?? null,
@@ -193,13 +199,13 @@ export async function POST(request: NextRequest) {
 
     const auth = await requireClawCloudAuth(request);
     if (!auth.ok) {
-      return NextResponse.json({ error: auth.error }, { status: auth.status });
+      return jsonUtf8({ error: auth.error }, { status: auth.status });
     }
 
     if (body.consentToken) {
       const verified = verifyAppAccessConsentToken(body.consentToken, auth.user.id);
       if (!verified) {
-        return NextResponse.json(
+        return jsonUtf8(
           {
             error: buildAppAccessExpiredReply(),
           },
@@ -240,7 +246,7 @@ export async function POST(request: NextRequest) {
             },
           },
         });
-        return NextResponse.json({
+        return jsonUtf8({
           success: true,
           response: deniedResponse,
           consentResolved: {
@@ -266,7 +272,7 @@ export async function POST(request: NextRequest) {
         result,
       });
 
-      return NextResponse.json({
+      return jsonUtf8({
         success: true,
         response: result.response,
         liveAnswerBundle: result.liveAnswerBundle ?? null,
@@ -279,12 +285,12 @@ export async function POST(request: NextRequest) {
     }
 
     if (!body.message?.trim()) {
-      return NextResponse.json({ error: "message is required" }, { status: 400 });
+      return jsonUtf8({ error: "message is required" }, { status: 400 });
     }
 
     const userId = body.userId ?? auth.user.id;
     if (userId !== auth.user.id) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      return jsonUtf8({ error: "Forbidden" }, { status: 403 });
     }
 
     const result = await routeInboundAgentMessageResult(userId, body.message);
@@ -310,7 +316,7 @@ export async function POST(request: NextRequest) {
         char_count: result.response?.length ?? 0,
       },
     });
-    return NextResponse.json({
+    return jsonUtf8({
       success: true,
       response: result.response,
       liveAnswerBundle: result.liveAnswerBundle ?? null,
@@ -319,7 +325,7 @@ export async function POST(request: NextRequest) {
       styleRequest: result.styleRequest ?? null,
     });
   } catch (error) {
-    return NextResponse.json(
+    return jsonUtf8(
       { error: getClawCloudErrorMessage(error) },
       { status: 500 },
     );

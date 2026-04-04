@@ -27,6 +27,7 @@ import {
   formatReminderFireMessage,
 } from "@/lib/clawcloud-reminders";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
+import { isSupabasePressureMessage } from "@/lib/clawcloud-supabase-pressure";
 import {
   clawCloudActiveTaskLimits,
   clawCloudDefaultTaskSeeds,
@@ -411,12 +412,11 @@ export async function getClawCloudDashboardData(
               .catch(() => []),
             supabaseAdmin
               .from("connected_accounts")
-              .select("id")
+              .select("id", { count: "exact", head: true })
               .eq("user_id", userId)
               .eq("provider", "whatsapp")
               .eq("is_active", true)
-              .maybeSingle()
-              .then(({ data }) => Boolean(data))
+              .then(({ count }) => (count ?? 0) > 0)
               .catch(() => false),
           ]);
 
@@ -701,12 +701,14 @@ export async function runDueClawCloudTasks(): Promise<{
   timestamp: string;
   fired: Array<{ userId: string; taskType: ClawCloudTaskType; detail?: string }>;
   errors: Array<{ userId: string; taskType: ClawCloudTaskType; error: string }>;
+  degraded: boolean;
 }> {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const now = new Date();
   const bucket = minuteBucket(now);
   const fired: Array<{ userId: string; taskType: ClawCloudTaskType; detail?: string }> = [];
   const errors: Array<{ userId: string; taskType: ClawCloudTaskType; error: string }> = [];
+  let degraded = false;
 
   const { data: scheduledTasks, error: scheduledError } = await supabaseAdmin
     .from("agent_tasks")
@@ -730,6 +732,7 @@ export async function runDueClawCloudTasks(): Promise<{
 
   if (scheduledError) {
     console.error("[cron] Failed to fetch scheduled tasks:", scheduledError.message);
+    degraded = degraded || isSupabasePressureMessage(scheduledError.message);
   } else {
     for (const task of (scheduledTasks ?? []) as Array<
       AgentTaskRow & {
@@ -775,7 +778,9 @@ export async function runDueClawCloudTasks(): Promise<{
   }
 
   const dueReminders = await fetchDueReminders().catch((error) => {
-    console.error("[cron] Failed to fetch due reminders:", error instanceof Error ? error.message : error);
+    const message = error instanceof Error ? error.message : String(error ?? "Unknown error");
+    console.error("[cron] Failed to fetch due reminders:", message);
+    degraded = degraded || isSupabasePressureMessage(message);
     return [];
   });
 
@@ -833,6 +838,7 @@ export async function runDueClawCloudTasks(): Promise<{
 
   if (meetingError) {
     console.error("[cron] Failed to fetch meeting reminder tasks:", meetingError.message);
+    degraded = degraded || isSupabasePressureMessage(meetingError.message);
   } else {
     for (const task of (meetingTasks ?? []) as Array<
       AgentTaskRow & {
@@ -944,6 +950,7 @@ export async function runDueClawCloudTasks(): Promise<{
 
     if (cronHealthError) {
       console.warn("[cron] Failed to update cron_health:", cronHealthError.message);
+      degraded = degraded || isSupabasePressureMessage(cronHealthError.message);
     }
   } catch {
     // Keep cron resilient if the heartbeat table is missing.
@@ -953,5 +960,6 @@ export async function runDueClawCloudTasks(): Promise<{
     timestamp: now.toISOString(),
     fired,
     errors,
+    degraded,
   };
 }

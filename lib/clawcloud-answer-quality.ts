@@ -13,6 +13,8 @@ import {
   isCompleteCountryMetricAnswer,
   shouldUseLiveSearch,
 } from "@/lib/clawcloud-live-search";
+import { detectAiModelRoutingDecision } from "@/lib/clawcloud-ai-model-routing";
+import { extractExplicitQuestionYear, hasPastYearScope } from "@/lib/clawcloud-time-scope";
 import {
   buildClawCloudReplyLanguageInstruction,
   inferClawCloudMessageLocale,
@@ -68,6 +70,16 @@ const MENTAL_HEALTH_PATTERNS = [
 const LEGAL_PATTERNS = [
   /\b(legal|law|laws|court|judge|lawyer|attorney|rights|contract|notice|fir|bail|appeal|crime|criminal|civil|sue|lawsuit|divorce|tenant|eviction|trademark|copyright|patent|jurisdiction)\b/i,
   /\b(can i sue|is it legal|what are my rights|am i liable|what is the law|file a case|legal notice)\b/i,
+];
+
+const SCIENTIFIC_LAW_CONTEXT_PATTERNS = [
+  /\b(?:physical|scientific|natural|fundamental)\s+laws?\b/i,
+  /\blaws?\s+of\s+(?:physics|nature|motion|thermodynamics|the universe|quantum mechanics|general relativity)\b/i,
+  /\bgoverning the universe\b/i,
+];
+
+const SCIENCE_RESEARCH_PATTERNS = [
+  /\b(quantum|relativity|physics|cosmology|thermodynamics|consciousness|decoherence|uncertainty principle|g[oö]del|chaos theory|computability|uncomputable|fixed-point|infinite regress|logical inconsistency|self-model(?:ing)?|simulate the universe|simulation hypothesis)\b/i,
 ];
 
 const FINANCE_ADVICE_PATTERNS = [
@@ -229,6 +241,38 @@ const WRONG_MODE_STORY_CLARIFICATION_PATTERNS = [
   /\bcreative writing\b/i,
 ];
 
+const WRONG_LANGUAGE_REPLY_PATTERNS = [
+  /\bhere(?:'s| is) (?:the|your|a) (?:answer|reply|response) in\b/i,
+  /\bi'll respond in\b/i,
+  /\blet me answer (?:in|that in)\b/i,
+  /\bswitching to\b/i,
+  /\btranslating (?:my|the) (?:response|answer|reply)\b/i,
+];
+
+const PLACEHOLDER_TEMPLATE_PATTERNS = [
+  /\[task\]/i, /\[time\]/i, /\[city\]/i, /\[name\]/i,
+  /\[date\]/i, /\[location\]/i, /\[topic\]/i, /\[subject\]/i,
+  /\[amount\]/i, /\[recipient\]/i, /\[email\]/i, /\[phone\]/i,
+];
+
+const GMAIL_QUALITY_PATTERNS = [
+  /\braw html\b/i, /\b<div\b/i, /\b<table\b/i, /\b<span\b/i,
+  /\bcontent-type:\s*text\/html/i,
+];
+
+const CALENDAR_QUALITY_PATTERNS = [
+  /\bevent created at \[/i, /\breminder set for \[/i,
+  /\btimezone not specified\b/i, /\bcould not parse the date\b/i,
+  /\binvalid date format\b/i,
+];
+
+const WEATHER_QUALITY_PATTERNS = [
+  /\bweather data (?:is )?unavailable\b/i,
+  /\bcould not (?:fetch|get|retrieve) weather\b/i,
+  /\bno weather information\b/i,
+  /\bweather service (?:is )?(?:down|unavailable)\b/i,
+];
+
 function matchesAny(value: string, patterns: RegExp[]) {
   return patterns.some((pattern) => pattern.test(value));
 }
@@ -245,6 +289,57 @@ function looksLikeStoryOrCultureQuestion(question: string) {
     /[\uac00-\ud7af\u3040-\u30ff\u4e00-\u9fff]/u.test(question)
     || /\b(story|plot|storyline|summary|synopsis|ending|season|episode|character|drama|movie|film|series|show|anime|novel|book|tell me about|story of|plot of|summary of)\b/i.test(question)
   );
+}
+
+function looksLikeScienceOrResearchQuestion(question: string, intent: string, category: string) {
+  return (
+    /^(?:science|research)$/i.test(intent)
+    || /^(?:science|research)$/i.test(category)
+    || matchesAny(question, SCIENCE_RESEARCH_PATTERNS)
+    || matchesAny(question, SCIENTIFIC_LAW_CONTEXT_PATTERNS)
+  );
+}
+
+function looksLikeFreshnessSensitiveTechQuestion(question: string) {
+  if (!question.trim() || hasPastYearScope(question)) {
+    return false;
+  }
+
+  if (detectAiModelRoutingDecision(question)?.mode === "web_search") {
+    return true;
+  }
+
+  return (
+    /\b(latest|current|newest|right now|today|released?|release(?: date)?|launch(?:ed)?|announced?|availability|price|pricing|cost|features?|specs?|specifications?)\b/i.test(question)
+    && (
+      /\b(gpt|chatgpt|claude|gemini|grok|llama|deepseek|mistral|openai|anthropic|deepmind|google)\b/i.test(question)
+      || /\b(iphone|samsung|galaxy|pixel|oneplus)\b/i.test(question)
+      || /\bs\d{2}\s*ultra\b/i.test(question)
+      || /\bs\d{2}\s*pro\b/i.test(question)
+    )
+  );
+}
+
+function requiresFreshLiveGroundingQuestion(question: string, category: string) {
+  return category === "news"
+    || category === "web_search"
+    || shouldUseLiveSearch(question)
+    || looksLikeFreshnessSensitiveTechQuestion(question);
+}
+
+function looksLikeLegalQuestion(question: string, intent: string, category: string) {
+  if (intent === "law" || category === "law") {
+    return true;
+  }
+
+  if (
+    looksLikeScienceOrResearchQuestion(question, intent, category)
+    && matchesAny(question, SCIENTIFIC_LAW_CONTEXT_PATTERNS)
+  ) {
+    return false;
+  }
+
+  return matchesAny(question, LEGAL_PATTERNS);
 }
 
 function normalizeExistingStoryWorkCandidate(candidate: string) {
@@ -355,6 +450,26 @@ function looksLikeIrrelevantAssistantLeak(question: string, answer: string) {
   return matchesAny(answer, IRRELEVANT_ASSISTANT_LEAK_PATTERNS);
 }
 
+export function looksLikePlaceholderTemplateReply(answer: string) {
+  return answer.trim() ? matchesAny(answer.trim(), PLACEHOLDER_TEMPLATE_PATTERNS) : false;
+}
+
+export function looksLikeWrongLanguageReply(answer: string) {
+  return answer.trim() ? matchesAny(answer.trim(), WRONG_LANGUAGE_REPLY_PATTERNS) : false;
+}
+
+export function looksLikeRawGmailContent(answer: string) {
+  return answer.trim() ? matchesAny(answer.trim(), GMAIL_QUALITY_PATTERNS) : false;
+}
+
+export function looksLikeBrokenCalendarReply(answer: string) {
+  return answer.trim() ? matchesAny(answer.trim(), CALENDAR_QUALITY_PATTERNS) : false;
+}
+
+export function looksLikeWeatherFailure(answer: string) {
+  return answer.trim() ? matchesAny(answer.trim(), WEATHER_QUALITY_PATTERNS) : false;
+}
+
 function looksLikeExplicitScopeBleed(question: string, answer: string) {
   const rankingScope = extractRichestRankingScope(question);
   if (!rankingScope || rankingScope === "mixed") {
@@ -373,6 +488,52 @@ function looksLikeExplicitScopeBleed(question: string, answer: string) {
   }
 
   return false;
+}
+
+function isSingleRichestPersonQuestion(question: string) {
+  const normalized = question.toLowerCase();
+  if (extractRichestRankingScope(question) !== "people") {
+    return false;
+  }
+
+  if (/\btop\s*\d+\b/i.test(normalized)) {
+    return false;
+  }
+
+  if (/\b(people|persons|billionaires?|list|ranking|rankings?|leaderboard)\b/i.test(normalized)) {
+    return false;
+  }
+
+  return /\b(richest|wealthiest)\b/i.test(normalized);
+}
+
+function isCompleteRichestRankingAnswer(question: string, answer: string) {
+  const rankingScope = extractRichestRankingScope(question);
+  if (!rankingScope) {
+    return true;
+  }
+
+  const hasFreshnessLine = /\bas of\b/i.test(answer) && /\b20\d{2}\b/.test(answer);
+  const hasRichListSource = /\bforbes\b|\bbloomberg\b/i.test(answer);
+  const hasHenleySource = /\bhenley\b|\bhenleyglobal\.com\b/i.test(answer);
+  const hasPeopleSection = /\btop richest people by live net worth\b/i.test(answer);
+  const hasCitiesSection = /\btop wealthiest cities by resident millionaires\b/i.test(answer);
+  const hasSinglePersonLead = /\bcurrent richest person in the world\b/i.test(answer);
+  const hasWorthFigure = /\$\d[\d,.]*\s*B\b/i.test(answer);
+
+  if (rankingScope === "people") {
+    if (isSingleRichestPersonQuestion(question)) {
+      return hasFreshnessLine && hasRichListSource && hasSinglePersonLead && hasWorthFigure;
+    }
+
+    return hasFreshnessLine && hasRichListSource && hasPeopleSection;
+  }
+
+  if (rankingScope === "cities") {
+    return hasCitiesSection && hasHenleySource;
+  }
+
+  return hasFreshnessLine && hasRichListSource && hasHenleySource && hasPeopleSection && hasCitiesSection;
 }
 
 export function looksLikeQuestionTopicMismatch(question: string, answer: string) {
@@ -594,11 +755,17 @@ function domainForQuestion(question: string, intent: string, category: string, i
   if (isDocumentBound) return "document";
   if (intent === "language" || category === "language") return "general";
   if (detectTaxQuery(question)) return "tax";
+  if (requiresFreshLiveGroundingQuestion(question, category)) return "live";
   if (intent === "finance" || category === "finance") return "finance";
   if (matchesAny(question, MENTAL_HEALTH_PATTERNS)) return "mental_health";
   if (intent === "health" || category === "health" || matchesAny(question, HEALTH_PATTERNS)) return "health";
-  if (intent === "law" || category === "law" || matchesAny(question, LEGAL_PATTERNS)) return "legal";
-  if (shouldUseLiveSearch(question) || category === "news" || category === "web_search") return "live";
+  if (
+    looksLikeScienceOrResearchQuestion(question, intent, category)
+    && !(shouldUseLiveSearch(question) || category === "news" || category === "web_search")
+  ) {
+    return "general";
+  }
+  if (looksLikeLegalQuestion(question, intent, category)) return "legal";
   return "general";
 }
 
@@ -742,6 +909,21 @@ function looksUnsafeUngroundedLiveNumber(answer: string): boolean {
   return hasNumbers && !matchesAny(answer, LIVE_EVIDENCE_PATTERNS) && !hasRiskLanguage;
 }
 
+function looksPastYearFreshnessLeak(question: string | undefined, answer: string) {
+  if (!question || !requiresFreshLiveGroundingQuestion(question, "")) {
+    return false;
+  }
+
+  const explicitYear = extractExplicitQuestionYear(question);
+  const currentYear = new Date().getUTCFullYear();
+  if ((explicitYear !== null && explicitYear < currentYear) || hasPastYearScope(question)) {
+    return false;
+  }
+
+  return [...answer.matchAll(/\b(20\d{2}|19\d{2})\b/g)]
+    .some((match) => Number.parseInt(match[1] ?? "", 10) < currentYear);
+}
+
 export function isClawCloudGroundedLiveAnswer(input: {
   question?: string;
   answer: string | null | undefined;
@@ -760,6 +942,9 @@ export function isClawCloudGroundedLiveAnswer(input: {
   if (looksUnsafeUngroundedLiveNumber(answer)) {
     return false;
   }
+  if (looksPastYearFreshnessLeak(input.question, answer)) {
+    return false;
+  }
   if (input.question) {
     if (
       detectWorldBankCountryMetricQuestion(input.question)
@@ -776,6 +961,12 @@ export function isClawCloudGroundedLiveAnswer(input: {
     if (
       detectRetailFuelPriceQuestion(input.question)
       && !isCompleteRetailFuelAnswer(input.question, answer)
+    ) {
+      return false;
+    }
+    if (
+      extractRichestRankingScope(input.question)
+      && !isCompleteRichestRankingAnswer(input.question, answer)
     ) {
       return false;
     }
@@ -964,6 +1155,18 @@ function buildClawCloudRecoveryDetailHint(
 ): string {
   const normalizedQuestion = question.toLowerCase();
 
+  if (
+    profile.intent === "science"
+    || profile.category === "science"
+    || looksLikeScienceOrResearchQuestion(question, profile.intent, profile.category)
+  ) {
+    return "Share the exact concept, assumptions, model, or theorem you want analyzed and the level of depth or proof you want, and I will answer it directly.";
+  }
+
+  if (detectAiModelRoutingDecision(question)?.mode === "web_search") {
+    return "Share the exact model names plus the axis you care about most — coding, price, latency, context window, or release timing — and I will give a source-backed comparison.";
+  }
+
   if (profile.requiresLiveGrounding) {
     return "Share the exact topic plus date, location, company, person, or ticker so I can return a source-backed answer.";
   }
@@ -1038,11 +1241,33 @@ export function buildClawCloudLowConfidenceReply(
   profile: ClawCloudAnswerQualityProfile,
   rationale?: string,
 ): string {
-  // Return an empty string to signal that the caller should try AI model
-  // recovery instead of showing a low-confidence placeholder.
-  // The caller (ensureProfessionalReply) will detect this as a fallback and
-  // attempt emergency AI calls (Phases 5-8) before giving up.
-  return "";
+  const detailHint = buildClawCloudRecoveryDetailHint(question, profile);
+  const needsScopedPrecisionLead =
+    !profile.isHighStakes
+    && profile.domain === "general"
+    && /^(?:what(?:'s| is| are)|define|explain|describe|meaning of|difference between|compare|vs\.?|versus)\b/i.test(question.trim());
+  const lines = [
+    "I could not complete a reliable direct answer on that attempt.",
+    "",
+    ...(needsScopedPrecisionLead ? ["This question needs one clearer scope detail for a precise answer.", ""] : []),
+    detailHint,
+  ];
+
+  if (profile.domain === "legal") {
+    lines.push(
+      "",
+      "If this could affect deadlines, liability, eviction, arrest, money, or formal rights, a qualified local lawyer can tell you the exact legal position.",
+    );
+  } else if (profile.domain === "health" || profile.domain === "mental_health") {
+    lines.push(
+      "",
+      "If this is urgent, severe, or safety-related, contact a qualified clinician or emergency service right away.",
+    );
+  }
+
+  void rationale;
+
+  return lines.join("\n");
 }
 
 export function clawCloudConfidenceBelowFloor(

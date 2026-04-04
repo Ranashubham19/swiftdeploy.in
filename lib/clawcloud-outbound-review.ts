@@ -8,12 +8,41 @@ function normalizeReviewText(text: string) {
   return text.trim().replace(/\s+/g, " ");
 }
 
+function looksLikeFreshActionCommand(text: string) {
+  const normalized = normalizeReviewText(text).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  // Treat concrete "send ... to <person>" style instructions as new actions,
+  // not as approval confirmations for previously queued drafts.
+  if (
+    /^(?:send|message|tell)\b/.test(normalized)
+    && (
+      /\bto\b/.test(normalized)
+      || /[:'"]/u.test(text)
+      || /\+\d{6,}/.test(normalized)
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    /^(?:create|save)\b/.test(normalized)
+    && /\b(?:reminder|task|contact|draft|message|email)\b/.test(normalized)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 function looksLikeApprove(text: string) {
   return [
     /^(?:yes|yep|yeah|haan|han)\b/i,
     /^(?:ok|okay|sure|fine|alright)\b(?:.*\b(?:send|create|save|go ahead|proceed|confirm)\b)?/i,
-    /^(?:send|send it|send this|send now)\b/i,
-    /^(?:create|create it|save|save it)\b(?:.*\bdraft\b)?/i,
+    /^(?:send|send it|send this|send now)(?:\s+please)?\s*[.!?]*$/i,
+    /^(?:create|create it|save|save it)(?:\s+(?:this|that))?(?:\s+draft)?(?:\s+please)?\s*[.!?]*$/i,
     /^(?:approve|approved|confirm|confirmed|go ahead|proceed|looks good|looks great|ship it|do it)\b/i,
   ].some((pattern) => pattern.test(text));
 }
@@ -71,6 +100,10 @@ function extractRewriteFeedback(text: string) {
 export function parseOutboundReviewDecision(text: string): OutboundReviewDecision {
   const normalized = normalizeReviewText(text);
   if (!normalized) {
+    return { kind: "none" };
+  }
+
+  if (looksLikeFreshActionCommand(normalized)) {
     return { kind: "none" };
   }
 

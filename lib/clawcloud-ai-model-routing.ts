@@ -108,12 +108,33 @@ function unique(values: string[]) {
   return [...new Set(values)];
 }
 
+function uniqueVendors(vendors: VendorSpec[]) {
+  const seen = new Set<string>();
+  return vendors.filter((vendor) => {
+    if (seen.has(vendor.label)) {
+      return false;
+    }
+    seen.add(vendor.label);
+    return true;
+  });
+}
+
 function collectMatchedVendors(question: string) {
   return VENDORS.filter((vendor) => vendor.patterns.some((pattern) => pattern.test(question)));
 }
 
 function collectAmbiguousClaudeFamilies(question: string) {
   return AMBIGUOUS_CLAUDE_FAMILIES.filter(({ term }) => new RegExp(`\\b${term}\\b`, "i").test(question));
+}
+
+function buildInferredClaudeFamilySnippets(question: string, families: AmbiguousFamily[]) {
+  return unique(
+    families.flatMap(({ term, familyLabel }) => {
+      const match = question.match(new RegExp(`\\b${term}\\s+(\\d+(?:\\.\\d+)?)\\b`, "i"));
+      const version = match?.[1]?.trim();
+      return [version ? `${familyLabel} ${version}` : familyLabel];
+    }),
+  );
 }
 
 function buildAiModelClarificationReply(families: AmbiguousFamily[]) {
@@ -237,6 +258,20 @@ function buildAiModelSearchQueries(
   return unique(queries.filter(Boolean));
 }
 
+function buildRankingVendorFlagshipQueries(vendors: VendorSpec[]) {
+  const perVendorQueries: Record<string, string[]> = {
+    OpenAI: ["OpenAI GPT flagship model official site:openai.com"],
+    Anthropic: ["Anthropic Claude flagship model official site:anthropic.com"],
+    Google: ["Google Gemini flagship model official site:blog.google"],
+    xAI: ["xAI Grok flagship model official site:x.ai"],
+    Meta: ["Meta Llama flagship model official site:ai.meta.com"],
+    DeepSeek: ["DeepSeek flagship model official site:deepseek.com"],
+    Mistral: ["Mistral flagship model official site:mistral.ai"],
+  };
+
+  return unique(vendors.flatMap((vendor) => perVendorQueries[vendor.label] ?? []));
+}
+
 export function detectAiModelRoutingDecision(question: string): AiModelRoutingDecision | null {
   const text = question.trim();
   if (!text) {
@@ -246,11 +281,23 @@ export function detectAiModelRoutingDecision(question: string): AiModelRoutingDe
   const hasComparisonSignal = COMPARISON_SIGNAL.test(text);
   const hasRankingSignal = RANKING_SIGNAL.test(text);
   const hasFactSignal = FACT_SIGNAL.test(text);
-  const matchedVendors = collectMatchedVendors(text);
   const ambiguousClaudeFamilies = collectAmbiguousClaudeFamilies(text);
-  const vendorSnippets = unique(
-    matchedVendors.flatMap((vendor) => extractVendorModelSnippets(text, vendor)),
-  );
+  const inferredClaudeVendor =
+    ambiguousClaudeFamilies.length > 0
+    && (
+      hasComparisonSignal
+      || hasFactSignal
+      || hasRankingSignal
+      || /\b(gpt|openai|claude|anthropic|gemini|google|grok|xai|meta|llama|deepseek|mistral|llm|model|models|ai)\b/i.test(text)
+    );
+  const matchedVendors = uniqueVendors([
+    ...collectMatchedVendors(text),
+    ...(inferredClaudeVendor ? VENDORS.filter((vendor) => vendor.label === "Anthropic") : []),
+  ]);
+  const vendorSnippets = unique([
+    ...matchedVendors.flatMap((vendor) => extractVendorModelSnippets(text, vendor)),
+    ...buildInferredClaudeFamilySnippets(text, ambiguousClaudeFamilies),
+  ]);
   const hasAmbiguousFamilyModelContext =
     ambiguousClaudeFamilies.length > 0
     && (
@@ -280,20 +327,6 @@ export function detectAiModelRoutingDecision(question: string): AiModelRoutingDe
     return null;
   }
 
-  const missingClaudeVendor =
-    ambiguousClaudeFamilies.length > 0
-    && !/\b(claude|anthropic)\b/i.test(text);
-
-  if (missingClaudeVendor) {
-    return {
-      mode: "clarify",
-      kind: "comparison",
-      officialDomains: [],
-      searchQueries: [],
-      clarificationReply: buildAiModelClarificationReply(ambiguousClaudeFamilies),
-    };
-  }
-
   const comparisonAxisCount = countComparisonAxes(text);
 
   if (!hasComparisonSignal && !hasFactSignal && !hasRankingSignal) {
@@ -314,7 +347,15 @@ export function detectAiModelRoutingDecision(question: string): AiModelRoutingDe
       ? VENDORS
       : matchedVendors).flatMap((vendor) => vendor.officialDomains),
   );
-  const searchQueries = buildAiModelSearchQueries(text, officialDomains, vendorSnippets, kind);
+  const rankingVendors = kind === "ranking" && matchedVendors.length === 0
+    ? VENDORS
+    : matchedVendors;
+  const searchQueries = kind === "ranking" && rankingVendors.length > 0
+    ? unique([
+      ...buildRankingVendorFlagshipQueries(rankingVendors),
+      ...buildAiModelSearchQueries(text, officialDomains, vendorSnippets, kind),
+    ])
+    : buildAiModelSearchQueries(text, officialDomains, vendorSnippets, kind);
 
   if (kind === "ranking") {
     queriesPush(searchQueries, [

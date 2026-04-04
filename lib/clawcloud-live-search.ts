@@ -1,10 +1,16 @@
 ﻿import { load as loadHtml } from "cheerio";
 import { completeClawCloudPrompt } from "@/lib/clawcloud-ai";
 import { looksLikeHistoricalWealthQuestion } from "@/lib/clawcloud-historical-wealth";
+import { looksLikeConsumerStaplePriceQuestion } from "@/lib/clawcloud-india-consumer-prices";
 import { fetchIndiaConsumerPriceAnswer } from "@/lib/clawcloud-india-consumer-prices";
-import { looksLikeCurrentAffairsQuestion } from "@/lib/clawcloud-current-affairs";
+import {
+  buildCurrentAffairsQueries,
+  looksLikeCurrentAffairsLogisticsQuestion,
+  looksLikeCurrentAffairsQuestion,
+} from "@/lib/clawcloud-current-affairs";
 import { env } from "@/lib/env";
-import { fetchOfficialPricingAnswer } from "@/lib/clawcloud-official-pricing";
+import { detectOfficialPricingQuery, fetchOfficialPricingAnswer } from "@/lib/clawcloud-official-pricing";
+import { detectAiModelRoutingDecision } from "@/lib/clawcloud-ai-model-routing";
 import { detectRetailFuelPriceQuestion, fetchRetailFuelPriceAnswer } from "@/lib/clawcloud-retail-prices";
 import {
   detectClawCloudRegionMention,
@@ -96,10 +102,21 @@ const KNOWLEDGE_PATTERNS: RegExp[] = [
   /\b(factorial|fibonacci|prime number|sort|recursion|loop|array|string|integer)\b/i,
   /\b(difference between|formula for|how many (bones|planets|countries|continents|elements))\b/i,
   /\b(largest|smallest|tallest|deepest)\s+(country|city|ocean|mountain|river|desert|building)\b/i,
+  /\b(quantum mechanics|general relativity|thermodynamics|consciousness|decoherence|uncertainty principle|g[oö]del|chaos theory|computability|uncomputable|infinite regress|fixed-point|logical inconsistency|self-model(?:ing)?|physical laws governing the universe|laws of thermodynamics)\b/i,
   // Entertainment / fiction — story requests about movies, shows, books, games
   /\b(story|plot|storyline|synopsis)\b.*\b(avenger|marvel|dc|star\s*wars?|harry\s*potter|naruto|one\s*piece|game\s*of\s*thrones|lord\s*of\s*the\s*rings|infinity\s*war|end\s*game|endgame|civil\s*war|anime|movie|film|series|drama|kdrama)\b/i,
   /\b(avenger|marvel|dc|star\s*wars?|harry\s*potter|naruto|one\s*piece|game\s*of\s*thrones|lord\s*of\s*the\s*rings|infinity\s*war|end\s*game|endgame|civil\s*war)\b.*\b(story|plot|storyline|synopsis)\b/i,
+  // Product knowledge — release dates, features, specs are stable facts, not live data
+  /\b(when\s+(?:was|did|is)\b.{0,40}\b(?:released?|launched?|announced?))\b/i,
+  /\b(features?\s+(?:of|in)\b.{0,30}\b(?:galaxy|iphone|pixel|oneplus|samsung|macbook|ipad|airpods))\b/i,
+  /\b(galaxy\s+s\d+|iphone\s+\d+|pixel\s+\d+)\b.*\b(features?|specs?|specifications?|review|camera|battery|display|screen|processor|chip|ram|storage)\b/i,
 ];
+
+const ADVANCED_STABLE_KNOWLEDGE_CUE_PATTERN =
+  /\b(quantum mechanics|general relativity|exact quantum state|conscious(?:ness| experience)?|decoherence|uncertainty(?: principle)?|chaos theory|g(?:o|ö)del|incompleteness|computable|uncomputable|recursive self-?model(?:ing)?|fixed[- ]point|infinite regress|logical inconsistency|physicalism|functionalism|determinism of consciousness|computable reality|non-?computable phenomena|current models of physics|physical laws governing the universe)\b/iu;
+
+const ADVANCED_STABLE_KNOWLEDGE_DIRECTIVE_PATTERN =
+  /\b(theoretically possible|justify|prove|disprove|formal proof|counterexample|formal boundary|analy[sz]e|simulate itself|simulate the universe|answer the following|bonus|impossible tier)\b/i;
 
 const REALTIME_CONTEXT_CUE = /\b(right now|today|live|currently|as of now|just now|breaking|latest|recent)\b/i;
 const REALTIME_ENTITY_CUE = /\b(price|rate|value|worth|nav|stock|share|score|weather|forecast|temperature|aqi|news|updates?|announcement|traffic|exchange rate|result|war|conflict|ceasefire|truce|peace|negotiation|negotiations|sanctions?|strike|attack|missile|terms?|conditions?|demands?)\b/i;
@@ -142,6 +159,7 @@ const TRUSTED_LIVE_DOMAINS = [
   "forbes.com",
   "bloomberg.com",
   "reuters.com",
+  "reutersconnect.com",
   "cnbc.com",
   "ft.com",
   "wsj.com",
@@ -330,6 +348,11 @@ function matchesAny(text: string, patterns: RegExp[]) {
 
 function normalizeQuestion(question: string) {
   return normalizeRegionalQuestion(question).toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function looksLikeAdvancedStableKnowledgeQuestion(normalizedQuestion: string) {
+  return ADVANCED_STABLE_KNOWLEDGE_CUE_PATTERN.test(normalizedQuestion)
+    && ADVANCED_STABLE_KNOWLEDGE_DIRECTIVE_PATTERN.test(normalizedQuestion);
 }
 
 function cleanShortDefinitionTerm(raw: string) {
@@ -732,6 +755,10 @@ export async function fetchWorldBankCountryMetricAnswer(question: string) {
 }
 
 function isRealtimeQuestion(normalizedQuestion: string) {
+  if (looksLikeAdvancedStableKnowledgeQuestion(normalizedQuestion)) {
+    return false;
+  }
+
   return (
     matchesAny(normalizedQuestion, REALTIME_PATTERNS)
     || looksLikeCurrentAffairsQuestion(normalizedQuestion)
@@ -740,6 +767,10 @@ function isRealtimeQuestion(normalizedQuestion: string) {
 }
 
 function isVolatileQuestion(normalizedQuestion: string) {
+  if (looksLikeAdvancedStableKnowledgeQuestion(normalizedQuestion)) {
+    return false;
+  }
+
   if (looksLikeHistoricalWealthQuestion(normalizedQuestion)) {
     return false;
   }
@@ -752,12 +783,45 @@ function isVolatileQuestion(normalizedQuestion: string) {
 }
 
 function isStableKnowledgeQuestion(normalizedQuestion: string) {
-  return matchesAny(normalizedQuestion, KNOWLEDGE_PATTERNS);
+  return looksLikeAdvancedStableKnowledgeQuestion(normalizedQuestion)
+    || matchesAny(normalizedQuestion, KNOWLEDGE_PATTERNS);
+}
+
+function isFreshDataQuestionThatShouldBypassKnowledgeGate(normalizedQuestion: string) {
+  if (looksLikeAdvancedStableKnowledgeQuestion(normalizedQuestion)) {
+    return false;
+  }
+
+  return (
+    looksLikeCurrentAffairsQuestion(normalizedQuestion)
+    || detectWorldBankCountryMetricQuestion(normalizedQuestion) !== null
+    || detectRetailFuelPriceQuestion(normalizedQuestion) !== null
+    || looksLikeConsumerStaplePriceQuestion(normalizedQuestion)
+    || detectOfficialPricingQuery(normalizedQuestion) !== null
+    || looksLikeRichestRankingQuestion(normalizedQuestion)
+    || looksLikeBitcoinPriceQuestion(normalizedQuestion)
+    || looksLikeCurrentCeoQuestion(normalizedQuestion)
+    || looksLikeLatestIphoneQuestion(normalizedQuestion)
+    || looksLikeDirectWeatherQuestion(normalizedQuestion)
+  );
 }
 
 export function classifyClawCloudLiveSearchTier(question: string): ClawCloudLiveSearchTier {
   const normalizedQuestion = normalizeQuestion(question);
   if (!normalizedQuestion) return "knowledge";
+
+  if (looksLikeAdvancedStableKnowledgeQuestion(normalizedQuestion)) {
+    return "knowledge";
+  }
+
+  if (isFreshDataQuestionThatShouldBypassKnowledgeGate(normalizedQuestion)) {
+    if (isRealtimeQuestion(normalizedQuestion) || detectRetailFuelPriceQuestion(normalizedQuestion) !== null || looksLikeConsumerStaplePriceQuestion(normalizedQuestion) || looksLikeDirectWeatherQuestion(normalizedQuestion)) {
+      return "realtime";
+    }
+    if (isVolatileQuestion(normalizedQuestion) || detectOfficialPricingQuery(normalizedQuestion) !== null) {
+      return "volatile";
+    }
+  }
 
   // CRITICAL: Check stable knowledge FIRST — science, math, coding, history
   // questions must never be routed to live search even if they mention
@@ -855,6 +919,247 @@ function clipText(value: string, max: number) {
 function formatUsdBillionsFromForbes(finalWorth: number) {
   const billions = finalWorth > 1_000 ? finalWorth / 1_000 : finalWorth;
   return `${billions.toFixed(1)}B`;
+}
+
+function formatLiveSnapshotTimestamp(date = new Date()) {
+  const rendered = date.toLocaleString("en-US", {
+    timeZone: "UTC",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
+
+  return `${rendered} UTC`;
+}
+
+function currentUtcYear() {
+  return new Date().getUTCFullYear();
+}
+
+function requiresStrictCurrentTimeline(question: string, route: ClawCloudLiveSearchRoute) {
+  if (!route.requiresWebSearch) {
+    return false;
+  }
+
+  if (looksLikeHistoricalWealthQuestion(question)) {
+    return false;
+  }
+
+  const explicitYear = extractExplicitQuestionYear(question);
+  if (explicitYear !== null && explicitYear < currentUtcYear()) {
+    return false;
+  }
+
+  if (hasPastYearScope(question)) {
+    return false;
+  }
+
+  // Consumer-device knowledge questions (release dates, features, specs, reviews)
+  // naturally reference past years and should not be blocked by the freshness
+  // guard. Keep this scoped to hardware/device terms so AI-model prompts like
+  // "GPT-5.4 vs Opus 4.6 release date" still fail closed on stale evidence.
+  const normalized = normalizeQuestion(question);
+  const looksLikeConsumerDeviceQuestion =
+    /\b(released?|launch(?:ed)?|features?|specs?|specifications?|review|price|cost|announced?|unveiled)\b/i.test(normalized)
+    && (
+      /\b(phone|mobile|smartphone|handset|tablet|laptop|notebook|macbook|ipad|watch|smartwatch|airpods|headphones|earbuds|tv)\b/i.test(normalized)
+      || /\b(samsung|galaxy|iphone|pixel|oneplus|xiaomi|poco|realme|vivo|oppo|huawei|motorola|nokia)\b/i.test(normalized)
+      || /\b(s\d{2}\s*ultra|s\d{2}\s*pro|s\d{2}\s*plus|s\d{2}\s*mini|s\d{2}\s*lite|fold|flip)\b/i.test(normalized)
+    );
+
+  if (looksLikeConsumerDeviceQuestion) {
+    return false;
+  }
+
+  return true;
+}
+
+function strictCurrentTimelineMaxAgeDays(question: string, route: ClawCloudLiveSearchRoute) {
+  const normalized = normalizeQuestion(question);
+  const aiModelRouting = detectAiModelRoutingDecision(question);
+
+  if (aiModelRouting?.mode === "web_search") {
+    return 400;
+  }
+
+  if (/\b(right now|today|currently|live|as of now)\b/i.test(normalized)) {
+    return route.tier === "realtime" ? 45 : 90;
+  }
+
+  return route.tier === "realtime" ? 90 : 180;
+}
+
+function extractReferencedYears(text: string) {
+  return [...text.matchAll(/\b(20\d{2}|19\d{2})\b/g)]
+    .map((match) => Number.parseInt(match[1] ?? "", 10))
+    .filter((year) => Number.isFinite(year));
+}
+
+function extractReferencedDates(text: string) {
+  const candidates = new Set<string>();
+  for (const match of text.matchAll(/\b\d{1,2}-[A-Za-z]{3}-\d{4}\b/g)) {
+    candidates.add(match[0]);
+  }
+  for (const match of text.matchAll(/\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}\b/g)) {
+    candidates.add(match[0]);
+  }
+  for (const match of text.matchAll(/\b[A-Za-z]{3,9}\s+\d{1,2},\s+\d{4}\b/g)) {
+    candidates.add(match[0]);
+  }
+  for (const match of text.matchAll(/\b[A-Za-z]{3,9}\s+\d{4}\b/g)) {
+    candidates.add(match[0]);
+  }
+
+  return [...candidates]
+    .map((candidate) => new Date(candidate))
+    .filter((date) => Number.isFinite(date.getTime()));
+}
+
+function buildStrictCurrentTimelineReply(
+  question: string,
+  route: ClawCloudLiveSearchRoute,
+  freshestAt?: string | null,
+) {
+  const normalized = normalizeQuestion(question);
+  const latestMode =
+    /\b(price|rate|worth|value|weather|forecast|score|news|update|updates|status|situation)\b/i.test(normalized)
+      ? "live reading"
+      : "current snapshot";
+
+  return [
+    route.tier === "realtime" ? "*Live freshness check*" : "*Freshness check*",
+    "",
+    "I won't present past-year or stale dated data as if it were current.",
+    freshestAt
+      ? `The freshest dated signal I found was ${freshestAt}, which is still too old for a safe ${latestMode}.`
+      : `I could not confirm a clearly current dated source for a safe ${latestMode}.`,
+    "If you want, ask for the latest finalized official estimate instead, or retry later for a newer live reading.",
+  ].join("\n");
+}
+
+function guardStrictCurrentTimelineAnswer(input: {
+  question: string;
+  answer: string;
+  route: ClawCloudLiveSearchRoute;
+  evidence?: ClawCloudEvidenceItem[];
+}) {
+  if (!requiresStrictCurrentTimeline(input.question, input.route)) {
+    return {
+      answer: input.answer.trim(),
+      freshnessGuarded: false,
+    };
+  }
+
+  const answer = input.answer.trim();
+  const answerYears = extractReferencedYears(answer);
+  const answerDates = extractReferencedDates(answer);
+  const evidenceDates = (input.evidence ?? [])
+    .map((item) => item.publishedAt ?? null)
+    .filter(Boolean)
+    .map((value) => new Date(value as string))
+    .filter((date) => Number.isFinite(date.getTime()));
+
+  const allDatedSignals = [...answerDates, ...evidenceDates].sort((left, right) => right.getTime() - left.getTime());
+  const freshest = allDatedSignals[0] ?? null;
+  const maxAgeDays = strictCurrentTimelineMaxAgeDays(input.question, input.route);
+  const maxAgeMs = maxAgeDays * 86_400_000;
+  const now = Date.now();
+  const aiModelRouting = detectAiModelRoutingDecision(input.question);
+
+  const hasPastYearInAnswer = answerYears.some((year) => year < currentUtcYear());
+  const hasPastYearEvidence = evidenceDates.some((date) => date.getUTCFullYear() < currentUtcYear());
+  const hasOverAgeDate = allDatedSignals.some((date) => now - date.getTime() > maxAgeMs);
+  const missingFreshnessEvidence = !allDatedSignals.length;
+  const hasFreshCurrentYearOfficialAiEvidence =
+    aiModelRouting?.mode === "web_search"
+    && (input.evidence ?? []).filter((item) => {
+      if (item.kind !== "official_page" && item.kind !== "official_api") {
+        return false;
+      }
+      const publishedAt = item.publishedAt ? new Date(item.publishedAt) : null;
+      if (!publishedAt || !Number.isFinite(publishedAt.getTime())) {
+        return false;
+      }
+      return publishedAt.getUTCFullYear() === currentUtcYear() && now - publishedAt.getTime() <= maxAgeMs;
+    }).length >= 2;
+
+  if (
+    !hasPastYearInAnswer
+    && !missingFreshnessEvidence
+    && (
+      (!hasPastYearEvidence && !hasOverAgeDate)
+      || hasFreshCurrentYearOfficialAiEvidence
+    )
+  ) {
+    return {
+      answer,
+      freshnessGuarded: false,
+    };
+  }
+
+  return {
+    answer: buildStrictCurrentTimelineReply(
+      input.question,
+      input.route,
+      freshest ? formatLiveSnapshotTimestamp(freshest) : null,
+    ),
+    freshnessGuarded: true,
+  };
+}
+
+function extractRequestedRichestPeopleCount(question: string) {
+  const normalized = normalizeQuestion(question);
+  const numericMatch = normalized.match(/\btop\s*(\d{1,2})\b/i);
+  if (numericMatch?.[1]) {
+    const parsed = Number(numericMatch[1]);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.max(1, Math.min(10, parsed));
+    }
+  }
+
+  const wordMap: Record<string, number> = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
+  };
+  const wordMatch = normalized.match(/\btop\s*(one|two|three|four|five|six|seven|eight|nine|ten)\b/i);
+  if (wordMatch?.[1]) {
+    return wordMap[wordMatch[1].toLowerCase()] ?? 10;
+  }
+
+  return 10;
+}
+
+function looksLikeSingleRichestPersonQuestion(question: string) {
+  const normalized = normalizeQuestion(question);
+  if (extractRichestRankingScope(question) !== "people") {
+    return false;
+  }
+
+  if (/\btop\s*\d+\b/i.test(normalized)) {
+    return false;
+  }
+
+  if (/\b(people|persons|billionaires?|list|ranking|rankings?|leaderboard)\b/i.test(normalized)) {
+    return false;
+  }
+
+  return (
+    /\bwho\s+is\s+(?:the\s+)?(?:current\s+)?(?:richest|wealthiest)\b/i.test(normalized)
+    || /\b(?:richest|wealthiest)\s+(?:person|man|woman|individual)\b/i.test(normalized)
+    || /\bworld'?s\s+(?:richest|wealthiest)\s+(?:person|man|woman|individual)\b/i.test(normalized)
+    || /\b(?:richest|wealthiest)\s+in\s+the\s+world\b/i.test(normalized)
+  );
 }
 
 export function extractRichestRankingScope(question: string): ClawCloudRichestRankingScope {
@@ -990,6 +1295,9 @@ async function buildRichestPeopleAnswerFromForbes(
     };
   };
 
+  const requestedCount = extractRequestedRichestPeopleCount(question);
+  const singlePersonQuestion = looksLikeSingleRichestPersonQuestion(question);
+
   const data = await fetchJsonWithTimeout<ForbesResponse>(
     "https://www.forbes.com/forbesapi/person/rtb/0/position/true.json?limit=10",
     8000,
@@ -997,23 +1305,51 @@ async function buildRichestPeopleAnswerFromForbes(
   const people = data?.personList?.personsLists?.filter(
     (person) => (person.personName || person.person?.name || person.name) && Number.isFinite(person.finalWorth),
   ) ?? [];
-  if (people.length < 5) {
+  const minimumPeopleRequired = singlePersonQuestion ? 1 : Math.min(3, requestedCount);
+  if (people.length < minimumPeopleRequired) {
     return "";
   }
 
-  const top = people.slice(0, 10);
+  const top = people.slice(0, Math.max(singlePersonQuestion ? 3 : requestedCount, 1));
+  const asOf = formatLiveSnapshotTimestamp();
+
+  if (singlePersonQuestion) {
+    const leader = top[0];
+    if (!leader) {
+      return "";
+    }
+
+    const leaderName = leader.personName || leader.person?.name || leader.name || "Unknown";
+    const leaderWorth = formatUsdBillionsFromForbes(Number(leader.finalWorth ?? 0));
+    const runnerUp = top[1];
+    const runnerUpLine = runnerUp
+      ? `*Next on the list:* ${runnerUp.personName || runnerUp.person?.name || runnerUp.name || "Unknown"} at *$${formatUsdBillionsFromForbes(Number(runnerUp.finalWorth ?? 0))}*`
+      : "";
+
+    return [
+      `*Current richest person in the world:* *${leaderName}*`,
+      `*Forbes live net worth:* *$${leaderWorth}*`,
+      runnerUpLine,
+      "*Rank source:* Forbes Real-Time Billionaires",
+      `*As of:* ${asOf}`,
+      "Source: forbes.com (Real-Time Billionaires)",
+      "_Note: live net worth can move intraday with market prices._",
+    ].filter(Boolean).join("\n");
+  }
+
   const lines = top.map((person, index) => {
     const worth = formatUsdBillionsFromForbes(Number(person.finalWorth ?? 0));
     const personName = person.personName || person.person?.name || person.name || "Unknown";
-    return `${index + 1}. *${personName}* â€” *$${worth}*`;
+    return `${index + 1}. *${personName}* - *$${worth}*`;
   });
 
   return [
     "Top richest people by live net worth:",
     ...lines,
     "",
-    `As of ${new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}`,
+    `As of: ${asOf}`,
     "Sources: forbes.com (Real-Time Billionaires API)",
+    "_Note: live net worth can move intraday with market prices._",
   ].join("\n");
 }
 
@@ -1343,6 +1679,13 @@ function buildLiveSearchQueries(question: string, route: ClawCloudLiveSearchRout
     && context.requestedRegionMatchType === "locality"
     && /\b(gdp|gross domestic product|population|inflation|unemployment|economy|economic output)\b/i.test(lower);
   const preferredCurrency = context.requestedCurrency?.toLowerCase() ?? "usd";
+  const currentAffairsQueries = looksLikeCurrentAffairsLogisticsQuestion(q)
+    ? buildCurrentAffairsQueries(q)
+    : [];
+
+  for (const query of currentAffairsQueries.slice(0, 4)) {
+    queries.add(query);
+  }
 
   if (route.tier === "realtime") {
     if (retailFuel) {
@@ -1360,6 +1703,10 @@ function buildLiveSearchQueries(question: string, route: ClawCloudLiveSearchRout
       queries.add(`bitcoin price live ${preferredCurrency} usd ${year}`);
       queries.add("btc usd live price");
       queries.add(`bitcoin ${preferredCurrency} live price`);
+    } else if (looksLikeCurrentAffairsLogisticsQuestion(q)) {
+      queries.add(`${q} latest Reuters AP BBC`);
+      queries.add(`${q} cargo barrels latest Reuters AP BBC`);
+      queries.add(`${q} arrived anchored latest Reuters AP BBC`);
     } else {
       queries.add(`${q} live update`);
       queries.add(`${q} official current`);
@@ -1425,6 +1772,32 @@ function buildLiveSearchQueries(question: string, route: ClawCloudLiveSearchRout
     queries.add(`${q} latest`);
   }
   return [...queries].slice(0, 5);
+}
+
+function looksLikeTierOneLiveSource(source: ResearchSource) {
+  const haystack = `${source.title} ${source.domain}`.toLowerCase();
+  return TRUSTED_LIVE_DOMAINS.some((domain) => source.domain.includes(domain))
+    || /\b(reuters|associated press|apnews|ap\b|bbc|bloomberg|financial times|ft|wall street journal|wsj)\b/i.test(haystack);
+}
+
+function allowsSingleStrongLiveSource(question: string, route: ClawCloudLiveSearchRoute, sources: ResearchSource[]) {
+  if (!looksLikeCurrentAffairsLogisticsQuestion(question)) {
+    return false;
+  }
+
+  const top = sources[0];
+  if (!top || !looksLikeTierOneLiveSource(top)) {
+    return false;
+  }
+
+  const published = top.publishedDate ? new Date(top.publishedDate) : null;
+  if (!published || !Number.isFinite(published.getTime())) {
+    return false;
+  }
+
+  const ageHours = (Date.now() - published.getTime()) / 3_600_000;
+  const maxAgeHours = route.tier === "realtime" ? 240 : 336;
+  return ageHours <= maxAgeHours;
 }
 
 function tokenizeQuestion(question: string) {
@@ -2163,11 +2536,7 @@ async function synthesizeLiveAnswerFromSources(
   route: ClawCloudLiveSearchRoute,
   sources: ResearchSource[],
 ) {
-  const asOfDate = new Date().toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
+  const asOfDate = formatLiveSnapshotTimestamp();
   const sourceBlock = buildSynthesisSourceBlock(sources);
   const instruction =
     route.tier === "realtime"
@@ -2179,7 +2548,11 @@ async function synthesizeLiveAnswerFromSources(
       "You are ClawCloud AI. Produce a professional WhatsApp-style answer grounded strictly in the provided sources.",
       "Never use training-cutoff language, and never invent values missing from sources.",
       "If data is unavailable in the sources, say exactly what is missing and still provide the best verified facts.",
+      "For time-sensitive answers, do not present an older source publication date as if it were today's date.",
+      "Use the explicit current timestamp from the prompt for the freshness line in the final answer.",
+      "For volatile rankings, roles, and net-worth questions, lead with the direct current answer in the first sentence.",
       "For ranking questions, use a numbered list.",
+      "Include one line near the end exactly in this form: As of: <current timestamp from the prompt>.",
       "At the end include one line: Sources: domain1, domain2, ...",
       instruction,
     ].join("\n"),
@@ -2317,8 +2690,14 @@ export function buildClawCloudLiveAnswerBundle(input: {
   evidence?: ClawCloudEvidenceItem[];
   strategy: ClawCloudLiveBundleStrategy;
 }): ClawCloudAnswerBundle {
-  const answer = input.answer.trim();
-  const evidence = (input.evidence?.length ? input.evidence : inferEvidenceFromRenderedAnswer(answer)).slice(0, 6);
+  const evidence = (input.evidence?.length ? input.evidence : inferEvidenceFromRenderedAnswer(input.answer)).slice(0, 6);
+  const freshness = guardStrictCurrentTimelineAnswer({
+    question: input.question,
+    answer: input.answer,
+    route: input.route,
+    evidence,
+  });
+  const answer = freshness.answer.trim();
 
   return {
     question: input.question,
@@ -2334,6 +2713,7 @@ export function buildClawCloudLiveAnswerBundle(input: {
       requires_web_search: input.route.requiresWebSearch,
       evidence_count: evidence.length,
       strategy: input.strategy,
+      freshness_guarded: freshness.freshnessGuarded,
     },
   };
 }
@@ -2389,20 +2769,34 @@ export async function fetchLiveAnswerBundle(question: string): Promise<ClawCloud
     return null;
   }
 
-  const deterministicAnswers = [
-    await buildCurrentWeatherAnswer(question),
-    await fetchIndiaConsumerPriceAnswer(question),
-    await fetchRetailFuelPriceAnswer(question),
-    await fetchWorldBankCountryMetricAnswer(question),
-    await fetchOfficialPricingAnswer(question),
-    await buildRichestPeopleAndCitiesAnswer(question),
-    await buildRichestPeopleAnswerFromForbes(question),
-    await buildRichestCitiesAnswerFromHenley(question),
-    await buildBitcoinPriceAnswer(question),
-    await buildCurrentCeoAnswerFromSerp(question),
-    await buildLatestIphoneAnswerFromSerp(question),
-  ];
-  const deterministic = deterministicAnswers.find((answer) => answer.trim().length > 0);
+  const deterministicResolvers: Array<() => Promise<string>> = looksLikeRichestRankingQuestion(question)
+    ? [
+      () => buildRichestPeopleAndCitiesAnswer(question),
+      () => buildRichestPeopleAnswerFromForbes(question),
+      () => buildRichestCitiesAnswerFromHenley(question),
+    ]
+    : [
+      () => buildCurrentWeatherAnswer(question),
+      () => fetchIndiaConsumerPriceAnswer(question),
+      () => fetchRetailFuelPriceAnswer(question),
+      () => fetchWorldBankCountryMetricAnswer(question),
+      () => fetchOfficialPricingAnswer(question),
+      () => buildRichestPeopleAndCitiesAnswer(question),
+      () => buildRichestPeopleAnswerFromForbes(question),
+      () => buildRichestCitiesAnswerFromHenley(question),
+      () => buildBitcoinPriceAnswer(question),
+      () => buildCurrentCeoAnswerFromSerp(question),
+      () => buildLatestIphoneAnswerFromSerp(question),
+    ];
+
+  let deterministic = "";
+  for (const resolveDeterministic of deterministicResolvers) {
+    deterministic = (await resolveDeterministic()).trim();
+    if (deterministic) {
+      break;
+    }
+  }
+
   if (deterministic) {
     return buildClawCloudLiveAnswerBundle({
       question,
@@ -2423,7 +2817,7 @@ export async function fetchLiveAnswerBundle(question: string): Promise<ClawCloud
   }
 
   const sources = selectRelevantLiveSources(question, search.sources);
-  if (sources.length < 2) {
+  if (sources.length < 2 && !allowsSingleStrongLiveSource(question, route, sources)) {
     return null;
   }
 
@@ -2476,4 +2870,3 @@ export function decorateLiveSearchAnswer(
     .filter((part) => part && part.trim().length > 0)
     .join("\n");
 }
-

@@ -4,9 +4,13 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
+import { normalizeClawCloudEmailAuthErrorMessage } from "@/lib/clawcloud-email-auth";
 import { getPostAuthRedirectPath } from "@/lib/onboarding";
 import { getPublicRedirectUrl } from "@/lib/public-app-url";
-import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
+import {
+  getSupabaseBrowserClient,
+  prepareSupabaseBrowserPkce,
+} from "@/lib/supabase-browser";
 import type { PublicAppConfig } from "@/lib/types";
 
 import styles from "./auth-page.module.css";
@@ -52,15 +56,39 @@ type GoogleBridgeSession = {
   error?: string;
 };
 
+type EmailAuthApiPayload = {
+  error?: string;
+  ok?: boolean;
+  needsEmailConfirmation?: boolean;
+  user?: {
+    id?: string | null;
+    email?: string | null;
+  } | null;
+  session?: {
+    access_token?: string;
+    refresh_token?: string;
+    user?: {
+      id?: string | null;
+      email?: string | null;
+    } | null;
+  } | null;
+};
+
 const googleSignInRolloutMessage =
   "Google sign-in is unavailable on this deployment right now. Sign in with email for now and reconnect Google later from Settings if needed.";
 
 const GOOGLE_SIGNIN_PROVIDER_MARKER = "clawcloud-auth-provider";
+const GOOGLE_PREFERRED_LOGIN_HINT_KEY = "clawcloud-google-login-hint";
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const authCodeExchangeCache = new Map<string, Promise<AuthExchangeResult>>();
 
 function normalizeAuthErrorMessage(message: string) {
+  const normalizedEmailAuth = normalizeClawCloudEmailAuthErrorMessage(message);
+  if (normalizedEmailAuth !== message) {
+    return normalizedEmailAuth;
+  }
+
   if (
     /pkce code verifier not found in storage/i.test(message)
     || /both auth code and code verifier should be non-empty/i.test(message)
@@ -167,6 +195,34 @@ function clearGoogleSignInProvider() {
   window.sessionStorage.removeItem(GOOGLE_SIGNIN_PROVIDER_MARKER);
 }
 
+function normalizePreferredGoogleLoginHint(value: string | null | undefined) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return emailPattern.test(normalized) ? normalized : "";
+}
+
+function rememberPreferredGoogleLoginHint(value: string | null | undefined) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const normalized = normalizePreferredGoogleLoginHint(value);
+  if (!normalized) {
+    return;
+  }
+
+  window.localStorage.setItem(GOOGLE_PREFERRED_LOGIN_HINT_KEY, normalized);
+}
+
+function readPreferredGoogleLoginHint() {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  return normalizePreferredGoogleLoginHint(
+    window.localStorage.getItem(GOOGLE_PREFERRED_LOGIN_HINT_KEY),
+  );
+}
+
 function buildPostAuthPath(path: string, provider?: "google") {
   if (!provider) {
     return path;
@@ -193,6 +249,19 @@ function appendGoogleSetupBootstrapState(
     url.searchParams.set("drive_lite", "connected");
   }
   return `${url.pathname}${url.search}${url.hash}`;
+}
+
+async function readJsonResponseSafe<T>(response: Response) {
+  const raw = await response.text();
+  if (!raw.trim()) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    throw new Error(normalizeAuthErrorMessage(raw));
+  }
 }
 
 function scorePassword(password: string) {
@@ -484,6 +553,7 @@ export function AuthPage({ config }: AuthPageProps) {
           setAuthTransitionLabel("Opening your workspace...");
           const { data: sessionData } = await authClient.auth.getSession();
           markGoogleSignInProvider();
+          rememberPreferredGoogleLoginHint(sessionData.session?.user?.email ?? null);
           redirectingRef.current = true;
           router.replace(
             await resolveGooglePostAuthPath(sessionData.session ?? { user: null }),
@@ -537,6 +607,7 @@ export function AuthPage({ config }: AuthPageProps) {
           setAuthTransitionLabel("Opening your workspace...");
           const { data: sessionData } = await authClient.auth.getSession();
           markGoogleSignInProvider();
+          rememberPreferredGoogleLoginHint(sessionData.session?.user?.email ?? null);
           router.replace(
             await resolveGooglePostAuthPath(sessionData.session ?? { user: null }),
           );
@@ -557,6 +628,10 @@ export function AuthPage({ config }: AuthPageProps) {
             window.sessionStorage.getItem(GOOGLE_SIGNIN_PROVIDER_MARKER) === "google"
               ? "google"
               : undefined;
+
+          if (provider === "google") {
+            rememberPreferredGoogleLoginHint(data.session.user.email ?? null);
+          }
 
           if (provider === "google") {
             router.replace(await resolveGooglePostAuthPath(data.session));
@@ -594,6 +669,10 @@ export function AuthPage({ config }: AuthPageProps) {
               window.sessionStorage.getItem(GOOGLE_SIGNIN_PROVIDER_MARKER) === "google"
                 ? "google"
                 : undefined;
+
+            if (provider === "google") {
+              rememberPreferredGoogleLoginHint(session.user.email ?? null);
+            }
 
             if (provider === "google") {
               router.replace(await resolveGooglePostAuthPath(session));
@@ -640,8 +719,15 @@ export function AuthPage({ config }: AuthPageProps) {
     markGoogleSignInProvider();
 
     const googleLoginUrl = new URL("/api/auth/google-login", window.location.origin);
+    const preferredHint = panel === "login"
+      ? normalizePreferredGoogleLoginHint(login.email)
+      : normalizePreferredGoogleLoginHint(signup.email);
+    const loginHint = preferredHint || readPreferredGoogleLoginHint();
     googleLoginUrl.searchParams.set("intent", mode);
     googleLoginUrl.searchParams.set("ts", String(Date.now()));
+    if (loginHint) {
+      googleLoginUrl.searchParams.set("login_hint", loginHint);
+    }
     window.location.assign(googleLoginUrl.toString());
   }
 
@@ -672,25 +758,47 @@ export function AuthPage({ config }: AuthPageProps) {
     }
 
     setLoadingAction("login");
-    const { error } = await supabase.auth.signInWithPassword({
-      email: login.email.trim(),
-      password: login.password,
-    });
-    setLoadingAction(null);
 
-    if (error) {
+    try {
+      const response = await fetch("/api/auth/email", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          intent: "login",
+          email: login.email.trim(),
+          password: login.password,
+        }),
+      });
+      const payload = await readJsonResponseSafe<EmailAuthApiPayload>(response);
+
+      if (!response.ok || !payload?.session?.access_token || !payload?.session?.refresh_token) {
+        throw new Error(payload?.error || "Unable to sign in right now.");
+      }
+
+      beginAuthTransition("Opening your workspace...");
+      const { error } = await supabase.auth.setSession({
+        access_token: payload.session.access_token,
+        refresh_token: payload.session.refresh_token,
+      });
+
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      const userId = payload.session.user?.id ?? payload.user?.id ?? undefined;
+      router.replace(await resolvePostAuthRedirectPath(userId));
+    } catch (error) {
+      endAuthTransition();
       setGlobalError(
-        error.message.includes("Invalid login credentials")
-          ? "Incorrect email or password. Please try again."
-          : normalizeAuthErrorMessage(error.message),
+        normalizeAuthErrorMessage(
+          error instanceof Error ? error.message : "Unable to sign in right now.",
+        ),
       );
-      return;
+    } finally {
+      setLoadingAction(null);
     }
-
-    setSuccessMessage("Signed in. Redirecting...");
-    beginAuthTransition("Opening your workspace...");
-    const { data } = await supabase.auth.getUser();
-    router.replace(await resolvePostAuthRedirectPath(data.user?.id));
   }
 
   async function handleSignup(event: React.FormEvent<HTMLFormElement>) {
@@ -730,37 +838,61 @@ export function AuthPage({ config }: AuthPageProps) {
     }
 
     setLoadingAction("signup");
-    const { data, error } = await supabase.auth.signUp({
-      email: signup.email.trim(),
-      password: signup.password,
-      options: {
-        data: {
-          first_name: signup.firstName.trim(),
-          last_name: signup.lastName.trim(),
-        },
-        emailRedirectTo: getPublicRedirectUrl(config, "/auth"),
-      },
-    });
-    setLoadingAction(null);
 
-    if (error) {
-      setGlobalError(
-        error.message.includes("already registered")
-          || error.message.includes("already been registered")
-          ? "An account with this email already exists. Please sign in instead."
-          : normalizeAuthErrorMessage(error.message),
+    try {
+      const pkce = await prepareSupabaseBrowserPkce(
+        { supabaseUrl: config.supabaseUrl },
       );
-      return;
-    }
 
-    if (data.session) {
-      setSuccessMessage("Account created. Redirecting...");
-      beginAuthTransition("Opening your workspace...");
-      router.replace(await resolvePostAuthRedirectPath(data.session.user.id));
-      return;
-    }
+      const response = await fetch("/api/auth/email", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          intent: "signup",
+          email: signup.email.trim(),
+          password: signup.password,
+          firstName: signup.firstName.trim(),
+          lastName: signup.lastName.trim(),
+          redirectTo: getPublicRedirectUrl(config, "/auth"),
+          codeChallenge: pkce.codeChallenge,
+          codeChallengeMethod: pkce.codeChallengeMethod,
+        }),
+      });
+      const payload = await readJsonResponseSafe<EmailAuthApiPayload>(response);
 
-    setSuccessMessage("Check your email to confirm your account, then come back to sign in.");
+      if (!response.ok) {
+        throw new Error(payload?.error || "Unable to create your account right now.");
+      }
+
+      if (payload?.session?.access_token && payload.session.refresh_token) {
+        beginAuthTransition("Opening your workspace...");
+        const { error } = await supabase.auth.setSession({
+          access_token: payload.session.access_token,
+          refresh_token: payload.session.refresh_token,
+        });
+
+        if (error) {
+          throw new Error(error.message);
+        }
+
+        const userId = payload.session.user?.id ?? payload.user?.id ?? undefined;
+        router.replace(await resolvePostAuthRedirectPath(userId));
+        return;
+      }
+
+      setSuccessMessage("Check your email to confirm your account, then come back to sign in.");
+    } catch (error) {
+      endAuthTransition();
+      setGlobalError(
+        normalizeAuthErrorMessage(
+          error instanceof Error ? error.message : "Unable to create your account right now.",
+        ),
+      );
+    } finally {
+      setLoadingAction(null);
+    }
   }
 
   async function handleForgot(event: React.FormEvent<HTMLFormElement>) {
@@ -781,17 +913,42 @@ export function AuthPage({ config }: AuthPageProps) {
     }
 
     setLoadingAction("forgot");
-    const { error } = await supabase.auth.resetPasswordForEmail(forgot.email.trim(), {
-      redirectTo: getPublicRedirectUrl(config, "/reset-password"),
-    });
-    setLoadingAction(null);
 
-    if (error) {
-      setGlobalError(normalizeAuthErrorMessage(error.message));
-      return;
+    try {
+      const pkce = await prepareSupabaseBrowserPkce(
+        { supabaseUrl: config.supabaseUrl },
+        { isPasswordRecovery: true },
+      );
+
+      const response = await fetch("/api/auth/email", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          intent: "forgot",
+          email: forgot.email.trim(),
+          redirectTo: getPublicRedirectUrl(config, "/reset-password"),
+          codeChallenge: pkce.codeChallenge,
+          codeChallengeMethod: pkce.codeChallengeMethod,
+        }),
+      });
+      const payload = await readJsonResponseSafe<EmailAuthApiPayload>(response);
+
+      if (!response.ok || payload?.ok !== true) {
+        throw new Error(payload?.error || "Unable to send the reset email right now.");
+      }
+
+      setSuccessMessage("Password reset email sent. Check your inbox to continue.");
+    } catch (error) {
+      setGlobalError(
+        normalizeAuthErrorMessage(
+          error instanceof Error ? error.message : "Unable to send the reset email right now.",
+        ),
+      );
+    } finally {
+      setLoadingAction(null);
     }
-
-    setSuccessMessage("Password reset email sent. Check your inbox to continue.");
   }
 
   async function handleReset(event: React.FormEvent<HTMLFormElement>) {

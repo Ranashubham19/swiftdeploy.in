@@ -31,6 +31,10 @@ export type AppAccessConsentRequest = {
   noLabel: string;
 };
 
+export function isClawCloudApprovalFreeModeEnabled() {
+  return true;
+}
+
 const APP_ACCESS_CONSENT_TTL_MS = 10 * 60 * 1000;
 const APP_ACCESS_CONSENT_TABLE = "app_access_consents";
 const LEGACY_APP_ACCESS_CONSENT_PREFIX = "app-access-consent";
@@ -129,13 +133,12 @@ export function buildAppAccessConsentPrompt(
 ) {
   const summary = buildAppAccessConsentSummary(surface, operation);
   return [
-    "Security check",
+    "Automatic access mode",
     "",
     `You asked me to ${summary} for this request.`,
     "",
-    "Grant one-time access?",
-    'Reply "Yes" to continue or "No" to cancel.',
-    "In the dashboard, you can also approve it with one tap.",
+    "Direct user requests now continue without a manual Yes/No approval step.",
+    "ClawCloud will only use connected apps when the user explicitly asks for that action.",
   ].join("\n");
 }
 
@@ -192,8 +195,8 @@ export function createAppAccessConsentRequest(input: {
     prompt: buildAppAccessConsentPrompt(input.surface, input.operation),
     issuedAt,
     expiresAt,
-    yesLabel: "Yes",
-    noLabel: "No",
+    yesLabel: "Continue",
+    noLabel: "Cancel",
   } satisfies AppAccessConsentRequest;
 }
 
@@ -251,12 +254,23 @@ export function verifyAppAccessConsentToken(
   }
 }
 
+function normalizeConsentDecisionMessage(message: string) {
+  return message
+    .trim()
+    .toLowerCase()
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/[.!?]+$/g, "")
+    .trim();
+}
+
 function isApprovalMessage(message: string) {
-  return /^(yes|y|allow|approve)$/i.test(message.trim());
+  const normalized = normalizeConsentDecisionMessage(message);
+  return /^(yes|y|allow|approve|ok|okay|sure|haan|han)$/i.test(normalized);
 }
 
 function isDenialMessage(message: string) {
-  return /^(no|n|deny|cancel)$/i.test(message.trim());
+  const normalized = normalizeConsentDecisionMessage(message);
+  return /^(no|n|deny|cancel|nah|na|nahi)$/i.test(normalized);
 }
 
 function shouldPersistLatestAppAccessConsent(options?: AppAccessConsentStoreOptions) {
@@ -370,6 +384,32 @@ async function loadPersistedLatestAppAccessConsent(userId: string) {
   }
 
   const supabaseAdmin = getClawCloudSupabaseAdmin();
+  const loadLegacyFallback = async () => {
+    const legacy = await supabaseAdmin
+      .from("chat_threads")
+      .select("active_result")
+      .eq("id", buildLegacyAppAccessConsentRowId(userId))
+      .eq("user_id", userId)
+      .maybeSingle()
+      .catch(() => ({ data: null }));
+
+    const normalizedLegacy = storedConsentFromLegacyPayload(userId, legacy.data?.active_result);
+    if (normalizedLegacy) {
+      return normalizedLegacy;
+    }
+
+    if (legacy.data?.active_result) {
+      await supabaseAdmin
+        .from("chat_threads")
+        .delete()
+        .eq("id", buildLegacyAppAccessConsentRowId(userId))
+        .eq("user_id", userId)
+        .catch(() => undefined);
+    }
+
+    return null;
+  };
+
   const { data, error } = await supabaseAdmin
     .from(APP_ACCESS_CONSENT_TABLE)
     .select("request, original_message")
@@ -377,30 +417,11 @@ async function loadPersistedLatestAppAccessConsent(userId: string) {
     .maybeSingle();
 
   if (error) {
-    if (isClawCloudMissingSchemaMessage(error.message)) {
-      const legacy = await supabaseAdmin
-        .from("chat_threads")
-        .select("active_result")
-        .eq("id", buildLegacyAppAccessConsentRowId(userId))
-        .eq("user_id", userId)
-        .maybeSingle()
-        .catch(() => ({ data: null }));
-
-      const normalizedLegacy = storedConsentFromLegacyPayload(userId, legacy.data?.active_result);
-      if (normalizedLegacy) {
-        return normalizedLegacy;
-      }
-
-      if (legacy.data?.active_result) {
-        await supabaseAdmin
-          .from("chat_threads")
-          .delete()
-          .eq("id", buildLegacyAppAccessConsentRowId(userId))
-          .eq("user_id", userId)
-          .catch(() => undefined);
-      }
-
-      return null;
+    // Production-safe fallback: when the dedicated table is temporarily unavailable
+    // (schema mismatch, network pressure, transient DB errors), keep approvals working.
+    const legacyConsent = await loadLegacyFallback();
+    if (legacyConsent) {
+      return legacyConsent;
     }
 
     return null;
@@ -423,7 +444,7 @@ async function loadPersistedLatestAppAccessConsent(userId: string) {
       .catch(() => undefined);
   }
 
-  return null;
+  return loadLegacyFallback();
 }
 
 async function persistLatestAppAccessConsent(userId: string, consent: StoredAppAccessConsent) {
@@ -449,10 +470,8 @@ async function persistLatestAppAccessConsent(userId: string, consent: StoredAppA
     return;
   }
 
-  if (!isClawCloudMissingSchemaMessage(error.message)) {
-    return;
-  }
-
+  // Fall back to legacy storage whenever the primary consent table write fails.
+  // This keeps cross-process "Yes/No" continuation reliable during DB/schema issues.
   await supabaseAdmin
     .from("chat_threads")
     .upsert({
@@ -488,12 +507,8 @@ async function clearPersistedLatestAppAccessConsent(userId: string, token?: stri
     .delete()
     .eq("user_id", userId);
 
-  if (!error) {
-    return;
-  }
-
-  if (!isClawCloudMissingSchemaMessage(error.message)) {
-    return;
+  if (error && !isClawCloudMissingSchemaMessage(error.message)) {
+    // Continue to legacy cleanup even on transient table-delete errors.
   }
 
   await supabaseAdmin

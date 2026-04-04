@@ -16,13 +16,19 @@ const CURRENT_AFFAIRS_STOP_WAR_PATTERN =
   /\b(?:stop|end|ceasefire|truce|halt|rokne|rokna|khatam|band)\b.{0,30}\b(?:war|conflict)\b|\b(?:war|conflict)\b.{0,30}\b(?:stop|end|ceasefire|truce|halt|rokne|rokna|khatam|band)\b/i;
 
 const CURRENT_AFFAIRS_STATUS_PATTERN =
-  /\b(open|opened|opening|closed|close|closure|reopen|reopened|reopening|blocked|block|blockade|shut|shutdown|safe|unsafe|stopped|stop|ended|ending|escalat(?:e|ed|ing|ion)|de-?escalat(?:e|ed|ing|ion)|resolved|ongoing)\b/i;
+  /\b(status|situation|open|opened|opening|closed|close|closure|reopen|reopened|reopening|blocked|block|blockade|shut|shutdown|safe|unsafe|stopped|stop|ended|ending|escalat(?:e|ed|ing|ion)|de-?escalat(?:e|ed|ing|ion)|resolved|ongoing)\b/i;
 
 const CURRENT_AFFAIRS_LOCATION_PATTERN =
   /\b(strait of hormuz|hormuz|taiwan strait|red sea|suez canal|gaza|west bank|south china sea|black sea|caribbean|cuba|havana|border|shipping lane|shipping lanes|shipping route|shipping routes|nuclear deal)\b/i;
 
 const CURRENT_AFFAIRS_LOGISTICS_PATTERN =
   /\b(tanker(?:s)?|vessel(?:s)?|shipment(?:s)?|cargo|ship(?:s|ped|ping)?|fuel(?:\s+supply| supplies| supply)?|deliver(?:y|ies|ed|ing)?|dispatch(?:ed|es|ing)?|send(?:ing|s|sent)?|export(?:s|ed|ing)?|import(?:s|ed|ing)?|dock(?:ed|ing)|port\s+call(?:s)?)\b/i;
+
+const CURRENT_AFFAIRS_LOGISTICS_STATUS_CUE_PATTERN =
+  /\b(reach(?:ed|es|ing)?|arriv(?:e|ed|es|ing)|dock(?:ed|ing|s)?|anchor(?:ed|ing|s)?|port|harbor|harbour|berth|where is|location|status)\b/i;
+
+const CURRENT_AFFAIRS_LOGISTICS_QUANTITY_CUE_PATTERN =
+  /\b(how much|how many|how large|quantity|amount|cargo size|cargo amount|barrels?|bbl|tons?|tonnes?|oil is there|fuel is there|load)\b/i;
 
 const CURRENT_AFFAIRS_POWER_CRISIS_PATTERN =
   /\b(blackout(?:s)?|power outage(?:s)?|outage(?:s)?|power cuts?|load shedding|grid failure|grid failures|grid collapse|grid instability|grid emergency|power crisis|energy crisis|rolling blackout(?:s)?|rolling outage(?:s)?|nationwide blackout(?:s)?|nationwide outage(?:s)?|countrywide blackout(?:s)?|countrywide outage(?:s)?|no electricity|without electricity|electricity shortage|power shortage|generation shortfall)\b/i;
@@ -40,7 +46,7 @@ const CURRENT_AFFAIRS_AMBIGUOUS_FILLER =
   /\b(?:today|todays|today's|right now|latest|current|currently|as of now|news|update|updates)\b/gi;
 
 const AMBIGUOUS_CURRENT_WAR_PATTERN =
-  /\b(?:the\s+)?(?:current|ongoing)\s+(?:war|conflict)\b/i;
+  /\b(?:the\s+)?(?:current|ongoing|right now)\s+(?:war|conflict)\b|\b(?:war|conflict)\b.{0,24}\b(?:status|situation)\b|\b(?:status|situation)\b.{0,24}\b(?:war|conflict)\b/i;
 
 const NAMED_CONFLICT_CUE_PATTERN =
   /\b(north korea|south korea|russia|ukraine|iran|israel|gaza|hamas|china|taiwan|india|pakistan|sudan|yemen|houthi|houthis|syria|lebanon|hormuz|red sea|venezuela)\b/gi;
@@ -54,8 +60,18 @@ const NAMED_CASE_NOISE_PATTERN =
 const NAMED_CASE_LOCATION_PATTERN =
   /\b(delhi|goa|mumbai|kolkata|bengaluru|bangalore|noida|gurgaon|gurugram|hyderabad|chennai|india|court|police|station|hotel|campus|school|college)\b/i;
 
+const CURRENT_AFFAIRS_SCIENCE_CUE_PATTERN =
+  /\b(quantum mechanics|general relativity|conscious(?:ness| experience)?|decoherence|uncertainty(?: principle)?|g(?:o|ö)del|incompleteness|chaos theory|computable|uncomputable|fixed[- ]point|infinite regress|logical inconsistency|recursive self-?model(?:ing)?|physical laws governing the universe|current models of physics)\b/u;
+
+const CURRENT_AFFAIRS_SCIENCE_ANALYSIS_PATTERN =
+  /\b(theoretically possible|prove|disprove|justify|formal proof|counterexample|formal boundary|analy[sz]e|simulate itself|simulate the universe|exact quantum state)\b/i;
+
 function normalizeCurrentAffairsQuestion(question: string) {
   return normalizeRegionalQuestion(question)
+    .replace(/\babhi\b/gi, "right now")
+    .replace(/\baaj\b/gi, "today")
+    .replace(/\b(yudh|jang|jung|ladai|larai)\b/gi, "war")
+    .replace(/\b(stithi|sthiti|halat|haalat)\b/gi, "status")
     .replace(/\bkyu+n\b/gi, "why")
     .replace(/\bmai\b/gi, "in")
     .replace(/\bapna\b/gi, "its")
@@ -134,6 +150,21 @@ export function looksLikeCurrentAffairsQuestion(question: string): boolean {
     return false;
   }
 
+  // Historical events/topics should not be routed to current affairs
+  if (
+    /\b(world\s*war\s*[12i]+|ww[12]|cold\s*war\s*(era)?|french\s*revolution|american\s*revolution|mughal|ottoman|roman\s*empire|british\s*raj|independence\s*movement|ancient|medieval|renaissance|baroque|victorian|industrial\s*revolution)\b/i.test(text)
+    && /\b(detail|history|batao|btao|samjhao|explain|tell\s*me|describe|summary|baare|about|overview|itihas)\b/i.test(text)
+  ) {
+    return false;
+  }
+
+  if (
+    CURRENT_AFFAIRS_SCIENCE_CUE_PATTERN.test(text)
+    && CURRENT_AFFAIRS_SCIENCE_ANALYSIS_PATTERN.test(text)
+  ) {
+    return false;
+  }
+
   const hasActor = CURRENT_AFFAIRS_ACTOR_PATTERN.test(text);
   const hasEvent = CURRENT_AFFAIRS_EVENT_PATTERN.test(text);
   const hasStatus = CURRENT_AFFAIRS_STATUS_PATTERN.test(text);
@@ -143,12 +174,16 @@ export function looksLikeCurrentAffairsQuestion(question: string): boolean {
   const hasPowerInfrastructure = CURRENT_AFFAIRS_POWER_INFRASTRUCTURE_PATTERN.test(text);
   const startsAsYesNo = CURRENT_AFFAIRS_QUESTION_PATTERN.test(text);
 
+  // Explicit "right now" / "currently" + actor/location = always current affairs
+  const hasRecencyMarker = /\b(right now|currently|at present|these days|nowadays|latest|today|abhi|filhal)\b/i.test(text);
+
   return Boolean(
     (hasActor && (hasEvent || hasStatus || hasDeadline || hasPowerCrisis))
     || (hasLocation && (hasEvent || hasStatus || hasDeadline || hasPowerCrisis))
     || (hasDeadline && hasEvent)
     || (startsAsYesNo && (hasActor || hasLocation) && (hasEvent || hasStatus || hasPowerCrisis))
     || (/^(?:why|how)\b/.test(text) && (hasActor || hasLocation) && (hasPowerCrisis || hasPowerInfrastructure))
+    || (hasRecencyMarker && (hasActor || hasLocation))
   );
 }
 
@@ -160,6 +195,15 @@ export function looksLikeCurrentAffairsPowerCrisisQuestion(question: string): bo
 
   return looksLikeCurrentAffairsQuestion(text)
     && (CURRENT_AFFAIRS_POWER_CRISIS_PATTERN.test(text) || CURRENT_AFFAIRS_POWER_INFRASTRUCTURE_PATTERN.test(text));
+}
+
+export function looksLikeCurrentAffairsLogisticsQuestion(question: string): boolean {
+  const text = normalizeCurrentAffairsQuestion(question).toLowerCase();
+  if (!text) {
+    return false;
+  }
+
+  return looksLikeCurrentAffairsQuestion(text) && CURRENT_AFFAIRS_LOGISTICS_PATTERN.test(text);
 }
 
 export function looksLikeNamedCaseQuestion(question: string): boolean {
@@ -220,13 +264,29 @@ function countNamedConflictCues(text: string) {
   return new Set(text.match(NAMED_CONFLICT_CUE_PATTERN) ?? []).size;
 }
 
-export function looksLikeAmbiguousCurrentWarQuestion(question: string): boolean {
-  const text = normalizeCurrentAffairsQuestion(question).toLowerCase();
-  if (!text || !AMBIGUOUS_CURRENT_WAR_PATTERN.test(text)) {
+function hasExplicitNamedConflictScope(text: string) {
+  return (
+    /\b(?:iran|israel|russia|ukraine|india|pakistan|china|taiwan|north korea|south korea|gaza|hamas)\b.{0,20}\b(?:and|vs\.?|versus|-)\b.{0,20}\b(?:iran|israel|russia|ukraine|india|pakistan|china|taiwan|north korea|south korea|gaza|hamas)\b/i.test(text)
+    || /\b(?:current|ongoing)\s+(?:war|conflict)\s+of\s+.+\b(?:and|vs\.?|versus|-)\b.+/i.test(text)
+    || /\b(?:war|conflict)\s+between\s+.+\b(?:and|vs\.?|versus|-)\b.+/i.test(text)
+  );
+}
+
+export function looksLikeAmbiguousCurrentWarQuestion(_question: string): boolean {
+  const text = normalizeCurrentAffairsQuestion(_question).toLowerCase();
+  if (!text) {
     return false;
   }
 
-  return countNamedConflictCues(text) < 2 && !CURRENT_AFFAIRS_LOCATION_PATTERN.test(text);
+  if (!AMBIGUOUS_CURRENT_WAR_PATTERN.test(text)) {
+    return false;
+  }
+
+  if (hasExplicitNamedConflictScope(text)) {
+    return false;
+  }
+
+  return countNamedConflictCues(text) < 2;
 }
 
 export function buildCurrentAffairsClarificationReply(question: string): string {
@@ -326,13 +386,33 @@ export function buildCurrentAffairsQueries(question: string): string[] {
 
   if (CURRENT_AFFAIRS_LOGISTICS_PATTERN.test(cleanedTopic)) {
     const [primaryActor, secondaryActor] = actors;
+    const asksLogisticsStatus = CURRENT_AFFAIRS_LOGISTICS_STATUS_CUE_PATTERN.test(cleanedTopic);
+    const asksCargoQuantity = CURRENT_AFFAIRS_LOGISTICS_QUANTITY_CUE_PATTERN.test(cleanedTopic);
     if (primaryActor && secondaryActor) {
+      if (asksLogisticsStatus) {
+        queries.add(`${primaryActor} ${secondaryActor} tanker arrived anchored latest Reuters AP BBC`);
+      }
+      if (asksCargoQuantity) {
+        queries.add(`${primaryActor} ${secondaryActor} tanker cargo barrels latest Reuters AP BBC`);
+      }
       queries.add(`${primaryActor} ${secondaryActor} tanker shipment latest Reuters AP BBC`);
       queries.add(`${primaryActor} ${secondaryActor} fuel supply latest Reuters AP BBC`);
       queries.add(`${primaryActor} ${secondaryActor} shipping latest Reuters AP BBC`);
     } else if (actorHint) {
+      if (asksLogisticsStatus) {
+        queries.add(`${actorHint} tanker arrived anchored latest Reuters AP BBC`);
+      }
+      if (asksCargoQuantity) {
+        queries.add(`${actorHint} tanker cargo barrels latest Reuters AP BBC`);
+      }
       queries.add(`${actorHint} tanker shipment latest Reuters AP BBC`);
       queries.add(`${actorHint} fuel supply latest Reuters AP BBC`);
+    }
+    if (asksLogisticsStatus) {
+      queries.add(`${cleanedTopic} arrived reached anchored latest Reuters AP BBC`);
+    }
+    if (asksCargoQuantity) {
+      queries.add(`${cleanedTopic} barrels cargo amount latest Reuters AP BBC`);
     }
     queries.add(`${cleanedTopic} explanation Reuters AP BBC`);
   }

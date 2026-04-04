@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import test from "node:test";
 
 import { detectCalendarActionIntent } from "@/lib/clawcloud-calendar-actions";
@@ -16,6 +18,7 @@ import {
   looksLikeClawCloudRefusal,
   summarizeClawCloudAnswerObservabilityRecords,
 } from "@/lib/clawcloud-answer-observability";
+import { setLogLevel } from "@/lib/clawcloud-observability";
 import {
   buildClawCloudModelPlannerDecisionForTest,
   chooseClawCloudCandidateForTest,
@@ -26,8 +29,10 @@ import { detectBillingIntent } from "@/lib/clawcloud-billing-wa";
 import {
   analyzeSendMessageCommandSafety,
   buildParsedSendMessageAction,
+  normalizeContactName,
   parseSendMessageCommand,
 } from "@/lib/clawcloud-contacts";
+import { formatAmbiguousReply } from "@/lib/clawcloud-contacts-v2";
 import { detectDriveIntent } from "@/lib/clawcloud-drive";
 import { answerHolidayQuery, detectHolidayQuery } from "@/lib/clawcloud-holidays";
 import {
@@ -101,7 +106,10 @@ import {
 } from "@/lib/clawcloud-whatsapp-storage";
 import { buildClawCloudWhatsAppContactIdentityGraph } from "@/lib/clawcloud-whatsapp-contact-identity";
 import { scheduleWhatsAppWorkflowRunsFromInbound } from "@/lib/clawcloud-whatsapp-workflows";
-import { filterWhatsAppHistoryRowsForResolvedContactForTest } from "@/lib/clawcloud-whatsapp-inbox";
+import {
+  dedupeWhatsAppHistoryRowsForTest,
+  filterWhatsAppHistoryRowsForResolvedContactForTest,
+} from "@/lib/clawcloud-whatsapp-inbox";
 import { parseOutboundReviewDecisionForTest } from "@/lib/clawcloud-outbound-review";
 import {
   deriveClawCloudSetupGoogleWorkspaceAvailability,
@@ -130,20 +138,29 @@ import {
   resolveStripeWebhookEventId,
 } from "@/lib/clawcloud-billing-webhook-inbox";
 import { buildDisclaimer } from "@/lib/clawcloud-disclaimers";
+import {
+  buildClawCloudSupabaseAuthStorageKey,
+  normalizeClawCloudEmailAuthErrorMessage,
+} from "@/lib/clawcloud-email-auth";
 import { matchesWholeAlias } from "@/lib/clawcloud-intent-match";
+import { pickAuthoritativeClawCloudGoogleAccount } from "@/lib/clawcloud-google-account-selection";
 import {
   detectLocaleFromEmail,
   detectLocalePreferenceCommand,
   extractExplicitReplyLocaleRequest,
+  extractExplicitReplyLocaleRequests,
   inferClawCloudMessageLocale,
   resolveClawCloudReplyLanguage,
   buildClawCloudReplyLanguageInstruction,
 } from "@/lib/clawcloud-i18n";
 import { detectHinglish } from "@/lib/clawcloud-hinglish";
 import {
+  buildUnhandledWhatsAppOperationalClarificationForTest,
+  buildDeterministicConversationReplyForTest,
   buildLocalizedCapabilityReplyForTest,
   buildLocalizedCapabilityReplyFromMessageForTest,
   buildWhatsAppHistoryProfessionalSummaryForTest,
+  detectDirectConversationSignalForTest,
   detectNativeLanguageDirectAnswerLaneIntentForTest,
   detectMultilingualNativeAnswerLaneIntentForTest,
   detectStrictIntentRouteForTest,
@@ -152,27 +169,47 @@ import {
   buildLocalizedDeterministicKnownStoryReplyForTest,
   buildCodingFallbackV2,
   buildTimeboxedProfessionalReplyForTest,
+  maybePromoteVisibleResponseWithLiveBundleForTest,
+  maybeBuildDeterministicProfessionalGreetingDraftForTest,
+  maybeBuildDeterministicStructuredWhatsAppDraftForTest,
+  autoCorrectWhatsAppOutgoingMessageForTest,
+  parseWhatsAppActiveContactSessionCommandForTest,
+  resolveWhatsAppPendingContactSelectionForTest,
+  resolveWhatsAppActiveContactDraftLanguageForTest,
+  resolveWhatsAppDraftingModeForTest,
   detectPendingApprovalContextQuestionForTest,
   detectIntentForTest,
+  inferAnswerLengthProfileForTest,
   detectRequestedLanguageForFallback,
   extractWhatsAppHistoryHintsForTest,
   extractRequestedEmailCount,
+  extractWhatsAppLooseContactFollowUpTargetForTest,
   filterEmailsForPromptWindow,
+  finalizeAgentReplyForTest,
+  inferRecentWhatsAppContactFollowUpIntentForTest,
   inferAppAccessRequirementForTest,
+  isAcceptableAiModelWebAnswerForTest,
+  isLikelyWhatsAppSelfLabelForTest,
   getInboundRouteTimeoutPolicyForTest,
   normalizeReplyForClawCloudDisplay,
   polishClawCloudAnswerStyleForTest,
   routeInboundAgentMessageResult,
+  resolveResponseModeForTest,
   resolveDeterministicKnownStoryReplyForTest,
   resolveRoutingMessageForTest,
   shouldUsePrimaryConversationLaneForTest,
   shouldUsePrimaryDirectAnswerLaneForTest,
   shouldUseSimpleKnowledgeFastLaneForTest,
   shouldUseMultilingualRoutingBridgeForTest,
+  shouldRouteMessageToActiveWhatsAppContactSessionForTest,
   stripClawCloudTrailingFollowUpForTest,
+  usesPastYearAsCurrentForTest,
 } from "@/lib/clawcloud-agent";
 import {
+  buildAppAccessConsentPrompt,
+  clearLatestAppAccessConsent,
   createAppAccessConsentRequest,
+  isClawCloudApprovalFreeModeEnabled,
   rememberLatestAppAccessConsent,
   resolveLatestAppAccessConsentDecision,
   verifyAppAccessConsentToken,
@@ -220,21 +257,27 @@ import {
   fetchLiveDataAndSynthesize,
   isCompleteCountryMetricAnswer,
   renderClawCloudAnswerBundle,
+  shouldUseLiveSearch,
 } from "@/lib/clawcloud-live-search";
 import {
   buildCurrentAffairsQueries,
   buildCurrentAffairsClarificationReply,
+  looksLikeCurrentAffairsLogisticsQuestion,
   looksLikeCurrentAffairsQuestion,
 } from "@/lib/clawcloud-current-affairs";
+
+setLogLevel("error");
 import {
   answerWebSearch,
   answerWebSearchResult,
+  buildNoLiveDataReply,
   buildCurrentAffairsEvidenceAnswer,
   buildSourceBackedLiveAnswerResult,
   buildAiModelEvidenceOnlyAnswer,
   buildEvidenceOnlyAnswer,
   buildNewsQueries,
   detectNewsQuestion,
+  extractAiModelEvidenceMentions,
   filterAiModelEvidenceSources,
   fastNewsSearch,
   resolveNewsSearchTaskWithTimeoutForTest,
@@ -250,6 +293,7 @@ import { isCompleteRetailFuelAnswer } from "@/lib/clawcloud-retail-prices";
 import { answerTaxQuery, detectTaxQuery } from "@/lib/clawcloud-tax";
 import {
   buildClawCloudGoogleAuthUrl,
+  buildClawCloudGoogleLoginAuthUrl,
   confirmGoogleWorkspaceScopeAccess,
   buildGoogleNotConnectedReply,
   buildGoogleWorkspaceScopeMismatchMessage,
@@ -281,9 +325,10 @@ import {
   normalizeReplyApprovalRewriteDraftForTest,
   buildReplyApprovalReviewReply,
 } from "@/lib/clawcloud-reply-approval";
-import { env, isGooglePublicSignInEnabled } from "@/lib/env";
+import { env, getPublicAppConfig, isGooglePublicSignInEnabled } from "@/lib/env";
 import { detectWhatsAppSettingsCommandIntent } from "@/lib/clawcloud-whatsapp-settings-commands";
 import { shouldBootstrapClawCloudWhatsAppWorkspace } from "@/lib/clawcloud-whatsapp";
+import { pickAuthoritativeClawCloudWhatsAppAccount } from "@/lib/clawcloud-whatsapp-account-selection";
 import {
   buildWhatsAppApprovalContextReply,
   buildWhatsAppApprovalReviewReply,
@@ -307,6 +352,7 @@ import {
 } from "@/lib/clawcloud-types";
 import { detectUpiSms, parseUpiSms } from "@/lib/clawcloud-upi";
 import {
+  getWeather,
   looksLikeDirectWeatherQuestion,
   normalizeWeatherLocationName,
   parseWeatherCity,
@@ -319,10 +365,14 @@ import {
 } from "@/lib/clawcloud-whatsapp-streaming";
 import { rankContactCandidates } from "@/lib/clawcloud-contacts-v2";
 import {
+  extractWhatsAppPhoneShareFromChat,
+  extractWhatsAppPhoneShareFromMessage,
+  isWhatsAppResolvedSelfChat,
   resolveDefaultAssistantChatJid,
   shouldRememberAssistantSelfChat,
 } from "@/lib/clawcloud-whatsapp-routing";
 import { detectFinanceQuery, formatFinanceReply, getLiveFinanceData } from "@/lib/clawcloud-finance";
+import { normalizeClawCloudUnderstandingMessage } from "@/lib/clawcloud-query-understanding";
 import {
   detectClawCloudRegionMention,
   inferClawCloudRegionContext,
@@ -401,6 +451,7 @@ test("whatsapp security defaults stay passive unless the user explicitly command
   assert.equal(defaultWhatsAppSettings.allowGroupReplies, false);
   assert.equal(defaultWhatsAppSettings.groupReplyMode, "never");
   assert.equal(defaultWhatsAppSettings.allowWorkflowAutoSend, false);
+  assert.equal(defaultWhatsAppSettings.activeContactSession, null);
 
   assert.equal(shouldRequireExplicitUserCommandForWhatsAppChat("self"), false);
   assert.equal(shouldRequireExplicitUserCommandForWhatsAppChat("direct"), true);
@@ -509,6 +560,31 @@ test("whatsapp inbound workflows never auto-schedule cross-contact actions", asy
   });
 
   assert.deepEqual(runs, []);
+});
+
+test("agent server blocks non-self inbound chats before helper reply branches", () => {
+  const source = readFileSync(path.resolve(process.cwd(), "agent-server.ts"), "utf8");
+  const passiveGuardIndex = source.indexOf(
+    "const assistantSelfTargetJid = resolveAssistantSelfReplyTarget(current, replyTargetJid);",
+  );
+  const helperReplyIndex = source.indexOf("await sendReply(userId, reply, replyTargetJid);");
+
+  assert.ok(passiveGuardIndex > 0);
+  assert.ok(helperReplyIndex > 0);
+  assert.ok(
+    passiveGuardIndex < helperReplyIndex,
+    "the passive external-chat guard must run before media/helper sendReply branches",
+  );
+});
+
+test("agent server assistant replies refuse non-self chat targets", () => {
+  const source = readFileSync(path.resolve(process.cwd(), "agent-server.ts"), "utf8");
+
+  assert.match(
+    source,
+    /const jid = resolveAssistantSelfReplyTarget\(session, targetJid\);/,
+  );
+  assert.match(source, /Blocked non-self assistant reply/);
 });
 
 test("whatsapp runtime progress and health stay bounded and honest", () => {
@@ -1374,6 +1450,25 @@ test("google login callback state requires an exact cookie match", () => {
   }
 });
 
+test("email auth helpers keep Supabase storage keys and HTML parse errors stable", () => {
+  assert.equal(
+    buildClawCloudSupabaseAuthStorageKey("https://anahzdzznusrswpmlzlc.supabase.co"),
+    "sb-anahzdzznusrswpmlzlc-auth-token",
+  );
+
+  assert.match(
+    normalizeClawCloudEmailAuthErrorMessage(
+      "Unexpected token '<', \"<!DOCTYPE html>\" is not valid JSON",
+    ),
+    /temporarily unavailable/i,
+  );
+
+  assert.equal(
+    normalizeClawCloudEmailAuthErrorMessage("Invalid login credentials"),
+    "Incorrect email or password. Please try again.",
+  );
+});
+
 test("google login state prefers the live request origin over the static app URL", () => {
   const previousAgentSecret = env.AGENT_SECRET;
   env.AGENT_SECRET = "test-agent-secret";
@@ -1620,7 +1715,7 @@ test("latest app access consent decisions accept plain yes and no replies", asyn
     );
     const approved = await resolveLatestAppAccessConsentDecision(
       "user-plain",
-      "yes",
+      "Yes.",
       { persist: false },
     );
     assert.equal(approved?.decision, "approve");
@@ -1632,13 +1727,59 @@ test("latest app access consent decisions accept plain yes and no replies", asyn
       "Send message to Maa: Good morning",
       { persist: false },
     );
+    const approvedHindi = await resolveLatestAppAccessConsentDecision(
+      "user-plain",
+      "haan",
+      { persist: false },
+    );
+    assert.equal(approvedHindi?.decision, "approve");
+
+    await rememberLatestAppAccessConsent(
+      "user-plain",
+      consent,
+      "Send message to Maa: Good morning",
+      { persist: false },
+    );
     const denied = await resolveLatestAppAccessConsentDecision(
       "user-plain",
-      "no",
+      "No!",
       { persist: false },
     );
     assert.equal(denied?.decision, "deny");
   } finally {
+    env.AGENT_SECRET = previousAgentSecret;
+  }
+});
+
+test("route resolves app-access Yes/No decisions before fast-lane intent routing", async () => {
+  const previousAgentSecret = env.AGENT_SECRET;
+  env.AGENT_SECRET = "test-agent-secret";
+
+  try {
+    const consent = createAppAccessConsentRequest({
+      userId: "user-route-approval",
+      surface: "gmail",
+      operation: "read",
+      originalMessage: "what is semparo",
+    });
+
+    await rememberLatestAppAccessConsent(
+      "user-route-approval",
+      consent,
+      "what is semparo",
+      { persist: false },
+    );
+
+    const approved = await routeInboundAgentMessageResult(
+      "user-route-approval",
+      "yes",
+    );
+
+    assert.ok(approved.response);
+    assert.match(approved.response ?? "", /semparo/i);
+    assert.doesNotMatch(approved.response ?? "", /no question to answer/i);
+  } finally {
+    await clearLatestAppAccessConsent("user-route-approval", undefined, { persist: false }).catch(() => undefined);
     env.AGENT_SECRET = previousAgentSecret;
   }
 });
@@ -1686,7 +1827,35 @@ test("app access consent routing classifies Gmail, calendar, drive, and WhatsApp
     summary: "read from your WhatsApp",
   });
 
+  assert.deepEqual(inferAppAccessRequirementForTest("tell me the conversation summary with that number"), {
+    surface: "whatsapp",
+    operation: "read",
+    summary: "read from your WhatsApp",
+  });
+  assert.deepEqual(inferAppAccessRequirementForTest("tell me the message of jaideep with me"), {
+    surface: "whatsapp",
+    operation: "read",
+    summary: "read from your WhatsApp",
+  });
+  assert.deepEqual(inferAppAccessRequirementForTest("read and tell me the message of jaideep"), {
+    surface: "whatsapp",
+    operation: "read",
+    summary: "read from your WhatsApp",
+  });
+
   assert.deepEqual(inferAppAccessRequirementForTest("Send message to Maa: Good morning"), {
+    surface: "whatsapp",
+    operation: "write",
+    summary: "use your WhatsApp to send or reply",
+  });
+
+  assert.deepEqual(inferAppAccessRequirementForTest("Send a WhatsApp message to Mehak saying hello from ClawCloud"), {
+    surface: "whatsapp",
+    operation: "write",
+    summary: "use your WhatsApp to send or reply",
+  });
+
+  assert.deepEqual(inferAppAccessRequirementForTest("Reply to Mehak on WhatsApp saying I am testing right now"), {
     surface: "whatsapp",
     operation: "write",
     summary: "use your WhatsApp to send or reply",
@@ -1699,6 +1868,21 @@ test("app access consent routing classifies Gmail, calendar, drive, and WhatsApp
     operation: "read",
     summary: "read from your WhatsApp",
   });
+});
+
+test("direct-action mode keeps app-access prompts informational and disables yes-no gating", () => {
+  assert.equal(isClawCloudApprovalFreeModeEnabled(), true);
+
+  const prompt = buildAppAccessConsentPrompt("whatsapp", "write");
+  assert.doesNotMatch(prompt, /Grant one-time access/i);
+  assert.doesNotMatch(prompt, /Reply "Yes" to continue/i);
+  assert.match(prompt, /without a manual Yes\/No approval step/i);
+});
+
+test("default WhatsApp settings keep approval gates off", () => {
+  assert.equal(defaultWhatsAppSettings.requireApprovalForSensitive, false);
+  assert.equal(defaultWhatsAppSettings.requireApprovalForNewContacts, false);
+  assert.equal(defaultWhatsAppSettings.requireApprovalForFirstOutreach, false);
 });
 
 test("schema compatibility helpers catch missing-column deployments cleanly", () => {
@@ -1792,6 +1976,97 @@ test("setup status can keep WhatsApp connected from the live workspace summary f
   assert.equal(state.gmailConnected, false);
   assert.equal(state.whatsappConnected, true);
   assert.equal(state.whatsappPhone, "918091392311");
+});
+
+test("authoritative WhatsApp account selection prefers the active live row over stale duplicates", () => {
+  const account = pickAuthoritativeClawCloudWhatsAppAccount([
+    {
+      phone_number: "919111111111",
+      display_name: "Old WhatsApp",
+      is_active: false,
+      connected_at: "2026-03-28T10:00:00.000Z",
+      last_used_at: "2026-03-28T10:05:00.000Z",
+    },
+    {
+      phone_number: "918091392311",
+      display_name: "Live WhatsApp",
+      is_active: true,
+      connected_at: "2026-04-02T20:00:00.000Z",
+      last_used_at: "2026-04-02T20:10:00.000Z",
+    },
+    {
+      phone_number: "919222222222",
+      display_name: "Older Active WhatsApp",
+      is_active: true,
+      connected_at: "2026-04-01T10:00:00.000Z",
+      last_used_at: "2026-04-01T10:05:00.000Z",
+    },
+  ]);
+
+  assert.equal(account?.phone_number, "918091392311");
+  assert.equal(account?.display_name, "Live WhatsApp");
+});
+
+test("setup status prefers the most recent active WhatsApp account when duplicate rows exist", () => {
+  const state = deriveClawCloudSetupConnectionState({
+    connected_accounts: [
+      {
+        provider: "whatsapp",
+        phone_number: "919111111111",
+        display_name: "Older Active WhatsApp",
+        is_active: true,
+        connected_at: "2026-04-01T10:00:00.000Z",
+        last_used_at: "2026-04-01T10:05:00.000Z",
+      },
+      {
+        provider: "whatsapp",
+        phone_number: "918091392311",
+        display_name: "Live WhatsApp",
+        is_active: true,
+        connected_at: "2026-04-02T20:00:00.000Z",
+        last_used_at: "2026-04-02T20:10:00.000Z",
+      },
+    ],
+    global_lite_connections: [],
+  });
+
+  assert.equal(state.whatsappConnected, true);
+  assert.equal(state.whatsappPhone, "918091392311");
+});
+
+test("authoritative Google account selection prefers the most recent active Gmail row over stale duplicates", () => {
+  const account = pickAuthoritativeClawCloudGoogleAccount([
+    {
+      account_email: "founder@example.com",
+      display_name: "Founder Old",
+      is_active: true,
+      connected_at: "2026-04-01T10:00:00.000Z",
+      last_used_at: "2026-04-01T10:05:00.000Z",
+      token_expiry: "2026-04-01T11:00:00.000Z",
+      refresh_token: "old-refresh",
+    },
+    {
+      account_email: "founder@example.com",
+      display_name: "Founder Live",
+      is_active: true,
+      connected_at: "2026-04-03T10:00:00.000Z",
+      last_used_at: "2026-04-03T10:05:00.000Z",
+      token_expiry: "2026-04-03T11:00:00.000Z",
+      refresh_token: "live-refresh",
+    },
+    {
+      account_email: "founder@example.com",
+      display_name: "Founder Inactive",
+      is_active: false,
+      connected_at: "2026-04-04T10:00:00.000Z",
+      last_used_at: "2026-04-04T10:05:00.000Z",
+      token_expiry: "2026-04-04T11:00:00.000Z",
+      refresh_token: "inactive-refresh",
+    },
+  ]);
+
+  assert.equal(account?.display_name, "Founder Live");
+  assert.equal(account?.refresh_token, "live-refresh");
 });
 
 test("setup Google Workspace availability leaves Lite mode only when rollout is actually open", () => {
@@ -1932,6 +2207,76 @@ test("whatsapp personal assistant channel stays anchored to self chat", () => {
   assert.equal(
     resolveDefaultAssistantChatJid(null, "918888777766@s.whatsapp.net"),
     "918888777766@s.whatsapp.net",
+  );
+});
+
+test("whatsapp self chat detection respects resolved lid mappings", () => {
+  assert.equal(
+    isWhatsAppResolvedSelfChat(
+      "919999888877",
+      "247046619549753@lid",
+      "919999888877@s.whatsapp.net",
+    ),
+    true,
+  );
+  assert.equal(
+    isWhatsAppResolvedSelfChat(
+      "919999888877",
+      "247046619549753@lid",
+      "918888777766@s.whatsapp.net",
+    ),
+    false,
+  );
+  assert.equal(
+    isWhatsAppResolvedSelfChat(
+      "919999888877",
+      "919999888877@s.whatsapp.net",
+    ),
+    true,
+  );
+});
+
+test("whatsapp phone-share extraction learns lid to direct mappings from chats and messages", () => {
+  assert.deepEqual(
+    extractWhatsAppPhoneShareFromChat({
+      id: "247046619549753@lid",
+      pnJid: "919999888877@s.whatsapp.net",
+    }),
+    {
+      lidJid: "247046619549753@lid",
+      directJid: "919999888877@s.whatsapp.net",
+    },
+  );
+
+  assert.deepEqual(
+    extractWhatsAppPhoneShareFromChat({
+      id: "919999888877@s.whatsapp.net",
+      lidJid: "247046619549753@lid",
+    }),
+    {
+      lidJid: "247046619549753@lid",
+      directJid: "919999888877@s.whatsapp.net",
+    },
+  );
+
+  assert.deepEqual(
+    extractWhatsAppPhoneShareFromMessage({
+      key: {
+        remoteJid: "247046619549753@lid",
+      },
+      message: {
+        extendedTextMessage: {
+          text: "hi",
+          contextInfo: {
+            pnJid: "919999888877@s.whatsapp.net",
+          },
+        },
+      },
+    }),
+    {
+      lidJid: "247046619549753@lid",
+      directJid: "919999888877@s.whatsapp.net",
+    },
   );
 });
 
@@ -2361,9 +2706,9 @@ test("phase 4 profile formatting separates confirmed profile facts from pending 
 
   const reply = formatProfileReply(facts);
   assert.match(reply, /saved profile \(1 confirmed fact\)/i);
-  assert.match(reply, /Suggested, not yet confirmed/i);
-  assert.match(reply, /Timezone:\* Asia\/Dubai/i);
-  assert.match(reply, /pending confirmation/i);
+  assert.match(reply, /Useful things you can still teach me/i);
+  assert.match(reply, /Remember my preferred tone is concise and direct/i);
+  assert.doesNotMatch(reply, /Asia\/Dubai/i);
 });
 
 test("phase 4 memory audit commands explain why a fact is remembered", () => {
@@ -2456,6 +2801,14 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
     profile: financeProfile,
   });
   assert.equal(evidenceScore, "high");
+
+  const modelCompareProfile = buildClawCloudAnswerQualityProfile({
+    question: "what is the key difference betweeen gpt 5.4 vs opus 4.6 and gemini 3.2 pro and when were they released and rate them all out of 100 accoriding to there performance",
+    intent: "general",
+    category: "general",
+  });
+  assert.equal(modelCompareProfile.domain, "live");
+  assert.equal(modelCompareProfile.requiresLiveGrounding, true);
 
   const lowConfidenceReply = buildClawCloudLowConfidenceReply(
     "Can I sue my landlord immediately?",
@@ -2553,7 +2906,7 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
         "Searched: 26 Mar 2026",
       ].join("\n"),
     }),
-    true,
+    false,
   );
 
   assert.equal(
@@ -2573,6 +2926,37 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
       ].join("\n"),
     }),
     false,
+  );
+
+  assert.equal(
+    isClawCloudGroundedLiveAnswer({
+      question: "who is the richest person of the world",
+      answer: [
+        "*Recommendation*",
+        "Use the real-time Forbes tracker as your single source of truth.",
+        "",
+        "*Bottom Line*",
+        "Right now Elon Musk is the richest person alive at ~$312B.",
+        "",
+        "As of June 4, 2025",
+        "Sources: forbes.com",
+      ].join("\n"),
+    }),
+    false,
+  );
+
+  assert.equal(
+    isClawCloudGroundedLiveAnswer({
+      question: "who is the richest person of the world",
+      answer: [
+        "*Current richest person in the world:* *Elon Musk*",
+        "*Forbes live net worth:* *$496.5B*",
+        "*Rank source:* Forbes Real-Time Billionaires",
+        "*As of:* March 30, 2026, 09:42 AM UTC",
+        "Source: forbes.com (Real-Time Billionaires)",
+      ].join("\n"),
+    }),
+    true,
   );
 });
 
@@ -2785,7 +3169,9 @@ test("primary direct-answer lane catches standalone knowledge prompts beyond wh-
   assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("overview of photosynthesis"), true);
   assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("photosynthesis process"), true);
   assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("latest stock market news"), false);
+  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("who is the richest person of the world"), false);
   assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("show my gmail inbox"), false);
+  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("Talk to Maa on my behalf"), false);
   assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("deep: overview of photosynthesis", "deep"), false);
 });
 
@@ -2886,6 +3272,12 @@ test("locale preference commands are explicit and do not depend on email domains
     label: "Hindi",
   });
 
+  assert.deepEqual(detectLocalePreferenceCommand("reply in thai"), {
+    type: "set",
+    locale: "th",
+    label: "Thai",
+  });
+
   assert.deepEqual(detectLocalePreferenceCommand("what is my language"), {
     type: "show",
   });
@@ -2903,6 +3295,30 @@ test("reply language resolver mirrors the user's current message language when i
   assert.equal(inferClawCloudMessageLocale("Bonjour, explique-moi ça clairement."), "fr");
   assert.equal(inferClawCloudMessageLocale("Can you explain this clearly today?"), "en");
   assert.equal(extractExplicitReplyLocaleRequest("tell me the story of my demon in korean"), "ko");
+  assert.equal(
+    extractExplicitReplyLocaleRequest("Tamam Şimdi Bana Bhool Bhulaiyaa 2'nin Tayca Hikayesini Ver"),
+    "th",
+  );
+  assert.deepEqual(
+    extractExplicitReplyLocaleRequests("tell me the story of avannger infinity war in korean and chinese"),
+    ["ko", "zh"],
+  );
+  assert.equal(
+    extractExplicitReplyLocaleRequest("\u8acb\u7528\u82f1\u6587\u66ff\u6211\u8ddf\u7238\u7238\u8aaa\u3002"),
+    "en",
+  );
+  assert.equal(
+    extractExplicitReplyLocaleRequest("\u82f1\u8a9e\u3067\u304a\u7236\u3055\u3093\u306b\u8a71\u3057\u3066"),
+    "en",
+  );
+  assert.equal(
+    extractExplicitReplyLocaleRequest("\uc601\uc5b4\ub85c \uc544\ube60\ud55c\ud14c \ub9d0\ud574"),
+    "en",
+  );
+  assert.equal(
+    extractExplicitReplyLocaleRequest("\u0e0a\u0e48\u0e27\u0e22\u0e1e\u0e39\u0e14\u0e01\u0e31\u0e1a\u0e1e\u0e48\u0e2d\u0e40\u0e1b\u0e47\u0e19\u0e20\u0e32\u0e29\u0e32\u0e2d\u0e31\u0e07\u0e01\u0e24\u0e29"),
+    "en",
+  );
 
   const spanish = resolveClawCloudReplyLanguage({
     message: "Necesito ayuda con esto hoy, por favor.",
@@ -2918,12 +3334,40 @@ test("reply language resolver mirrors the user's current message language when i
   assert.equal(english.locale, "en");
   assert.equal(english.source, "mirrored_message");
 
+  const englishContactHandoff = resolveClawCloudReplyLanguage({
+    message: "Talk to Maa on my behalf",
+    preferredLocale: "es",
+  });
+  assert.equal(englishContactHandoff.locale, "en");
+  assert.equal(englishContactHandoff.source, "mirrored_message");
+
+  const chineseContactHandoff = resolveClawCloudReplyLanguage({
+    message: "\u8acb\u66ff\u6211\u8ddf\u7238\u7238\u8aaa\u3002",
+    preferredLocale: "en",
+  });
+  assert.equal(chineseContactHandoff.locale, "zh");
+  assert.equal(chineseContactHandoff.source, "mirrored_message");
+
   const explicitKorean = resolveClawCloudReplyLanguage({
     message: "tell me the story of my demon in korean",
     preferredLocale: "en",
   });
   assert.equal(explicitKorean.locale, "ko");
   assert.equal(explicitKorean.source, "explicit_request");
+
+  const explicitThaiFromTurkish = resolveClawCloudReplyLanguage({
+    message: "Tamam Şimdi Bana Bhool Bhulaiyaa 2'nin Tayca Hikayesini Ver",
+    preferredLocale: "en",
+  });
+  assert.equal(explicitThaiFromTurkish.locale, "th");
+  assert.equal(explicitThaiFromTurkish.source, "explicit_request");
+
+  const chineseExplicitEnglish = resolveClawCloudReplyLanguage({
+    message: "\u8acb\u7528\u82f1\u6587\u66ff\u6211\u8ddf\u7238\u7238\u8aaa\u3002",
+    preferredLocale: "zh",
+  });
+  assert.equal(chineseExplicitEnglish.locale, "en");
+  assert.equal(chineseExplicitEnglish.source, "explicit_request");
 });
 
 test("reply language resolver keeps Hinglish in Roman script instead of forcing pure Hindi", () => {
@@ -2955,6 +3399,180 @@ test("reply language resolver catches common Hinglish shorthand in capability pr
   assert.equal(resolution.preserveRomanScript, true);
 });
 
+test("reply language resolver keeps active-contact Hinglish commands in Roman script", () => {
+  const startResolution = resolveClawCloudReplyLanguage({
+    message: "ab mere behalf me aap dii se baat karange",
+    preferredLocale: "en",
+  });
+  assert.equal(detectHinglish("ab mere behalf me aap dii se baat karange"), true);
+  assert.equal(startResolution.locale, "en");
+  assert.equal(startResolution.source, "hinglish_message");
+  assert.equal(startResolution.preserveRomanScript, true);
+
+  const statusResolution = resolveClawCloudReplyLanguage({
+    message: "abhi kis se baat kar rahe ho",
+    preferredLocale: "en",
+  });
+  assert.equal(detectHinglish("abhi kis se baat kar rahe ho"), true);
+  assert.equal(statusResolution.locale, "en");
+  assert.equal(statusResolution.source, "hinglish_message");
+  assert.equal(statusResolution.preserveRomanScript, true);
+});
+
+test("reply language resolver avoids stale history locale for short ambiguous greetings", () => {
+  const staleHistoryMessage = "awak boleh bantu saya hari ini";
+  const staleHistoryLocale = inferClawCloudMessageLocale(staleHistoryMessage);
+  assert.notEqual(staleHistoryLocale, "en");
+  assert.ok(staleHistoryLocale === "ms" || staleHistoryLocale === "id");
+
+  const resolution = resolveClawCloudReplyLanguage({
+    message: "hii",
+    preferredLocale: "en",
+    recentUserMessages: [staleHistoryMessage],
+  });
+
+  assert.equal(resolution.locale, "en");
+  assert.equal(resolution.source, "mirrored_message");
+  assert.equal(resolution.preserveRomanScript, false);
+});
+
+test("query understanding normalizes common typos and telegraphic prompts", () => {
+  assert.equal(
+    normalizeClawCloudUnderstandingMessage("telll me stroy of the movi boy next door in koreean"),
+    "tell me the story of the movie boy next door in korean",
+  );
+  assert.equal(
+    normalizeClawCloudUnderstandingMessage("wrtie fibonaci cdoe in pythn"),
+    "write fibonacci code in python",
+  );
+  assert.equal(
+    normalizeClawCloudUnderstandingMessage("capitel japan"),
+    "what is the capital of japan",
+  );
+  assert.deepEqual(
+    detectIntentForTest("capitel japan"),
+    { type: "geography", category: "geography" },
+  );
+});
+
+test("reply language extraction survives misspelled story and locale requests", () => {
+  assert.equal(
+    extractExplicitReplyLocaleRequest("telll me stroy of the movi boy next door in koreean"),
+    "ko",
+  );
+});
+
+test("reply language extraction understands noisy WhatsApp send prompts with explicit output language", () => {
+  const message =
+    "send a professional thanku note to aman for helping me in my todays exam and that to in hindi do not change the text only paste the same test ok do it professionally";
+
+  assert.equal(extractExplicitReplyLocaleRequest(message), "hi");
+
+  const resolution = resolveClawCloudReplyLanguage({
+    message,
+    preferredLocale: "en",
+  });
+
+  assert.equal(resolution.locale, "hi");
+  assert.equal(resolution.source, "explicit_request");
+});
+
+test("reply language extraction understands WhatsApp read prompts with explicit output language", () => {
+  const message = "tell me the messages of jaideep with me and that too in hindi please";
+
+  assert.equal(extractExplicitReplyLocaleRequest(message), "hi");
+
+  const resolution = resolveClawCloudReplyLanguage({
+    message,
+    preferredLocale: "en",
+  });
+
+  assert.equal(resolution.locale, "hi");
+  assert.equal(resolution.source, "explicit_request");
+});
+
+test("reply language resolution recognizes explicit Sanskrit output requests", () => {
+  const resolution = resolveClawCloudReplyLanguage({
+    message: "explain binary search in sanskrit",
+    preferredLocale: "en",
+  });
+
+  assert.equal(resolution.locale, "hi");
+  assert.equal(resolution.source, "explicit_request");
+  assert.equal(resolution.targetLanguageName, "Sanskrit");
+  assert.match(buildClawCloudReplyLanguageInstruction(resolution), /Sanskrit/i);
+  assert.doesNotMatch(buildClawCloudReplyLanguageInstruction(resolution), /Hindi/i);
+});
+
+test("reply language resolution mirrors Sanskrit prompts instead of drifting to a different language", () => {
+  const message =
+    "यदि कस्यचित् संगणक-प्रणाल्याः समय-जटिलता O(nlogn) अस्ति, तथा च तस्याः स्थान-जटिलता O(1) अस्ति, तर्हि व्यवहारिक-सीमाः कुत्र भवन्ति?";
+
+  const resolution = resolveClawCloudReplyLanguage({
+    message,
+    preferredLocale: "en",
+  });
+
+  assert.equal(resolution.locale, "hi");
+  assert.equal(resolution.source, "mirrored_message");
+  assert.equal(resolution.targetLanguageName, "Sanskrit");
+  assert.match(buildClawCloudReplyLanguageInstruction(resolution), /Sanskrit/i);
+  assert.doesNotMatch(buildClawCloudReplyLanguageInstruction(resolution), /Hindi/i);
+});
+
+test("reply language resolver mirrors Roman Punjabi and keeps Roman script", () => {
+  const message = "tusi lassi pasand krdo";
+  assert.equal(inferClawCloudMessageLocale(message), "pa");
+
+  const mirrored = resolveClawCloudReplyLanguage({
+    message,
+    preferredLocale: "en",
+  });
+  assert.equal(mirrored.locale, "pa");
+  assert.equal(mirrored.source, "mirrored_message");
+  assert.equal(mirrored.preserveRomanScript, true);
+
+  const samePreferred = resolveClawCloudReplyLanguage({
+    message,
+    preferredLocale: "pa",
+  });
+  assert.equal(samePreferred.locale, "pa");
+  assert.equal(samePreferred.source, "stored_preference");
+  assert.equal(samePreferred.preserveRomanScript, true);
+
+  const instruction = buildClawCloudReplyLanguageInstruction(mirrored);
+  assert.match(instruction, /Roman script/i);
+});
+
+test("latin-script operational commands do not inherit stale non-English locale from history", () => {
+  const resolution = resolveClawCloudReplyLanguage({
+    message: "ok send hii to aatish",
+    preferredLocale: "fi",
+    recentUserMessages: [
+      "terima kasih, saya setuju",
+      "awas boleh bantu saya hari ini",
+    ],
+  });
+
+  assert.equal(resolution.locale, "en");
+  assert.equal(resolution.source, "mirrored_message");
+  assert.equal(resolution.preserveRomanScript, false);
+});
+
+test("plain English follow-up queries stay English even when stored preference is non-English", () => {
+  const resolution = resolveClawCloudReplyLanguage({
+    message: "is it has its branch in lpu",
+    preferredLocale: "af",
+    recentUserMessages: [
+      "vertel my die storie in afrikaans",
+    ],
+  });
+
+  assert.equal(resolution.locale, "en");
+  assert.equal(resolution.source, "mirrored_message");
+  assert.equal(resolution.preserveRomanScript, false);
+});
+
 test("localized capability replies stay conversational and mirror the current language", () => {
   const hinglishReply = buildLocalizedCapabilityReplyFromMessageForTest("aap kese ho or aap kya kr skte ho");
   assert.match(hinglishReply, /Main theek hoon/i);
@@ -2964,6 +3582,47 @@ test("localized capability replies stay conversational and mirror the current la
   const spanishReply = buildLocalizedCapabilityReplyForTest("que puedes hacer", "es");
   assert.match(spanishReply, /Puedo ayudarte/i);
   assert.match(spanishReply, /Dime la tarea exacta/i);
+});
+
+test("deterministic multilingual conversation detection catches Russian name-exchange prompts", () => {
+  const signal = detectDirectConversationSignalForTest("Привет, меня зовут Шубхам, а как тебя зовут?");
+  assert.equal(signal?.asksAssistantName, true);
+  assert.equal(signal?.userName, "Шубхам");
+
+  const reply = buildDeterministicConversationReplyForTest("Привет, меня зовут Шубхам, а как тебя зовут?");
+  assert.match(reply ?? "", /ClawCloud/i);
+  assert.match(reply ?? "", /Шубхам/u);
+});
+
+test("deterministic multilingual conversation detection catches Chinese and Korean name-exchange prompts", () => {
+  const chineseSignal = detectDirectConversationSignalForTest("你好，我叫 Shubham，你叫什么名字？");
+  assert.equal(chineseSignal?.asksAssistantName, true);
+  assert.equal(chineseSignal?.userName, "Shubham");
+
+  const chineseReply = buildDeterministicConversationReplyForTest("你好，我叫 Shubham，你叫什么名字？");
+  assert.match(chineseReply ?? "", /ClawCloud/i);
+  assert.match(chineseReply ?? "", /Shubham/i);
+  assert.match(chineseReply ?? "", /你好|我的名字是|我是/u);
+
+  const koreanSignal = detectDirectConversationSignalForTest("안녕, 내 이름은 슈밤이야. 너 이름은 뭐야?");
+  assert.equal(koreanSignal?.asksAssistantName, true);
+  assert.equal(koreanSignal?.userName, "슈밤");
+
+  const koreanReply = buildDeterministicConversationReplyForTest("안녕, 내 이름은 슈밤이야. 너 이름은 뭐야?");
+  assert.match(koreanReply ?? "", /ClawCloud/i);
+  assert.match(koreanReply ?? "", /슈밤/u);
+  assert.match(koreanReply ?? "", /안녕하세요|제 이름은|저는/u);
+});
+
+test("inbound agent route answers Russian name-exchange prompts in Russian", async () => {
+  const result = await routeInboundAgentMessageResult(
+    "test-user",
+    "Привет, меня зовут Шубхам, а как тебя зовут?",
+  );
+
+  assert.match(result.response ?? "", /ClawCloud/i);
+  assert.match(result.response ?? "", /Шубхам/u);
+  assert.match(result.response ?? "", /Привет|Меня зовут|Я ClawCloud/u);
 });
 
 test("multilingual routing bridge promotes native-language prompts onto direct answer lanes", () => {
@@ -3023,6 +3682,32 @@ test("native-language direct answer lane stays available even when English gloss
     ),
     { type: "general", category: "general" },
   );
+});
+
+test("multilingual technical prompts still qualify for translated direct-answer handling", () => {
+  const prompt = "2026年において、世界的なパンデミックと医療データの爆発的増加の中で、リアルタイムに患者の重症化リスクを予測する分散型AIシステムをどのように設計しますか？ さらに、ディファレンシャルプライバシーや連合学習を用いながら、各国の規制やデータ偏りの問題をどのように克服しますか？";
+  const resolution = resolveClawCloudReplyLanguage({
+    message: prompt,
+    preferredLocale: "en",
+  });
+
+  assert.equal(resolution.locale, "ja");
+  assert.equal(
+    shouldUseMultilingualRoutingBridgeForTest(prompt, resolution),
+    true,
+  );
+  const strictRoute = detectStrictIntentRouteForTest(prompt);
+  assert.deepEqual(strictRoute?.intent, { type: "technology", category: "technology" });
+  assert.equal(strictRoute?.locked, true);
+});
+
+test("multilingual gloss routing keeps safe locked technical prompts on a direct-answer lane", () => {
+  const glossIntent = detectMultilingualNativeAnswerLaneIntentForTest(
+    "How would you design a distributed AI system to predict patient deterioration risk in real time during a global pandemic while using differential privacy and federated learning across countries with different regulations and data bias?",
+  );
+
+  assert.ok(glossIntent);
+  assert.ok(["technology", "research", "health", "coding"].includes(glossIntent?.type ?? ""));
 });
 
 test("whole-alias matching blocks substring false positives", () => {
@@ -3085,6 +3770,38 @@ test("coding fallback respects requested language aliases for algorithm prompts"
   assert.match(palindromeRust, /Palindrome Check - Rust/i);
   assert.match(palindromeRust, /```rust/i);
   assert.doesNotMatch(palindromeRust, /```python/i);
+});
+
+test("inbound route solves exact arithmetic deterministically in English", async () => {
+  const result = await routeInboundAgentMessageResult("test-user", "what is 347 * 289 + 56?");
+
+  assert.match(result.response ?? "", /100339/);
+  assert.doesNotMatch(result.response ?? "", /100449/);
+  assert.doesNotMatch(result.response ?? "", /\b(?:berekening|vermenigvuldiging|verskil|optelling|kontrole|korrek)\b/i);
+});
+
+test("inbound route returns runnable fibonacci code for simple coding prompts", async () => {
+  const result = await routeInboundAgentMessageResult("test-user", "write fibonacci code in python");
+
+  assert.match(result.response ?? "", /```python/i);
+  assert.match(result.response ?? "", /def fib\(n: int\) -> int:/i);
+  assert.match(result.response ?? "", /\bComplexity\b/i);
+  assert.doesNotMatch(result.response ?? "", /i could not complete a reliable direct answer/i);
+});
+
+test("inbound route repairs misspelled arithmetic prompts before solving", async () => {
+  const result = await routeInboundAgentMessageResult("test-user", "waht is 347 * 289 + 56");
+
+  assert.match(result.response ?? "", /100339/);
+  assert.doesNotMatch(result.response ?? "", /100449/);
+});
+
+test("inbound route repairs misspelled coding prompts before answering", async () => {
+  const result = await routeInboundAgentMessageResult("test-user", "wrtie fibonaci cdoe in pythn");
+
+  assert.match(result.response ?? "", /```python/i);
+  assert.match(result.response ?? "", /def fib\(n: int\) -> int:/i);
+  assert.match(result.response ?? "", /\bComplexity\b/i);
 });
 
 test("finance replies read like a clean market brief instead of a raw quote dump", () => {
@@ -3398,12 +4115,13 @@ test("official pricing answers use direct provider pages for supported pricing q
   }
 });
 
-test("AI model routing clarifies ambiguous family names and preserves normal writing prompts", async () => {
+test("AI model routing infers Claude family aliases in comparison prompts and preserves normal writing prompts", async () => {
   const ambiguous = detectAiModelRoutingDecision("difference between gpt 5.4 and opus 4.6");
-  assert.equal(ambiguous?.mode, "clarify");
+  assert.equal(ambiguous?.mode, "web_search");
   assert.equal(ambiguous?.kind, "comparison");
-  assert.match(ambiguous?.clarificationReply ?? "", /Model name clarification/i);
-  assert.match(ambiguous?.clarificationReply ?? "", /Claude Opus/i);
+  assert.ok(ambiguous?.officialDomains.includes("openai.com"));
+  assert.ok(ambiguous?.officialDomains.includes("anthropic.com"));
+  assert.ok(ambiguous?.searchQueries.some((query) => /\bClaude Opus 4\.6 official\b/i.test(query)));
 
   const scopedSearch = detectAiModelRoutingDecision("difference between GPT-5.4 and Claude Sonnet 4");
   assert.equal(scopedSearch?.mode, "web_search");
@@ -3439,6 +4157,8 @@ test("AI model routing clarifies ambiguous family names and preserves normal wri
   assert.ok(ranking?.officialDomains.includes("ai.google.dev"));
   assert.ok(ranking?.searchQueries.some((query) => /benchmark leaderboard/i.test(query)));
   assert.ok(ranking?.searchQueries.some((query) => /flagship model official/i.test(query)));
+  assert.ok(ranking?.searchQueries.some((query) => /OpenAI GPT flagship model official site:openai\.com/i.test(query)));
+  assert.ok(ranking?.searchQueries.some((query) => /Anthropic Claude flagship model official site:anthropic\.com/i.test(query)));
 
   assert.equal(detectAiModelRoutingDecision("what is artificial intelligence"), null);
   assert.equal(detectAiModelRoutingDecision("explain machine learning"), null);
@@ -3446,7 +4166,8 @@ test("AI model routing clarifies ambiguous family names and preserves normal wri
   assert.equal(detectAiModelRoutingDecision("write a haiku about rain"), null);
 
   const directReply = await answerWebSearch("difference between gpt 5.4 and opus 4.6");
-  assert.match(directReply, /Model name clarification/i);
+  assert.doesNotMatch(directReply, /Model name clarification/i);
+  assert.match(directReply, /GPT-5\.4|Claude Opus 4\.6|AI model comparison snapshot|AI model frontier snapshot/i);
 });
 
 test("AI model evidence filters out company-app-course noise and keeps source-backed model mentions", () => {
@@ -3487,8 +4208,10 @@ test("AI model evidence filters out company-app-course noise and keeps source-ba
   assert.ok(curated.some((source) => source.domain === "anthropic.com"));
 
   const fallback = buildAiModelEvidenceOnlyAnswer(question, curated);
-  assert.match(fallback, /AI model frontier snapshot/i);
-  assert.match(fallback, /There is no single universal official top-10 ranking/i);
+  assert.match(fallback, /AI model ranking/i);
+  assert.match(fallback, /Evidence-based frontier ranking/i);
+  assert.match(fallback, /Ranking method/i);
+  assert.match(fallback, /Top models in this run/i);
   if (false) {
   assert.match(fallback, /OpenAI — GPT-5\.4/i);
   assert.match(fallback, /Anthropic — Claude Sonnet 4/i);
@@ -3509,8 +4232,11 @@ test("AI model evidence filters out company-app-course noise and keeps source-ba
       score: 0.3,
     },
   ]);
-  assert.match(thinFallback, /I couldn't verify a universal official top-10 ranking/i);
-  assert.match(thinFallback, /Ask for one axis: coding, reasoning, price, latency, multimodal, or open-weight/i);
+  assert.match(thinFallback, /Current frontier shortlist from verified official vendor model pages/i);
+  assert.match(thinFallback, /OpenAI.*GPT-5\.4/i);
+  assert.match(thinFallback, /Google.*Gemini 3\.1 Pro/i);
+  assert.match(thinFallback, /Anthropic.*Claude Opus 4\.6/i);
+  assert.match(thinFallback, /live mixed-source batch was too thin/i);
 
   const compareFallback = buildAiModelEvidenceOnlyAnswer(
     "what is difference between gemini 3.2 pro vs gpt 5.4 and claude opus 4.6 and also there relase date",
@@ -3567,8 +4293,146 @@ test("AI model evidence filters out company-app-course noise and keeps source-ba
   assert.doesNotMatch(noEvidenceCompareFallback, /â€”|â€¢/i);
 });
 
+test("AI model evidence extraction reads official model names from URL slugs when titles are generic", () => {
+  const mentions = extractAiModelEvidenceMentions([
+    {
+      title: "OpenAI",
+      url: "https://openai.com/index/gpt-5-4",
+      snippet: "Latest flagship model.",
+      domain: "openai.com",
+      score: 0.8,
+    },
+    {
+      title: "Anthropic",
+      url: "https://www.anthropic.com/news/claude-opus-4-6",
+      snippet: "Advanced reasoning model.",
+      domain: "anthropic.com",
+      score: 0.79,
+    },
+    {
+      title: "Google DeepMind",
+      url: "https://blog.google/technology/google-deepmind/gemini-3-1-pro/",
+      snippet: "Newest Pro model.",
+      domain: "blog.google",
+      score: 0.78,
+    },
+  ]);
+
+  assert.ok(mentions.some((mention) => /GPT-5\.4/i.test(mention.model)));
+  assert.ok(mentions.some((mention) => /Claude Opus 4\.6/i.test(mention.model)));
+  assert.ok(mentions.some((mention) => /Gemini 3\.1 Pro/i.test(mention.model)));
+});
+
+test("AI model ranking answers stay acceptable on the shared web-search route", () => {
+  const rankingQuestion = "name top 10 best ai model of 2026";
+  const rankingFallback = buildAiModelEvidenceOnlyAnswer(rankingQuestion, [
+    {
+      title: "GPT-5.4",
+      url: "https://openai.com/index/gpt-5-4",
+      snippet: "OpenAI introduces GPT-5.4 with stronger reasoning and coding support.",
+      domain: "openai.com",
+      score: 0.75,
+    },
+    {
+      title: "Claude Opus 4.6",
+      url: "https://www.anthropic.com/news/claude-opus-4-6",
+      snippet: "Anthropic introduces Claude Opus 4.6 for advanced reasoning and coding.",
+      domain: "anthropic.com",
+      score: 0.74,
+    },
+    {
+      title: "Gemini 3.1 Pro",
+      url: "https://blog.google/technology/google-deepmind/gemini-3-1-pro/",
+      snippet: "Google DeepMind announces Gemini 3.1 Pro as its latest Pro model.",
+      domain: "blog.google",
+      score: 0.73,
+    },
+  ]);
+
+  assert.match(rankingFallback, /AI model ranking/i);
+  assert.match(rankingFallback, /Top models in this run/i);
+  assert.equal(
+    isAcceptableAiModelWebAnswerForTest(rankingFallback, rankingQuestion),
+    true,
+  );
+
+  const compareQuestion = "Compare GPT-5.4, Claude Opus 4.6, and Gemini 3.1 Pro for release timing.";
+  const compareFallback = buildAiModelEvidenceOnlyAnswer(compareQuestion, []);
+  assert.match(compareFallback, /AI model comparison snapshot/i);
+  assert.equal(
+    isAcceptableAiModelWebAnswerForTest(compareFallback, compareQuestion),
+    true,
+  );
+});
+
+test("AI model prompts get a domain-specific no-live-data fallback instead of the generic stale-data template", () => {
+  const fallback = buildNoLiveDataReply("name top 10 best ai model of 2026");
+  assert.match(fallback, /AI model ranking/i);
+  assert.doesNotMatch(fallback, /Time-sensitive query/i);
+  assert.doesNotMatch(fallback, /Live search unavailable for this query/i);
+});
+
+test("current-affairs logistics prompts get a domain-specific no-live-data fallback instead of the generic stale-data template", () => {
+  const fallback = buildNoLiveDataReply("is russia oil tanker reached cuba how much oil is there in that tanker");
+  assert.match(fallback, /current-affairs check/i);
+  assert.match(fallback, /could not confirm from the live source batch whether the tanker had already reached Cuba/i);
+  assert.match(fallback, /could not verify a current cargo figure/i);
+  assert.doesNotMatch(fallback, /Time-sensitive query/i);
+  assert.doesNotMatch(fallback, /Live search unavailable for this query/i);
+});
+
+test("AI model ranking answers keep current-year evidence instead of tripping the strict live freshness guard", () => {
+  const question = "name top 10 best ai model of 2026";
+  const result = buildSourceBackedLiveAnswerResult({
+    question,
+    answer: [
+      "*AI model ranking*",
+      "Evidence-based frontier ranking from the current retrieved source batch:",
+      "",
+      "*Ranking method*",
+      "- Order favors repeated current-source support, official vendor confirmation, and the freshest visible release signal.",
+      "",
+      "*Top models in this run*",
+      "1. OpenAI — GPT-5.4",
+      "2. Anthropic — Claude Opus 4.6",
+      "3. Google — Gemini 3.1 Pro",
+    ].join("\n"),
+    sources: [
+      {
+        title: "GPT-5.4",
+        url: "https://openai.com/index/gpt-5-4",
+        snippet: "OpenAI introduces GPT-5.4 with stronger reasoning and coding support.",
+        domain: "openai.com",
+        publishedDate: "2026-03-17T07:00:00.000Z",
+        score: 0.9,
+      },
+      {
+        title: "Claude Opus 4.6",
+        url: "https://www.anthropic.com/news/claude-opus-4-6",
+        snippet: "Anthropic introduces Claude Opus 4.6 for advanced reasoning and coding.",
+        domain: "anthropic.com",
+        publishedDate: "2026-03-18T07:00:00.000Z",
+        score: 0.89,
+      },
+      {
+        title: "Old frontier roundup",
+        url: "https://example.com/frontier-models-2024",
+        snippet: "A 2024 roundup of older frontier models.",
+        domain: "example.com",
+        publishedDate: "2024-06-01T00:00:00.000Z",
+        score: 0.2,
+      },
+    ],
+    officialDomains: ["openai.com", "anthropic.com", "blog.google"],
+  });
+
+  assert.doesNotMatch(result.answer, /\*Freshness check\*/i);
+  assert.equal(result.liveAnswerBundle?.metadata.freshness_guarded, false);
+});
+
 test("send-message parsing keeps contact commands strict and avoids tell-me hijacks", () => {
   assert.equal(parseSendMessageCommand("tell me top 10 richest persons and richest cities of the world"), null);
+  assert.equal(parseSendMessageCommand("tell me the conversation summary with that number"), null);
   assert.equal(parseSendMessageCommand("message me: hello"), null);
 
   const parsed = parseSendMessageCommand("tell Raj that I will be 10 minutes late");
@@ -3576,6 +4440,147 @@ test("send-message parsing keeps contact commands strict and avoids tell-me hija
   assert.equal(parsed?.kind, "contacts");
   assert.equal(parsed?.contactName, "Raj");
   assert.equal(parsed?.message, "I will be 10 minutes late");
+});
+
+test("send-message parsing understands natural WhatsApp send and reply phrasing", () => {
+  const sendParsed = parseSendMessageCommand("Send a WhatsApp message to Mehak saying hello from ClawCloud");
+  assert.ok(sendParsed);
+  assert.equal(sendParsed?.kind, "contacts");
+  assert.equal(sendParsed?.contactName, "Mehak");
+  assert.equal(sendParsed?.message, "hello from ClawCloud");
+
+  const replyParsed = parseSendMessageCommand("Reply to Mehak on WhatsApp saying I am testing right now");
+  assert.ok(replyParsed);
+  assert.equal(replyParsed?.kind, "contacts");
+  assert.equal(replyParsed?.contactName, "Mehak");
+  assert.equal(replyParsed?.message, "I am testing right now");
+});
+
+test("send-message parsing tolerates common typos in send and reply commands", () => {
+  const sendParsed = parseSendMessageCommand("Send mesage to Mehak sayng hello from ClawCloud");
+  assert.ok(sendParsed);
+  assert.equal(sendParsed?.kind, "contacts");
+  assert.equal(sendParsed?.contactName, "Mehak");
+  assert.equal(sendParsed?.message, "hello from ClawCloud");
+
+  const replyParsed = parseSendMessageCommand("Replly to Mehak on whatsap with I am testing right now");
+  assert.ok(replyParsed);
+  assert.equal(replyParsed?.kind, "contacts");
+  assert.equal(replyParsed?.contactName, "Mehak");
+  assert.equal(replyParsed?.message, "I am testing right now");
+});
+
+test("send-message parsing survives soft prefixes and understanding-layer typo cleanup", () => {
+  const prefixed = parseSendMessageCommand("juat message good morning in professional way in hinglish to maa");
+  assert.ok(prefixed);
+  assert.equal(prefixed?.kind, "contacts");
+  assert.equal(normalizeContactName(prefixed?.contactName ?? ""), "maa");
+  assert.equal(prefixed?.message, "good morning in professional way in hinglish");
+
+  const repairedGlueTypo = parseSendMessageCommand("juat message good morning t=in professional way in hinglish to maa");
+  assert.ok(repairedGlueTypo);
+  assert.equal(repairedGlueTypo?.kind, "contacts");
+  assert.equal(normalizeContactName(repairedGlueTypo?.contactName ?? ""), "maa");
+  assert.equal(repairedGlueTypo?.message, "good morning in professional way in hinglish");
+
+  const corrected = parseSendMessageCommand("telll maa that call me when free");
+  assert.ok(corrected);
+  assert.equal(corrected?.kind, "contacts");
+  assert.equal(normalizeContactName(corrected?.contactName ?? ""), "maa");
+  assert.equal(corrected?.message, "call me when free");
+});
+
+test("send-message parsing understands abstract drafting requests for both send and reply commands", () => {
+  const sendParsed = parseSendMessageCommand(
+    "send a professional thanku note to Priyanka for helping me in my todays exam and that to in hindi",
+  );
+  assert.ok(sendParsed);
+  assert.equal(sendParsed?.kind, "contacts");
+  assert.equal(sendParsed?.contactName, "Priyanka");
+  assert.equal(
+    sendParsed?.message,
+    "a professional thanku note for helping me in my todays exam and that to in hindi",
+  );
+
+  const replyParsed = parseSendMessageCommand("reply a polite apology note to Raj for the delay");
+  assert.ok(replyParsed);
+  assert.equal(replyParsed?.kind, "contacts");
+  assert.equal(replyParsed?.contactName, "Raj");
+  assert.equal(replyParsed?.message, "a polite apology note for the delay");
+});
+
+test("send-message parsing ignores internal style markers during approval replay", () => {
+  const parsed = parseSendMessageCommand(
+    "[[clawcloud-style:professional]] send a professional thanku note to Priyanka for helping me in my todays exam and that to in hindi",
+  );
+  assert.ok(parsed);
+  assert.equal(parsed?.kind, "contacts");
+  assert.equal(parsed?.contactName, "Priyanka");
+  assert.equal(
+    parsed?.message,
+    "a professional thanku note for helping me in my todays exam and that to in hindi",
+  );
+});
+
+test("ambiguous whatsapp contact replies ask which exact named contact to use", () => {
+  const reply = formatAmbiguousReply("Priyanka", [
+    {
+      name: "Priyanka Ludhiana",
+      phone: "919876396534",
+      aliases: ["priyanka ludhiana"],
+      score: 0.9,
+      exact: false,
+      matchBasis: "word",
+    },
+    {
+      name: "Priyanka Sharma",
+      phone: "919812345678",
+      aliases: ["priyanka sharma"],
+      score: 0.9,
+      exact: false,
+      matchBasis: "word",
+    },
+  ]);
+
+  assert.match(reply, /I found more than one strong WhatsApp match for "Priyanka"\./);
+  assert.match(reply, /Which Priyanka should I use\?/);
+  assert.match(reply, /\*1\.\* Priyanka Ludhiana - \+919876396534/);
+  assert.match(reply, /\*2\.\* Priyanka Sharma - \+919812345678/);
+});
+
+test("contact ranking drops fuzzy near-miss names when stronger exact-name matches exist", () => {
+  const result = rankContactCandidates("Priyanka", [
+    {
+      name: "Priyanka Ludhiana",
+      phone: "919876396534",
+      jid: null,
+      aliases: ["priyanka", "priyanka ludhiana"],
+      identityKey: "phone:919876396534",
+    },
+    {
+      name: "Priyanka Kumari Mandi Hp",
+      phone: "917590054574",
+      jid: null,
+      aliases: ["priyanka", "priyanka kumari mandi hp"],
+      identityKey: "phone:917590054574",
+    },
+    {
+      name: "Priyanshu Classmate",
+      phone: "918260382319",
+      jid: null,
+      aliases: ["priyanshu", "priyanshu classmate"],
+      identityKey: "phone:918260382319",
+    },
+  ]);
+
+  assert.equal(result.type, "ambiguous");
+  if (result.type === "ambiguous") {
+    assert.deepEqual(
+      result.matches.map((match) => match.name),
+      ["Priyanka Ludhiana", "Priyanka Kumari Mandi Hp"],
+    );
+    assert.doesNotMatch(result.prompt, /Priyanshu/i);
+  }
 });
 
 test("send-message safety blocks scheduled, conditional, and ambiguous recipient commands without breaking normal drafts", () => {
@@ -3638,7 +4643,419 @@ test("send-message action planning escalates multi-recipient and broadcast reque
   }
 });
 
+test("active contact mode parses professional handoff commands and only proxies normal follow-up messages", () => {
+  assert.equal(parseSendMessageCommand("Talk to Aman on my behalf"), null);
+  assert.equal(parseSendMessageCommand("Start talking to Aman on my behalf"), null);
+  assert.equal(parseSendMessageCommand("Handle Aman on my behalf"), null);
+  assert.equal(parseSendMessageCommand("Can you talk to Aman on my behalf?"), null);
+  assert.equal(parseSendMessageCommand("from now onward you will message every question of bhudev"), null);
+  assert.equal(parseSendMessageCommand("میری طرف سے رجنیش سے بات کریں۔"), null);
+  assert.equal(analyzeSendMessageCommandSafety("Talk to Aman on my behalf"), null);
+
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("Talk to Maa on my behalf"),
+    { type: "start", contactName: "Maa" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("Can you talk to Maa on my behalf?"),
+    { type: "start", contactName: "Maa" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("from now onward you will message every question of bhudev"),
+    { type: "start", contactName: "bhudev" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("from now onward you will talk with hansraj lpu on my behalf"),
+    { type: "start", contactName: "hansraj lpu" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("ab se app mere behalf mai maa se baat karange"),
+    { type: "start", contactName: "maa" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("अब से आप मेरी तरफ से माँ से बात करिए"),
+    { type: "start", contactName: "माँ" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("ab mere behalf me aap dii se baat karange"),
+    { type: "start", contactName: "dii" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("ab mere behalf me dii se baat karange"),
+    { type: "start", contactName: "dii" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("میری طرف سے رجنیش سے بات کریں۔"),
+    { type: "start", contactName: "رجنیش" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("هل يمكنك التحدث مع بابا نيابةً عني؟"),
+    { type: "start", contactName: "بابا" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("Stop talking to Maa"),
+    { type: "stop", contactName: "Maa" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("Maa se baat karna band karo"),
+    { type: "stop", contactName: "Maa" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("Who are you talking to right now?"),
+    { type: "status" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("abhi kis se baat kar rahe ho"),
+    { type: "status" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("\u8acb\u66ff\u6211\u8ddf\u7238\u7238\u8aaa\u3002"),
+    { type: "start", contactName: "\u7238\u7238" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("\u4f60\u73fe\u5728\u5728\u8ddf\u8ab0\u8aaa\u8a71\uff1f"),
+    { type: "status" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("\u4e0d\u8981\u518d\u8ddf\u7238\u7238\u8aaa\u8a71\u4e86\u3002"),
+    { type: "stop", contactName: "\u7238\u7238" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("\u79c1\u306e\u4ee3\u308f\u308a\u306b\u304a\u7236\u3055\u3093\u3068\u8a71\u3057\u3066"),
+    { type: "start", contactName: "\u304a\u7236\u3055\u3093" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("\uc9c0\uae08 \ub204\uad6c\ub791 \ub300\ud654\ud558\uace0 \uc788\uc5b4?"),
+    { type: "status" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("\u0e42\u0e2d\u0e40\u0e04 \u0e08\u0e32\u0e01\u0e19\u0e35\u0e49\u0e44\u0e1b\u0e04\u0e38\u0e13\u0e08\u0e30\u0e2a\u0e48\u0e07\u0e02\u0e49\u0e2d\u0e04\u0e27\u0e32\u0e21\u0e44\u0e1b\u0e2b\u0e32\u0e2d\u0e32\u0e21\u0e31\u0e19\u0e43\u0e19\u0e19\u0e32\u0e21\u0e02\u0e2d\u0e07\u0e09\u0e31\u0e19"),
+    { type: "start", contactName: "\u0e2d\u0e32\u0e21\u0e31\u0e19" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("\u0e15\u0e2d\u0e19\u0e19\u0e35\u0e49\u0e04\u0e38\u0e13\u0e01\u0e33\u0e25\u0e31\u0e07\u0e04\u0e38\u0e22\u0e01\u0e31\u0e1a\u0e43\u0e04\u0e23"),
+    { type: "status" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("\u0e2b\u0e22\u0e38\u0e14\u0e04\u0e38\u0e22\u0e01\u0e31\u0e1a\u0e2d\u0e32\u0e21\u0e31\u0e19\u0e41\u0e17\u0e19\u0e09\u0e31\u0e19"),
+    { type: "stop", contactName: "\u0e2d\u0e32\u0e21\u0e31\u0e19" },
+  );
+
+  const activeSession = {
+    contactName: "Maa",
+    phone: "919876543210",
+    jid: "919876543210@s.whatsapp.net",
+    startedAt: "2026-04-03T00:00:00.000Z",
+    sourceMessage: "Talk to Maa on my behalf",
+  };
+
+  assert.equal(
+    shouldRouteMessageToActiveWhatsAppContactSessionForTest(
+      "Please tell her I will be 10 minutes late.",
+      activeSession,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldRouteMessageToActiveWhatsAppContactSessionForTest(
+      "Stop talking to Maa",
+      activeSession,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRouteMessageToActiveWhatsAppContactSessionForTest(
+      "Show my WhatsApp settings",
+      activeSession,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRouteMessageToActiveWhatsAppContactSessionForTest(
+      "Set language to Hindi",
+      activeSession,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRouteMessageToActiveWhatsAppContactSessionForTest(
+      "What is GDP of China right now?",
+      activeSession,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRouteMessageToActiveWhatsAppContactSessionForTest(
+      "What's the weather in Delhi right now?",
+      activeSession,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRouteMessageToActiveWhatsAppContactSessionForTest(
+      "Write a short apology note in Hindi",
+      activeSession,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRouteMessageToActiveWhatsAppContactSessionForTest(
+      "Call me when free.",
+      activeSession,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldRouteMessageToActiveWhatsAppContactSessionForTest(
+      "Where are you right now?",
+      activeSession,
+    ),
+    true,
+  );
+});
+
+test("pending WhatsApp contact resolution understands exact-name and go-for follow-ups", () => {
+  const pending = {
+    kind: "whatsapp_history" as const,
+    requestedName: "hansraj",
+    resumePrompt: "just read the message of me with hansraj",
+    createdAt: new Date().toISOString(),
+    options: [
+      {
+        name: "Hansraj Lpu",
+        phone: "918949826240",
+        jid: "918949826240@s.whatsapp.net",
+      },
+      {
+        name: "Hansraj",
+        phone: "919799402911",
+        jid: "919799402911@s.whatsapp.net",
+      },
+    ],
+  };
+
+  assert.deepEqual(
+    resolveWhatsAppPendingContactSelectionForTest({
+      message: "Hansraj Lpu",
+      pending,
+    }),
+    {
+      type: "selected",
+      option: pending.options[0],
+      resumePrompt: "Show WhatsApp history with Hansraj Lpu",
+    },
+  );
+
+  assert.deepEqual(
+    resolveWhatsAppPendingContactSelectionForTest({
+      message: "go for hansraj lpu",
+      pending,
+    }),
+    {
+      type: "selected",
+      option: pending.options[0],
+      resumePrompt: "Show WhatsApp history with Hansraj Lpu",
+    },
+  );
+});
+
+test("recent WhatsApp clarification turns can classify a loose follow-up contact choice", () => {
+  assert.equal(
+    inferRecentWhatsAppContactFollowUpIntentForTest([
+      {
+        role: "assistant",
+        content: "Try searching with a more specific contact name or a keyword from the message to get accurate results for the WhatsApp messages from Hansraj LPU.",
+      },
+    ]),
+    "whatsapp_history",
+  );
+
+  assert.equal(
+    extractWhatsAppLooseContactFollowUpTargetForTest("go for hansraj lpu"),
+    "hansraj lpu",
+  );
+});
+
+test("full inbound route prioritizes active-contact status and stop commands over casual chat fallbacks", async () => {
+  const start = await routeInboundAgentMessageResult("test-user", "Talk to Aman on my behalf");
+  assert.match(start.response ?? "", /WhatsApp web session is not active right now\./i);
+  assert.match(start.response ?? "", /Please reconnect WhatsApp in setup/i);
+  assert.doesNotMatch(start.response ?? "", /Send "Hello" to/i);
+
+  const questionStyleStart = await routeInboundAgentMessageResult("test-user", "Can you talk to Aman on my behalf?");
+  assert.match(questionStyleStart.response ?? "", /WhatsApp web session is not active right now\./i);
+  assert.doesNotMatch(questionStyleStart.response ?? "", /tell me exactly what you want me to say/i);
+  assert.doesNotMatch(questionStyleStart.response ?? "", /what do you want me to say/i);
+
+  const status = await routeInboundAgentMessageResult("test-user", "abhi kis se baat kar rahe ho");
+  assert.match(status.response ?? "", /Koi active contact mode abhi chal nahi raha hai\./i);
+  assert.match(status.response ?? "", /Talk to Maa on my behalf/i);
+  assert.doesNotMatch(status.response ?? "", /aapki taraf se baat karunga/i);
+
+  const stop = await routeInboundAgentMessageResult("test-user", "Maa se baat karna band karo");
+  assert.match(stop.response ?? "", /Koi active contact mode abhi chal nahi raha hai\./i);
+  assert.match(stop.response ?? "", /Talk to Maa on my behalf/i);
+  assert.doesNotMatch(stop.response ?? "", /kya aap mujhe bata sakte/i);
+});
+
+test("intent detection keeps persistent contact-mode handoff commands out of research fallbacks", () => {
+  assert.deepEqual(
+    detectIntentForTest("from now onward you will message every question of bhudev"),
+    { type: "send_message", category: "send_message" },
+  );
+});
+
+test("near-miss WhatsApp operational prompts fail closed with a WhatsApp clarification instead of a generic answer", () => {
+  const sendClarification = buildUnhandledWhatsAppOperationalClarificationForTest(
+    "message to maa professionally please",
+  );
+  assert.equal(sendClarification?.kind, "send_message");
+  assert.match(sendClarification?.reply ?? "", /WhatsApp send lane/i);
+  assert.match(sendClarification?.reply ?? "", /Send message to Maa: Good morning/i);
+
+  const contactClarification = buildUnhandledWhatsAppOperationalClarificationForTest(
+    "handle maa for me on whatsapp",
+  );
+  assert.equal(contactClarification?.kind, "active_contact");
+  assert.match(contactClarification?.reply ?? "", /WhatsApp contact-mode lane/i);
+  assert.match(contactClarification?.reply ?? "", /Talk to Maa on my behalf/i);
+});
+
+test("final reply pipeline preserves operational WhatsApp history clarifications instead of collapsing them", async () => {
+  const result = await finalizeAgentReplyForTest({
+    locale: "en",
+    question: "just read the message of me with hansraj",
+    intent: "send_message",
+    category: "whatsapp_history",
+    alreadyTranslated: true,
+    preserveRomanScript: false,
+    reply: [
+      'I couldn\'t find synced WhatsApp messages for "hansraj" yet.',
+      "",
+      "Keep this in the WhatsApp history lane by choosing the exact contact below:",
+      "1. hansraj lpu - +918949826240",
+      "",
+      "Reply with the exact contact name, full number, or option number and I will check the right chat.",
+    ].join("\n"),
+  });
+
+  assert.match(result.response ?? "", /I couldn't find synced WhatsApp messages for "hansraj" yet\./i);
+  assert.match(result.response ?? "", /Keep this in the WhatsApp history lane/i);
+  assert.match(result.response ?? "", /1\. hansraj lpu - \+918949826240/i);
+  assert.match(result.response ?? "", /Reply with the exact contact name, full number, or option number/i);
+});
+
+test("active-contact Hinglish status and stop replies stay in Roman Hinglish through the final reply pipeline", async () => {
+  const status = await finalizeAgentReplyForTest({
+    locale: "en",
+    preserveRomanScript: true,
+    question: "abhi kis se baat kar rahe ho",
+    intent: "send_message",
+    category: "send_message",
+    alreadyTranslated: true,
+    reply: [
+      "Abhi active contact: didi (+917876831969)",
+      "",
+      "Yahan aap jo normal messages bhejoge, woh us contact ko jayenge jab tak aap stop nahi bolte, aur main us contact ki recent chat language ke hisaab se adapt karunga unless aap explicitly override karo.",
+      "Stop karne ke liye bolo: _Stop talking to didi_.",
+    ].join("\n"),
+  });
+  assert.match(status.response ?? "", /Abhi active contact:\s*didi(?: \(\+917876831969\))?/i);
+  assert.match(status.response ?? "", /recent chat language ke hisaab se adapt karunga/i);
+  assert.doesNotMatch(status.response ?? "", /No active contact mode is running right now/i);
+  assert.doesNotMatch(status.response ?? "", /Normal messages you send here will go to that contact/i);
+
+  const stop = await finalizeAgentReplyForTest({
+    locale: "en",
+    preserveRomanScript: true,
+    question: "Dii se baat karna band karo",
+    intent: "send_message",
+    category: "send_message",
+    alreadyTranslated: true,
+    reply: [
+      "didi ke liye active contact mode band kar diya gaya hai.",
+      "",
+      "Ab naye messages isi chat me rahenge jab tak aap koi naya contact mode start nahi karte.",
+    ].join("\n"),
+  });
+  assert.match(stop.response ?? "", /didi ke liye active contact mode band kar diya gaya hai\./i);
+  assert.doesNotMatch(stop.response ?? "", /Stopped active contact mode for/i);
+  assert.doesNotMatch(stop.response ?? "", /Active contact mode has been stopped/i);
+
+  const afterStop = await finalizeAgentReplyForTest({
+    locale: "en",
+    preserveRomanScript: true,
+    question: "abhi kis se baat kar rahe ho",
+    intent: "send_message",
+    category: "send_message",
+    alreadyTranslated: true,
+    reply: [
+      "Koi active contact mode abhi chal nahi raha hai.",
+      "",
+      "Naya mode start karne ke liye bolo: _Talk to Maa on my behalf_.",
+    ].join("\n"),
+  });
+  assert.match(afterStop.response ?? "", /Koi active contact mode abhi chal nahi raha hai\./i);
+  assert.doesNotMatch(afterStop.response ?? "", /No active contact mode is running right now/i);
+});
+
+test("active contact mode adapts to the contact's recent language unless a message explicitly overrides it", () => {
+  const hinglishContact = resolveWhatsAppActiveContactDraftLanguageForTest({
+    currentMessage: "Please tell her I will be 10 minutes late.",
+    preferredLocale: "en",
+    contactMessages: ["aap kese ho or aap kya kr skte ho"],
+  });
+  assert.equal(hinglishContact.selection, "contact_history");
+  assert.equal(hinglishContact.resolution.locale, "en");
+  assert.equal(hinglishContact.resolution.preserveRomanScript, true);
+
+  const hindiContact = resolveWhatsAppActiveContactDraftLanguageForTest({
+    currentMessage: "Please tell her I will be 10 minutes late.",
+    preferredLocale: "en",
+    contactMessages: ["hola, necesito ayuda con esto hoy"],
+  });
+  assert.equal(hindiContact.selection, "contact_history");
+  assert.equal(hindiContact.resolution.locale, "es");
+  assert.equal(hindiContact.resolution.preserveRomanScript, false);
+
+  const explicitOverride = resolveWhatsAppActiveContactDraftLanguageForTest({
+    currentMessage: "Say I will be 10 minutes late in English.",
+    preferredLocale: "hi",
+    contactMessages: ["hola, necesito ayuda con esto hoy"],
+  });
+  assert.equal(explicitOverride.selection, "explicit_request");
+  assert.equal(explicitOverride.resolution.locale, "en");
+  assert.equal(explicitOverride.resolution.source, "explicit_request");
+
+  const chineseContact = resolveWhatsAppActiveContactDraftLanguageForTest({
+    currentMessage: "Please tell him I will call later.",
+    preferredLocale: "en",
+    contactMessages: ["\u7238\u7238\uff0c\u6211\u4eca\u5929\u665a\u4e00\u9ede\u6253\u7d66\u4f60\u3002"],
+  });
+  assert.equal(chineseContact.selection, "contact_history");
+  assert.equal(chineseContact.resolution.locale, "zh");
+  assert.equal(chineseContact.resolution.preserveRomanScript, false);
+
+  const thaiContact = resolveWhatsAppActiveContactDraftLanguageForTest({
+    currentMessage: "Please tell Aman I will message later.",
+    preferredLocale: "en",
+    contactMessages: ["\u0e44\u0e14\u0e49 \u0e40\u0e14\u0e35\u0e4b\u0e22\u0e27\u0e04\u0e48\u0e2d\u0e22\u0e04\u0e38\u0e22\u0e01\u0e31\u0e19\u0e19\u0e30"],
+  });
+  assert.equal(thaiContact.selection, "contact_history");
+  assert.equal(thaiContact.resolution.locale, "th");
+  assert.equal(thaiContact.resolution.preserveRomanScript, false);
+});
+
 test("contact ranking resolves family aliases from synced WhatsApp names and recent chat history", () => {
+  assert.equal(normalizeContactName("Dii"), "didi");
+  assert.equal(normalizeContactName("sister"), "didi");
+  assert.equal(normalizeContactName("\u7238\u7238"), "papa");
+  assert.equal(normalizeContactName("\u304a\u7236\u3055\u3093"), "papa");
+  assert.equal(normalizeContactName("\uc5c4\ub9c8"), "maa");
+  assert.equal(normalizeContactName("\u0e41\u0e21\u0e48"), "maa");
+  assert.equal(normalizeContactName("\u0e1e\u0e48\u0e2d"), "papa");
+  assert.equal(normalizeContactName("\u0e1e\u0e35\u0e48\u0e2a\u0e32\u0e27"), "didi");
+
   const resolved = rankContactCandidates("papa ji", [
     {
       name: "Papa Ji",
@@ -3941,13 +5358,12 @@ test("strict intent routing locks operational WhatsApp commands before generic h
   assert.equal(detectIntentForTest("Send an email to my Gmail saying I understand what you said.").category, "gmail_send");
 });
 
-test("strict intent routing clarifies ambiguous personal-surface lookups instead of guessing the wrong tool", () => {
+test("strict intent routing locks direct contact-message lookups to WhatsApp history when the phrasing names the chat target", () => {
   const route = detectStrictIntentRouteForTest("read and tell me the message of jaideep");
   assert.ok(route);
-  assert.equal(route?.intent.category, "personal_tool_clarify");
-  assert.equal(route?.confidence, "low");
-  assert.match(route?.clarificationReply ?? "", /WhatsApp messages/i);
-  assert.match(route?.clarificationReply ?? "", /Gmail emails/i);
+  assert.equal(route?.intent.category, "whatsapp_history");
+  assert.equal(route?.confidence, "medium");
+  assert.equal(route?.clarificationReply, null);
 });
 
 test("strict intent routing locks Korean story requests into the culture_story path", () => {
@@ -3959,6 +5375,34 @@ test("strict intent routing locks Korean story requests into the culture_story p
 
 test("strict intent routing locks title-based English story requests with target language into the culture_story path", () => {
   const route = detectStrictIntentRouteForTest("tell me the story of my demon in korean");
+  assert.ok(route);
+  assert.equal(route?.intent.category, "culture_story");
+  assert.equal(route?.locked, true);
+});
+
+test("strict intent routing treats multi-language Infinity War story prompts as culture_story requests", () => {
+  const route = detectStrictIntentRouteForTest("tell me the story of avannger infinity war in korean and chinese");
+  assert.ok(route);
+  assert.equal(route?.intent.category, "culture_story");
+  assert.equal(route?.locked, true);
+});
+
+test("strict intent routing survives misspelled movie story prompts with language targets", () => {
+  const route = detectStrictIntentRouteForTest("telll me stroy of the movi boy next door in koreean");
+  assert.ok(route);
+  assert.equal(route?.intent.category, "culture_story");
+  assert.equal(route?.locked, true);
+});
+
+test("strict intent routing catches Turkish story prompts with explicit non-English target language", () => {
+  const route = detectStrictIntentRouteForTest("Tamam Şimdi Bana Bhool Bhulaiyaa 2'nin Tayca Hikayesini Ver");
+  assert.ok(route);
+  assert.equal(route?.intent.category, "culture_story");
+  assert.equal(route?.locked, true);
+});
+
+test("strict intent routing catches ASCII Turkish story prompts with explicit non-English target language", () => {
+  const route = detectStrictIntentRouteForTest("Tamam simdi Bana Bhool Bhulaiyaa 2'nin Tayca Hikayesini Ver");
   assert.ok(route);
   assert.equal(route?.intent.category, "culture_story");
   assert.equal(route?.locked, true);
@@ -3982,6 +5426,15 @@ test("deterministic known-story replies handle Kalki prompts that append a true-
   assert.match(answer, /Ashwatthama/i);
 });
 
+test("deterministic known-story replies handle Bhool Bhulaiyaa 2 prompts", () => {
+  const answer = resolveDeterministicKnownStoryReplyForTest(
+    "give me story of bhool bhulaiyaa 2 in thai",
+  ) ?? "";
+  assert.match(answer, /Ruhaan/i);
+  assert.match(answer, /Reet/i);
+  assert.match(answer, /Manjulika/i);
+});
+
 test("localized deterministic known-story replies can answer My Demon directly in Korean", () => {
   const answer = buildLocalizedDeterministicKnownStoryReplyForTest(
     "tell me the story of my demon in korean",
@@ -3989,6 +5442,17 @@ test("localized deterministic known-story replies can answer My Demon directly i
   ) ?? "";
   assert.match(answer, /도도희/u);
   assert.match(answer, /정구원/u);
+});
+
+test("inbound agent story replies stay non-empty for multi-language Infinity War prompts", async () => {
+  const result = await routeInboundAgentMessageResult(
+    "test-user",
+    "tell me the story of avannger infinity war in korean and chinese",
+  );
+
+  assert.match(result.response ?? "", /\bKorean\b/i);
+  assert.match(result.response ?? "", /\bChinese\b/i);
+  assert.match(result.response ?? "", /Thanos/i);
 });
 
 test("wrong-mode detection rejects translation-meta replies for story questions", () => {
@@ -4217,6 +5681,127 @@ test("weather and news routing helpers avoid vague update misrouting", () => {
   });
 });
 
+test("weather lookup prefers the exact geocoded city over nearby provider drift", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+    if (url.startsWith("https://geocoding-api.open-meteo.com/v1/search?")) {
+      return Response.json({
+        results: [
+          {
+            name: "Shikinejima",
+            country: "Japan",
+            timezone: "Asia/Tokyo",
+            latitude: 34.326,
+            longitude: 139.219,
+            population: 2500,
+            feature_code: "PPL",
+          },
+          {
+            name: "Tokyo",
+            country: "Japan",
+            timezone: "Asia/Tokyo",
+            latitude: 35.6762,
+            longitude: 139.6503,
+            population: 13_960_000,
+            feature_code: "PPLC",
+          },
+        ],
+      });
+    }
+
+    if (url.startsWith("https://api.open-meteo.com/v1/forecast?latitude=35.6762&longitude=139.6503")) {
+      return Response.json({
+        current: {
+          temperature_2m: 18.2,
+          apparent_temperature: 17.5,
+          relative_humidity_2m: 52,
+          wind_speed_10m: 11.2,
+          weather_code: 1,
+        },
+        daily: {
+          temperature_2m_max: [22.1],
+          temperature_2m_min: [12.4],
+        },
+        hourly: {
+          precipitation_probability: [0, 10, 20],
+        },
+      });
+    }
+
+    throw new Error(`Unexpected fetch during test: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const weather = await getWeather("tokyo");
+    assert.match(weather ?? "", /\*Weather in Tokyo, Japan\*/i);
+    assert.match(weather ?? "", /Source: open-meteo\.com/i);
+    assert.doesNotMatch(weather ?? "", /Shikinejima/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("weather lookup fails closed when fallback providers drift to the wrong place", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+    if (url.startsWith("https://geocoding-api.open-meteo.com/v1/search?")) {
+      return new Response("unavailable", { status: 503 });
+    }
+
+    if (url.startsWith("https://wttr.in/tokyo?format=j1")) {
+      return Response.json({
+        current_condition: [
+          {
+            temp_C: "14",
+            FeelsLikeC: "13",
+            humidity: "54",
+            windspeedKmph: "17",
+            visibility: "10",
+            weatherDesc: [{ value: "Sunny" }],
+          },
+        ],
+        nearest_area: [
+          {
+            areaName: [{ value: "Shikinejima" }],
+            country: [{ value: "Japan" }],
+          },
+        ],
+        weather: [
+          {
+            maxtempC: "17",
+            mintempC: "14",
+            hourly: [{ chanceofrain: "80" }],
+          },
+        ],
+      });
+    }
+
+    throw new Error(`Unexpected fetch during test: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    assert.equal(await getWeather("tokyo"), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("vague live news requests build headline-focused queries", () => {
   const queries = buildNewsQueries("news of today");
   assert.ok(queries.some((query) => /headlines/i.test(query)));
@@ -4251,8 +5836,39 @@ test("current-affairs verification requests build stronger event queries", () =>
     buildCurrentAffairsClarificationReply("did north korea enter the current war of iran and israel"),
     "",
   );
+  assert.match(
+    buildCurrentAffairsClarificationReply("abhi yudh ki stithi kya hai"),
+    /named explicitly/i,
+  );
+  assert.equal(detectNewsQuestion("abhi yudh ki stithi kya hai"), true);
+  assert.equal(looksLikeCurrentAffairsQuestion("what is the situation of iran right now"), true);
+  assert.equal(detectNewsQuestion("what is the situation of iran right now"), true);
   assert.equal(looksLikeCurrentAffairsQuestion("Why is Cuba all blackout and has no electricity?"), true);
   assert.equal(detectNewsQuestion("Why is Cuba all blackout and has no electricity?"), true);
+  const abstractPrompt = "Problem (Ultra Hard - Cross Domain) Consider a hypothetical AI system that has complete knowledge of all physical laws governing the universe and unlimited computational resources. Assume the universe is governed by quantum mechanics and general relativity. Is it theoretically possible to predict the exact conscious experience of a human at t1 > t0? Prove or disprove and analyze infinite regress, fixed-point convergence, logical inconsistency, and computable versus uncomputable reality within current models of physics.";
+  assert.equal(looksLikeCurrentAffairsQuestion(abstractPrompt), false);
+  assert.equal(classifyClawCloudLiveSearchTier(abstractPrompt), "knowledge");
+  const fullHardSciencePrompt = [
+    "Problem (Ultra Hard - Cross Domain)",
+    "Consider a hypothetical AI system that has complete knowledge of all physical laws governing the universe and unlimited computational resources.",
+    "Assume:",
+    "The universe is governed by quantum mechanics and general relativity.",
+    "The AI has perfect access to the exact quantum state of a human brain at time t0.",
+    "Answer the following:",
+    "Is it theoretically possible for the AI to predict the exact conscious experience of that human at time t1 > t0?",
+    "Justify your answer using principles from quantum mechanics, uncertainty, decoherence, and computational theory.",
+    "If the AI simulates the brain perfectly, does the simulation itself become conscious? Provide arguments using both physicalism and functionalism.",
+    "Prove or disprove: perfect prediction of human behavior implies determinism of consciousness.",
+    "Include arguments involving chaos theory, Godel incompleteness, and limits of computation.",
+    "Suppose the AI attempts to simulate itself simulating the universe using recursive self-modeling.",
+    "Analyze whether this leads to infinite regress, fixed-point convergence, or logical inconsistency.",
+    "Define a formal boundary between computable reality and non-computable phenomena.",
+    "Can such a boundary exist within current models of physics?",
+    "Bonus: construct a formal proof or counterexample for the statement that any system capable of fully simulating the universe must necessarily contain an uncomputable component.",
+  ].join(" ");
+  assert.equal(looksLikeCurrentAffairsQuestion(fullHardSciencePrompt), false);
+  assert.equal(classifyClawCloudLiveSearchTier(fullHardSciencePrompt), "knowledge");
+  assert.equal(shouldUseLiveSearch(fullHardSciencePrompt), false);
   assert.deepEqual(detectIntentForTest("Why is Cuba all blackout and has no electricity?"), {
     type: "research",
     category: "news",
@@ -4279,6 +5895,14 @@ test("current-affairs verification requests build stronger event queries", () =>
   const hinglishTankerQueries = buildNewsQueries("russia cuba mai apna oil tanker kyun bhej rha hai");
   assert.ok(hinglishTankerQueries.some((query) => /russia/i.test(query) && /cuba/i.test(query)));
   assert.ok(hinglishTankerQueries.some((query) => /tanker|shipping|fuel supply|shipment/i.test(query)));
+  assert.equal(
+    looksLikeCurrentAffairsLogisticsQuestion("is russia oil tanker reached cuba how much oil is there in that tanker"),
+    true,
+  );
+  const tankerArrivalQueries = buildCurrentAffairsQueries("is russia oil tanker reached cuba how much oil is there in that tanker");
+  assert.ok(tankerArrivalQueries.some((query) => /russia/i.test(query) && /cuba/i.test(query)));
+  assert.ok(tankerArrivalQueries.some((query) => /barrels|cargo/i.test(query)));
+  assert.ok(tankerArrivalQueries.some((query) => /arrived|anchored|reached/i.test(query)));
 });
 
 test("current-affairs demand answers stay evidence-first when only low-trust wrapped headlines are available", () => {
@@ -4351,6 +5975,28 @@ test("current-affairs power-crisis answers stay evidence-first for nationwide bl
   assert.match(answer, /closest source signals/i);
 });
 
+test("current-affairs logistics answers stay evidence-first for tanker arrival and cargo questions", () => {
+  const answer = buildCurrentAffairsEvidenceAnswer(
+    "is russia oil tanker reached cuba how much oil is there in that tanker",
+    [
+      {
+        title: "Russia-origin fuel tanker bound for Cuba anchored in Venezuelan waters - Reuters",
+        url: "https://www.reutersconnect.com/item/russia-origin-fuel-tanker-bound-for-cuba-anchored-in-venezuelan-waters/dGFnOnJldXRlcnMuY29tLDIwMjY6bmV3c21sX1JDMk5ES0E2NzM2Vg",
+        snippet: "The vessel Sea Horse, carrying some 200,000 barrels of Russia-origin fuel originally bound for Cuba, is anchored in Venezuelan waters.",
+        domain: "reutersconnect.com",
+        publishedDate: "2026-03-28T08:00:00.000Z",
+        score: 0.88,
+      },
+    ],
+  );
+
+  assert.match(answer, /current-affairs check/i);
+  assert.match(answer, /anchored in Venezuelan waters/i);
+  assert.match(answer, /not confirm it had reached Cuba|not fully confirmed/i);
+  assert.match(answer, /200,000 barrels/i);
+  assert.match(answer, /closest source signals/i);
+});
+
 test("news search task timeout helper fails closed when one provider hangs", async () => {
   let slowTaskResolved = false;
   const slowTask = new Promise<Array<{
@@ -4393,6 +6039,19 @@ test("power-crisis news synthesis still answers directly when live source covera
   assert.match(answer, /grid instability/i);
   assert.match(answer, /pending verification/i);
   assert.match(answer, /searched:/i);
+});
+
+test("logistics news synthesis avoids the generic no-sources prompt for tanker arrival questions", async () => {
+  const answer = await synthesiseNewsAnswerForTest(
+    "is russia oil tanker reached cuba how much oil is there in that tanker",
+    [],
+  );
+
+  assert.match(answer, /current-affairs check/i);
+  assert.match(answer, /could not confirm from the live source batch whether the tanker had already reached Cuba/i);
+  assert.match(answer, /could not verify a current cargo figure/i);
+  assert.match(answer, /searched:/i);
+  assert.doesNotMatch(answer, /No strong live sources found/i);
 });
 
 test("current-affairs demand ranking prefers direct negotiation coverage over opinion pieces", () => {
@@ -4438,6 +6097,74 @@ test("current-affairs demand ranking prefers direct negotiation coverage over op
   assert.doesNotMatch(answer, /Opinion \| Iran May Be Far More Prepared For A 'Ground Invasion' Than Trump Thinks/i);
   assert.match(answer, /The Washington Post/i);
   assert.match(answer, /Il Sole 24 ORE/i);
+});
+
+test("current-affairs evidence answers fail closed when a right-now question only has stale coverage", () => {
+  const answer = buildCurrentAffairsEvidenceAnswer(
+    "what is the situation of iran right now",
+    [
+      {
+        title: "Iran protests intensify after Mahsa Amini death - Reuters",
+        url: "https://www.reuters.com/world/middle-east/iran-protests-2022",
+        snippet: "Iran sees major protests after the death of Mahsa Amini in police custody.",
+        domain: "reuters.com",
+        publishedDate: "2022-09-25T10:00:00.000Z",
+        score: 0.9,
+      },
+      {
+        title: "Iran unrest continues amid crackdown - AP",
+        url: "https://apnews.com/article/iran-unrest-2022",
+        snippet: "Iranian authorities continue their crackdown after nationwide protests.",
+        domain: "apnews.com",
+        publishedDate: "2022-10-01T08:30:00.000Z",
+        score: 0.88,
+      },
+    ],
+  );
+
+  assert.match(answer, /current-affairs check/i);
+  assert.match(answer, /could not verify a safe current snapshot/i);
+  assert.match(answer, /should not present it as the situation right now/i);
+});
+
+test("news synthesis fails closed for freshness-sensitive current-affairs questions when sources are stale", async () => {
+  const answer = await synthesiseNewsAnswerForTest(
+    "abhi yudh ki stithi kya hai",
+    [
+      {
+        title: "Major conflicts to watch in 2024 - Reuters",
+        url: "https://www.reuters.com/world/conflicts-2024",
+        snippet: "An overview of the main global conflicts analysts were watching in 2024.",
+        domain: "reuters.com",
+        publishedDate: "2024-05-20T05:30:00.000Z",
+        score: 0.86,
+      },
+      {
+        title: "Global flashpoints update - AP",
+        url: "https://apnews.com/article/global-flashpoints-2024",
+        snippet: "A snapshot of the major global flashpoints as of May 2024.",
+        domain: "apnews.com",
+        publishedDate: "2024-05-19T07:00:00.000Z",
+        score: 0.84,
+      },
+    ],
+  );
+
+  assert.match(answer, /current-affairs check/i);
+  assert.match(answer, /could not verify a safe current snapshot/i);
+  assert.match(answer, /retry the live check/i);
+  assert.match(answer, /searched:/i);
+});
+
+test("inbound route clarifies ambiguous Hinglish war-status prompts instead of using the generic latest-update recovery", async () => {
+  const result = await routeInboundAgentMessageResult(
+    "test-user",
+    "abhi yudh ki stithi kya hai",
+  );
+
+  assert.match(result.response ?? "", /current-affairs clarification/i);
+  assert.match(result.response ?? "", /named explicitly/i);
+  assert.doesNotMatch(result.response ?? "", /latest update request/i);
 });
 
 test("source-backed live answer results preserve evidence metadata for current-affairs answers", () => {
@@ -4798,6 +6525,7 @@ test("generic email writing requests do not get misclassified as live Gmail acti
 test("outbound review parser understands approve, cancel, and rewrite replies", () => {
   assert.deepEqual(parseOutboundReviewDecisionForTest("Yes, send it"), { kind: "approve" });
   assert.deepEqual(parseOutboundReviewDecisionForTest("No, cancel it"), { kind: "cancel" });
+  assert.deepEqual(parseOutboundReviewDecisionForTest("send now please"), { kind: "approve" });
   assert.deepEqual(parseOutboundReviewDecisionForTest("Rewrite it more professional and shorter"), {
     kind: "rewrite",
     feedback: "more professional and shorter",
@@ -4814,6 +6542,139 @@ test("outbound review parser understands approve, cancel, and rewrite replies", 
     kind: "rewrite",
     feedback: "add that we can meet tomorrow morning",
   });
+  assert.deepEqual(parseOutboundReviewDecisionForTest('send hey to rajnish classmate'), { kind: "none" });
+  assert.deepEqual(parseOutboundReviewDecisionForTest('Send "Hello" to Maa'), { kind: "none" });
+  assert.deepEqual(parseOutboundReviewDecisionForTest("create reminder for tomorrow 8am"), { kind: "none" });
+});
+
+test("deterministic professional greeting drafting upgrades short casual send text", () => {
+  assert.equal(
+    maybeBuildDeterministicProfessionalGreetingDraftForTest({
+      requestedMessage: "hii",
+      recipientLabel: "Rajnish classmate",
+      conversationStyle: "professional",
+      locale: "en",
+    }),
+    "Hi Rajnish, hope you're doing well.",
+  );
+
+  assert.equal(
+    maybeBuildDeterministicProfessionalGreetingDraftForTest({
+      requestedMessage: "need to talk today",
+      recipientLabel: "Rajnish classmate",
+      conversationStyle: "professional",
+      locale: "en",
+    }),
+    null,
+  );
+});
+
+test("whatsapp send drafting mode defaults to verbatim for normal direct commands", () => {
+  assert.equal(
+    resolveWhatsAppDraftingModeForTest("send hii to rajnish", "hii"),
+    "verbatim",
+  );
+  assert.equal(
+    resolveWhatsAppDraftingModeForTest('send "class khtm hone ke baad phone krna" to jaideep', "class khtm hone ke baad phone krna"),
+    "verbatim",
+  );
+});
+
+test("whatsapp send drafting mode only enables styled rewrites for explicit drafting requests", () => {
+  assert.equal(
+    resolveWhatsAppDraftingModeForTest("send a professional good morning message to 9931856101", "a professional good morning message"),
+    "styled",
+  );
+  assert.equal(
+    resolveWhatsAppDraftingModeForTest('send "professional good morning message" to rajnish', "professional good morning message"),
+    "verbatim",
+  );
+});
+
+test("whatsapp send drafting mode upgrades abstract note requests without rewriting literal courtesy text", () => {
+  assert.equal(
+    resolveWhatsAppDraftingModeForTest("send thanku note to priyanshu", "thanku note"),
+    "styled",
+  );
+  assert.equal(
+    resolveWhatsAppDraftingModeForTest(
+      "send a professional thanku note to priyanka for helping me in my todays exam and that to in hindi",
+      "a professional thanku note for helping me in my todays exam and that to in hindi",
+    ),
+    "styled",
+  );
+  assert.equal(
+    resolveWhatsAppDraftingModeForTest("send thank you to priyanshu", "thank you"),
+    "verbatim",
+  );
+  assert.equal(
+    resolveWhatsAppDraftingModeForTest("send thank you to priyanshu and do not change the text", "thank you"),
+    "verbatim",
+  );
+  assert.equal(
+    resolveWhatsAppDraftingModeForTest(
+      "send a professional thanku note to aman for helping me in my todays exam and that to in hindi do not change the text only paste the same test ok do it professionally",
+      "a professional thanku note for helping me in my todays exam and that to in hindi do not change the text only paste the same test ok do it professionally",
+    ),
+    "styled",
+  );
+});
+
+test("deterministic structured whatsapp drafts clean up typoed thank-you note prompts into polished messages", async () => {
+  const draft = await maybeBuildDeterministicStructuredWhatsAppDraftForTest({
+    originalRequest:
+      "send a professional thanku note to priyanka for helping me in my todays exam and that to in hindi",
+    requestedMessage:
+      "a professional thanku note for helping me in my todays exam and that to in hindi",
+    recipientLabel: "Priyanka classmate",
+    conversationStyle: "professional",
+    locale: "en",
+  });
+
+  assert.ok(draft);
+  assert.match(draft ?? "", /^Hi Priyanka,/);
+  assert.match(draft ?? "", /Thank you so much for helping me with today's exam\./i);
+  assert.match(draft ?? "", /I really appreciate your support, and it meant a lot to me\./i);
+  assert.doesNotMatch(draft ?? "", /\bthat to\b/i);
+  assert.doesNotMatch(draft ?? "", /\btodays\b/i);
+});
+
+test("deterministic structured whatsapp drafts ignore pasted instruction clutter for abstract note requests", async () => {
+  const draft = await maybeBuildDeterministicStructuredWhatsAppDraftForTest({
+    originalRequest:
+      "send a professional thanku note to aman for helping me in my todays exam and that to in hindi do not change the text only paste the same test ok do it professionally",
+    requestedMessage:
+      "a professional thanku note for helping me in my todays exam and that to in hindi do not change the text only paste the same test ok do it professionally",
+    recipientLabel: "Aman classmate",
+    conversationStyle: "professional",
+    locale: "en",
+  });
+
+  assert.ok(draft);
+  assert.match(draft ?? "", /^Hi Aman,/);
+  assert.match(draft ?? "", /Thank you so much for helping me with today's exam\./i);
+  assert.match(draft ?? "", /I really appreciate your support, and it meant a lot to me\./i);
+  assert.doesNotMatch(draft ?? "", /\bdo not change\b/i);
+  assert.doesNotMatch(draft ?? "", /\bonly paste\b/i);
+  assert.doesNotMatch(draft ?? "", /\bsame test\b/i);
+  assert.doesNotMatch(draft ?? "", /\bok do it professionally\b/i);
+});
+
+test("whatsapp outgoing autocorrect fixes obvious Hinglish spelling issues without changing intent", () => {
+  assert.equal(
+    autoCorrectWhatsAppOutgoingMessageForTest("Aaaj mai class ni aa rha", "professional"),
+    "Aaj main class nahi aa raha.",
+  );
+  assert.equal(
+    autoCorrectWhatsAppOutgoingMessageForTest("hii", "casual"),
+    "hi",
+  );
+});
+
+test("whatsapp self-label guard detects message-yourself contacts without blocking normal names", () => {
+  assert.equal(isLikelyWhatsAppSelfLabelForTest("Shubham Himavhal (You)"), true);
+  assert.equal(isLikelyWhatsAppSelfLabelForTest("message yourself"), true);
+  assert.equal(isLikelyWhatsAppSelfLabelForTest("Rajnish Classmate"), false);
 });
 
 test("gmail approval rewrite normalization supports subject-aware JSON rewrites and plain-text fallback", () => {
@@ -4852,7 +6713,7 @@ test("approval context detector recognizes review, explanation, and recipient qu
   assert.equal(detectPendingApprovalContextQuestionForTest("rewrite it warmer"), null);
 });
 
-test("gmail approval previews now ask for natural confirmation before send", () => {
+test("gmail legacy review previews now point to manual SEND/EDIT/SKIP commands", () => {
   const emailId = `meta:${Buffer.from(JSON.stringify({
     version: 1,
     action: "compose_send",
@@ -4874,10 +6735,10 @@ test("gmail approval previews now ask for natural confirmation before send", () 
   assert.match(preview, /Gmail message ready for review/i);
   assert.match(preview, /\*To:\* raj@example\.com/i);
   assert.match(preview, /Should I send this now\?/i);
-  assert.match(preview, /Reply `Yes` to confirm, `No` to cancel, or `Rewrite it/i);
+  assert.match(preview, /SEND .*EDIT .*SKIP/i);
 });
 
-test("gmail approval context replies explain why approval is pending and who it targets", () => {
+test("gmail legacy review context replies explain the queued-item status and target", () => {
   const emailId = `meta:${Buffer.from(JSON.stringify({
     version: 1,
     action: "compose_send",
@@ -4897,16 +6758,16 @@ test("gmail approval context replies explain why approval is pending and who it 
   };
 
   const explain = buildReplyApprovalContextReply(approval, "explain");
-  assert.match(explain, /human-confirmed/i);
+  assert.match(explain, /older queued review item/i);
   assert.match(explain, /\*Target:\* raj@example\.com/i);
   assert.match(explain, /\*Subject:\* Project update/i);
 
   const target = buildReplyApprovalContextReply(approval, "target");
   assert.match(target, /pending Gmail message is for \*raj@example\.com\*/i);
-  assert.match(target, /Reply `Yes`, `No`, or `Rewrite it/i);
+  assert.match(target, /SEND.*, `EDIT`, or `SKIP`|SEND.*EDIT.*SKIP/i);
 });
 
-test("whatsapp approval previews now ask for natural confirmation before send", () => {
+test("whatsapp legacy review previews now point to manual WSEND/WEDIT/WSKIP commands", () => {
   const preview = buildWhatsAppApprovalReviewReply({
     id: "87654321-abcd-efgh",
     user_id: "user-1",
@@ -4929,10 +6790,10 @@ test("whatsapp approval previews now ask for natural confirmation before send", 
   assert.match(preview, /WhatsApp draft ready for review: 2 contacts/i);
   assert.match(preview, /\*Draft:\*/i);
   assert.match(preview, /Should I send this now\?/i);
-  assert.match(preview, /Reply `Yes` to confirm, `No` to cancel, or `Rewrite it/i);
+  assert.match(preview, /WSEND .*WEDIT .*WSKIP/i);
 });
 
-test("whatsapp approval context replies explain the safety reason and recipient scope", () => {
+test("whatsapp legacy review context replies explain the queued-item status and recipient scope", () => {
   const approval = {
     id: "87654321-abcd-efgh",
     user_id: "user-1",
@@ -4955,17 +6816,17 @@ test("whatsapp approval context replies explain the safety reason and recipient 
   };
 
   const explain = buildWhatsAppApprovalContextReply(approval, "explain", 12);
-  assert.match(explain, /needs approval before sending it to all recipients/i);
+  assert.match(explain, /older queued review item/i);
   assert.match(explain, /Broadcast draft targets 12 contacts/i);
   assert.match(explain, /\*Target:\* 12 contacts/i);
-  assert.match(explain, /Yes, send to all/i);
+  assert.match(explain, /WSEND/i);
 
   const target = buildWhatsAppApprovalContextReply(approval, "target", 12);
   assert.match(target, /pending WhatsApp draft is for \*12 contacts\*/i);
   assert.match(target, /broadcast-style draft for 12 contacts/i);
 });
 
-test("whatsapp broadcast approval previews require explicit send-to-all confirmation", () => {
+test("whatsapp broadcast legacy previews use manual command handling instead of yes-no confirmation", () => {
   const preview = buildWhatsAppApprovalReviewReply({
     id: "87654321-abcd-efgh",
     user_id: "user-1",
@@ -4989,7 +6850,7 @@ test("whatsapp broadcast approval previews require explicit send-to-all confirma
 
   assert.match(preview, /Should I send this to all now\?/i);
   assert.match(preview, /broadcast-style draft for 12 contacts/i);
-  assert.match(preview, /Yes, send to all/i);
+  assert.match(preview, /WSEND/i);
 });
 
 test("generic prompts do not trigger WhatsApp approval command handling", async () => {
@@ -5034,6 +6895,63 @@ test("gmail search routing understands natural mailbox-reading prompts", () => {
     detectIntentForTest("what is Gmail"),
     { type: "explain", category: "explain" },
   );
+});
+
+test("gmail search routing understands typoed and message-style inbox prompts without drifting to WhatsApp", () => {
+  assert.equal(
+    normalizeClawCloudUnderstandingMessage("show my gmial inbxo"),
+    "show my gmail inbox",
+  );
+
+  assert.deepEqual(
+    detectIntentForTest("show my gmial inbxo"),
+    { type: "email", category: "email_search" },
+  );
+
+  assert.deepEqual(
+    detectIntentForTest("what did my latest emial say"),
+    { type: "email", category: "email_search" },
+  );
+
+  assert.deepEqual(
+    detectIntentForTest("tell me the message of my latest email"),
+    { type: "email", category: "email_search" },
+  );
+
+  assert.deepEqual(
+    detectIntentForTest("read the messages of my email and tell me what it replied"),
+    { type: "email", category: "email_search" },
+  );
+
+  assert.deepEqual(
+    detectIntentForTest("my unread gmial"),
+    { type: "email", category: "email_search" },
+  );
+});
+
+test("timeboxed Gmail read recovery stays Gmail-specific instead of drifting into latest-update fallbacks", () => {
+  const reply = buildTimeboxedProfessionalReplyForTest("what did my latest email say?", "email");
+  assert.match(reply, /gmail/i);
+  assert.doesNotMatch(reply, /latest update request/i);
+  assert.doesNotMatch(reply, /scoped live answer needed/i);
+  assert.doesNotMatch(reply, /who to, what purpose/i);
+});
+
+test("full inbound route keeps typoed Gmail read prompts on Gmail-safe replies instead of generic clarification fallbacks", async () => {
+  for (const prompt of [
+    "show my gmial inbxo",
+    "read my latest gmail email",
+    "what did my latest emial say",
+    "read the messages of my email and tell me what it replied",
+  ]) {
+    const result = await routeInboundAgentMessageResult("test-user", prompt);
+    const response = result.response ?? "";
+    assert.match(response, /gmail|google/i);
+    assert.doesNotMatch(response, /latest update request/i);
+    assert.doesNotMatch(response, /scoped live answer needed/i);
+    assert.doesNotMatch(response, /need more context/i);
+    assert.doesNotMatch(response, /who to, what purpose/i);
+  }
 });
 
 test("calendar action routing recognizes create, reschedule, and cancel requests", () => {
@@ -5111,12 +7029,20 @@ test("intent detection routes upgraded Gmail, Calendar, and WhatsApp control pro
   assert.deepEqual(detectIntentForTest("In WhatsApp, see what message I got from Papa ji"), { type: "send_message", category: "whatsapp_history" });
   assert.deepEqual(detectIntentForTest("Show WhatsApp history with Jaideep"), { type: "send_message", category: "whatsapp_history" });
   assert.deepEqual(detectIntentForTest("In WhatsApp, read and tell me the message of Jaideep"), { type: "send_message", category: "whatsapp_history" });
+  assert.deepEqual(detectIntentForTest("tell me the message of jaideep with me"), { type: "send_message", category: "whatsapp_history" });
+  assert.deepEqual(detectIntentForTest("tell me the conversation of mehak with me"), { type: "send_message", category: "whatsapp_history" });
+  assert.deepEqual(detectIntentForTest("mehak ke saath meri chat dikhao"), { type: "send_message", category: "whatsapp_history" });
+  assert.deepEqual(detectIntentForTest("rajnish ke messages summarize karo"), { type: "send_message", category: "whatsapp_history" });
   assert.deepEqual(
     detectIntentForTest("what was the conversation there in hansraj contact tell me"),
     { type: "send_message", category: "whatsapp_history" },
   );
   assert.deepEqual(
     detectIntentForTest("tell me the conversation in papa ji contact"),
+    { type: "send_message", category: "whatsapp_history" },
+  );
+  assert.deepEqual(
+    detectIntentForTest("tell me the conversation summary with that number"),
     { type: "send_message", category: "whatsapp_history" },
   );
   assert.deepEqual(detectIntentForTest("Show the contract attachment from Raj"), { type: "general", category: "personal_tool_clarify" });
@@ -5160,6 +7086,28 @@ test("deterministic architecture solvers stay concrete for Stripe and satellite 
   assert.match(stripeWebhookAnswer, /subscription-period/i);
   assert.match(stripeWebhookAnswer, /ordering/i);
   assert.match(stripeWebhookAnswer, /reconciliation/i);
+});
+
+test("country GDP prompts do not trigger deterministic architecture solvers", () => {
+  const gdpPrompt = "what is gdp of china right now";
+  assert.equal(solveCodingArchitectureQuestion(gdpPrompt), null);
+  const timeout = getInboundRouteTimeoutPolicyForTest(gdpPrompt);
+  assert.equal(timeout.kind, "live_research");
+});
+
+test("hard math expert covers Cayley-Hamilton and Hohmann transfer prompts", () => {
+  const cayleyHamiltonPrompt = "Verify Cayley-Hamilton Theorem (CHT) for the matrix 1 1 2 3 1 1 2 3 1 and find A^-1.";
+  const cayleyHamiltonAnswer = solveHardMathQuestion(cayleyHamiltonPrompt) ?? "";
+  assert.match(cayleyHamiltonAnswer, /Characteristic Polynomial/i);
+  assert.match(cayleyHamiltonAnswer, /A\^3/i);
+  assert.match(cayleyHamiltonAnswer, /A\^-1/i);
+
+  const hohmannPrompt = "A spacecraft is in a circular low Earth orbit (LEO) at an altitude of 300 km above Earth. It needs to transfer to a geostationary orbit (GEO) at an altitude of 35,786 km using a Hohmann transfer orbit. Given: mu = 3.986 x 10^14 m^3/s^2 and Re = 6371 km. Calculate the total delta-v and the transfer time. Explain the J2 effect and longitudinal drift.";
+  const hohmannAnswer = solveHardMathQuestion(hohmannPrompt) ?? "";
+  assert.match(hohmannAnswer, /Total delta-v/i);
+  assert.match(hohmannAnswer, /Time of flight/i);
+  assert.match(hohmannAnswer, /J2/i);
+  assert.match(hohmannAnswer, /Longitudinal Drift/i);
 });
 
 test("topic mismatch detection flags menu-style clarification answers for clear technical explainers", () => {
@@ -5216,9 +7164,65 @@ test("whatsapp history hint extraction understands natural contact-conversation 
     },
   );
   assert.deepEqual(
+    extractWhatsAppHistoryHintsForTest("read and tell me the message of jaideep"),
+    {
+      contactHint: "jaideep",
+      queryHint: null,
+      direction: null,
+    },
+  );
+  assert.deepEqual(
+    extractWhatsAppHistoryHintsForTest("tell me the message of jaideep with me"),
+    {
+      contactHint: "jaideep",
+      queryHint: null,
+      direction: null,
+    },
+  );
+  assert.deepEqual(
     extractWhatsAppHistoryHintsForTest("in whatsapp, tell me the conversation I had with jaideep"),
     {
       contactHint: "jaideep",
+      queryHint: null,
+      direction: null,
+    },
+  );
+  assert.deepEqual(
+    extractWhatsAppHistoryHintsForTest("tell me the conversation summary with that number"),
+    {
+      contactHint: "that number",
+      queryHint: null,
+      direction: null,
+    },
+  );
+  assert.deepEqual(
+    extractWhatsAppHistoryHintsForTest("tell me the conversation of mehak with me"),
+    {
+      contactHint: "mehak",
+      queryHint: null,
+      direction: null,
+    },
+  );
+  assert.deepEqual(
+    extractWhatsAppHistoryHintsForTest("just read the message of me with hansraj"),
+    {
+      contactHint: "hansraj",
+      queryHint: null,
+      direction: null,
+    },
+  );
+  assert.deepEqual(
+    extractWhatsAppHistoryHintsForTest("mehak ke saath meri chat dikhao"),
+    {
+      contactHint: "mehak",
+      queryHint: null,
+      direction: null,
+    },
+  );
+  assert.deepEqual(
+    extractWhatsAppHistoryHintsForTest("rajnish ke messages summarize karo"),
+    {
+      contactHint: "rajnish",
       queryHint: null,
       direction: null,
     },
@@ -5272,6 +7276,117 @@ test("resolved WhatsApp history contact filtering stays scoped to the matched co
   assert.equal(filtered.length, 1);
   assert.equal(filtered[0]?.remote_phone, "919053776191");
   assert.equal(filtered[0]?.content, "This is the actual Jaideep chat");
+});
+
+test("resolved WhatsApp history contact filtering ignores alias collisions once the exact phone is known", () => {
+  const rows: WhatsAppHistoryEntry[] = [
+    {
+      id: "1",
+      direction: "inbound",
+      content: "Wrong Mehak thread",
+      message_type: "text",
+      remote_jid: "919999999999@s.whatsapp.net",
+      remote_phone: "919999999999",
+      contact_name: "mehak",
+      chat_type: "direct",
+      sent_at: "2026-03-26T02:19:39+00:00",
+      priority: "normal",
+      needs_reply: false,
+      reply_confidence: null,
+      sensitivity: "normal",
+      approval_state: "not_required",
+      audit_payload: null,
+    },
+    {
+      id: "2",
+      direction: "inbound",
+      content: "Correct Mehak thread",
+      message_type: "text",
+      remote_jid: "916230291184@s.whatsapp.net",
+      remote_phone: "916230291184",
+      contact_name: "916230291184",
+      chat_type: "direct",
+      sent_at: "2026-03-26T02:19:45+00:00",
+      priority: "normal",
+      needs_reply: false,
+      reply_confidence: null,
+      sensitivity: "normal",
+      approval_state: "not_required",
+      audit_payload: null,
+    },
+  ];
+
+  const filtered = filterWhatsAppHistoryRowsForResolvedContactForTest(rows, {
+    phone: "916230291184",
+    jid: "916230291184@s.whatsapp.net",
+    aliases: ["mehak"],
+  });
+
+  assert.equal(filtered.length, 1);
+  assert.equal(filtered[0]?.remote_phone, "916230291184");
+  assert.equal(filtered[0]?.content, "Correct Mehak thread");
+});
+
+test("duplicate WhatsApp history rows are collapsed before summarizing the chat", () => {
+  const rows: WhatsAppHistoryEntry[] = [
+    {
+      id: "1",
+      direction: "inbound",
+      content: "Hello",
+      message_type: "text",
+      remote_jid: "916230291184@s.whatsapp.net",
+      remote_phone: "916230291184",
+      contact_name: "mehak",
+      chat_type: "direct",
+      sent_at: "2026-01-11T12:59:11+00:00",
+      priority: "normal",
+      needs_reply: false,
+      reply_confidence: null,
+      sensitivity: "normal",
+      approval_state: "not_required",
+      audit_payload: null,
+    },
+    {
+      id: "2",
+      direction: "inbound",
+      content: "Hello",
+      message_type: "text",
+      remote_jid: "916230291184@s.whatsapp.net",
+      remote_phone: "916230291184",
+      contact_name: "mehak",
+      chat_type: "direct",
+      sent_at: "2026-01-11T12:59:11+00:00",
+      priority: "normal",
+      needs_reply: false,
+      reply_confidence: null,
+      sensitivity: "normal",
+      approval_state: "not_required",
+      audit_payload: null,
+    },
+    {
+      id: "3",
+      direction: "outbound",
+      content: "Hii",
+      message_type: "text",
+      remote_jid: "916230291184@s.whatsapp.net",
+      remote_phone: "916230291184",
+      contact_name: "916230291184",
+      chat_type: "direct",
+      sent_at: "2026-01-11T13:55:57+00:00",
+      priority: "normal",
+      needs_reply: false,
+      reply_confidence: null,
+      sensitivity: "normal",
+      approval_state: "not_required",
+      audit_payload: null,
+    },
+  ];
+
+  const deduped = dedupeWhatsAppHistoryRowsForTest(rows);
+
+  assert.equal(deduped.length, 2);
+  assert.equal(deduped[0]?.content, "Hello");
+  assert.equal(deduped[1]?.content, "Hii");
 });
 
 test("whatsapp history replies now use a professional conversation summary format", () => {
@@ -5350,6 +7465,32 @@ test("whatsapp conversation summaries stay professional for multi-person chats t
   assert.match(summary, /Priya/);
 });
 
+test("whatsapp history summaries prefer the resolved contact name over phone-like synced labels", () => {
+  const summary = buildWhatsAppHistoryProfessionalSummaryForTest({
+    resolvedContactName: "mehak",
+    requestedCount: 3,
+    rows: [
+      {
+        direction: "inbound",
+        content: "Kesa h",
+        contact_name: "916230291184",
+        remote_phone: "916230291184",
+        sent_at: "2026-01-11T15:21:30+00:00",
+      },
+      {
+        direction: "outbound",
+        content: "Badiya tu bta kesi hai",
+        contact_name: "916230291184",
+        remote_phone: "916230291184",
+        sent_at: "2026-01-11T15:29:32+00:00",
+      },
+    ],
+  });
+
+  assert.match(summary, /mehak said: "Kesa h/i);
+  assert.doesNotMatch(summary, /916230291184 said/i);
+});
+
 test("workspace knowledge questions stay explanatory instead of triggering live tool actions", () => {
   assert.equal(detectBillingIntent("How to cancel a Google Calendar event"), null);
   assert.equal(detectBillingIntent("How to cancel my subscription"), "cancel");
@@ -5384,6 +7525,286 @@ test("assistant capability prompts across Hinglish and other languages stay on t
   assert.deepEqual(detectIntentForTest("aap kese ho or aap kya kr skte ho"), { type: "help", category: "help" });
   assert.deepEqual(detectIntentForTest("que puedes hacer"), { type: "help", category: "help" });
   assert.deepEqual(detectIntentForTest("आप क्या कर सकते हो"), { type: "help", category: "help" });
+});
+
+test("consumer tech release questions do not get hijacked by the help route", () => {
+  assert.deepEqual(
+    detectIntentForTest("when s26 ultra was realesed and what all features it is having"),
+    { type: "web_search", category: "web_search" },
+  );
+});
+
+test("structured multi-part technical challenge prompts lock to deep research routing", () => {
+  const prompt = [
+    "Problem: You are designing a real-time fraud detection system for a payment platform.",
+    "Constraints: 1 billion transactions/day, decision time < 50 ms, known and unknown fraud.",
+    "Tasks",
+    "Part 1 - DSA core logic with sudden spike, geographic anomaly, frequency burst.",
+    "Part 2 - System design with ingestion, Kafka, Flink, hot vs cold storage, API latency.",
+    "Part 3 - Machine learning for supervised and unsupervised anomaly detection.",
+    "Part 4 - Operating systems concurrency, memory management, thread vs async.",
+    "Part 5 - Bayes theorem probability for flagged transaction precision.",
+    "Part 6 - Security twist for adaptive adversarial attackers.",
+  ].join("\n");
+
+  const strictRoute = detectStrictIntentRouteForTest(prompt);
+  assert.ok(strictRoute);
+  assert.deepEqual(strictRoute?.intent, { type: "research", category: "research" });
+  assert.equal(strictRoute?.locked, true);
+  assert.deepEqual(detectIntentForTest(prompt), { type: "research", category: "research" });
+
+  const timeout = getInboundRouteTimeoutPolicyForTest(prompt);
+  assert.equal(timeout.kind, "deep_reasoning");
+});
+
+test("response length profile detection captures concise vs detailed requests", () => {
+  assert.equal(
+    inferAnswerLengthProfileForTest("Explain JWT in short in 3 lines."),
+    "short",
+  );
+  assert.equal(
+    inferAnswerLengthProfileForTest("Explain JWT in detail with a step-by-step deep dive."),
+    "detailed",
+  );
+  assert.equal(
+    inferAnswerLengthProfileForTest("What is JWT?"),
+    "short",
+  );
+});
+
+test("response mode follows explicit depth cues while preserving complex deep routing", () => {
+  assert.equal(
+    resolveResponseModeForTest("research", "Explain quantum tunneling in short."),
+    "fast",
+  );
+  assert.equal(
+    resolveResponseModeForTest("research", "Explain quantum tunneling in detail with full analysis."),
+    "deep",
+  );
+
+  const complexPrompt = [
+    "Problem: Design a global real-time fraud platform.",
+    "Constraints: 1 billion tx/day and < 50 ms decision budget.",
+    "Tasks: Part 1 data structure, Part 2 architecture, Part 3 ML, Part 4 Bayes.",
+  ].join(" ");
+  assert.equal(
+    resolveResponseModeForTest("research", complexPrompt),
+    "deep",
+  );
+});
+
+test("exact fraud-system deep prompt stays out of the fast direct-answer lane", () => {
+  const prompt = [
+    "Problem:",
+    "You are designing a real-time fraud detection system for a payment platform (like UPI/Paytm scale).",
+    "",
+    "Constraints:",
+    "1 billion transactions/day",
+    "",
+    "Decision time: < 50 ms per transaction",
+    "",
+    "Must detect:",
+    "",
+    "Known fraud patterns",
+    "",
+    "Unknown (zero-day) fraud",
+    "",
+    "System must:",
+    "",
+    "Scale globally",
+    "",
+    "Be fault-tolerant",
+    "",
+    "Handle adversarial attacks",
+    "",
+    "Tasks",
+    "Part 1 - DSA core logic",
+    "Part 2 - System Design",
+    "Part 3 - Machine Learning",
+    "Part 4 - Operating Systems",
+    "Part 5 - Mathematics / Probability",
+    "Part 6 - Security Twist",
+  ].join("\n");
+
+  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest(prompt), false);
+  assert.equal(resolveResponseModeForTest("research", prompt), "deep");
+});
+
+test("complex high-stakes prompts force deep mode across health law and finance", () => {
+  const healthPrompt = "My father has diabetes, kidney disease, and hypertension. Compare medication classes, side effects, contraindications, and warning signs that require urgent care.";
+  const lawPrompt = "Compare termination, indemnity, limitation of liability, and jurisdiction clauses in this startup SaaS contract and explain the main legal risks.";
+  const financePrompt = "Compare a 60/40 portfolio, risk parity, and a bond ladder for a 20-year horizon with tax considerations, drawdown control, and rebalancing strategy.";
+
+  assert.equal(resolveResponseModeForTest("health", healthPrompt), "deep");
+  assert.equal(resolveResponseModeForTest("law", lawPrompt), "deep");
+  assert.equal(resolveResponseModeForTest("finance", financePrompt), "deep");
+});
+
+test("deep fraud-system prompt does not trigger Drive access consent", () => {
+  const prompt = [
+    "Problem:",
+    "You are designing a real-time fraud detection system for a payment platform (like UPI/Paytm scale).",
+    "",
+    "Constraints:",
+    "1 billion transactions/day",
+    "",
+    "Decision time: < 50 ms per transaction",
+    "",
+    "Must detect:",
+    "",
+    "Known fraud patterns",
+    "",
+    "Unknown (zero-day) fraud",
+    "",
+    "System must:",
+    "",
+    "Scale globally",
+    "",
+    "Be fault-tolerant",
+    "",
+    "Handle adversarial attacks",
+    "",
+    "Part 2 - System Design",
+    "Design the full architecture:",
+    "Storage (hot vs cold data)",
+    "How do you redesign your system to stay ahead?",
+  ].join("\n");
+
+  assert.equal(detectDriveIntent(prompt), null);
+  assert.equal(inferAppAccessRequirementForTest(prompt), null);
+});
+
+test("multilingual Japanese technical architecture prompts lock to a direct technical route", () => {
+  const prompt = [
+    "2026年において、世界的なパンデミックと医療データの爆発的増加の中で、リアルタイムに患者の重症化リスクを予測する分散型AIシステムをどのように設計しますか？",
+    "さらに、ディファレンシャルプライバシーや連合学習を用いながら、各国の規制やデータ偏りの問題をどのように克服しますか？",
+  ].join("\n");
+
+  const strictRoute = detectStrictIntentRouteForTest(prompt);
+  assert.ok(strictRoute);
+  assert.deepEqual(strictRoute?.intent, { type: "technology", category: "technology" });
+  assert.equal(strictRoute?.locked, true);
+  assert.equal(resolveResponseModeForTest("technology", prompt), "deep");
+});
+
+test("simple easy prompts still stay fast", () => {
+  assert.equal(resolveResponseModeForTest("science", "What is osmosis?"), "fast");
+  assert.equal(resolveResponseModeForTest("history", "Who was Ashoka?"), "fast");
+});
+
+test("AI model comparison prompts do not get swallowed by the primary conversation lane", async () => {
+  const prompt = "what is the key difference betweeen gpt 5.4 vs opus 4.6 and gemini 3.2 pro and when were they released and rate them all out of 100 accoriding to there performance";
+  const result = await routeInboundAgentMessageResult("test-user", prompt);
+
+  assert.doesNotMatch(result.response ?? "", /Model name clarification/i);
+  assert.match(result.response ?? "", /GPT-5\.4|Claude Opus 4\.6|Gemini 3\.2 Pro|AI model comparison snapshot/i);
+  assert.doesNotMatch(result.response ?? "", /GPT-4-Turbo|Gemini 1\.5 Pro|Claude 3 Opus/i);
+});
+
+test("formal orbital and abstract computability prompts stay out of weather and copilot fallbacks", () => {
+  const hohmannPrompt = "Problem (Advanced - Space & Technology) A spacecraft is in a circular low Earth orbit (LEO) at an altitude of 300 km above Earth. It needs to transfer to a geostationary orbit (GEO) at an altitude of 35,786 km using a Hohmann transfer orbit. Given: mu = 3.986 x 10^14 m^3/s^2, Re = 6371 km. Calculate the total delta-v required and the time taken.";
+  assert.deepEqual(detectIntentForTest(hohmannPrompt), { type: "math", category: "math" });
+  assert.equal(solveCodingArchitectureQuestion(hohmannPrompt), null);
+  assert.doesNotMatch(buildTimeboxedProfessionalReplyForTest(hohmannPrompt, "research"), /Satellite Collision-Avoidance Copilot|Weather update/i);
+
+  const abstractPrompt = "Problem (Ultra Hard - Cross Domain) Consider a hypothetical AI system that has complete knowledge of all physical laws governing the universe and unlimited computational resources. Assume the universe is governed by quantum mechanics and general relativity. Is it theoretically possible to predict the exact conscious experience of a human at t1 > t0? Prove or disprove and analyze infinite regress, fixed-point convergence, logical inconsistency, and computable versus uncomputable reality.";
+  assert.deepEqual(detectIntentForTest(abstractPrompt), { type: "science", category: "science" });
+  const abstractReply = buildTimeboxedProfessionalReplyForTest(abstractPrompt, "science");
+  assert.doesNotMatch(abstractReply, /Weather update/i);
+  assert.doesNotMatch(abstractReply, /could not complete a reliable direct answer/i);
+  assert.match(abstractReply, /Bottom line:/i);
+  assert.match(abstractReply, /Disprove\./i);
+  assert.match(abstractReply, /computable reality/i);
+
+  const abstractProfile = buildClawCloudAnswerQualityProfile({
+    question: abstractPrompt,
+    intent: "science",
+    category: "science",
+  });
+  assert.equal(abstractProfile.domain, "general");
+
+  const abstractLowConfidenceReply = buildClawCloudLowConfidenceReply(
+    abstractPrompt,
+    abstractProfile,
+  );
+  assert.match(abstractLowConfidenceReply, /concept, assumptions, model, or theorem/i);
+  assert.doesNotMatch(abstractLowConfidenceReply, /country or state|lawyer|legal position/i);
+
+  const abstractResearchFallback = buildClawCloudLowConfidenceReply(
+    abstractPrompt,
+    buildClawCloudAnswerQualityProfile({
+      question: abstractPrompt,
+      intent: "research",
+      category: "web_search",
+    }),
+  );
+  assert.match(abstractResearchFallback, /concept, assumptions, model, or theorem/i);
+  assert.doesNotMatch(abstractResearchFallback, /date, location, company, person, or ticker/i);
+});
+
+test("hard science computability prompts answer directly across the full inbound route", async () => {
+  const prompt = [
+    "Problem (Ultra Hard - Cross Domain)",
+    "Consider a hypothetical AI system that has complete knowledge of all physical laws governing the universe and unlimited computational resources.",
+    "Assume the universe is governed by quantum mechanics and general relativity.",
+    "The AI has perfect access to the exact quantum state of a human brain at time t0.",
+    "Is it theoretically possible for the AI to predict the exact conscious experience of that human at time t1 > t0?",
+    "Prove or disprove: perfect prediction of human behavior implies determinism of consciousness.",
+    "Analyze infinite regress, fixed-point convergence, logical inconsistency, and the boundary between computable reality and non-computable phenomena.",
+    "Bonus: construct a formal proof or counterexample for the claim that any system capable of fully simulating the universe must necessarily contain an uncomputable component.",
+  ].join(" ");
+
+  const result = await routeInboundAgentMessageResult("test-user", prompt);
+
+  assert.doesNotMatch(result.response ?? "", /could not complete a reliable direct answer/i);
+  assert.match(result.response ?? "", /Bottom line:/i);
+  assert.match(result.response ?? "", /Disprove\./i);
+  assert.match(result.response ?? "", /cellular-automaton universe|finite cellular-automaton universe/i);
+});
+
+test("full hard science prompt stays out of live freshness fallback", async () => {
+  const prompt = [
+    "Problem (Ultra Hard - Cross Domain)",
+    "Consider a hypothetical AI system that has complete knowledge of all physical laws governing the universe and unlimited computational resources.",
+    "Assume:",
+    "The universe is governed by quantum mechanics and general relativity.",
+    "The AI has perfect access to the exact quantum state of a human brain at time t0.",
+    "Answer the following:",
+    "Is it theoretically possible for the AI to predict the exact conscious experience of that human at time t1 > t0?",
+    "Justify your answer using principles from quantum mechanics, uncertainty, decoherence, and computational theory.",
+    "If the AI simulates the brain perfectly, does the simulation itself become conscious? Provide arguments using both physicalism and functionalism.",
+    "Prove or disprove: perfect prediction of human behavior implies determinism of consciousness.",
+    "Include arguments involving chaos theory, Godel incompleteness, and limits of computation.",
+    "Suppose the AI attempts to simulate itself simulating the universe using recursive self-modeling.",
+    "Analyze whether this leads to infinite regress, fixed-point convergence, or logical inconsistency.",
+    "Define a formal boundary between computable reality and non-computable phenomena.",
+    "Can such a boundary exist within current models of physics?",
+    "Bonus: construct a formal proof or counterexample for the statement that any system capable of fully simulating the universe must necessarily contain an uncomputable component.",
+  ].join(" ");
+
+  const result = await routeInboundAgentMessageResult("test-user", prompt);
+
+  assert.doesNotMatch(result.response ?? "", /live freshness check/i);
+  assert.doesNotMatch(result.response ?? "", /could not confirm a clearly current dated source/i);
+  assert.match(result.response ?? "", /Bottom line:/i);
+  assert.match(result.response ?? "", /Disprove\./i);
+});
+
+test("strict current timeline guard flags past-year answers for right-now questions", () => {
+  assert.equal(
+    usesPastYearAsCurrentForTest(
+      "what is the situation of iran right now",
+      "Iran is locked in a vicious cycle in August 2024.",
+    ),
+    true,
+  );
+  assert.equal(
+    usesPastYearAsCurrentForTest(
+      "what was the situation of iran in 2024",
+      "Iran is locked in a vicious cycle in August 2024.",
+    ),
+    false,
+  );
 });
 
 test("gmail body extraction falls back to html content when plain text is absent", () => {
@@ -5501,6 +7922,28 @@ test("reply display normalization strips mojibake icon prefixes and repairs inli
   );
 });
 
+test("reply display normalization repairs full-script Hindi mojibake instead of leaving garbled text", () => {
+  const normalized = normalizeReplyForClawCloudDisplay(
+    "Chata = à¤à¤¤, à¤®à¤à¤¾à¤¨ à¤à¥ à¤¸à¤¬à¤¸à¥ à¤à¤ªà¤°à¥ à¤¢à¤à¤¨ (slab à¤¯à¤¾ à¤à¤¤)à¥¤",
+  );
+
+  assert.equal(
+    normalized,
+    "Chata = छत, मकान की सबसे ऊपरी ढकन (slab या छत)।",
+  );
+});
+
+test("reply display normalization repairs Romanian diacritics from UTF-8 mojibake", () => {
+  const normalized = normalizeReplyForClawCloudDisplay(
+    "*Deadpool â povestea pe scurt (fÄrÄ spoilere majore)*",
+  );
+
+  assert.equal(
+    normalized,
+    "Deadpool – povestea pe scurt (fără spoilere majore)",
+  );
+});
+
 test("reply display normalization preserves numbered lists and keeps follow-up bullets separate", () => {
   const normalized = normalizeReplyForClawCloudDisplay([
     "1. F-35 Lightning II",
@@ -5567,6 +8010,48 @@ test("timeboxed reply answers clear current-affairs outage questions directly in
   assert.match(reply, /fuel shortages/i);
   assert.match(reply, /grid instability/i);
   assert.doesNotMatch(reply, /latest update request/i);
+});
+
+test("timeboxed reply answers deep fraud-system prompts directly during timeout recovery", () => {
+  const prompt = [
+    "Problem:",
+    "You are designing a real-time fraud detection system for a payment platform (like UPI/Paytm scale).",
+    "Constraints: 1 billion transactions/day. Decision time: < 50 ms per transaction.",
+    "Must detect known fraud patterns and unknown (zero-day) fraud.",
+    "Tasks: Part 1 DSA core logic, Part 2 system design, Part 3 machine learning, Part 4 operating systems, Part 5 Bayes theorem, Part 6 security twist.",
+  ].join("\n");
+
+  const reply = buildTimeboxedProfessionalReplyForTest(prompt, "research");
+
+  assert.match(reply, /Kafka/i);
+  assert.match(reply, /Flink/i);
+  assert.match(reply, /ring buffer/i);
+  assert.match(reply, /9\.0%/i);
+  assert.doesNotMatch(reply, /could not complete a reliable direct answer/i);
+});
+
+test("timeboxed reply uses architecture expert fallback even when the prompt was routed as research", () => {
+  const prompt = "Design a multi-tenant RAG platform with hybrid retrieval, reranking, chunking strategy, citation grounding, and evaluation metrics.";
+  const reply = buildTimeboxedProfessionalReplyForTest(prompt, "research");
+
+  assert.match(reply, /RAG Architecture/i);
+  assert.match(reply, /hybrid/i);
+  assert.match(reply, /rerank/i);
+  assert.doesNotMatch(reply, /could not complete a reliable direct answer/i);
+});
+
+test("timeboxed reply answers Japanese distributed-clinical-AI prompts directly", () => {
+  const prompt = [
+    "2026年において、世界的なパンデミックと医療データの爆発的増加の中で、リアルタイムに患者の重症化リスクを予測する分散型AIシステムをどのように設計しますか？",
+    "さらに、ディファレンシャルプライバシーや連合学習を用いながら、各国の規制やデータ偏りの問題をどのように克服しますか？",
+  ].join("\n");
+  const reply = buildTimeboxedProfessionalReplyForTest(prompt, "technology");
+
+  assert.match(reply, /分散型 AI 基盤/u);
+  assert.match(reply, /連合学習/u);
+  assert.match(reply, /ディファレンシャルプライバシー/u);
+  assert.match(reply, /secure aggregation/i);
+  assert.doesNotMatch(reply, /could not complete a reliable direct answer/i);
 });
 
 test("current-affairs power-crisis questions short-circuit before the heavy inbound route stack", async () => {
@@ -5646,6 +8131,15 @@ test("disclaimer matching stays domain-aware and avoids health bleed on stats qu
     answer: "General guidance only.",
   });
   assert.match(healthDisclaimer ?? "", /medical advice/i);
+
+  const scienceDisclaimer = buildDisclaimer({
+    intent: "science",
+    category: "science",
+    question:
+      "Consider a hypothetical AI system that has complete knowledge of all physical laws governing the universe and unlimited computational resources.",
+    answer: "This is a theory-of-mind and physics discussion.",
+  });
+  assert.equal(scienceDisclaimer, null);
 });
 
 test("api guards rate-limit bursts and reject private crawl targets", async () => {
@@ -5811,13 +8305,57 @@ test("live answer bundles carry explicit evidence metadata and render cleanly", 
   assert.equal(bundle.channel, "live");
   assert.equal(bundle.metadata.route_tier, "volatile");
   assert.equal(bundle.metadata.strategy, "deterministic");
+  assert.equal(bundle.metadata.freshness_guarded, true);
   assert.ok(bundle.evidence.some((entry) => entry.domain === "worldbank.org"));
   assert.ok(bundle.sourceSummary.includes("worldbank.org"));
 
   const rendered = renderClawCloudAnswerBundle(bundle);
   assert.match(rendered, /\*Fresh answer\*/i);
   assert.match(rendered, /Source note: checked against live web signals/i);
-  assert.match(rendered, /\*China GDP\*/i);
+  assert.match(rendered, /\*Freshness check\*/i);
+  assert.match(rendered, /won't present past-year or stale dated data as if it were current/i);
+});
+
+test("AI model comparison live answers fail closed when only stale prior-year evidence is available", () => {
+  const result = buildSourceBackedLiveAnswerResult({
+    question: "what is the key difference betweeen gpt 5.4 vs opus 4.6 and gemini 3.2 pro and when were they released and rate them all out of 100 accoriding to there performance",
+    answer: [
+      "*AI model comparison snapshot*",
+      "",
+      "GPT-4-Turbo (2024-04), Claude 3 Opus (2024-03), and Gemini 1.5 Pro (2024-02) are the latest real models.",
+    ].join("\n"),
+    sources: [
+      {
+        title: "GPT-4 Turbo",
+        url: "https://openai.com/index/gpt-4-turbo",
+        snippet: "OpenAI details GPT-4 Turbo.",
+        domain: "openai.com",
+        publishedDate: "2024-04-10T00:00:00.000Z",
+        score: 0.9,
+      },
+      {
+        title: "Claude 3 Opus",
+        url: "https://www.anthropic.com/news/claude-3-family",
+        snippet: "Anthropic introduces Claude 3 Opus.",
+        domain: "anthropic.com",
+        publishedDate: "2024-03-04T00:00:00.000Z",
+        score: 0.88,
+      },
+      {
+        title: "Gemini 1.5 Pro",
+        url: "https://blog.google/technology/ai/google-gemini-1-5-pro/",
+        snippet: "Google announces Gemini 1.5 Pro.",
+        domain: "blog.google",
+        publishedDate: "2024-02-15T00:00:00.000Z",
+        score: 0.86,
+      },
+    ],
+  });
+
+  assert.ok(result.liveAnswerBundle);
+  assert.equal(result.liveAnswerBundle?.metadata.freshness_guarded, true);
+  assert.match(result.answer, /\*Freshness check\*/i);
+  assert.match(result.answer, /won't present past-year or stale dated data as if it were current/i);
 });
 
 test("country metric live answers use World Bank data instead of generic search prose", async () => {
@@ -5863,19 +8401,99 @@ test("country metric live answers use World Bank data instead of generic search 
   try {
     const answer = await fetchLiveDataAndSynthesize("what is the gdp of china");
     assert.match(answer, /\*Fresh answer\*/i);
-    assert.match(answer, /\*China GDP\*/i);
-    assert.match(answer, /\*Latest official annual estimate:\*/i);
-    assert.match(answer, /\$18\.74 trillion/i);
-    assert.match(answer, /2024/i);
-    assert.match(answer, /\*What to know\*/i);
-    assert.match(answer, /world bank/i);
+    assert.match(answer, /\*Freshness check\*/i);
+    assert.match(answer, /won't present past-year or stale dated data as if it were current/i);
     assert.equal(
       isCompleteCountryMetricAnswer("what is the gdp of china", answer),
-      true,
+      false,
     );
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("google login auth URL uses a remembered login hint to skip forced account chooser", () => {
+  const previous = {
+    GOOGLE_CLIENT_ID: env.GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET: env.GOOGLE_CLIENT_SECRET,
+    NEXT_PUBLIC_APP_URL: env.NEXT_PUBLIC_APP_URL,
+  };
+
+  env.GOOGLE_CLIENT_ID = "client-id.apps.googleusercontent.com";
+  env.GOOGLE_CLIENT_SECRET = "test-secret";
+  env.NEXT_PUBLIC_APP_URL = "https://swift-deploy.in";
+
+  try {
+    const hintedUrl = new URL(
+      buildClawCloudGoogleLoginAuthUrl(
+        "login:v2:test-state",
+        "https://swift-deploy.in",
+        { loginHint: "Founder@Example.com" },
+      ),
+    );
+    assert.equal(hintedUrl.searchParams.get("login_hint"), "founder@example.com");
+    assert.equal(hintedUrl.searchParams.get("prompt"), null);
+
+    const chooserUrl = new URL(
+      buildClawCloudGoogleLoginAuthUrl("login:v2:test-state", "https://swift-deploy.in"),
+    );
+    assert.equal(chooserUrl.searchParams.get("prompt"), "select_account");
+  } finally {
+    env.GOOGLE_CLIENT_ID = previous.GOOGLE_CLIENT_ID;
+    env.GOOGLE_CLIENT_SECRET = previous.GOOGLE_CLIENT_SECRET;
+    env.NEXT_PUBLIC_APP_URL = previous.NEXT_PUBLIC_APP_URL;
+  }
+});
+
+test("google workspace rollout lets public Gmail and Calendar connect override legacy Lite-only mode", () => {
+  const previous = {
+    GOOGLE_CLIENT_ID: env.GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET: env.GOOGLE_CLIENT_SECRET,
+    NEXT_PUBLIC_APP_URL: env.NEXT_PUBLIC_APP_URL,
+    GOOGLE_WORKSPACE_PUBLIC_ENABLED: env.GOOGLE_WORKSPACE_PUBLIC_ENABLED,
+    GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED: env.GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED,
+    GOOGLE_WORKSPACE_TEMPORARY_HOLD: env.GOOGLE_WORKSPACE_TEMPORARY_HOLD,
+    GOOGLE_WORKSPACE_SETUP_LITE_ONLY: env.GOOGLE_WORKSPACE_SETUP_LITE_ONLY,
+  };
+
+  env.GOOGLE_CLIENT_ID = "client-id.apps.googleusercontent.com";
+  env.GOOGLE_CLIENT_SECRET = "test-secret";
+  env.NEXT_PUBLIC_APP_URL = "https://swift-deploy.in";
+  env.GOOGLE_WORKSPACE_PUBLIC_ENABLED = true;
+  env.GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED = false;
+  env.GOOGLE_WORKSPACE_TEMPORARY_HOLD = false;
+  env.GOOGLE_WORKSPACE_SETUP_LITE_ONLY = true;
+
+  try {
+    const publicCore = getGoogleWorkspaceCoreAccess("person@example.com");
+    assert.equal(publicCore.available, true);
+    assert.equal(publicCore.allowlisted, false);
+    assert.match(publicCore.reason ?? "", /available/i);
+
+    const publicConfig = getPublicAppConfig();
+    assert.equal(publicConfig.googleRollout.publicWorkspaceEnabled, true);
+    assert.equal(publicConfig.googleRollout.setupLiteMode, false);
+  } finally {
+    env.GOOGLE_CLIENT_ID = previous.GOOGLE_CLIENT_ID;
+    env.GOOGLE_CLIENT_SECRET = previous.GOOGLE_CLIENT_SECRET;
+    env.NEXT_PUBLIC_APP_URL = previous.NEXT_PUBLIC_APP_URL;
+    env.GOOGLE_WORKSPACE_PUBLIC_ENABLED = previous.GOOGLE_WORKSPACE_PUBLIC_ENABLED;
+    env.GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED = previous.GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED;
+    env.GOOGLE_WORKSPACE_TEMPORARY_HOLD = previous.GOOGLE_WORKSPACE_TEMPORARY_HOLD;
+    env.GOOGLE_WORKSPACE_SETUP_LITE_ONLY = previous.GOOGLE_WORKSPACE_SETUP_LITE_ONLY;
+  }
+});
+
+test("google oauth verification pack matches the live Gmail and Calendar scope set", () => {
+  const submissionPack = readFileSync(
+    path.join(process.cwd(), "GOOGLE-OAUTH-VERIFICATION-SUBMISSION.md"),
+    "utf8",
+  );
+
+  assert.match(submissionPack, /https:\/\/www\.googleapis\.com\/auth\/gmail\.modify/);
+  assert.match(submissionPack, /https:\/\/www\.googleapis\.com\/auth\/calendar\.events/);
+  assert.doesNotMatch(submissionPack, /https:\/\/www\.googleapis\.com\/auth\/gmail\.readonly/);
+  assert.doesNotMatch(submissionPack, /https:\/\/www\.googleapis\.com\/auth\/calendar\.readonly/);
 });
 
 test("country metric quality check rejects generic memo-style non-answers", () => {
@@ -5942,11 +8560,61 @@ test("web search results expose live evidence bundles for deterministic country 
 
   try {
     const result = await answerWebSearchResult("what is the gdp of china");
-    assert.match(result.answer, /\*China GDP\*/i);
+    assert.match(result.answer, /\*Freshness check\*/i);
     assert.ok(result.liveAnswerBundle);
     assert.equal(result.liveAnswerBundle?.channel, "live");
     assert.equal(result.liveAnswerBundle?.sourceSummary.includes("worldbank.org"), true);
     assert.equal(result.liveAnswerBundle?.metadata.strategy, "deterministic");
+    assert.equal(result.liveAnswerBundle?.metadata.freshness_guarded, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("full inbound route keeps country GDP prompts on the country-metric live path", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+    if (url.includes("api.worldbank.org/v2/country?format=json&per_page=400")) {
+      return new Response(JSON.stringify([
+        { page: 1, pages: 1, per_page: "400", total: 2 },
+        [
+          { id: "CHN", iso2Code: "CN", name: "China" },
+          { id: "USA", iso2Code: "US", name: "United States" },
+        ],
+      ]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (url.includes("/country/CHN/indicator/NY.GDP.MKTP.CD")) {
+      return new Response(JSON.stringify([
+        { page: 1, pages: 1, per_page: "10", total: 2, sourceid: "2", lastupdated: "2026-02-24" },
+        [
+          { country: { value: "China" }, date: "2025", value: null },
+          { country: { value: "China" }, date: "2024", value: 18_743_803_170_827.2 },
+        ],
+      ]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    throw new Error(`Unexpected fetch during test: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const result = await routeInboundAgentMessageResult("test-user", "what is gdp of china right now");
+    assert.match(result.response ?? "", /Freshness-safe reply/i);
+    assert.doesNotMatch(result.response ?? "", /cold-chain|GDP\/GxP|excursion|shipment|sensor/i);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -6113,7 +8781,7 @@ test("consumer staple clarification avoids source-dump replies for unsupported r
   assert.match(answer, /country \+ city or market/i);
 });
 
-test("mixed richest rankings stay complete when the cities source page is unavailable", async () => {
+test("mixed richest rankings fail closed when part of the answer depends on stale city reports", async () => {
   const originalFetch = globalThis.fetch;
 
   globalThis.fetch = (async (input: string | URL | Request) => {
@@ -6158,14 +8826,66 @@ test("mixed richest rankings stay complete when the cities source page is unavai
       "tell me top 10 richest persons and richest cities of the world",
     );
     assert.match(answer, /\*Fresh answer\*/i);
-    assert.match(answer, /Top richest people by live net worth/i);
-    assert.match(answer, /Top wealthiest cities by resident millionaires/i);
-    assert.match(answer, /New York/i);
-    assert.match(answer, /Bay Area/i);
-    assert.match(answer, /Elon Musk/i);
+    assert.match(answer, /\*Freshness check\*/i);
+    assert.match(answer, /won't present past-year or stale dated data as if it were current/i);
+    assert.doesNotMatch(answer, /Top wealthiest cities by resident millionaires/i);
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("strong live answer bundles override generic time-sensitive fallback responses", () => {
+  const promoted = maybePromoteVisibleResponseWithLiveBundleForTest(
+    "what is the situation of iran and israel war",
+    {
+      response: [
+        "Time-sensitive query",
+        "",
+        "To keep this accurate, send the exact company, person, product, topic, date, or location you want checked live.",
+        "If you want a stable overview instead of a live update, ask for an overview and I will answer directly.",
+        "",
+        "Live search unavailable for this query.",
+      ].join("\n"),
+      liveAnswerBundle: {
+        question: "what is the situation of iran and israel war",
+        answer: [
+          "No active Iran-Israel war right now.",
+          "Israel and Iran are still in their long-running shadow conflict, but no open declared war has restarted.",
+          "",
+          "As of: March 31, 2026 at 02:27 PM UTC",
+          "Sources: nytimes.com, sky.com",
+        ].join("\n"),
+        channel: "live",
+        generatedAt: "2026-03-31T14:27:16.677Z",
+        badge: "*Live answer*",
+        sourceNote: "_Source note: checked against live web signals; figures can shift quickly._",
+        evidence: [
+          {
+            title: "Iran war latest - Example Source",
+            domain: "nytimes.com",
+            kind: "report",
+            url: "https://nytimes.com/iran-war",
+            snippet: "Example evidence snippet",
+            publishedAt: "Tue, 31 Mar 2026 14:24:56 GMT",
+            observedAt: "2026-03-31T14:27:16.472Z",
+          },
+        ],
+        sourceSummary: ["nytimes.com"],
+        metadata: {
+          route_tier: "realtime",
+          requires_web_search: true,
+          evidence_count: 1,
+          strategy: "search_synthesis",
+          freshness_guarded: false,
+        },
+      },
+      modelAuditTrail: null,
+    },
+  );
+
+  assert.match(promoted.response ?? "", /No active Iran-Israel war right now/i);
+  assert.equal(promoted.liveAnswerBundle?.answer, promoted.response);
+  assert.doesNotMatch(promoted.response ?? "", /Time-sensitive query/i);
 });
 
 test("richest ranking scope detection keeps city-only prompts out of the people route", () => {
@@ -6175,7 +8895,53 @@ test("richest ranking scope detection keeps city-only prompts out of the people 
   assert.equal(extractRichestRankingScope("top 10 richest in the world"), "people");
 });
 
-test("city-only richest rankings stay scoped to cities and never append the people leaderboard", async () => {
+test("single richest-person prompts return a direct current answer even when only a few Forbes rows are available", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestedUrls: string[] = [];
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    requestedUrls.push(url);
+
+    if (url.includes("forbes.com/forbesapi/person/rtb/0/position/true.json")) {
+      return new Response(JSON.stringify({
+        personList: {
+          personsLists: [
+            { personName: "Elon Musk", finalWorth: 496_500 },
+            { personName: "Bernard Arnault", finalWorth: 298_200 },
+            { personName: "Jeff Bezos", finalWorth: 205_100 },
+          ],
+        },
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    throw new Error(`Unexpected fetch during test: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const answer = await fetchLiveDataAndSynthesize("who is the richest person of the world");
+    assert.match(answer, /\*Fresh answer\*/i);
+    assert.match(answer, /\*Current richest person in the world:\* \*Elon Musk\*/i);
+    assert.match(answer, /\*Forbes live net worth:\* \*\$496\.5B\*/i);
+    assert.match(answer, /\*As of:\* .*UTC/i);
+    assert.match(answer, /Source: forbes\.com/i);
+    assert.doesNotMatch(answer, /\*Recommendation\*/i);
+    assert.equal(requestedUrls.length, 1);
+    assert.match(requestedUrls[0] ?? "", /forbes\.com\/forbesapi\/person\/rtb\/0\/position\/true\.json/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("city-only richest rankings fail closed when the latest available city report is stale", async () => {
   const originalFetch = globalThis.fetch;
 
   globalThis.fetch = (async (input: string | URL | Request) => {
@@ -6200,9 +8966,8 @@ test("city-only richest rankings stay scoped to cities and never append the peop
   try {
     const answer = await fetchLiveDataAndSynthesize("top 10 richest cities in the world");
     assert.match(answer, /\*Fresh answer\*/i);
-    assert.match(answer, /Top wealthiest cities by resident millionaires/i);
-    assert.match(answer, /New York/i);
-    assert.match(answer, /Bay Area/i);
+    assert.match(answer, /\*Freshness check\*/i);
+    assert.match(answer, /won't present past-year or stale dated data as if it were current/i);
     assert.doesNotMatch(answer, /Top richest people by live net worth/i);
     assert.doesNotMatch(answer, /Elon Musk/i);
   } finally {
@@ -6225,7 +8990,7 @@ test("topic mismatch detection flags explicit people-versus-cities scope bleed",
   );
 });
 
-test("web-search routing accepts grounded city-only wealth rankings instead of rejecting them as incomplete metrics", async () => {
+test("web-search routing fails closed for city-only wealth rankings when the cited report is stale", async () => {
   const originalFetch = globalThis.fetch;
 
   globalThis.fetch = (async (input: string | URL | Request) => {
@@ -6250,8 +9015,8 @@ test("web-search routing accepts grounded city-only wealth rankings instead of r
   try {
     const result = await answerWebSearchResult("top 10 richest cities in the world");
     assert.match(result.answer, /\*Fresh answer\*/i);
-    assert.match(result.answer, /Top wealthiest cities by resident millionaires/i);
-    assert.doesNotMatch(result.answer, /not confident enough/i);
+    assert.match(result.answer, /\*Freshness check\*/i);
+    assert.match(result.answer, /won't present past-year or stale dated data as if it were current/i);
     assert.doesNotMatch(result.answer, /Top richest people by live net worth/i);
   } finally {
     globalThis.fetch = originalFetch;

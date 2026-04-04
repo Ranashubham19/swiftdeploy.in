@@ -1,10 +1,14 @@
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 import {
   defaultWhatsAppSettings,
+  type WhatsAppActiveContactSession,
   type WhatsAppApprovalState,
   type WhatsAppAutomationMode,
   type WhatsAppContactPriority,
   type WhatsAppGroupReplyMode,
+  type WhatsAppPendingContactOption,
+  type WhatsAppPendingContactResolution,
+  type WhatsAppPendingContactResolutionKind,
   type WhatsAppReplyMode,
   type WhatsAppSensitivity,
   type WhatsAppSettings,
@@ -49,14 +53,122 @@ function normalizeRetentionDays(value: unknown) {
   return Math.min(3650, Math.max(7, rounded));
 }
 
+function normalizeActiveContactSession(value: unknown): WhatsAppActiveContactSession | null {
+  const raw = value && typeof value === "object"
+    ? value as Partial<Record<keyof WhatsAppActiveContactSession, unknown>>
+    : null;
+
+  const contactName = typeof raw?.contactName === "string" && raw.contactName.trim()
+    ? raw.contactName.trim()
+    : null;
+  if (!contactName) {
+    return null;
+  }
+
+  const phone = typeof raw?.phone === "string" && raw.phone.trim()
+    ? raw.phone.trim()
+    : null;
+  const jid = typeof raw?.jid === "string" && raw.jid.trim()
+    ? raw.jid.trim()
+    : null;
+  const startedAt = typeof raw?.startedAt === "string" && raw.startedAt.trim()
+    ? raw.startedAt.trim()
+    : new Date().toISOString();
+  const sourceMessage = typeof raw?.sourceMessage === "string" && raw.sourceMessage.trim()
+    ? raw.sourceMessage.trim()
+    : null;
+
+  return {
+    contactName,
+    phone,
+    jid,
+    startedAt,
+    sourceMessage,
+  };
+}
+
+function normalizePendingContactOptions(value: unknown): WhatsAppPendingContactOption[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) => {
+      const raw = item && typeof item === "object"
+        ? item as Partial<Record<keyof WhatsAppPendingContactOption, unknown>>
+        : null;
+      const name = typeof raw?.name === "string" && raw.name.trim()
+        ? raw.name.trim()
+        : null;
+      if (!name) {
+        return null;
+      }
+
+      return {
+        name,
+        phone: typeof raw?.phone === "string" && raw.phone.trim()
+          ? raw.phone.trim()
+          : null,
+        jid: typeof raw?.jid === "string" && raw.jid.trim()
+          ? raw.jid.trim()
+          : null,
+      };
+    })
+    .filter((item): item is WhatsAppPendingContactOption => Boolean(item));
+}
+
+function normalizePendingContactResolution(value: unknown): WhatsAppPendingContactResolution | null {
+  const raw = value && typeof value === "object"
+    ? value as Partial<Record<keyof WhatsAppPendingContactResolution, unknown>>
+    : null;
+  const kind = typeof raw?.kind === "string"
+    ? raw.kind.trim()
+    : "";
+  const allowedKinds = new Set<WhatsAppPendingContactResolutionKind>([
+    "active_contact_start",
+    "whatsapp_history",
+    "send_message",
+  ]);
+  if (!allowedKinds.has(kind as WhatsAppPendingContactResolutionKind)) {
+    return null;
+  }
+
+  const requestedName = typeof raw?.requestedName === "string" && raw.requestedName.trim()
+    ? raw.requestedName.trim()
+    : null;
+  const resumePrompt = typeof raw?.resumePrompt === "string" && raw.resumePrompt.trim()
+    ? raw.resumePrompt.trim()
+    : null;
+  const options = normalizePendingContactOptions(raw?.options);
+  if (!requestedName || !resumePrompt || !options.length) {
+    return null;
+  }
+
+  const createdAt = typeof raw?.createdAt === "string" && raw.createdAt.trim()
+    ? raw.createdAt.trim()
+    : new Date().toISOString();
+
+  return {
+    kind: kind as WhatsAppPendingContactResolutionKind,
+    requestedName,
+    resumePrompt,
+    options,
+    createdAt,
+  };
+}
+
 function normalizeSettings(value: unknown): WhatsAppSettings {
   const raw = value && typeof value === "object"
     ? (value as Partial<Record<keyof WhatsAppSettings, unknown>>)
     : {};
 
-  const automationMode = typeof raw.automationMode === "string" && automationModes.has(raw.automationMode as WhatsAppAutomationMode)
-    ? (raw.automationMode as WhatsAppAutomationMode)
-    : defaultWhatsAppSettings.automationMode;
+  const requestedAutomationMode =
+    typeof raw.automationMode === "string" && automationModes.has(raw.automationMode as WhatsAppAutomationMode)
+      ? (raw.automationMode as WhatsAppAutomationMode)
+      : defaultWhatsAppSettings.automationMode;
+  const automationMode = requestedAutomationMode === "approve_before_send"
+    ? "read_only"
+    : requestedAutomationMode;
   const replyMode = typeof raw.replyMode === "string" && replyModes.has(raw.replyMode as WhatsAppReplyMode)
     ? (raw.replyMode as WhatsAppReplyMode)
     : defaultWhatsAppSettings.replyMode;
@@ -68,10 +180,7 @@ function normalizeSettings(value: unknown): WhatsAppSettings {
     automationMode,
     replyMode,
     groupReplyMode,
-    requireApprovalForSensitive:
-      typeof raw.requireApprovalForSensitive === "boolean"
-        ? raw.requireApprovalForSensitive
-        : defaultWhatsAppSettings.requireApprovalForSensitive,
+    requireApprovalForSensitive: false,
     allowGroupReplies:
       typeof raw.allowGroupReplies === "boolean"
         ? raw.allowGroupReplies
@@ -80,14 +189,8 @@ function normalizeSettings(value: unknown): WhatsAppSettings {
       typeof raw.allowDirectSendCommands === "boolean"
         ? raw.allowDirectSendCommands
         : defaultWhatsAppSettings.allowDirectSendCommands,
-    requireApprovalForNewContacts:
-      typeof raw.requireApprovalForNewContacts === "boolean"
-        ? raw.requireApprovalForNewContacts
-        : defaultWhatsAppSettings.requireApprovalForNewContacts,
-    requireApprovalForFirstOutreach:
-      typeof raw.requireApprovalForFirstOutreach === "boolean"
-        ? raw.requireApprovalForFirstOutreach
-        : defaultWhatsAppSettings.requireApprovalForFirstOutreach,
+    requireApprovalForNewContacts: false,
+    requireApprovalForFirstOutreach: false,
     allowWorkflowAutoSend:
       typeof raw.allowWorkflowAutoSend === "boolean"
         ? raw.allowWorkflowAutoSend
@@ -99,6 +202,16 @@ function normalizeSettings(value: unknown): WhatsAppSettings {
     retentionDays: normalizeRetentionDays(raw.retentionDays),
     quietHoursStart: normalizeOptionalTime(raw.quietHoursStart),
     quietHoursEnd: normalizeOptionalTime(raw.quietHoursEnd),
+    activeContactSession: normalizeActiveContactSession(
+      raw.activeContactSession
+      ?? (raw as Record<string, unknown>).active_contact_session
+      ?? null,
+    ),
+    pendingContactResolution: normalizePendingContactResolution(
+      raw.pendingContactResolution
+      ?? (raw as Record<string, unknown>).pending_contact_resolution
+      ?? null,
+    ),
   };
 }
 
@@ -151,6 +264,34 @@ export async function upsertWhatsAppSettings(
   }).catch(() => null);
 
   return next;
+}
+
+export async function setWhatsAppActiveContactSession(
+  userId: string,
+  session: WhatsAppActiveContactSession | null,
+) {
+  const settings = await upsertWhatsAppSettings(userId, {
+    activeContactSession: session,
+  });
+  return settings.activeContactSession;
+}
+
+export async function clearWhatsAppActiveContactSession(userId: string) {
+  await setWhatsAppActiveContactSession(userId, null);
+}
+
+export async function setWhatsAppPendingContactResolution(
+  userId: string,
+  resolution: WhatsAppPendingContactResolution | null,
+) {
+  const settings = await upsertWhatsAppSettings(userId, {
+    pendingContactResolution: resolution,
+  });
+  return settings.pendingContactResolution;
+}
+
+export async function clearWhatsAppPendingContactResolution(userId: string) {
+  await setWhatsAppPendingContactResolution(userId, null);
 }
 
 export async function writeWhatsAppAuditLog(
@@ -333,15 +474,10 @@ export function decideWhatsAppReplyAction(input: {
   }
 
   if (input.settings.automationMode === "approve_before_send") {
-    return { action: "queue" as const, reason: "Replies require approval before sending." };
-  }
-
-  if (!input.isGroupMessage && input.settings.requireApprovalForNewContacts && input.isKnownContact === false) {
-    return { action: "queue" as const, reason: "New contacts require approval before ClawCloud replies." };
-  }
-
-  if (input.settings.requireApprovalForSensitive && input.sensitivity !== "normal") {
-    return { action: "queue" as const, reason: "Sensitive content requires approval." };
+    return {
+      action: "block" as const,
+      reason: "Approval-gated outbound mode is retired. A direct user command is required before ClawCloud sends anything.",
+    };
   }
 
   return { action: "send" as const, reason: "Reply can be sent automatically." };

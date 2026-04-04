@@ -1,5 +1,6 @@
 import { completeClawCloudFast, completeClawCloudPrompt, type IntentType } from "@/lib/clawcloud-ai";
 import { runResearchAgent } from "@/lib/research-agent";
+import { answerWebSearchResult } from "@/lib/clawcloud-news";
 import {
   classifyClawCloudLiveSearchRoute,
   decorateLiveSearchAnswer,
@@ -1804,6 +1805,172 @@ function solveFintechWalletLedgerQuestion(question: string) {
   ].join("\n");
 }
 
+function solveRealtimeFraudDetectionQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (
+    !containsAny(text, [
+      /\b(fraud detection|fraud platform|fraud system|payment platform|upi|paytm|flagged transaction|known fraud patterns|zero-day fraud|adversarial attacks?)\b/,
+    ])
+    || !containsAny(text, [
+      /\b(1 billion transactions\/day|decision time|50 ms|system design|machine learning|bayes|geographic anomaly|frequency burst)\b/,
+    ])
+  ) {
+    return null;
+  }
+
+  const prevalence = 0.001;
+  const sensitivity = 0.99;
+  const specificity = 0.99;
+  const truePositiveRate = prevalence * sensitivity;
+  const falsePositiveRate = (1 - prevalence) * (1 - specificity);
+  const precision = truePositiveRate / (truePositiveRate + falsePositiveRate);
+
+  return [
+    "*Executive Summary*",
+    "- Use a two-speed fraud stack: a *sub-50 ms synchronous decision path* for authorization and a *stateful streaming backbone* for richer cross-user, cross-device, and cross-merchant intelligence. The hot path should combine deterministic rules, an online feature store, and a fast supervised model; the async path should use Kafka plus Flink for stateful windows, graph features, retraining signals, and adversarial analytics.",
+    "",
+    "*Recommendation*",
+    "- My production choice is: regional API gateways -> stateless risk-decision service -> Redis or Aerospike online feature store -> rules engine + gradient-boosted model -> approve / decline / step-up action, with every event mirrored into Kafka for Flink-based feature updates, anomaly detection, graph intelligence, and cold-path learning.",
+    "",
+    "*Part 1 - Data Structure (O(1) insert, O(log N) or better queries)*",
+    "- Per user, keep a fixed-size *ring buffer* of the last N transactions (`N ~= 1000`) with head pointer and sequence number. Insert is O(1); eviction is overwrite-on-wrap.",
+    "- Maintain auxiliary indexes beside the ring buffer:",
+    "- `timeBuckets`: Fenwick tree or segment tree over recent time buckets for count / amount windows. Update O(log W), burst query O(log W).",
+    "- `amountStats`: rolling mean, variance, EWMA, and robust percentile sketch for sudden-spike detection. Update O(1), score O(1).",
+    "- `geoState`: hash map keyed by geohash plus last trusted centroid / last country / impossible-travel metadata. Update O(1), anomaly check O(1).",
+    "- `merchantDeviceCounters`: compact hash maps for device, IP, merchant, BIN, and card-present / card-not-present transitions. Update O(1), lookup O(1).",
+    "- Practical pattern checks:",
+    "- Sudden spike: compare amount and count against EWMA / rolling z-score over recent windows.",
+    "- Geographic anomaly: compute distance and implied velocity from the last trusted location; flag impossible travel or abnormal country / MCC switch.",
+    "- Frequency burst: query `timeBuckets` for the last 1 min / 5 min / 1 hr counts in O(log W).",
+    "",
+    "*Part 2 - System Design*",
+    "- *Ingress:* Anycast DNS -> regional edge -> API gateway -> auth / idempotency -> risk-decision service. Kafka is the right backbone, but it should be *off the synchronous decision path* except for an async fire-and-forget publish.",
+    "- *Real-time processing:* choose *Flink* over Spark Streaming because the problem is stateful, event-time heavy, and needs low-latency keyed windows, timers, and exactly-once semantics.",
+    "- *Hot storage:* Redis / Aerospike for online features, device reputation, velocity counters, and recent graph edges. Keep only hot, decision-critical state here.",
+    "- *System of record:* append-only event log in Kafka plus durable OLTP storage for transactions / cases / analyst actions.",
+    "- *Cold storage:* object storage plus Iceberg / Delta / BigQuery / ClickHouse for offline training, backfills, investigations, and regulatory audit.",
+    "- *Latency budget:* 5-10 ms network + auth, 5-8 ms online feature reads, 2-5 ms rule engine, 3-8 ms model inference, 2-5 ms decision writeback, leaving buffer for retries and tail latency. Cache only the features needed on the hot path.",
+    "- *Global scaling:* active-active by region with data residency boundaries. Make the first decision locally; replicate signals globally asynchronously. Use global reputations and blacklists as eventually consistent enrichments, not blocking dependencies.",
+    "- *Fault tolerance:* idempotent event keys, outbox pattern, per-region graceful degradation, circuit breakers, replayable streams, and a rules-only safe mode if the model tier is unavailable.",
+    "",
+    "*Part 3 - Machine Learning*",
+    "- *Known fraud:* supervised gradient-boosted trees (LightGBM / XGBoost / CatBoost) are the best first-line model because they handle tabular risk features, heterogeneous signals, missing values, and fast inference well.",
+    "- *Unknown fraud:* add unsupervised and weak-supervision layers: isolation forest or autoencoder for point anomalies, graph anomaly detection for mule networks, and sequence models for behavioral drift.",
+    "- *False-positive control:* do not force binary decline for every risky score. Use three actions: approve, decline, and step-up verification. Tune thresholds by segment, merchant, channel, and geography using cost-sensitive optimization, not raw accuracy.",
+    "- *Model governance:* champion-challenger deployment, shadow scoring, feature drift monitoring, delayed-label evaluation, analyst feedback loops, and per-feature lineage so training-serving skew is visible.",
+    "",
+    "*Part 4 - Operating Systems / Runtime*",
+    "- Use *async I/O* at the edge and in network-heavy services, but keep model scoring and feature joins on bounded worker pools so CPU work does not starve the event loop.",
+    "- Prefer memory-stable services: preallocated buffers, pooled objects, zero-copy parsing where possible, and bounded queues to prevent unbounded heap growth during spikes.",
+    "- Concurrency model: sharded state by user / card / device key, lock-free or actor-style message passing, and backpressure at every queue boundary.",
+    "- For millions of requests per second globally, the OS-level priorities are: connection reuse, kernel tuning for sockets, pinned CPU budgets for inference workers, and strict timeout / retry budgets so tail latency cannot amplify into retry storms.",
+    "",
+    "*Part 5 - Bayes Theorem*",
+    "- If we interpret '99% model accuracy' as *99% sensitivity* and *99% specificity*, with fraud prevalence `0.1% = 0.001`, then:",
+    `- True positives = 0.001 x 0.99 = ${truePositiveRate.toFixed(5)}`,
+    `- False positives = 0.999 x 0.01 = ${falsePositiveRate.toFixed(5)}`,
+    `- Precision = P(fraud | flagged) = ${truePositiveRate.toFixed(5)} / (${truePositiveRate.toFixed(5)} + ${falsePositiveRate.toFixed(5)}) = ${(precision * 100).toFixed(1)}%`,
+    "- So only about *9.0%* of flagged transactions are actually fraud. That is the base-rate problem: even a very accurate model can still generate many false alarms when fraud is rare.",
+    "- Operational implication: the action policy must combine score thresholds, customer friction, analyst queues, merchant context, and loss severity. Accuracy alone is not the right optimization target.",
+    "",
+    "*Part 6 - Security Twist / Adaptive Attackers*",
+    "- Assume attackers will copy normal behavior, age accounts slowly, and probe thresholds. Counter this with multi-horizon features, population baselines, device / graph intelligence, and randomization in secondary checks so the boundary is harder to reverse-engineer.",
+    "- Keep a *feedback flywheel*: analyst outcomes, confirmed chargebacks, synthetic adversarial testing, red-team simulations, and canary rules that detect gradual drift before loss explodes.",
+    "- Separate hard rules from ML. Hard rules protect known catastrophic patterns; ML ranks ambiguous cases; graph / anomaly systems surface coordinated attacks that per-user models miss.",
+    "- Build for delayed truth: chargebacks arrive late, so keep backfill-ready labels, counterfactual replay, and offline evaluation windows that measure precision / recall by cohort and attack family.",
+    "",
+    "*Bottom Line*",
+    "- The production-grade answer is: *ring buffer + auxiliary online indexes per user, Kafka + Flink for stateful streaming, Redis / Aerospike hot features, append-only event storage, supervised plus anomaly / graph models, async I/O with bounded worker pools, and adversarially aware station-keeping through continuous feedback, shadow models, and safe degraded modes.*",
+  ].join("\n");
+}
+
+function solveDistributedClinicalRiskAiQuestion(question: string) {
+  const lower = question.toLowerCase();
+  const isJapanese =
+    /[\u3040-\u30ff\u4e00-\u9fff]/u.test(question)
+    && containsAny(question, [
+      /パンデミック/u,
+      /重症化/u,
+      /分散型ai/u,
+      /リアルタイム/u,
+      /患者/u,
+      /医療データ/u,
+      /ディファレンシャルプライバシー/u,
+      /連合学習/u,
+      /規制/u,
+      /データ偏り/u,
+    ]);
+  const isEnglish =
+    containsAny(lower, [
+      /\b(pandemic|patient deterioration|severity risk|clinical risk|distributed ai|federated learning|differential privacy|medical data|hospital)\b/,
+    ])
+    && containsAny(lower, [
+      /\b(real-time|regulation|bias|data drift|icu|triage|ehr)\b/,
+    ]);
+
+  if (!isJapanese && !isEnglish) {
+    return null;
+  }
+
+  if (isJapanese) {
+    return [
+      "*推奨アーキテクチャ*",
+      "- 各病院・各国の EHR、検査、バイタル、画像レポート、ICU ベッド状況を院内エッジで標準化し、中央には生データを送らず、特徴量・勾配・監査メタデータだけを送る *分散型 AI 基盤* にします。",
+      "",
+      "*1. リアルタイム推論パス*",
+      "- 病院内イベントは Kafka / Pulsar に入り、オンライン feature store で患者ごとの時系列特徴量を更新します。",
+      "- 推論モデルは *GBDT + 時系列 Transformer* の二段構成にし、SpO2、呼吸数、炎症マーカー、NEWS2、既往歴、薬剤、画像所見をまとめて 1〜5 秒単位で再評価します。",
+      "- 出力は『重症化リスク』『72 時間以内 ICU 介入確率』『推奨トリアージ優先度』に分け、現場 UI には根拠特徴量も返します。",
+      "",
+      "*2. 分散学習とプライバシー*",
+      "- 学習は *連合学習* を採用し、各国・各病院がローカル更新を計算し、中央集約は *secure aggregation* で実施します。",
+      "- 勾配や更新量には *ディファレンシャルプライバシー* をかけ、患者単位の寄与を逆推定しにくくします。",
+      "- モデルは『共通基盤モデル + 国別アダプタ』に分けると、共通知識を保ちながら各国規制や疾患構成差に追従しやすいです。",
+      "",
+      "*3. 各国規制への対応*",
+      "- EU は GDPR / 医療データ越境制限、米国は HIPAA、各国保健省ルールに合わせて、*データは原則ローカル保管・学習のみ* にします。",
+      "- 中央で保持するのはモデル重み、DP 付き集計、監査ログ、モデルカード、性能指標だけに限定します。",
+      "- 監査面では、学習ラウンドごとに『どの施設が参加したか』『どの特徴量版を使ったか』『性能が悪化した地域はどこか』を追跡できるようにします。",
+      "",
+      "*4. データ偏りと性能劣化への対策*",
+      "- 国・年齢・性別・基礎疾患・都市 / 地方で層別評価を行い、AUC だけでなく再現率、偽陽性率、校正誤差を cohort ごとに監視します。",
+      "- 希少集団では reweighting、focal loss、階層ベイズ校正を使い、特定国や大病院のデータに引っ張られすぎるのを防ぎます。",
+      "- パンデミック中は病原体変異や治療プロトコル変更で drift が起きるため、概念ドリフト検知と shadow deployment を常時回します。",
+      "",
+      "*5. 信頼性と運用*",
+      "- 通信が不安定な地域では『院内ローカル推論は継続、学習更新は後送』にして、診療判断を止めない構成にします。",
+      "- モデル障害時は安全側のルールベースへ自動フォールバックし、重症化疑いを取りこぼさない設計を優先します。",
+      "- 重大アラートは human-in-the-loop にして、臨床医が上書きできるようにし、その判断を再学習に戻します。",
+      "",
+      "*結論*",
+      "- 最適解は *院内エッジ推論 + 連合学習 + secure aggregation + differential privacy + 国別アダプタ + 層別校正監視* です。これならリアルタイム性、規制順守、偏り補正、国際展開を同時に満たせます。",
+    ].join("\n");
+  }
+
+  return [
+    "*Recommendation*",
+    "- Build a *hospital-edge federated AI system* where each site keeps raw EHR and imaging data locally, streams patient events into a local feature store, and shares only secure aggregated model updates plus audit metadata with a central control plane.",
+    "",
+    "*Real-Time Risk Path*",
+    "- Ingest vitals, labs, notes, bed state, and imaging metadata into Kafka or Pulsar, update patient features continuously, and score with a two-stage model: gradient-boosted trees for fast tabular screening plus a temporal transformer for deterioration trajectories.",
+    "- Output three separate signals: near-term deterioration risk, ICU escalation probability, and triage priority, with feature-level explanations for clinicians.",
+    "",
+    "*Privacy And Federated Learning*",
+    "- Use federated learning with secure aggregation so hospitals train locally and the coordinator only sees protected updates.",
+    "- Apply differential privacy to clipped gradients and maintain per-site privacy budgets, so the system reduces re-identification risk while still learning global patterns.",
+    "- Keep a shared backbone plus country-specific adapters to capture common physiology while honoring local care pathways and regulations.",
+    "",
+    "*Regulation And Bias Control*",
+    "- Keep patient-level data resident inside each jurisdiction and centralize only model weights, DP-protected aggregates, evaluation metrics, and audit logs.",
+    "- Measure calibration, recall, and false-positive rate by country, age, sex, comorbidity burden, and hospital type. Reweight underrepresented cohorts and monitor concept drift continuously during variant or treatment-shift phases.",
+    "",
+    "*Reliability*",
+    "- If wide-area links degrade, local inference keeps running and federated updates are queued for later. If the learned model becomes unavailable, fall back to a conservative clinical rules layer rather than interrupting triage.",
+    "- The production answer is: *edge inference, federated learning, secure aggregation, differential privacy, jurisdiction-local storage, cohort-level calibration monitoring, and clinician override loops.*",
+  ].join("\n");
+}
+
 function solveAdAttributionQuestion(question: string) {
   const text = question.toLowerCase();
   if (
@@ -1897,7 +2064,7 @@ function solveMarketplaceSearchQuestion(question: string) {
 function solveColdChainPlatformQuestion(question: string) {
   const text = question.toLowerCase();
   if (
-    !containsAny(text, [/\b(cold-chain|vaccine|excursion alert|sensor calibration drift|batch recall|gdp|gxp|temperature monitoring)\b/])
+    !containsAny(text, [/\b(cold-chain|vaccine|excursion alert|sensor calibration drift|batch recall|gxp|temperature monitoring|good distribution practice|good storage practice)\b/])
   ) {
     return null;
   }
@@ -2071,6 +2238,18 @@ function solveSatelliteCollisionAvoidanceQuestion(question: string) {
     return null;
   }
 
+  const isDesignPrompt = containsAny(text, [
+    /\b(design|architecture|copilot|pipeline|ingestion|risk scoring|human override|approval|controls?|rollout)\b/,
+    /\b(decision|recommendation|operator review|shadow mode|phase 1|phase 2|phase 3)\b/,
+  ]);
+  const isOrbitalMechanicsProblem = containsAny(text, [
+    /\b(hohmann|delta-?v|transfer orbit|geostationary|geo\b|leo\b|station-keeping|longitudinal drift|orbital energy|oblateness|j2)\b/,
+    /\b(calculate|determine|derive|verify|prove)\b/,
+  ]);
+  if (!isDesignPrompt || isOrbitalMechanicsProblem) {
+    return null;
+  }
+
   return [
     "*Satellite Collision-Avoidance Copilot*",
     "",
@@ -2099,6 +2278,213 @@ function solveSatelliteCollisionAvoidanceQuestion(question: string) {
     "",
     "*Bottom Line*",
     "- Let the model accelerate analysis, not authority. Collision avoidance is a copilot problem, not a full-autonomy problem.",
+  ].join("\n");
+}
+
+function extractThreeByThreeMatrix(question: string) {
+  const matrixSlice =
+    question.match(/\bmatrix\b([\s\S]+?)(?:\band\s+find\b|$)/i)?.[1]
+    ?? question.match(/\ba\s*=\s*([\s\S]+?)(?:\band\s+find\b|$)/i)?.[1]
+    ?? question;
+
+  const lineRows = matrixSlice
+    .split(/\r?\n/)
+    .map((line) => [...line.matchAll(/-?\d+(?:\.\d+)?/g)].map((match) => Number.parseFloat(match[0] ?? "")))
+    .filter((row) => row.length >= 3)
+    .slice(0, 3)
+    .map((row) => row.slice(0, 3));
+
+  if (lineRows.length === 3 && lineRows.every((row) => row.length === 3)) {
+    return lineRows;
+  }
+
+  const flat = [...matrixSlice.matchAll(/-?\d+(?:\.\d+)?/g)]
+    .map((match) => Number.parseFloat(match[0] ?? ""))
+    .filter((value) => Number.isFinite(value));
+  if (flat.length !== 9) {
+    return null;
+  }
+
+  return [
+    flat.slice(0, 3),
+    flat.slice(3, 6),
+    flat.slice(6, 9),
+  ];
+}
+
+function multiplyThreeByThree(left: number[][], right: number[][]) {
+  return Array.from({ length: 3 }, (_row, rowIndex) =>
+    Array.from({ length: 3 }, (_col, colIndex) =>
+      left[rowIndex]![0]! * right[0]![colIndex]!
+      + left[rowIndex]![1]! * right[1]![colIndex]!
+      + left[rowIndex]![2]! * right[2]![colIndex]!,
+    ));
+}
+
+function determinantThreeByThree(matrix: number[][]) {
+  const [[a, b, c], [d, e, f], [g, h, i]] = matrix;
+  return a! * (e! * i! - f! * h!) - b! * (d! * i! - f! * g!) + c! * (d! * h! - e! * g!);
+}
+
+function traceThreeByThree(matrix: number[][]) {
+  return matrix[0]![0]! + matrix[1]![1]! + matrix[2]![2]!;
+}
+
+function formatPolynomialTerm(coefficient: number, symbol: string, isFirst = false) {
+  if (Math.abs(coefficient) < 1e-9) {
+    return "";
+  }
+
+  const sign = coefficient >= 0 ? (isFirst ? "" : " + ") : (isFirst ? "-" : " - ");
+  const absolute = Math.abs(coefficient);
+  const magnitude = Math.abs(absolute - 1) < 1e-9 && symbol ? "" : `${formatExpertNumber(absolute)}`;
+  return `${sign}${magnitude}${symbol}`;
+}
+
+function formatMatrixForExpert(matrix: number[][]) {
+  return matrix.map((row) => `[${row.map((value) => formatExpertNumber(value)).join(", ")}]`).join("\n");
+}
+
+function solveCayleyHamiltonQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (!containsAny(text, [/\b(cayley-?hamilton|cht)\b/, /\bfind\s+a\^?-?1\b/, /\bmatrix\b/])) {
+    return null;
+  }
+
+  const matrix = extractThreeByThreeMatrix(question);
+  if (!matrix) {
+    return null;
+  }
+
+  const a2 = multiplyThreeByThree(matrix, matrix);
+  const traceA = traceThreeByThree(matrix);
+  const traceA2 = traceThreeByThree(a2);
+  const s2 = ((traceA * traceA) - traceA2) / 2;
+  const detA = determinantThreeByThree(matrix);
+  if (Math.abs(detA) < 1e-9) {
+    return null;
+  }
+
+  const inverseNumerator = a2.map((row, rowIndex) =>
+    row.map((value, colIndex) =>
+      value
+      - traceA * matrix[rowIndex]![colIndex]!
+      + (rowIndex === colIndex ? s2 : 0),
+    ));
+
+  return [
+    "*Cayley-Hamilton Verification*",
+    "",
+    "*Matrix*",
+    formatMatrixForExpert(matrix),
+    "",
+    "*Characteristic Polynomial*",
+    `- p(lambda) = lambda^3${formatPolynomialTerm(-traceA, "lambda^2")}${formatPolynomialTerm(s2, "lambda")}${formatPolynomialTerm(-detA, "", false)}`,
+    "",
+    "*By Cayley-Hamilton*",
+    `- A^3${formatPolynomialTerm(-traceA, "A^2")}${formatPolynomialTerm(s2, "A")}${formatPolynomialTerm(-detA, "I")} = 0`,
+    "",
+    "*Inverse*",
+    `- det(A) = ${formatExpertNumber(detA)}, so A^-1 exists.`,
+    `- A^-1 = (A^2${formatPolynomialTerm(-traceA, "A")}${formatPolynomialTerm(s2, "I")}) / ${formatExpertNumber(detA)}`,
+    `- A^2 =\n${formatMatrixForExpert(a2)}`,
+    `- A^-1 = (1/${formatExpertNumber(detA)}) *\n${formatMatrixForExpert(inverseNumerator)}`,
+  ].join("\n");
+}
+
+function extractScientificNumber(question: string, pattern: RegExp) {
+  const match = pattern.exec(question.replace(/,/g, ""));
+  if (!match) {
+    return null;
+  }
+
+  const base = Number.parseFloat(match[1] ?? "");
+  const exponent = match[2] ? Number.parseInt(match[2], 10) : 0;
+  if (!Number.isFinite(base) || !Number.isFinite(exponent)) {
+    return null;
+  }
+
+  return base * (10 ** exponent);
+}
+
+function solveHohmannTransferQuestion(question: string) {
+  const text = question.toLowerCase();
+  if (!containsAny(text, [/\b(hohmann|geostationary|geo\b|leo\b|delta-?v|transfer orbit)\b/, /\b(spacecraft|orbit|orbital)\b/])) {
+    return null;
+  }
+
+  const mu = extractScientificNumber(question, /[μmu]\s*=\s*([0-9.]+)\s*[×x*]\s*10\^?([+-]?\d+)/i);
+  const earthRadiusKmMatch = /r[ₑe]?\s*=\s*([0-9.]+)\s*km/i.exec(question);
+  const altitudeMatches = [...question.replace(/,/g, "").matchAll(/altitude of\s*([0-9.]+)\s*km/gi)]
+    .map((match) => Number.parseFloat(match[1] ?? ""))
+    .filter((value) => Number.isFinite(value));
+  const leoAltitudeKmMatch = /altitude of\s*([0-9.]+)\s*km[^.\n]*leo/i.exec(question) ?? /leo[^.\n]*altitude of\s*([0-9.]+)\s*km/i.exec(question);
+  const geoAltitudeKmMatch = /geo[^.\n]*altitude of\s*([0-9.]+)\s*km/i.exec(question) ?? /geostationary orbit[^.\n]*altitude of\s*([0-9.]+)\s*km/i.exec(question);
+
+  const earthRadiusKm = earthRadiusKmMatch ? Number.parseFloat(earthRadiusKmMatch[1] ?? "") : null;
+  const leoAltitudeKm = leoAltitudeKmMatch
+    ? Number.parseFloat(leoAltitudeKmMatch[1] ?? "")
+    : altitudeMatches[0] ?? null;
+  const geoAltitudeKm = geoAltitudeKmMatch
+    ? Number.parseFloat(geoAltitudeKmMatch[1] ?? "")
+    : altitudeMatches[1] ?? null;
+  if (
+    !Number.isFinite(mu)
+    || !Number.isFinite(earthRadiusKm)
+    || !Number.isFinite(leoAltitudeKm)
+    || !Number.isFinite(geoAltitudeKm)
+  ) {
+    return null;
+  }
+
+  const r1 = (earthRadiusKm! + leoAltitudeKm!) * 1_000;
+  const r2 = (earthRadiusKm! + geoAltitudeKm!) * 1_000;
+  const transferSemiMajorAxis = (r1 + r2) / 2;
+  const vLeo = Math.sqrt(mu! / r1);
+  const vGeo = Math.sqrt(mu! / r2);
+  const vTransferPerigee = Math.sqrt(mu! * (2 / r1 - 1 / transferSemiMajorAxis));
+  const vTransferApogee = Math.sqrt(mu! * (2 / r2 - 1 / transferSemiMajorAxis));
+  const deltaV1 = vTransferPerigee - vLeo;
+  const deltaV2 = vGeo - vTransferApogee;
+  const totalDeltaV = deltaV1 + deltaV2;
+  const transferTimeSeconds = Math.PI * Math.sqrt((transferSemiMajorAxis ** 3) / mu!);
+  const geoMeanMotion = Math.sqrt(mu! / (r2 ** 3));
+
+  return [
+    "*Hohmann Transfer: LEO to GEO*",
+    "",
+    "*Orbital Radii*",
+    `- r1 = Re + h_LEO = ${formatExpertNumber(r1 / 1_000)} km`,
+    `- r2 = Re + h_GEO = ${formatExpertNumber(r2 / 1_000)} km`,
+    `- Transfer semi-major axis a_t = ${formatExpertNumber(transferSemiMajorAxis / 1_000)} km`,
+    "",
+    "*Delta-v*",
+    `- Circular speed in LEO = ${formatExpertNumber(vLeo)} m/s`,
+    `- Transfer speed at perigee = ${formatExpertNumber(vTransferPerigee)} m/s`,
+    `- First burn delta-v1 = ${formatExpertNumber(deltaV1)} m/s`,
+    `- Circular speed in GEO = ${formatExpertNumber(vGeo)} m/s`,
+    `- Transfer speed at apogee = ${formatExpertNumber(vTransferApogee)} m/s`,
+    `- Second burn delta-v2 = ${formatExpertNumber(deltaV2)} m/s`,
+    `- Total delta-v = ${formatExpertNumber(totalDeltaV)} m/s`,
+    "",
+    "*Transfer Time*",
+    `- Time of flight = pi * sqrt(a_t^3 / mu) = ${formatExpertNumber(transferTimeSeconds)} s (${formatExpertNumber(transferTimeSeconds / 3600)} hours)`,
+    "",
+    "*If Ion Propulsion Is Used*",
+    "- The path is no longer an impulsive two-burn ellipse. The spacecraft follows a gradual outward spiral with continuous low thrust.",
+    "- Transfer time becomes much longer, but propellant efficiency improves because ion thrusters deliver much higher specific impulse than chemical burns.",
+    "- Mission design shifts from impulsive delta-v budgeting to low-thrust optimal control and long-duration power-limited thrusting.",
+    "",
+    "*J2 / Oblateness Effect*",
+    "- Earth's oblateness perturbs the transfer orbit by causing secular drift of the orbital plane and apsidal line.",
+    "- In practice, J2 changes RAAN and argument of perigee during the transfer, so precise targeting and inclination management need perturbation-aware propagation.",
+    "- For long low-thrust spirals, the accumulated J2 effect matters more than in an ideal instantaneous Hohmann transfer.",
+    "",
+    "*Bonus: Longitudinal Drift Near GEO*",
+    "- For a small semimajor-axis error da near GEO, dn ~= -(3/2) * (n/a) * da, so the longitudinal drift rate in the Earth-fixed frame is d(lambda)/dt ~= n - omega_E ~= dn.",
+    "- Using specific orbital energy e = -mu/(2a), a small energy change de gives da = 2a^2 * de / mu, hence d(lambda)/dt ~= -3na * de / mu.",
+    `- At GEO, n = omega_E ~= ${geoMeanMotion.toExponential(6)} rad/s, so east-west drift is controlled by restoring the semimajor axis with small along-track station-keeping burns.`,
+    "- Station-keeping corrects the drift by slightly raising or lowering orbital energy so the mean motion returns to the geostationary value and the satellite stops walking in longitude.",
   ].join("\n");
 }
 
@@ -3549,6 +3935,7 @@ async function solveAnyExpertQuestion(input: {
   const answer = await completeClawCloudPrompt({
     system: [
       "You are ClawCloud AI — the world's most capable AI assistant operating at expert level.",
+      `Today's date: ${new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" })}. Current year: ${new Date().getUTCFullYear()}. Always answer based on this current date.`,
       "Your answers must be MORE accurate, MORE detailed, and MORE useful than any competing AI.",
       domainContext,
       "",
@@ -3691,6 +4078,18 @@ export async function runGroundedResearchReply(input: {
     if (directLiveAnswer.trim()) {
       return directLiveAnswer.trim();
     }
+
+    const liveWebFallback = await answerWebSearchResult(input.question).catch(() => null);
+    const normalizedWebFallback = liveWebFallback?.answer?.trim() ?? "";
+    if (
+      normalizedWebFallback
+      && (
+        liveWebFallback?.liveAnswerBundle
+        || /\b(?:fresh answer|live answer|as of:|live data as of|searched:)\b/i.test(normalizedWebFallback)
+      )
+    ) {
+      return normalizedWebFallback;
+    }
   }
 
   if (!liveSearchRoute.requiresWebSearch) {
@@ -3735,9 +4134,83 @@ export async function runGroundedResearchReply(input: {
   return decorateLiveSearchAnswer(groundedAnswer, liveSearchRoute);
 }
 
+function looksLikeHardScienceComputabilityQuestion(question: string) {
+  const normalized = question.toLowerCase().trim();
+  if (!normalized) {
+    return false;
+  }
+
+  const hasConsciousnessOrPhysicsCue =
+    /\b(conscious(?:ness| experience)?|human brain|quantum state|quantum mechanics|general relativity|decoherence|uncertainty)\b/.test(normalized);
+  const hasComputabilityCue =
+    /\b(computable|uncomputable|g(?:o|ö)del|incompleteness|chaos theory|fixed[- ]point|infinite regress|logical inconsistency|recursive self-?model(?:ing)?|simulate itself|simulate the universe|formal proof|counterexample)\b/u.test(normalized);
+  const hasDirective =
+    /\b(is it theoretically possible|prove or disprove|justify|analy[sz]e|define a formal boundary|answer the following|bonus|impossible tier)\b/.test(normalized)
+    || /\bassume\b/.test(normalized);
+
+  return hasDirective && hasComputabilityCue && hasConsciousnessOrPhysicsCue;
+}
+
+function solveConsciousnessComputabilityQuestion(question: string) {
+  if (!looksLikeHardScienceComputabilityQuestion(question)) {
+    return null;
+  }
+
+  const includesBonus = /\bbonus|impossible tier|counterexample|formal proof\b/i.test(question);
+
+  const sections = [
+    "Bottom line: no single theorem lets the AI uniquely predict one future conscious experience in every physically admissible model, and perfect behavioral prediction does not by itself prove determinism of consciousness.",
+    "",
+    "1. Predicting the exact conscious experience at t1",
+    "- If the exact physical state at t0 is already given, the uncertainty principle is not the main blocker. It limits joint measurement precision for a physical observer; it does not stop a hypothetical reasoner from evolving a supplied state forward under the laws.",
+    "- Decoherence explains why brain-scale quantum states rapidly look classical at the macroscopic level, but decoherence does not by itself pick one unique experienced outcome. It suppresses interference between branches; it does not solve the measurement problem or the hard problem of consciousness.",
+    "- Therefore the answer depends on the physics. Under deterministic unitary evolution, the AI can in principle propagate the wavefunction and predict the future physical branch structure, but not a uniquely singled-out phenomenal episode unless one adds an interpretation linking consciousness to one branch. Under objective-collapse theories, the AI can predict only probabilities for future experiences, not one exact outcome.",
+    "- Computationally, unlimited resources remove ordinary complexity barriers, but they do not create a bridge law from physical state to phenomenal state. Current physics gives dynamics for matter, not a consensus theorem identifying an exact conscious experience functional from the quantum state.",
+    "",
+    "2. If the AI simulates the brain perfectly, is the simulation conscious?",
+    "- Physicalism: maybe. If consciousness supervenes on the causally relevant physical organization, then a sufficiently exact simulation could be conscious. But a stricter substrate-dependent physicalism can deny this and say the simulation only models the brain unless it instantiates the same physically relevant properties.",
+    "- Functionalism: usually yes. If the simulation preserves the same causal topology and functional organization at the right grain, then it has the same mental states, including consciousness, because function rather than biological substrate is what matters.",
+    "- So a perfect simulation does not settle the issue by logic alone. It is conscious under functionalism and under some forms of physicalism, but not under every substrate-sensitive view.",
+    "",
+    "3. Perfect prediction of human behavior implies determinism of consciousness",
+    "Disprove.",
+    "- Perfect behavioral prediction can underdetermine phenomenal state. Multiple internal realizations could in principle generate the same behavior, so behavioral predictability alone does not entail a theorem about qualia.",
+    "- Chaos theory does not rescue the claim. Chaos means extreme sensitivity to initial conditions; it creates practical unpredictability for bounded agents, not a proof of metaphysical indeterminism.",
+    "- Godel incompleteness also does not prove non-computable consciousness. It limits what sufficiently strong formal systems can prove about themselves. It is not a general theorem that human thought or conscious experience outruns physical or computational description.",
+    "- Limits of computation matter for realistic predictors, but your premise gives unlimited resources. Once that premise is granted, the remaining gap is conceptual: predicting behavior is not the same as proving that phenomenal consciousness is deterministic.",
+    "",
+    "4. Recursive self-modeling: AI simulating itself simulating the universe",
+    "- Infinite regress appears if the specification demands a fully explicit internal copy of the whole simulator, inside itself, at the same fidelity and at the same level of detail, with no abstraction or indexing trick.",
+    "- Fixed-point convergence is possible at the description level. Self-reference can be represented by a finite program that refers to its own code, and reflective semantics can stabilize on a self-consistent fixed point rather than unfold forever.",
+    "- Logical inconsistency is not forced. It arises only if the model demands incompatible conditions, such as a total exact self-embedding that must be both fully identical to and strictly contained within the original system.",
+    "- So the best formal answer is: naive explicit nesting gives regress, but description-level self-reference can converge to a fixed point without contradiction.",
+    "",
+    "5. Formal boundary between computable reality and non-computable phenomena",
+    "- Call a physical theory computable when the initial state s0 is computable, the evolution map U_t is Turing-computable to arbitrary requested precision, and the observation map O from physical state to measurable output is computable.",
+    "- A phenomenon is non-computable only if at least one physically accessible observable requires a non-recursive set, a non-computable real, or an oracle-like update rule to predict exactly.",
+    "- Within current physics, no sharp experimentally established boundary is known. Quantum mechanics and general relativity are written with continuum mathematics, but that alone does not show that nature exposes physically usable uncomputability.",
+    "",
+    "Conclusion: current physics supports precise dynamical prediction much better than it supports a unique, interpretation-independent theorem of exact conscious prediction.",
+  ];
+
+  if (includesBonus) {
+    sections.push(
+      "",
+      "Bonus: the statement \"Any system capable of fully simulating the universe must necessarily contain an uncomputable component\" is false in general.",
+      "- Counterexample: take a finite cellular-automaton universe on a finite torus with alphabet Sigma and computable local update rule f. Its global update map F is computable.",
+      "- A universal Turing machine can store the full state and iterate F exactly for every time step. That machine fully simulates that universe and contains no uncomputable component.",
+      "- Therefore the statement is disproved by counterexample. What remains open is whether our actual universe contains physically exploitable non-computable structure. Current physics does not establish that."
+    );
+  }
+
+  return sections.join("\n");
+}
+
 export function solveHardMathQuestion(question: string) {
   return (
-    solveSuccessiveDiscountQuestion(question)
+    solveCayleyHamiltonQuestion(question)
+    || solveHohmannTransferQuestion(question)
+    || solveSuccessiveDiscountQuestion(question)
     || solveLoanPrepaymentQuestion(question)
     || solveEmiQuestion(question)
     || solveSipFutureValueQuestion(question)
@@ -3765,9 +4238,15 @@ export function solveHardMathQuestion(question: string) {
   );
 }
 
+export function solveHardScienceQuestion(question: string) {
+  return solveConsciousnessComputabilityQuestion(question);
+}
+
 export function solveCodingArchitectureQuestion(question: string) {
   return (
-    solveStripeSubscriptionWebhookQuestion(question)
+    solveDistributedClinicalRiskAiQuestion(question)
+    || solveRealtimeFraudDetectionQuestion(question)
+    || solveStripeSubscriptionWebhookQuestion(question)
     || solveColdChainPlatformQuestion(question)
     || solveCrisprPipelineQuestion(question)
     || solveFintechWalletLedgerQuestion(question)

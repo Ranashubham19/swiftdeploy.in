@@ -3345,7 +3345,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
                               <span className={styles.workspaceRowValue}>{groupBehaviorDisplay}</span>
                             </div>
                             <div className={styles.workspaceRow}>
-                              <span className={styles.workspaceRowLabel}>Sensitive approval</span>
+                              <span className={styles.workspaceRowLabel}>Sensitive-content safeguard</span>
                               <span className={styles.workspaceRowValue}>{sensitiveApprovalDisplay}</span>
                             </div>
                             <div className={styles.workspaceRow}>

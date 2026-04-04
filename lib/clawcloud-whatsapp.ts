@@ -1,6 +1,7 @@
 import { env } from "@/lib/env";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 import { backfillWhatsAppContactsFromHistory } from "@/lib/clawcloud-whatsapp-contacts";
+import { pickAuthoritativeClawCloudWhatsAppAccount } from "@/lib/clawcloud-whatsapp-account-selection";
 import type { ClawCloudWhatsAppHistoryCoverageSummary } from "@/lib/clawcloud-whatsapp-history-plan";
 import {
   computeClawCloudWhatsAppSyncProgress,
@@ -32,6 +33,20 @@ export type ClawCloudWhatsAppRefreshResult = {
   persistedCount?: number;
   historyMessageCount?: number;
   previousHistoryMessageCount?: number;
+};
+
+export type ClawCloudWhatsAppAckStatus = "pending" | "server_ack" | "delivery_ack" | "read" | "error";
+
+export type ClawCloudWhatsAppSendResult = {
+  success: true;
+  messageIds: string[];
+  targetJid: string | null;
+  targetPhone: string | null;
+  deduped: boolean;
+  ackStatus: ClawCloudWhatsAppAckStatus | null;
+  sentAccepted: boolean;
+  deliveryConfirmed: boolean;
+  warning: string | null;
 };
 
 export type ClawCloudWhatsAppWorkspaceState = {
@@ -218,20 +233,22 @@ export async function getClawCloudWhatsAppAccount(userId: string) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const { data, error } = await supabaseAdmin
     .from("connected_accounts")
-    .select("phone_number, display_name, is_active")
+    .select("phone_number, display_name, is_active, connected_at, last_used_at")
     .eq("user_id", userId)
     .eq("provider", "whatsapp")
-    .single();
+    .limit(12);
 
-  if (error || !data) {
+  if (error || !Array.isArray(data)) {
     return null;
   }
 
-  return data as {
+  return pickAuthoritativeClawCloudWhatsAppAccount(data as Array<{
     phone_number: string | null;
     display_name: string | null;
     is_active: boolean;
-  };
+    connected_at?: string | null;
+    last_used_at?: string | null;
+  }>);
 }
 
 export function shouldBootstrapClawCloudWhatsAppWorkspace(input: {
@@ -429,6 +446,8 @@ export async function requestClawCloudWhatsAppQr(
   const refreshQuery = options?.forceRefresh ? "?refresh=1" : "";
   const response = await agentServerFetch(`/wa/qr/${userId}${refreshQuery}`, {
     method: "GET",
+  }, {
+    timeoutMs: 2_500,
   });
 
   const json = (await response.json()) as {
@@ -471,6 +490,8 @@ export async function sendClawCloudWhatsAppToPhone(
     workflowRunId?: string | null;
     idempotencyKey?: string | null;
     metadata?: Record<string, unknown> | null;
+    waitForAckMs?: number | null;
+    requireRegisteredNumber?: boolean | null;
   },
 ) {
   if (!getAgentServerBaseUrl() || !env.AGENT_SECRET) {
@@ -490,7 +511,17 @@ export async function sendClawCloudWhatsAppToPhone(
       if (!ok) {
         throw new Error("Failed to send WhatsApp message.");
       }
-      return true;
+      return {
+        success: true as const,
+        messageIds: [],
+        targetJid: options?.jid ?? null,
+        targetPhone: phone ?? null,
+        deduped: false,
+        ackStatus: null,
+        sentAccepted: true,
+        deliveryConfirmed: false,
+        warning: null,
+      };
     }
   }
 
@@ -507,15 +538,52 @@ export async function sendClawCloudWhatsAppToPhone(
       workflowRunId: options?.workflowRunId ?? null,
       idempotencyKey: options?.idempotencyKey ?? null,
       metadata: options?.metadata ?? null,
+      waitForAckMs: options?.waitForAckMs ?? null,
+      requireRegisteredNumber: options?.requireRegisteredNumber ?? true,
     }),
   });
 
-  const json = (await response.json().catch(() => ({}))) as { error?: string };
+  const json = (await response.json().catch(() => ({}))) as {
+    error?: string;
+    success?: boolean;
+    deduped?: boolean;
+    messageIds?: string[];
+    targetJid?: string | null;
+    targetPhone?: string | null;
+    ackStatus?: ClawCloudWhatsAppAckStatus | null;
+    sentAccepted?: boolean;
+    deliveryConfirmed?: boolean;
+    warning?: string | null;
+  };
   if (!response.ok) {
     throw new Error(json.error || "Failed to send WhatsApp message.");
   }
 
-  return true;
+  if (!json.success) {
+    throw new Error("WhatsApp send failed without explicit error.");
+  }
+
+  const ackStatus = (
+    json.ackStatus === "pending"
+    || json.ackStatus === "server_ack"
+    || json.ackStatus === "delivery_ack"
+    || json.ackStatus === "read"
+    || json.ackStatus === "error"
+  )
+    ? json.ackStatus
+    : null;
+
+  return {
+    success: true as const,
+    messageIds: Array.isArray(json.messageIds) ? json.messageIds : [],
+    targetJid: json.targetJid ?? options?.jid ?? null,
+    targetPhone: json.targetPhone ?? phone ?? null,
+    deduped: Boolean(json.deduped),
+    ackStatus,
+    sentAccepted: Boolean(json.sentAccepted ?? (ackStatus === "server_ack" || ackStatus === "delivery_ack" || ackStatus === "read")),
+    deliveryConfirmed: Boolean(json.deliveryConfirmed ?? (ackStatus === "delivery_ack" || ackStatus === "read")),
+    warning: typeof json.warning === "string" ? json.warning : null,
+  };
 }
 
 export async function resolveClawCloudWhatsAppContact(userId: string, contactName: string) {

@@ -542,7 +542,7 @@ export async function handleLatestWhatsAppApprovalReview(userId: string, message
         [
           `For safety, this WhatsApp draft targets ${group.approvals.length} contacts.`,
           "",
-          "Reply `Yes, send to all` to confirm the broadcast, `No` to cancel, or `Rewrite it ...` to change the draft.",
+          "Use `WSEND`, `WEDIT`, or `WSKIP` to handle this older broadcast draft manually.",
         ].join("\n"),
         locale,
       ),
@@ -637,10 +637,10 @@ export function buildWhatsAppApprovalReviewReply(approval: WhatsAppReplyApproval
     ...(explicitBroadcast
       ? [
         `*Safety:* This is a broadcast-style draft for ${recipientCount} contacts.`,
-        "Reply `Yes, send to all` to confirm, `No` to cancel, or `Rewrite it ...` to refine it.",
+        "Use `WSEND`, `WEDIT`, or `WSKIP` to handle this older broadcast draft manually.",
       ]
       : [
-        "Reply `Yes` to confirm, `No` to cancel, or `Rewrite it ...` to refine it.",
+        "Use `WSEND`, `WEDIT`, or `WSKIP` to handle this older draft manually.",
       ]),
     `Power option: \`WSEND ${shortId(approval.id)}\`, \`WEDIT ${shortId(approval.id)} your new reply\`, \`WSKIP ${shortId(approval.id)}\``,
   ].join("\n");
@@ -656,8 +656,8 @@ export function buildWhatsAppApprovalContextReply(
     : `${recipientCount} contacts`;
   const explicitBroadcast = requiresExplicitBroadcastConfirmation(approval);
   const confirmLine = explicitBroadcast
-    ? "Reply `Yes, send to all` to confirm, `No` to cancel, or `Rewrite it ...` to change the draft."
-    : "Reply `Yes` to confirm, `No` to cancel, or `Rewrite it ...` to change the draft.";
+    ? "Use `WSEND`, `WEDIT`, or `WSKIP` to handle this older broadcast draft manually."
+    : "Use `WSEND`, `WEDIT`, or `WSKIP` to handle this older draft manually.";
 
   if (kind === "review") {
     return buildWhatsAppApprovalReviewReply(approval, recipientCount);
@@ -675,7 +675,7 @@ export function buildWhatsAppApprovalContextReply(
   }
 
   return [
-    `This WhatsApp draft is waiting because ClawCloud needs approval before sending it${explicitBroadcast ? " to all recipients" : ""}.`,
+    `This WhatsApp draft is an older queued review item from before direct-send mode was enabled${explicitBroadcast ? " for multiple recipients" : ""}.`,
     approval.reason ? `*Reason:* ${approval.reason}` : null,
     `*Target:* ${who}`,
     confirmLine,
@@ -696,7 +696,7 @@ export function buildWhatsAppApprovalNotice(approval: WhatsAppReplyApproval) {
     ...(explicitBroadcast
       ? [
         `*Safety:* This broadcast draft needs explicit confirmation.`,
-        "Reply `Yes, send to all` to confirm in chat, or use the power option below after checking the recipient list.",
+        "Use `WSEND`, `WEDIT`, or `WSKIP` after checking the recipient list.",
       ]
       : []),
     `Use \`WSEND ${shortId(approval.id)}\` to send`,

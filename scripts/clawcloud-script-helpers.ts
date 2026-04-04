@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createClient } from "@supabase/supabase-js";
+import { pickAuthoritativeClawCloudWhatsAppAccount } from "../lib/clawcloud-whatsapp-account-selection";
 
 const DEFAULT_CLAWCLOUD_AUDIT_EMAIL = "clawcloud-audit@swiftdeploy.test";
 const DEFAULT_CLAWCLOUD_AUDIT_NAME = "ClawCloud Audit";
@@ -130,6 +131,27 @@ async function findPublicUserByEmail(email: string) {
   return data?.[0]?.id ? String(data[0].id) : null;
 }
 
+async function hasActiveWhatsAppAccount(userId: string) {
+  const supabaseAdmin = createSupabaseAdminClient();
+  if (!supabaseAdmin || !userId) {
+    return false;
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("connected_accounts")
+    .select("phone_number, display_name, is_active, connected_at, last_used_at")
+    .eq("user_id", userId)
+    .eq("provider", "whatsapp")
+    .limit(12);
+
+  if (error) {
+    throw new Error(`Unable to inspect WhatsApp linkage for shared QA user ${maskUserId(userId)}: ${error.message}`);
+  }
+
+  const preferredAccount = pickAuthoritativeClawCloudWhatsAppAccount(data ?? []);
+  return Boolean(preferredAccount?.is_active);
+}
+
 async function createAuditUser(email: string, fullName: string) {
   const supabaseAdmin = createSupabaseAdminClient();
   if (!supabaseAdmin) {
@@ -230,6 +252,7 @@ export async function resolveClawCloudSharedUser(
     );
   }
 
+  let fallbackConfiguredUserId: string | null = null;
   for (const key of envKeys) {
     const configuredId = (process.env[key] ?? "").trim();
     if (!configuredId) {
@@ -243,12 +266,18 @@ export async function resolveClawCloudSharedUser(
 
     const resolvedConfiguredId = await findPublicUserById(configuredId);
     if (resolvedConfiguredId) {
-      return {
-        userId: resolvedConfiguredId,
-        source: "env",
-        staleConfiguredKeys,
-        auditEmail,
-      };
+      if (await hasActiveWhatsAppAccount(resolvedConfiguredId).catch(() => false)) {
+        return {
+          userId: resolvedConfiguredId,
+          source: "env",
+          staleConfiguredKeys,
+          auditEmail,
+        };
+      }
+
+      fallbackConfiguredUserId ??= resolvedConfiguredId;
+      staleConfiguredKeys.push(key);
+      continue;
     }
 
     staleConfiguredKeys.push(key);
@@ -256,9 +285,36 @@ export async function resolveClawCloudSharedUser(
 
   const existingAuditUserId = await findPublicUserByEmail(auditEmail);
   if (existingAuditUserId) {
+    if (await hasActiveWhatsAppAccount(existingAuditUserId).catch(() => false)) {
+      return {
+        userId: existingAuditUserId,
+        source: "audit_email",
+        staleConfiguredKeys,
+        auditEmail,
+      };
+    }
+
+    if (fallbackConfiguredUserId) {
+      return {
+        userId: fallbackConfiguredUserId,
+        source: "env",
+        staleConfiguredKeys,
+        auditEmail,
+      };
+    }
+
     return {
       userId: existingAuditUserId,
       source: "audit_email",
+      staleConfiguredKeys,
+      auditEmail,
+    };
+  }
+
+  if (fallbackConfiguredUserId) {
+    return {
+      userId: fallbackConfiguredUserId,
+      source: "env",
       staleConfiguredKeys,
       auditEmail,
     };

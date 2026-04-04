@@ -1,5 +1,7 @@
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
+import { looksLikeActiveContactStartCommand } from "@/lib/clawcloud-active-contact-intent";
 import { matchesWholeAlias } from "@/lib/clawcloud-intent-match";
+import { normalizeClawCloudUnderstandingMessage } from "@/lib/clawcloud-query-understanding";
 import { loadSyncedWhatsAppContactAliases } from "@/lib/clawcloud-whatsapp-contacts";
 
 type ContactMap = Record<string, string>;
@@ -30,12 +32,91 @@ const CANONICAL_CONTACT_ALIASES: Record<string, string> = {
   mamma: "maa",
   mama: "maa",
   ma: "maa",
+  "\u5988\u5988": "maa",
+  "\u5abd\u5abd": "maa",
+  "\u5988": "maa",
+  "\u5abd": "maa",
+  "\u6bcd\u4eb2": "maa",
+  "\u6bcd\u89aa": "maa",
+  "\u304a\u6bcd\u3055\u3093": "maa",
+  "\u6bcd": "maa",
+  "\u30de\u30de": "maa",
+  "\uc5c4\ub9c8": "maa",
+  "\uc5b4\uba38\ub2c8": "maa",
+  "mamae": "maa",
+  "mammae": "maa",
+  "mam\u00e1": "maa",
+  "madre": "maa",
+  "m\u00e3e": "maa",
+  mae: "maa",
+  "maman": "maa",
+  "m\u00e8re": "maa",
+  mere: "maa",
+  "\u043c\u0430\u043c\u0430": "maa",
+  "\u043c\u0430\u0442\u044c": "maa",
+  "\u0623\u0645\u064a": "maa",
+  "\u0627\u0645\u064a": "maa",
+  "\u0623\u0645": "maa",
+  "\u0627\u0645": "maa",
+  "\u0648\u0627\u0644\u062f\u062a\u064a": "maa",
+  anne: "maa",
+  annem: "maa",
+  ibu: "maa",
+  "\u0e41\u0e21\u0e48": "maa",
+  "\u0e04\u0e38\u0e13\u0e41\u0e21\u0e48": "maa",
   dad: "papa",
   father: "papa",
   daddy: "papa",
   pappa: "papa",
   baba: "papa",
   pitaji: "papa",
+  "\u7238\u7238": "papa",
+  "\u7238": "papa",
+  "\u7236\u4eb2": "papa",
+  "\u7236\u89aa": "papa",
+  "\u304a\u7236\u3055\u3093": "papa",
+  "\u7236": "papa",
+  "\u30d1\u30d1": "papa",
+  "\uc544\ube60": "papa",
+  "\uc544\ubc84\uc9c0": "papa",
+  "pap\u00e1": "papa",
+  padre: "papa",
+  pai: "papa",
+  papai: "papa",
+  "p\u00e8re": "papa",
+  pere: "papa",
+  vater: "papa",
+  "\u043f\u0430\u043f\u0430": "papa",
+  "\u043e\u0442\u0435\u0446": "papa",
+  "\u0623\u0628\u064a": "papa",
+  "\u0627\u0628\u064a": "papa",
+  "\u0623\u0628": "papa",
+  "\u0627\u0628": "papa",
+  "\u0648\u0627\u0644\u062f\u064a": "papa",
+  "\u0e1e\u0e48\u0e2d": "papa",
+  "\u0e04\u0e38\u0e13\u0e1e\u0e48\u0e2d": "papa",
+  di: "didi",
+  dii: "didi",
+  didi: "didi",
+  sis: "didi",
+  sister: "didi",
+  "\u59d0\u59d0": "didi",
+  "\u59d0": "didi",
+  "\u304a\u59c9\u3055\u3093": "didi",
+  "\u304a\u59c9\u3061\u3083\u3093": "didi",
+  "\u59c9": "didi",
+  "\uc5b8\ub2c8": "didi",
+  "\ub204\ub098": "didi",
+  hermana: "didi",
+  "irm\u00e3": "didi",
+  irma: "didi",
+  "s\u0153ur": "didi",
+  soeur: "didi",
+  schwester: "didi",
+  "\u0441\u0435\u0441\u0442\u0440\u0430": "didi",
+  "\u0623\u062e\u062a\u064a": "didi",
+  "\u0627\u062e\u062a\u064a": "didi",
+  "\u0e1e\u0e35\u0e48\u0e2a\u0e32\u0e27": "didi",
 };
 
 const AMBIGUOUS_DIRECT_RECIPIENTS = new Set([
@@ -132,13 +213,23 @@ const CONDITIONAL_SEND_CUE_PATTERN =
 const SCHEDULED_SEND_CUE_PATTERN =
   /\b(?:tomorrow|tonight|later|today|this\s+(?:morning|afternoon|evening|night)|next\s+(?:week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|on\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:at|around|by)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|in\s+\d+\s+(?:minutes?|hours?|days?|weeks?)|after\s+\d+\s+(?:minutes?|hours?|days?|weeks?))\b/i;
 
+const SEND_VERB_SOURCE = "(?:send|sned|snd)";
+const REPLY_VERB_SOURCE = "(?:reply|replly)";
+const MESSAGE_SURFACE_SOURCE = "(?:(?:(?:whatsapp|whatsap|whatsaap|wa)\\s+)?(?:message|mesage|msg)|whatsapp|whatsap|whatsaap|wa)";
+const SEND_SEPARATOR_SOURCE = "(?:saying|sayng|sayin|that|with)";
+const SEND_COMMAND_SOFT_PREFIX_SOURCE = "(?:(?:please|pls|plz|just|juat|simply|only|ok|okay)\\s+)*";
+const CLAWCLOUD_STYLE_PREFIX_RE = /^(?:\[\[clawcloud-style:(?:professional|casual)\]\]\s*)+/i;
+const ABSTRACT_MESSAGE_TEMPLATE_KEYWORD_RE =
+  /\b(?:thank(?:s| you)?|thanku|gratitude|appreciation|note|wish|greeting|reply|text|apology|sorry|birthday|congrat(?:s|ulations)?|farewell|welcome|invitation|invite|follow[\s-]?up|reminder)\b/i;
+const ABSTRACT_MESSAGE_TEMPLATE_STYLE_RE =
+  /\b(?:professional|formal|polite|warm|sweet|heartfelt|brief|short|nice|proper|kind)\b/i;
 function cleanupNamePunctuation(value: string) {
   return value
     .normalize("NFKC")
     .replace(/[\u200d\uFE0F]/g, "")
     .replace(/[_]+/g, " ")
     .replace(/[“”"']/g, "")
-    .replace(/[^\p{L}\p{N}\s.&+\-/\u0900-\u097F]/gu, " ")
+    .replace(/[^\p{L}\p{M}\p{N}\s.&+\-/\u0900-\u097F]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -165,6 +256,21 @@ function buildSendCommandEnvelope(text: string, message: string) {
   return stripFirstMessageOccurrence(text, message)
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function stripClawCloudInternalCommandPrefixes(value: string) {
+  return String(value ?? "")
+    .replace(CLAWCLOUD_STYLE_PREFIX_RE, "")
+    .trim();
+}
+
+function looksLikeActiveContactHandoffCommand(value: string) {
+  const trimmed = stripClawCloudInternalCommandPrefixes(String(value ?? "").trim());
+  if (!trimmed) {
+    return false;
+  }
+
+  return looksLikeActiveContactStartCommand(trimmed);
 }
 
 export function normalizeContactName(name: string) {
@@ -304,6 +410,53 @@ function buildParsedSendCommand(
   };
 }
 
+const NON_CONTACT_TELL_RECIPIENT_PATTERN =
+  /\b(?:conversation|chat|history|summary|recap|overview|message|messages|text|texts|email|emails|mail|number|details?|story|plot|richest|poorest|largest|smallest|best|worst|top|latest|news|weather|price|prices|capital|math|maths|coding|code)\b/i;
+
+function looksLikeTellMessageRecipient(rawRecipient: string) {
+  const cleaned = cleanupNamePunctuation(rawRecipient);
+  if (!cleaned) {
+    return false;
+  }
+
+  if (extractDirectPhone(cleaned)) {
+    return true;
+  }
+
+  const normalized = normalizeContactName(cleaned);
+  if (!normalized || AMBIGUOUS_DIRECT_RECIPIENTS.has(normalized)) {
+    return false;
+  }
+
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0 || tokens.length > 4) {
+    return false;
+  }
+
+  if (NON_CONTACT_TELL_RECIPIENT_PATTERN.test(normalized)) {
+    return false;
+  }
+
+  if (/\b(?:me|my|the|this|that|these|those|what|which|who|why|how|where|when)\b/i.test(tokens[0] ?? "")) {
+    return false;
+  }
+
+  return true;
+}
+
+function looksLikeAbstractTemplateMessageDescriptor(value: string) {
+  const cleaned = cleanupNamePunctuation(value).toLowerCase();
+  if (!cleaned || cleaned.length > 120) {
+    return false;
+  }
+
+  const hasIntentKeyword = ABSTRACT_MESSAGE_TEMPLATE_KEYWORD_RE.test(cleaned);
+  const hasMessageSurface = /\b(?:note|message|wish|greeting|reply|text)\b/.test(cleaned);
+  const hasStyleCue = ABSTRACT_MESSAGE_TEMPLATE_STYLE_RE.test(cleaned);
+
+  return hasIntentKeyword || (hasMessageSurface && hasStyleCue);
+}
+
 export async function loadContacts(userId: string): Promise<ContactMap> {
   const db = getClawCloudSupabaseAdmin();
   const { data } = await db
@@ -438,11 +591,40 @@ export function parseSaveContactCommand(text: string): { name: string; phone: st
   return null;
 }
 
-export function parseSendMessageCommand(text: string): ParsedSendMessageCommand | null {
-  const t = text.trim().replace(/^ok\s+/i, "").trim();
+function parseSendMessageCommandCandidate(t: string): ParsedSendMessageCommand | null {
+  const sendToSaying = t.match(
+    new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}${SEND_VERB_SOURCE}\\s+(?:a\\s+)?${MESSAGE_SURFACE_SOURCE}\\s+to\\s+(.+?)\\s+${SEND_SEPARATOR_SOURCE}\\s+(.+)$`, "i"),
+  );
+  if (sendToSaying) {
+    return buildParsedSendCommand(sendToSaying[1] ?? "", sendToSaying[2] ?? "");
+  }
+
+  const replyOnWhatsApp = t.match(
+    new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}${REPLY_VERB_SOURCE}\\s+to\\s+(.+?)(?:\\s+(?:on|via|in)\\s+(?:whatsapp|whatsap|whatsaap)|\\s+\\bwa\\b)?\\s+${SEND_SEPARATOR_SOURCE}\\s+(.+)$`, "i"),
+  );
+  if (replyOnWhatsApp) {
+    return buildParsedSendCommand(replyOnWhatsApp[1] ?? "", replyOnWhatsApp[2] ?? "");
+  }
+
+  const templateReplyPattern = t.match(
+    new RegExp(
+      `^${SEND_COMMAND_SOFT_PREFIX_SOURCE}${REPLY_VERB_SOURCE}\\s+(.+?)\\s+to\\s+(.+?)(?=\\s+\\b(?:for|about|regarding|because|in|into|on|saying|with)\\b|$)(.*)$`,
+      "i",
+    ),
+  );
+  if (
+    templateReplyPattern
+    && looksLikeAbstractTemplateMessageDescriptor(templateReplyPattern[1] ?? "")
+    && looksLikeTellMessageRecipient(templateReplyPattern[2] ?? "")
+  ) {
+    const descriptor = String(templateReplyPattern[1] ?? "").trim();
+    const trailingContext = String(templateReplyPattern[3] ?? "").trim();
+    const message = `${descriptor}${trailingContext ? ` ${trailingContext}` : ""}`.trim();
+    return buildParsedSendCommand(templateReplyPattern[2] ?? "", message);
+  }
 
   const quotedMessageFirst = t.match(
-    /^(?:please\s+)?(?:send|message|msg|whatsapp|wa)\s+(?:"([^"]+)"|'([^']+)')\s+to\s+(.+)$/i,
+    new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}(?:${SEND_VERB_SOURCE}|message|mesage|msg|whatsapp|whatsap|whatsaap|wa)\\s+(?:\"([^\"]+)\"|'([^']+)')\\s+to\\s+(.+)$`, "i"),
   );
   if (quotedMessageFirst) {
     return buildParsedSendCommand(
@@ -452,14 +634,14 @@ export function parseSendMessageCommand(text: string): ParsedSendMessageCommand 
   }
 
   const sendToColon = t.match(
-    /^(?:please\s+)?(?:send|message|msg|whatsapp|wa)\s+to\s+(.+?)\s*:\s*(.+)$/i,
+    new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}(?:${SEND_VERB_SOURCE}|message|mesage|msg|whatsapp|whatsap|whatsaap|wa)\\s+to\\s+(.+?)\\s*:\\s*(.+)$`, "i"),
   );
   if (sendToColon) {
     return buildParsedSendCommand(sendToColon[1] ?? "", sendToColon[2] ?? "");
   }
 
   const sendToQuoted = t.match(
-    /^(?:please\s+)?(?:send|message|msg|whatsapp|wa)\s+to\s+(.+?)\s+(?:"([^"]+)"|'([^']+)')$/i,
+    new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}(?:${SEND_VERB_SOURCE}|message|mesage|msg|whatsapp|whatsap|whatsaap|wa)\\s+to\\s+(.+?)\\s+(?:\"([^\"]+)\"|'([^']+)')$`, "i"),
   );
   if (sendToQuoted) {
     return buildParsedSendCommand(
@@ -469,37 +651,88 @@ export function parseSendMessageCommand(text: string): ParsedSendMessageCommand 
   }
 
   const recipientFirst = t.match(
-    /^(?:send\s+(?:a\s+)?(?:message|msg|whatsapp|wa)\s+to|message|msg|whatsapp|wa)\s+(.+?)\s*:\s*(.+)$/i,
+    new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}(?:${SEND_VERB_SOURCE}\\s+(?:a\\s+)?(?:message|mesage|msg|whatsapp|whatsap|whatsaap|wa)\\s+to|message|mesage|msg|whatsapp|whatsap|whatsaap|wa)\\s+(.+?)\\s*:\\s*(.+)$`, "i"),
   );
   if (recipientFirst) {
     return buildParsedSendCommand(recipientFirst[1] ?? "", recipientFirst[2] ?? "");
   }
 
-  const tellPattern = t.match(/^tell\s+(.+?)\s+that\s+(.+)$/i);
-  if (tellPattern) {
+  const tellPattern = t.match(new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}tell\\s+(.+?)\\s+that\\s+(.+)$`, "i"));
+  if (tellPattern && looksLikeTellMessageRecipient(tellPattern[1] ?? "")) {
     return buildParsedSendCommand(tellPattern[1] ?? "", tellPattern[2] ?? "");
   }
 
-  const tellColonPattern = t.match(/^tell\s+(.+?)\s*:\s*(.+)$/i);
-  if (tellColonPattern) {
+  const tellColonPattern = t.match(new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}tell\\s+(.+?)\\s*:\\s*(.+)$`, "i"));
+  if (tellColonPattern && looksLikeTellMessageRecipient(tellColonPattern[1] ?? "")) {
     return buildParsedSendCommand(tellColonPattern[1] ?? "", tellColonPattern[2] ?? "");
   }
 
-  const messageFirst = t.match(/^(?:please\s+)?send\s+(.{2,160}?)\s+to\s+(.+)$/i);
+  const templateSendPattern = t.match(
+    new RegExp(
+      `^${SEND_COMMAND_SOFT_PREFIX_SOURCE}${SEND_VERB_SOURCE}\\s+(.+?)\\s+to\\s+(.+?)(?=\\s+\\b(?:for|about|regarding|because|in|into|on|saying|with)\\b|$)(.*)$`,
+      "i",
+    ),
+  );
+  if (
+    templateSendPattern
+    && looksLikeAbstractTemplateMessageDescriptor(templateSendPattern[1] ?? "")
+    && looksLikeTellMessageRecipient(templateSendPattern[2] ?? "")
+  ) {
+    const descriptor = String(templateSendPattern[1] ?? "").trim();
+    const trailingContext = String(templateSendPattern[3] ?? "").trim();
+    const message = `${descriptor}${trailingContext ? ` ${trailingContext}` : ""}`.trim();
+    return buildParsedSendCommand(templateSendPattern[2] ?? "", message);
+  }
+
+  const messageFirst = t.match(new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}(?:${SEND_VERB_SOURCE}|message|mesage|msg|whatsapp|whatsap|whatsaap|wa)\\s+(.{2,160}?)\\s+to\\s+(.+)$`, "i"));
   if (messageFirst) {
     return buildParsedSendCommand(messageFirst[2] ?? "", messageFirst[1] ?? "");
   }
 
   const shortGreeting = t.match(
-    /^send\s+(good\s+(?:morning|night|evening|afternoon)|hello|hi|bye|take care|good day)\s+(?:to\s+)?(.+)$/i,
+    new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}(?:${SEND_VERB_SOURCE}|message|mesage|msg|whatsapp|whatsap|whatsaap|wa)\\s+(good\\s+(?:morning|night|evening|afternoon)|hello|hi|bye|take care|good day)\\s+(?:to\\s+)?(.+)$`, "i"),
   );
   if (shortGreeting) {
     return buildParsedSendCommand(shortGreeting[2] ?? "", shortGreeting[1] ?? "");
   }
 
-  const directToPattern = t.match(/^send\s+to\s+(.+?)\s+(.+)$/i);
+  const directToPattern = t.match(new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}${SEND_VERB_SOURCE}\\s+to\\s+(.+?)\\s+(.+)$`, "i"));
   if (directToPattern) {
     return buildParsedSendCommand(directToPattern[1] ?? "", directToPattern[2] ?? "");
+  }
+
+  return null;
+}
+
+function repairSendMessageCommandCandidate(value: string) {
+  return String(value ?? "")
+    .replace(/\bt\s*=\s*(in|to|on)\b/gi, "$1")
+    .replace(/\bmsgg?\b/gi, "msg")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function parseSendMessageCommand(text: string): ParsedSendMessageCommand | null {
+  const raw = stripClawCloudInternalCommandPrefixes(
+    text.trim().replace(/^ok\s+/i, "").trim(),
+  );
+  const understood = normalizeClawCloudUnderstandingMessage(raw).trim();
+  const candidates = Array.from(new Set([
+    raw,
+    understood,
+    repairSendMessageCommandCandidate(raw),
+    repairSendMessageCommandCandidate(understood),
+  ].filter(Boolean)));
+
+  if (candidates.some((candidate) => looksLikeActiveContactHandoffCommand(candidate))) {
+    return null;
+  }
+
+  for (const candidate of candidates) {
+    const parsed = parseSendMessageCommandCandidate(candidate);
+    if (parsed) {
+      return parsed;
+    }
   }
 
   return null;

@@ -135,3 +135,13 @@ If the dashboard says WhatsApp is connected but logs do not show:
 ```
 
 the UI is showing stale stored connection state, not a live WhatsApp socket.
+
+If `/auth` shows a message like:
+
+```text
+Email auth is temporarily unavailable because the upstream auth service is not returning a valid response right now.
+```
+
+then the app-side auth flow is working, but the active Supabase auth origin is not healthy. Check the current `SUPABASE_URL` project directly and follow:
+
+- [SUPABASE-AUTH-RECOVERY-CHECKLIST.md](/c:/Users/ranas/Downloads/swiftdeploy-ai%20(2)/SUPABASE-AUTH-RECOVERY-CHECKLIST.md)

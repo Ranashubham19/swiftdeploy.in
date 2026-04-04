@@ -9,7 +9,11 @@ has been approved.
 - Public Gmail / Calendar connect is now opt-in via `GOOGLE_WORKSPACE_PUBLIC_ENABLED=true`.
 - Public Drive / Sheets reconnect is separately opt-in via `GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED=true`.
 - Local development still works without extra rollout flags.
-- Setup only requests Gmail + Calendar scopes first.
+- Setup only requests the core Gmail + Calendar scopes first:
+  - `gmail.modify`
+  - `gmail.compose`
+  - `gmail.send`
+  - `calendar.events`
 - Drive / Sheets scopes are requested later via reconnect from Settings.
 
 ## Required before enabling for all users
@@ -28,6 +32,7 @@ has been approved.
    - `GOOGLE_WORKSPACE_PUBLIC_ENABLED=true`
    - `GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED=true` once the extended Drive / Sheets review is approved
    - `GOOGLE_WORKSPACE_TEMPORARY_HOLD=false`
+   - `GOOGLE_WORKSPACE_SETUP_LITE_ONLY=false`
 8. Re-test:
    - Setup > Gmail / Calendar connect
    - Settings > Reconnect Google for Drive / Sheets
@@ -47,4 +52,5 @@ GOOGLE_WORKSPACE_TEMPORARY_HOLD=true
 GOOGLE_WORKSPACE_PUBLIC_ENABLED=true
 GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED=true
 GOOGLE_WORKSPACE_TEMPORARY_HOLD=false
+GOOGLE_WORKSPACE_SETUP_LITE_ONLY=false
 ```

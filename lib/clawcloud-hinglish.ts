@@ -1,6 +1,7 @@
 const HINGLISH_WORDS = new Set([
   "main",
   "mai",
+  "mein",
   "mujhe",
   "mera",
   "meri",
@@ -8,10 +9,12 @@ const HINGLISH_WORDS = new Set([
   "hum",
   "humara",
   "aap",
+  "app",
   "tum",
   "tu",
   "tumhara",
   "kya",
+  "kis",
   "kaise",
   "kese",
   "kyun",
@@ -28,6 +31,8 @@ const HINGLISH_WORDS = new Set([
   "karta",
   "karti",
   "karein",
+  "karenge",
+  "karange",
   "sakte",
   "sakta",
   "sakti",
@@ -80,6 +85,7 @@ const HINGLISH_WORDS = new Set([
   "toh",
   "to",
   "ab",
+  "abhi",
   "kal",
   "aaj",
   "parso",
@@ -101,6 +107,7 @@ const HINGLISH_WORDS = new Set([
   "zaroor",
   "thoda",
   "baat",
+  "taraf",
   "kaam",
   "cheez",
   "jagah",
@@ -113,6 +120,8 @@ const HINGLISH_WORDS = new Set([
   "aurat",
   "baccha",
   "dost",
+  "dii",
+  "didi",
   "bhai",
   "yaar",
   "paisa",
@@ -144,10 +153,32 @@ const HINGLISH_WORDS = new Set([
   "badhiya",
   "bekar",
   "bahut",
+  "btao",
+  "btana",
+  "smjhao",
+  "smjh",
+  "bhompu",
+  "pura",
+  "puri",
+  "poora",
+  "poori",
+  "detail",
+  "vistar",
+  "itihas",
+  "kahani",
+  "ghatna",
+  "yudh",
+  "samrajya",
+  "raja",
+  "rani",
+  "desh",
+  "duniya",
+  "jankari",
 ]);
 
 const HINDI_SUFFIXES = [
   /\b\w+(?:ega|egi|enge|oge|ogi|onga)\b/i,
+  /\b\w+(?:ange|angi)\b/i,
   /\b\w+(?:raha|rahi|rahe)\b/i,
   /\b\w+(?:liya|liye|li|lia)\b/i,
   /\b\w+(?:karo|karna|karein|kijiye)\b/i,
@@ -158,7 +189,7 @@ const HINDI_SUFFIXES = [
 const HINGLISH_PHRASES = [
   /\b(mujhe|mujh ko)\s+\w+\s+(chahiye|chahti|chahta)\b/i,
   /\b(kya|kaisi)\s+(hai|hain|thi|tha|the)\b/i,
-  /\b(batao|bata|samjhao|samajhao)\b/i,
+  /\b(batao|btao|bata|btana|samjhao|smjhao|samajhao)\b/i,
   /\b(kal|aaj|abhi|parso)\s+(tak|se|ko|mein)\b/i,
   /\b(kaise|kyun|kab|kitna)\s+\w+\s+(hai|hain|hoga|hogi)\b/i,
   /\b(aap|tum|tu)\s+(kaise|kese|theek|thik)\s+(ho|hai|hain)\b/i,
@@ -167,6 +198,10 @@ const HINGLISH_PHRASES = [
   /\bkya\s+(aap|tum|tu)\b/i,
   /\b(yaad|reminder)\s+(kar|dila|dilao|set)/i,
   /\bsamajh\s+(nahi|nahin)\b/i,
+  /\babhi\s+kis\s+se\s+baat\s+kar\s+rahe\s+ho\b/i,
+  /\b(?:ab|abhi)\s+(?:mere|meri)\s+(?:taraf\s+se|behalf\s+(?:me|mai|mein|par|pe))\s+(?:aap\s+)?[\w'.-]+\s+se\s+baat\s+kar(?:o|na|enge|karenge|karange|rahe|rhe)\b/i,
+  /\b[\w'.-]+\s+se\s+(?:mere|meri)\s+(?:taraf\s+se|behalf\s+(?:me|mai|mein|par|pe))\s+baat\s+kar(?:o|na|enge|karenge|karange)\b/i,
+  /\b[\w'.-]+\s+se\s+baat\s+karna\s+band\s+karo\b/i,
 ];
 
 export function detectHinglish(message: string): boolean {
@@ -200,7 +235,7 @@ export function extractHinglishIntent(message: string): "reminder" | "explain" |
   if (/\b(yaad|reminder|remind)\b/.test(normalized) && /\b(kar|dilao|set|lagao)\b/.test(normalized)) {
     return "reminder";
   }
-  if (/\b(samjhao|batao|bata|explain|kya hai)\b/.test(normalized)) {
+  if (/\b(samjhao|smjhao|batao|btao|bata|btana|explain|kya hai)\b/.test(normalized)) {
     return "explain";
   }
   if (/\b(code|program|script|function)\b/.test(normalized) && /\b(likho|banao|karo|dikhao)\b/.test(normalized)) {
@@ -208,4 +243,14 @@ export function extractHinglishIntent(message: string): "reminder" | "explain" |
   }
 
   return null;
+}
+
+/**
+ * Detect if a Hinglish message requests detailed/comprehensive output.
+ * Used to escalate from "fast" to "deep" response mode.
+ */
+export function isHinglishDetailRequest(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return /\b(full\s+detail|pura|puri|poora|poori|vistar\s*se|detail\s*(mai|mein|me|m)|sab\s+kuch|puri\s+jankari|poori\s+jankari)\b/i.test(normalized)
+    && /\b(batao|btao|bata|btana|samjhao|smjhao|likho|do|dijiye|explain)\b/i.test(normalized);
 }

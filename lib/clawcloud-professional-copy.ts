@@ -90,10 +90,9 @@ export function buildBackgroundTaskFailureMessage(
 }
 
 export function buildNoLiveDataProfessionalReply() {
-  return [
-    "*Time-sensitive query*",
-    "",
-    "To keep this accurate, send the exact company, person, product, topic, date, or location you want checked live.",
-    "If you want a stable overview instead of a live update, ask for an overview and I will answer directly.",
-  ].join("\n");
+  // NOTE: This function should NEVER be the final answer shown to users.
+  // The caller must always attempt a knowledge-based fallback answer instead.
+  // This string is only used as an internal signal — if it ever reaches the user,
+  // the agent layer has a bug.
+  return "__NO_LIVE_DATA_INTERNAL_SIGNAL__";
 }

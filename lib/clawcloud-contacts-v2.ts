@@ -58,14 +58,38 @@ const COMMON_NICKNAME_EXPANSIONS: Record<string, string[]> = {
   sonu: ["sonali", "sonam", "sonal"],
   tina: ["teena"],
   aman: ["amandeep", "amanjot", "amanbir"],
-  maa: ["mom", "mother", "mama", "mum", "mummy", "mommy", "ma"],
-  mummy: ["mom", "mother", "mum", "mommy", "maa", "ma"],
-  mom: ["mother", "mum", "mummy", "maa", "ma"],
-  papa: ["dad", "father", "pappa", "baba", "daddy", "pitaji"],
-  papaji: ["papa ji", "papa", "dad", "father", "pitaji", "daddy"],
-  dii: ["didi", "di", "sister", "sis"],
-  di: ["didi", "dii", "sister", "sis"],
-  didi: ["dii", "di", "sister", "sis"],
+  maa: [
+    "mom", "mother", "mama", "mum", "mummy", "mommy", "ma",
+    "\u5988\u5988", "\u5abd\u5abd", "\u5988", "\u5abd", "\u6bcd\u4eb2", "\u6bcd\u89aa",
+    "\u304a\u6bcd\u3055\u3093", "\u30de\u30de", "\uc5c4\ub9c8", "\uc5b4\uba38\ub2c8",
+    "mam\u00e1", "madre", "m\u00e3e", "mae", "maman", "m\u00e8re", "mere",
+    "\u043c\u0430\u043c\u0430", "\u043c\u0430\u0442\u044c",
+    "\u0623\u0645\u064a", "\u0627\u0645\u064a", "\u0648\u0627\u0644\u062f\u062a\u064a",
+    "anne", "annem", "ibu", "\u0e41\u0e21\u0e48", "\u0e04\u0e38\u0e13\u0e41\u0e21\u0e48",
+  ],
+  mummy: ["mom", "mother", "mum", "mommy", "maa", "ma", "\u5988\u5988", "\u5abd\u5abd", "\uc5c4\ub9c8"],
+  mom: ["mother", "mum", "mummy", "maa", "ma", "\u5988\u5988", "\u5abd\u5abd", "\uc5c4\ub9c8"],
+  papa: [
+    "dad", "father", "pappa", "baba", "daddy", "pitaji",
+    "\u7238\u7238", "\u7238", "\u7236\u4eb2", "\u7236\u89aa",
+    "\u304a\u7236\u3055\u3093", "\u30d1\u30d1", "\uc544\ube60", "\uc544\ubc84\uc9c0",
+    "pap\u00e1", "padre", "pai", "papai", "p\u00e8re", "pere", "vater",
+    "\u043f\u0430\u043f\u0430", "\u043e\u0442\u0435\u0446",
+    "\u0623\u0628\u064a", "\u0627\u0628\u064a", "\u0648\u0627\u0644\u062f\u064a",
+    "\u0e1e\u0e48\u0e2d", "\u0e04\u0e38\u0e13\u0e1e\u0e48\u0e2d",
+  ],
+  papaji: ["papa ji", "papa", "dad", "father", "pitaji", "daddy", "\u7238\u7238", "\u30d1\u30d1", "\uc544\ube60"],
+  dii: [
+    "didi", "di", "sister", "sis",
+    "\u59d0\u59d0", "\u59d0",
+    "\u304a\u59c9\u3055\u3093", "\u304a\u59c9\u3061\u3083\u3093",
+    "\uc5b8\ub2c8", "\ub204\ub098",
+    "hermana", "irm\u00e3", "irma", "s\u0153ur", "soeur", "schwester",
+    "\u0441\u0435\u0441\u0442\u0440\u0430",
+    "\u0623\u062e\u062a\u064a", "\u0627\u062e\u062a\u064a", "\u0e1e\u0e35\u0e48\u0e2a\u0e32\u0e27",
+  ],
+  di: ["didi", "dii", "sister", "sis", "\u59d0\u59d0", "\u304a\u59c9\u3055\u3093", "\uc5b8\ub2c8", "\ub204\ub098"],
+  didi: ["dii", "di", "sister", "sis", "\u59d0\u59d0", "\u304a\u59c9\u3055\u3093", "\uc5b8\ub2c8", "\ub204\ub098"],
   bhai: ["bhaiya", "brother", "bro"],
   bhaiya: ["bhai", "brother", "bro"],
   boss: ["manager", "sir"],
@@ -210,21 +234,37 @@ function pickBetterContactScore(current: ContactScoreDetail | null, next: Contac
   return current;
 }
 
-function scoreContact(queryVariants: string[], storedName: string): ContactScoreDetail {
+function scoreContact(queryVariants: string[], storedName: string, primaryQuery: string): ContactScoreDetail {
   const normalizedStored = normalizeName(storedName);
   const storedWords = normalizedStored.split(/\s+/).filter(Boolean);
+  const compactPrimaryQuery = primaryQuery.replace(/\s+/g, "");
   let best: ContactScoreDetail | null = null;
 
   for (const query of queryVariants) {
     if (!query) continue;
 
     if (normalizedStored === query) {
-      return {
-        score: EXACT_SCORE,
-        exact: true,
+      const compactQuery = query.replace(/\s+/g, "");
+      const isFullQueryExact =
+        Boolean(primaryQuery)
+        && (query === primaryQuery || compactQuery === compactPrimaryQuery);
+
+      if (isFullQueryExact) {
+        return {
+          score: EXACT_SCORE,
+          exact: true,
+          matchedAlias: storedName,
+          matchBasis: "exact",
+        };
+      }
+
+      best = pickBetterContactScore(best, {
+        score: WORD_MATCH_SCORE + 0.01,
+        exact: false,
         matchedAlias: storedName,
-        matchBasis: "exact",
-      };
+        matchBasis: "word",
+      });
+      continue;
     }
 
     if (normalizedStored.startsWith(query) || query.startsWith(normalizedStored)) {
@@ -287,8 +327,11 @@ function describeContactMatchReason(match: ContactMatch) {
 }
 
 function buildAmbiguityPrompt(queryName: string, matches: ContactMatch[]): string {
+  const requestedLabel = queryName.replace(/\s+/g, " ").trim() || "that contact";
   return [
-    `I found more than one strong WhatsApp match for "${queryName}":`,
+    `I found more than one strong WhatsApp match for "${requestedLabel}".`,
+    "",
+    `Which ${requestedLabel} should I use?`,
     "",
     ...matches.map((match, index) =>
       match.phone
@@ -303,6 +346,10 @@ function buildAmbiguityPrompt(queryName: string, matches: ContactMatch[]): strin
 
 function uniqueStrings(values: Array<string | null | undefined>) {
   return [...new Set(values.map((value) => String(value ?? "").trim()).filter(Boolean))];
+}
+
+function isStructuredContactMatch(match: Pick<ContactMatch, "exact" | "matchBasis">) {
+  return Boolean(match.exact || match.matchBasis === "exact" || match.matchBasis === "prefix" || match.matchBasis === "word");
 }
 
 function normalizeWhatsAppCandidatePhone(jid: string | null | undefined, phone: string | null | undefined) {
@@ -410,11 +457,12 @@ export function rankContactCandidates(
   }
 
   const queryVariants = getNameVariants(rawName);
+  const primaryQuery = normalizeName(rawName);
   const scored: ContactMatch[] = [];
 
   for (const candidate of candidates) {
     const bestMatch = candidate.aliases.reduce<ContactScoreDetail | null>((best, alias) => {
-      const detail = scoreContact(queryVariants, alias);
+      const detail = scoreContact(queryVariants, alias, primaryQuery);
       if (detail.score > (best?.score ?? 0)) {
         return detail;
       }
@@ -444,6 +492,14 @@ export function rankContactCandidates(
         .slice(0, 5)
         .map((candidate) => candidate.name),
     };
+  }
+
+  const exactMatches = scored.filter((match) => match.exact || match.matchBasis === "exact");
+  if (exactMatches.length) {
+    scored.splice(0, scored.length, ...exactMatches);
+  } else if (scored.some(isStructuredContactMatch)) {
+    const structuredMatches = scored.filter(isStructuredContactMatch);
+    scored.splice(0, scored.length, ...structuredMatches);
   }
 
   if (scored.length === 1) {

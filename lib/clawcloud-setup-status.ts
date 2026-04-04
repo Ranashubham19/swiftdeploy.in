@@ -1,5 +1,6 @@
 import type { GlobalLiteConnection } from "@/lib/clawcloud-global-lite";
 import type { ClawCloudWhatsAppRuntimeStatus } from "@/lib/clawcloud-whatsapp-runtime";
+import { pickAuthoritativeClawCloudWhatsAppAccount } from "@/lib/clawcloud-whatsapp-account-selection";
 
 export type SetupConnectedAccount = {
   provider: string;
@@ -50,7 +51,9 @@ export function deriveClawCloudSetupConnectionState(
 ) {
   const activeAccounts = listActiveAccounts(snapshot.connected_accounts);
   const providers = new Set(activeAccounts.map((account) => account.provider));
-  const whatsappAccount = activeAccounts.find((account) => account.provider === "whatsapp");
+  const whatsappAccount = pickAuthoritativeClawCloudWhatsAppAccount(
+    activeAccounts.filter((account) => account.provider === "whatsapp"),
+  );
 
   return {
     gmailConnected: providers.has("gmail"),

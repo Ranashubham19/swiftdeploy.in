@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { listGlobalLiteConnections } from "@/lib/clawcloud-global-lite";
 import type { ClawCloudSetupStatusSnapshot } from "@/lib/clawcloud-setup-status";
+import { pickAuthoritativeClawCloudWhatsAppAccount } from "@/lib/clawcloud-whatsapp-account-selection";
 import {
   getClawCloudErrorMessage,
   getClawCloudSupabaseAdmin,
@@ -95,8 +96,8 @@ export async function GET(request: NextRequest) {
     const connectedAccounts = (data ?? []) as NonNullable<
       ClawCloudSetupStatusSnapshot["connected_accounts"]
     >;
-    const activeWhatsAppAccount = connectedAccounts.find(
-      (account) => account.provider === "whatsapp" && account.is_active,
+    const activeWhatsAppAccount = pickAuthoritativeClawCloudWhatsAppAccount(
+      connectedAccounts.filter((account) => account.provider === "whatsapp"),
     );
 
     const whatsappConnected = typeof whatsAppRuntime?.connected === "boolean"

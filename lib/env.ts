@@ -285,6 +285,18 @@ export function isGoogleWorkspaceExtendedConnectEnabled() {
   );
 }
 
+export function isGoogleWorkspaceSetupLiteMode() {
+  if (env.GOOGLE_WORKSPACE_TEMPORARY_HOLD) {
+    return true;
+  }
+
+  if (env.GOOGLE_WORKSPACE_PUBLIC_ENABLED || env.GOOGLE_WORKSPACE_EXTENDED_PUBLIC_ENABLED) {
+    return false;
+  }
+
+  return env.GOOGLE_WORKSPACE_SETUP_LITE_ONLY;
+}
+
 export function getProviderSnapshot(): ProviderSnapshot {
   return {
     tavily: Boolean(env.TAVILY_API_KEY),
@@ -315,7 +327,7 @@ export function getPublicAppConfig(): PublicAppConfig {
       publicSignInEnabled: isGooglePublicSignInEnabled(),
       publicWorkspaceEnabled: isGoogleWorkspacePublicConnectEnabled(),
       publicWorkspaceExtendedEnabled: isGoogleWorkspaceExtendedConnectEnabled(),
-      setupLiteMode: env.GOOGLE_WORKSPACE_SETUP_LITE_ONLY,
+      setupLiteMode: isGoogleWorkspaceSetupLiteMode(),
     },
     firebase: {
       apiKey: env.FIREBASE_API_KEY,

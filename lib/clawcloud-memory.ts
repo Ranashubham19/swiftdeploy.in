@@ -289,7 +289,7 @@ export function buildMemorySystemSnippet(
     if (looksLikeDocumentPrompt(memory.resolvedQuestion)) {
       lines.push("Resolved question includes the recent uploaded document context.");
     } else {
-      lines.push(`Resolved question with context: ${memory.resolvedQuestion}`);
+      lines.push(`Resolved question: ${memory.resolvedQuestion}`);
     }
     lines.push("IMPORTANT: Answer in the context of the ongoing conversation. Do not treat this as a standalone question.");
   }

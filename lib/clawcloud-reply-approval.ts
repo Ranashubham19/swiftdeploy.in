@@ -152,7 +152,7 @@ export function buildReplyApprovalReviewReply(approval: ReplyApproval) {
     preview,
     "",
     buildReplyApprovalPrompt(plan),
-    "Reply `Yes` to confirm, `No` to cancel, or `Rewrite it ...` to refine it.",
+    "Use `SEND`, `EDIT`, or `SKIP` if you still want to process this older queued draft manually.",
     `Power option: \`SEND ${approval.id.slice(0, 8)}\`, \`EDIT ${approval.id.slice(0, 8)} <text>\`, \`SKIP ${approval.id.slice(0, 8)}\``,
   ].join("\n");
 }
@@ -162,9 +162,6 @@ export function buildReplyApprovalContextReply(
   kind: "review" | "explain" | "target",
 ) {
   const plan = resolveReplyApprovalExecutionPlan(approval);
-  const actionLabel = plan.mode === "compose_draft" || plan.mode === "reply_draft"
-    ? "save this Gmail draft"
-    : "send this Gmail message";
 
   if (kind === "review") {
     return buildReplyApprovalReviewReply(approval);
@@ -174,15 +171,15 @@ export function buildReplyApprovalContextReply(
     return [
       `This pending Gmail ${plan.mode === "compose_draft" || plan.mode === "reply_draft" ? "draft" : "message"} is for *${plan.displayTarget}*.`,
       `*Subject:* ${plan.subject}`,
-      `I'm waiting for your confirmation before I ${actionLabel.replace("this ", "")}. Reply \`Yes\`, \`No\`, or \`Rewrite it ...\`.`,
+      "Use `SEND`, `EDIT`, or `SKIP` if you still want to process this older queued item manually.",
     ].join("\n\n");
   }
 
   return [
-    `This Gmail ${plan.mode === "compose_draft" || plan.mode === "reply_draft" ? "draft" : "message"} is waiting because ClawCloud keeps outbound Gmail actions human-confirmed.`,
+    `This Gmail ${plan.mode === "compose_draft" || plan.mode === "reply_draft" ? "draft" : "message"} is an older queued review item from before direct-send mode was enabled.`,
     `*Target:* ${plan.displayTarget}`,
     `*Subject:* ${plan.subject}`,
-    `If you want, reply \`Yes\` to confirm, \`No\` to cancel, or \`Rewrite it ...\` to refine the draft first.`,
+    "Use `SEND`, `EDIT`, or `SKIP` if you still want to process it manually.",
   ].join("\n\n");
 }
 

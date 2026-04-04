@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { sendReplyApprovalRequests } from "@/lib/clawcloud-reply-approval";
+import { sendLatestGmailRepliesOnCommand } from "@/lib/clawcloud-gmail-actions";
 import {
   getClawCloudErrorMessage,
   requireClawCloudAuth,
@@ -15,10 +15,12 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const result = await sendReplyApprovalRequests(auth.user.id, 5);
+    const result = await sendLatestGmailRepliesOnCommand(auth.user.id, 5);
     return NextResponse.json({
       success: true,
-      queued: result.queued,
+      queued: result.sent,
+      sent: result.sent,
+      reply: result.reply,
     });
   } catch (error) {
     return NextResponse.json(

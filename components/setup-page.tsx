@@ -152,8 +152,8 @@ const GOOGLE_SIGNIN_PROVIDER_MARKER = "clawcloud-auth-provider";
 const GOOGLE_WORKSPACE_CONNECT_TARGET_MARKER = "clawcloud-setup-google-connect-target";
 const SETUP_STATUS_CACHE_KEY = "clawcloud:setup-cache:v1";
 const SETUP_STATUS_CACHE_TTL_MS = 10 * 60_000;
-const SETUP_STATUS_FETCH_TIMEOUT_MS = 2_500;
-const GOOGLE_WORKSPACE_ACCESS_TIMEOUT_MS = 1_600;
+const SETUP_STATUS_FETCH_TIMEOUT_MS = 1_600;
+const GOOGLE_WORKSPACE_ACCESS_TIMEOUT_MS = 900;
 const GLOBAL_LITE_PROVIDER_ORDER: GlobalLiteProvider[] = [
   "gmail",
   "google_calendar",
@@ -1498,10 +1498,12 @@ export function SetupPage({ config }: SetupPageProps) {
       handled = true;
     }
 
+    let shouldRefreshLiveSnapshot = false;
+
     if (gmailConnectedFromSearch || calendarConnectedFromSearch || driveConnectedFromSearch) {
       const resolvedConnectTarget = sourceProviderFromSearch ?? readRememberedGoogleWorkspaceConnectTarget();
       clearGoogleTimeouts();
-      setGoogleConnecting(true);
+      setGoogleConnecting(false);
       setGoogleConnectTarget(resolvedConnectTarget);
       rememberGoogleWorkspaceConnectTarget(resolvedConnectTarget);
       setGmailStatus(gmailConnectedFromSearch ? "done" : "idle");
@@ -1510,9 +1512,7 @@ export function SetupPage({ config }: SetupPageProps) {
         setDriveConnected(true);
       }
       setCurrentStep(nextStep === "2" ? 2 : 1);
-      void refreshSetupStatusSnapshot({ silent: true }).finally(() => {
-        setGoogleConnecting(false);
-      });
+      shouldRefreshLiveSnapshot = true;
       handled = true;
     }
 
@@ -1533,7 +1533,9 @@ export function SetupPage({ config }: SetupPageProps) {
       return;
     }
 
-    void refreshSetupStatusSnapshot({ silent: true }).catch(() => undefined);
+    if (shouldRefreshLiveSnapshot || handled) {
+      void refreshSetupStatusSnapshot({ silent: true }).catch(() => undefined);
+    }
 
     const nextParams = new URLSearchParams(searchParams.toString());
     nextParams.delete("auth_provider");

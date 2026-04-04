@@ -24,6 +24,7 @@ export async function GET(request: NextRequest) {
   const intent = request.nextUrl.searchParams.get("intent")?.trim().toLowerCase() === "signup"
     ? "signup"
     : "login";
+  const loginHint = request.nextUrl.searchParams.get("login_hint")?.trim() ?? "";
 
   if (!isGooglePublicSignInEnabled()) {
     redirectBase.searchParams.set(
@@ -35,7 +36,9 @@ export async function GET(request: NextRequest) {
 
   try {
     const state = buildClawCloudGoogleLoginState(request.nextUrl.origin, intent);
-    const url = buildClawCloudGoogleLoginAuthUrl(state, request.nextUrl.origin);
+    const url = buildClawCloudGoogleLoginAuthUrl(state, request.nextUrl.origin, {
+      loginHint,
+    });
     const response = withNoStoreHeaders(NextResponse.redirect(url));
 
     response.cookies.set(GOOGLE_LOGIN_STATE_COOKIE, state, {

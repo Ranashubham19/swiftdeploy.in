@@ -35,6 +35,7 @@ type ResolvedHistoryContact = {
 const WHATSAPP_HISTORY_READ_LIMIT_MAX = 1_000;
 const WHATSAPP_CONTACT_LIST_LIMIT = 1_000;
 const WHATSAPP_CONTACT_MESSAGE_SCAN_LIMIT = 1_500;
+const WHATSAPP_MEDIA_MESSAGE_TYPES = ["image", "audio", "document", "video"] as const;
 
 function uniqueStrings(values: Array<string | null | undefined>) {
   return [...new Set(values.map((value) => String(value ?? "").trim()).filter(Boolean))];
@@ -52,6 +53,20 @@ function normalizeHistoryPhone(value: string | null | undefined) {
 
   const normalized = normalizePhone(raw);
   return normalized || raw.replace(/\D/g, "");
+}
+
+function buildSafeIlikePattern(value: string | null | undefined) {
+  const trimmed = String(value ?? "").trim().replace(/[%_]/g, "");
+  return trimmed ? `%${trimmed}%` : "";
+}
+
+function hasResolvedHistoryExactIdentity(
+  resolvedContact: ResolvedHistoryContact | null | undefined,
+) {
+  return Boolean(
+    normalizeHistoryPhone(resolvedContact?.phone)
+    || String(resolvedContact?.jid ?? "").trim(),
+  );
 }
 
 function pickPreferredContactLabel(current: string | null | undefined, candidate: string | null | undefined) {
@@ -113,17 +128,20 @@ function filterWhatsAppHistoryRowsForResolvedContact(
   const aliases = new Set(
     uniqueStrings(resolvedContact.aliases ?? []).map((value) => normalizeHistoryContactName(value)).filter(Boolean),
   );
+  const hasExactIdentity = Boolean(resolvedPhone || resolvedJid);
 
   return rows.filter((row) => {
     const rowPhone = normalizeHistoryPhone(row.remote_phone);
     const rowJid = String(row.remote_jid ?? "").trim().toLowerCase();
     const rowName = normalizeHistoryContactName(row.contact_name);
+    const phoneMatches = Boolean(resolvedPhone && rowPhone && rowPhone === resolvedPhone);
+    const jidMatches = Boolean(resolvedJid && rowJid && rowJid === resolvedJid);
 
-    return Boolean(
-      (resolvedPhone && rowPhone && rowPhone === resolvedPhone)
-      || (resolvedJid && rowJid && rowJid === resolvedJid)
-      || (rowName && aliases.has(rowName)),
-    );
+    if (hasExactIdentity) {
+      return phoneMatches || jidMatches;
+    }
+
+    return Boolean(rowName && aliases.has(rowName));
   });
 }
 
@@ -132,6 +150,38 @@ export function filterWhatsAppHistoryRowsForResolvedContactForTest(
   resolvedContact: ResolvedHistoryContact | null | undefined,
 ) {
   return filterWhatsAppHistoryRowsForResolvedContact(rows, resolvedContact);
+}
+
+function buildWhatsAppHistoryDedupKey(row: MessageRow) {
+  return [
+    String(row.remote_jid ?? "").trim().toLowerCase(),
+    normalizeHistoryPhone(row.remote_phone),
+    String(row.sent_at ?? "").trim(),
+    String(row.direction ?? "").trim().toLowerCase(),
+    String(row.message_type ?? "").trim().toLowerCase(),
+    String(row.chat_type ?? "").trim().toLowerCase(),
+    String(row.content ?? "").replace(/\s+/g, " ").trim(),
+  ].join("|");
+}
+
+function dedupeWhatsAppHistoryRows(rows: MessageRow[]) {
+  const seen = new Set<string>();
+  const deduped: MessageRow[] = [];
+
+  for (const row of rows) {
+    const key = buildWhatsAppHistoryDedupKey(row);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(row);
+  }
+
+  return deduped;
+}
+
+export function dedupeWhatsAppHistoryRowsForTest(rows: MessageRow[]) {
+  return dedupeWhatsAppHistoryRows(rows);
 }
 
 function isMediaMessageType(value: string | null | undefined) {
@@ -279,28 +329,92 @@ export async function listWhatsAppHistory(input: {
 }) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const limit = Math.min(Math.max(input.limit ?? 100, 1), WHATSAPP_HISTORY_READ_LIMIT_MAX);
-  const { data, error } = await supabaseAdmin
-    .from("whatsapp_messages")
-    .select(
-      "id, direction, content, message_type, remote_jid, remote_phone, contact_name, chat_type, sent_at, priority, needs_reply, reply_confidence, sensitivity, approval_state, audit_payload",
-    )
-    .eq("user_id", input.userId)
-    .order("sent_at", { ascending: false })
-    .limit(limit);
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  let rows = (data ?? []) as MessageRow[];
   const query = input.query?.trim().toLowerCase() ?? "";
   const contact = input.contact?.trim().toLowerCase() ?? "";
   const chatType = input.chatType?.trim().toLowerCase() ?? "";
   const approvalState = input.approvalState?.trim().toLowerCase() ?? "";
   const sensitivity = input.sensitivity?.trim().toLowerCase() ?? "";
   const direction = input.direction?.trim().toLowerCase() ?? "";
+  const exactResolvedIdentity = hasResolvedHistoryExactIdentity(input.resolvedContact);
+  const fetchLimit = exactResolvedIdentity
+    ? Math.min(
+      WHATSAPP_HISTORY_READ_LIMIT_MAX,
+      Math.max(limit * 40, 200),
+    )
+    : Math.min(
+      WHATSAPP_HISTORY_READ_LIMIT_MAX,
+      Math.max(limit, limit * ((contact || query) ? 4 : 1)),
+    );
 
-  if (query) {
+  let historyQuery = supabaseAdmin
+    .from("whatsapp_messages")
+    .select(
+      "id, direction, content, message_type, remote_jid, remote_phone, contact_name, chat_type, sent_at, priority, needs_reply, reply_confidence, sensitivity, approval_state, audit_payload",
+    )
+    .eq("user_id", input.userId)
+    .order("sent_at", { ascending: false });
+
+  if (exactResolvedIdentity) {
+    const resolvedPhone = normalizeHistoryPhone(input.resolvedContact?.phone);
+    const resolvedJid = String(input.resolvedContact?.jid ?? "").trim().toLowerCase();
+
+    if (resolvedPhone) {
+      historyQuery = historyQuery.eq("remote_phone", resolvedPhone);
+    } else if (resolvedJid) {
+      historyQuery = historyQuery.eq("remote_jid", resolvedJid);
+    }
+
+    const queryPattern = buildSafeIlikePattern(query);
+    if (queryPattern) {
+      historyQuery = historyQuery.ilike("content", queryPattern);
+    }
+  } else if (contact) {
+    const normalizedContactPhone = normalizeHistoryPhone(contact);
+    const contactPattern = buildSafeIlikePattern(contact);
+    if (normalizedContactPhone && normalizedContactPhone === contact.replace(/\D/g, "")) {
+      historyQuery = historyQuery.eq("remote_phone", normalizedContactPhone);
+    } else if (contactPattern) {
+      historyQuery = historyQuery.or([
+        `contact_name.ilike.${contactPattern}`,
+        `remote_phone.ilike.${contactPattern}`,
+        `remote_jid.ilike.${contactPattern}`,
+      ].join(","));
+    }
+  }
+
+  if (chatType && chatType !== "all") {
+    historyQuery = historyQuery.eq("chat_type", chatType);
+  }
+
+  if (approvalState && approvalState !== "all") {
+    historyQuery = historyQuery.eq("approval_state", approvalState);
+  }
+
+  if (sensitivity && sensitivity !== "all") {
+    historyQuery = historyQuery.eq("sensitivity", sensitivity);
+  }
+
+  if (direction && direction !== "all") {
+    historyQuery = historyQuery.eq("direction", direction);
+  }
+
+  if (input.mediaOnly) {
+    historyQuery = historyQuery.in("message_type", [...WHATSAPP_MEDIA_MESSAGE_TYPES]);
+  }
+
+  if (input.awaitingOnly) {
+    historyQuery = historyQuery.eq("needs_reply", true);
+  }
+
+  const { data, error } = await historyQuery.limit(fetchLimit);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  let rows = dedupeWhatsAppHistoryRows((data ?? []) as MessageRow[]);
+
+  if (query && !exactResolvedIdentity) {
     rows = rows.filter((row) =>
       row.content.toLowerCase().includes(query)
       || String(row.contact_name ?? "").toLowerCase().includes(query)
@@ -335,12 +449,14 @@ export async function listWhatsAppHistory(input: {
   }
 
   if (input.mediaOnly) {
-    rows = rows.filter((row) => isMediaMessageType(row.message_type));
+    rows = rows.filter((row) => WHATSAPP_MEDIA_MESSAGE_TYPES.includes(String(row.message_type ?? "").trim().toLowerCase() as typeof WHATSAPP_MEDIA_MESSAGE_TYPES[number]));
   }
 
   if (input.awaitingOnly) {
     rows = rows.filter((row) => row.needs_reply);
   }
+
+  rows = rows.slice(0, limit);
 
   return {
     rows,
@@ -599,12 +715,11 @@ export async function getWhatsAppInboxSummary(userId: string): Promise<WhatsAppI
       .catch(() => []),
     supabaseAdmin
       .from("connected_accounts")
-      .select("id")
+      .select("id", { count: "exact", head: true })
       .eq("user_id", userId)
       .eq("provider", "whatsapp")
       .eq("is_active", true)
-      .maybeSingle()
-      .then(({ data }) => Boolean(data))
+      .then(({ count }) => (count ?? 0) > 0)
       .catch(() => false),
   ]);
 

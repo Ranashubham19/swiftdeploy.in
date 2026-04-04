@@ -48,6 +48,33 @@ export type WhatsAppOutboundSource =
   | "system"
   | "api_send";
 
+export type WhatsAppActiveContactSession = {
+  contactName: string;
+  phone: string | null;
+  jid: string | null;
+  startedAt: string;
+  sourceMessage: string | null;
+};
+
+export type WhatsAppPendingContactOption = {
+  name: string;
+  phone: string | null;
+  jid: string | null;
+};
+
+export type WhatsAppPendingContactResolutionKind =
+  | "active_contact_start"
+  | "whatsapp_history"
+  | "send_message";
+
+export type WhatsAppPendingContactResolution = {
+  kind: WhatsAppPendingContactResolutionKind;
+  requestedName: string;
+  resumePrompt: string;
+  options: WhatsAppPendingContactOption[];
+  createdAt: string;
+};
+
 export type WhatsAppOutboundStatus =
   | "drafted"
   | "queued"
@@ -75,6 +102,8 @@ export type WhatsAppSettings = {
   retentionDays: number;
   quietHoursStart: string | null;
   quietHoursEnd: string | null;
+  activeContactSession: WhatsAppActiveContactSession | null;
+  pendingContactResolution: WhatsAppPendingContactResolution | null;
 };
 
 export type WhatsAppReplyApproval = {
@@ -256,14 +285,16 @@ export const defaultWhatsAppSettings: WhatsAppSettings = {
   automationMode: "read_only",
   replyMode: "balanced",
   groupReplyMode: "never",
-  requireApprovalForSensitive: true,
+  requireApprovalForSensitive: false,
   allowGroupReplies: false,
   allowDirectSendCommands: true,
-  requireApprovalForNewContacts: true,
-  requireApprovalForFirstOutreach: true,
+  requireApprovalForNewContacts: false,
+  requireApprovalForFirstOutreach: false,
   allowWorkflowAutoSend: false,
   maskSensitivePreviews: true,
   retentionDays: 90,
   quietHoursStart: null,
   quietHoursEnd: null,
+  activeContactSession: null,
+  pendingContactResolution: null,
 };

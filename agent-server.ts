@@ -55,7 +55,6 @@ import {
   upsertWhatsAppContacts,
   type WhatsAppContactSyncInput,
 } from "./lib/clawcloud-whatsapp-contacts";
-import { buildWhatsAppApprovalNotice, queueWhatsAppReplyApproval } from "./lib/clawcloud-whatsapp-approval";
 import {
   applyWhatsAppReplyMode,
   detectWhatsAppSensitivity,
@@ -73,6 +72,7 @@ import {
 } from "./lib/clawcloud-whatsapp-workflows";
 import {
   ensureWhatsAppOutboundMessage,
+  getWhatsAppOutboundMessage,
   markWhatsAppOutboundAckByWaMessageId,
   transitionWhatsAppOutboundMessage,
   type WhatsAppMessageAckStatus,
@@ -117,12 +117,15 @@ import {
   whatsAppInitialTypingDelayMs,
 } from "./lib/clawcloud-whatsapp-streaming";
 import {
-  isWhatsAppSelfChatJid,
+  extractWhatsAppPhoneShareFromChat,
+  extractWhatsAppPhoneShareFromMessage,
+  isWhatsAppResolvedSelfChat,
   resolveDefaultAssistantChatJid,
   shouldRememberAssistantSelfChat,
 } from "./lib/clawcloud-whatsapp-routing";
 import type {
   WhatsAppContactPriority,
+  WhatsAppOutboundStatus,
   WhatsAppOutboundSource,
   WhatsAppSettings,
 } from "./lib/clawcloud-whatsapp-workspace-types";
@@ -134,11 +137,11 @@ const QR_WAIT_TIMEOUT_MS = 1_500;
 const QR_WAIT_POLL_MS = 120;
 const QR_CONNECTING_RESET_MS = 2_000;
 const WA_VERSION_CACHE_MS = 30 * 60_000;
-const DIRECT_REPLY_TIMEOUT_MS = 50_000;
-const HTTP_REPLY_TIMEOUT_MS = 55_000;
+const DIRECT_REPLY_TIMEOUT_MS = 12_000;
+const HTTP_REPLY_TIMEOUT_MS = 14_000;
 const STREAM_REPLY_MIN_LENGTH = Math.max(
-  80,
-  Number.parseInt(process.env.WA_STREAM_REPLY_MIN_LENGTH ?? "140", 10) || 140,
+  40,
+  Number.parseInt(process.env.WA_STREAM_REPLY_MIN_LENGTH ?? "80", 10) || 80,
 );
 const SESSION_WATCHDOG_STALE_MS = 3 * 60_000;
 const SESSION_WATCHDOG_INTERVAL_MS = 5 * 60_000;
@@ -170,6 +173,8 @@ const SESSION_HISTORY_EXPANSION_FOLLOWUP_DELAY_MS = 3_000;
 const SESSION_RECONNECT_BASE_DELAY_MS = 3_000;
 const SESSION_RECONNECT_MAX_DELAY_MS = 60_000;
 const SESSION_STORAGE_HEALTH_CACHE_MS = 15_000;
+const PASSIVE_EXTERNAL_WHATSAPP_REASON =
+  "Explicit user command is required before ClawCloud can read, reply, or act in other WhatsApp chats.";
 
 function readPositiveIntEnv(name: string) {
   const parsed = Number.parseInt(process.env[name] ?? "", 10);
@@ -211,6 +216,7 @@ type SessionRecord = {
   qrIssuedAt: number | null;
   phone: string | null;
   lastChatJid: string | null;
+  ownerIdentityKeys: Set<string>;
   startedAt: number;
   connectedAt: number | null;
   lastActivityAt: number;
@@ -271,6 +277,14 @@ type SessionHistoryEntry = {
   contact_name: string | null;
   chat_type: "direct" | "group" | "self" | "broadcast" | "unknown";
   sent_at: string;
+};
+
+type DurableWhatsAppContactRow = {
+  jid?: string | null;
+  phone_number?: string | null;
+  contact_name?: string | null;
+  notify_name?: string | null;
+  verified_name?: string | null;
 };
 
 type SessionHistoryCursor = {
@@ -1454,6 +1468,7 @@ async function sendStreamingMessage(sock: WASocket, jid: string, fullText: strin
   const chunks = splitWhatsAppStreamChunks(trimmed);
   const messageIds: string[] = [];
 
+  // Show "typing..." indicator before first message — like Meta AI's thinking pause
   await sock.sendPresenceUpdate("composing", jid).catch(() => null);
   await new Promise((resolve) => setTimeout(resolve, whatsAppInitialTypingDelayMs(trimmed)));
 
@@ -1472,9 +1487,9 @@ async function sendStreamingMessage(sock: WASocket, jid: string, fullText: strin
     const isLast = index === chunks.length - 1;
 
     if (index > 0) {
+      // Show "typing..." between each chunk for natural word-by-word feel
       await sock.sendPresenceUpdate("composing", jid).catch(() => null);
       await new Promise((resolve) => setTimeout(resolve, whatsAppChunkDelayMs(chunk)));
-      await new Promise((resolve) => setTimeout(resolve, 300));
     }
 
     const sent = await sock.sendMessage(jid, { text: chunk });
@@ -1483,8 +1498,11 @@ async function sendStreamingMessage(sock: WASocket, jid: string, fullText: strin
       messageIds.push(sent.key.id);
     }
 
+    // Keep "typing..." visible between chunks so it feels continuous
     if (!isLast) {
       await sock.sendPresenceUpdate("composing", jid).catch(() => null);
+      // Small breathing pause between send and next typing indicator
+      await new Promise((resolve) => setTimeout(resolve, 200));
     }
   }
 
@@ -1566,6 +1584,113 @@ function mapReceiptUpdateToAckStatus(receipt: {
   }
 
   return null;
+}
+
+function mapOutboundStatusToAckStatus(status: WhatsAppOutboundStatus | null | undefined): WhatsAppMessageAckStatus | null {
+  if (status === "read") return "read";
+  if (status === "delivered") return "delivery_ack";
+  if (status === "sent") return "server_ack";
+  if (status === "failed") return "error";
+  if (
+    status === "queued"
+    || status === "approved"
+    || status === "retrying"
+    || status === "approval_required"
+    || status === "drafted"
+  ) {
+    return "pending";
+  }
+  return null;
+}
+
+function buildOutboundAckSummary(status: WhatsAppOutboundStatus | null | undefined) {
+  const ackStatus = mapOutboundStatusToAckStatus(status);
+  return {
+    ackStatus,
+    sentAccepted: ackStatus === "server_ack" || ackStatus === "delivery_ack" || ackStatus === "read",
+    deliveryConfirmed: ackStatus === "delivery_ack" || ackStatus === "read",
+    failed: ackStatus === "error",
+  };
+}
+
+async function waitForTrackedOutboundStatus(input: {
+  userId: string;
+  idempotencyKey: string | null;
+  timeoutMs: number;
+}) {
+  const timeoutMs = Math.max(0, Math.min(15_000, Math.trunc(input.timeoutMs)));
+  if (!input.idempotencyKey || timeoutMs <= 0) {
+    return null;
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  let lastStatus: WhatsAppOutboundStatus | null = null;
+
+  while (Date.now() <= deadline) {
+    const outbound = await getWhatsAppOutboundMessage({
+      userId: input.userId,
+      idempotencyKey: input.idempotencyKey,
+    }).catch(() => null);
+
+    if (outbound?.status) {
+      lastStatus = outbound.status;
+      const summary = buildOutboundAckSummary(outbound.status);
+      if (summary.deliveryConfirmed || summary.failed) {
+        return summary;
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  return lastStatus ? buildOutboundAckSummary(lastStatus) : null;
+}
+
+async function resolveRegisteredWhatsAppTargetJid(sock: WASocket, targetJid: string) {
+  if (!isDirectChatJid(targetJid)) {
+    return {
+      exists: true as const,
+      jid: targetJid,
+      warning: null as string | null,
+      reason: null as "not_registered" | "verification_unavailable" | null,
+    };
+  }
+
+  try {
+    const result = await (sock as unknown as { onWhatsApp?: (...jids: string[]) => Promise<Array<{ jid?: string; exists?: boolean }>> }).onWhatsApp?.(targetJid);
+    const first = Array.isArray(result) ? result[0] : null;
+    if (!first) {
+      return {
+        exists: false as const,
+        jid: targetJid,
+        warning: null as string | null,
+        reason: "verification_unavailable" as const,
+      };
+    }
+
+    if (first.exists === false) {
+      return {
+        exists: false as const,
+        jid: targetJid,
+        warning: null as string | null,
+        reason: "not_registered" as const,
+      };
+    }
+
+    return {
+      exists: true as const,
+      jid: toReplyableJid(first.jid ?? targetJid) ?? targetJid,
+      warning: null as string | null,
+      reason: null as "not_registered" | "verification_unavailable" | null,
+    };
+  } catch {
+    return {
+      exists: false as const,
+      jid: targetJid,
+      warning: null as string | null,
+      reason: "verification_unavailable" as const,
+    };
+  }
 }
 
 async function prepareTrackedWhatsAppOutbound(input: TrackedWhatsAppSendInput) {
@@ -1721,6 +1846,74 @@ function normalizePhone(value: string | null | undefined) {
   return digits || null;
 }
 
+function deriveSessionCountryCode(record: SessionRecord | null | undefined) {
+  const selfDigits = normalizePhone(record?.phone);
+  if (!selfDigits || selfDigits.length <= 10) {
+    return null;
+  }
+
+  const countryCode = selfDigits.slice(0, selfDigits.length - 10);
+  return countryCode || null;
+}
+
+function resolvePhoneFromSessionContacts(
+  record: SessionRecord | null | undefined,
+  rawPhone: string | null | undefined,
+) {
+  const digits = normalizePhone(rawPhone);
+  if (!record || !digits) {
+    return null;
+  }
+
+  let suffixMatch: string | null = null;
+  for (const contact of record.contacts.values()) {
+    const contactPhone = normalizePhone(contact.phone);
+    if (!contactPhone) {
+      continue;
+    }
+
+    if (contactPhone === digits) {
+      return contactPhone;
+    }
+
+    if (digits.length >= 7 && contactPhone.endsWith(digits)) {
+      if (suffixMatch && suffixMatch !== contactPhone) {
+        return null;
+      }
+      suffixMatch = contactPhone;
+    }
+  }
+
+  return suffixMatch;
+}
+
+function normalizeOutboundPhoneForSession(
+  record: SessionRecord | null | undefined,
+  rawPhone: string | null | undefined,
+) {
+  const digits = normalizePhone(rawPhone);
+  if (!digits) {
+    return null;
+  }
+
+  const resolvedFromContacts = resolvePhoneFromSessionContacts(record, digits);
+  if (resolvedFromContacts) {
+    return resolvedFromContacts;
+  }
+
+  const countryCode = deriveSessionCountryCode(record);
+
+  if (digits.length === 11 && digits.startsWith("0") && countryCode) {
+    return `${countryCode}${digits.slice(1)}`;
+  }
+
+  if (digits.length === 10 && countryCode) {
+    return `${countryCode}${digits}`;
+  }
+
+  return digits;
+}
+
 function phoneFromJid(jid: string | null | undefined) {
   const value = String(jid ?? "").trim().toLowerCase();
   if (!/@s\.whatsapp\.net$/i.test(value)) {
@@ -1763,6 +1956,69 @@ function toReplyableJid(jid: string | null | undefined) {
   if (isIgnoredChatJid(value)) return null;
   if (!isDirectChatJid(value) && !isLidChatJid(value)) return null;
   return value;
+}
+
+function buildOutboundDirectTarget(input: {
+  record: SessionRecord | null | undefined;
+  phone?: string | null;
+  jid?: string | null;
+}) {
+  const normalizedInputJid = toReplyableJid(input.jid ?? null);
+  const normalizedPhone = normalizeOutboundPhoneForSession(
+    input.record,
+    input.phone ?? phoneFromJid(normalizedInputJid),
+  );
+
+  if (normalizedInputJid && isLidChatJid(normalizedInputJid)) {
+    const lidTarget = resolveSessionReplyableJid(input.record ?? null, normalizedInputJid) ?? normalizedInputJid;
+    return {
+      jid: lidTarget,
+      phone: normalizedPhone ?? phoneFromJid(lidTarget),
+    };
+  }
+
+  if (normalizedPhone) {
+    return {
+      jid: `${normalizedPhone}@s.whatsapp.net`,
+      phone: normalizedPhone,
+    };
+  }
+
+  return {
+    jid: normalizedInputJid,
+    phone: phoneFromJid(normalizedInputJid),
+  };
+}
+
+async function resolveWhatsAppDialCodeForUser(
+  userId: string | null | undefined,
+  record: SessionRecord | null | undefined,
+) {
+  const sessionCountryCode = deriveSessionCountryCode(record);
+  if (sessionCountryCode) {
+    return sessionCountryCode;
+  }
+
+  const normalizedUserId = String(userId ?? "").trim();
+  if (!normalizedUserId) {
+    return null;
+  }
+
+  const { data } = await db()
+    .from("connected_accounts")
+    .select("phone_number, account_email")
+    .eq("user_id", normalizedUserId)
+    .eq("provider", "whatsapp")
+    .maybeSingle()
+    .catch(() => ({ data: null }));
+
+  const linkedDigits = normalizePhone(data?.phone_number) ?? normalizePhone(data?.account_email);
+  if (!linkedDigits || linkedDigits.length <= 10) {
+    return null;
+  }
+
+  const countryCode = linkedDigits.slice(0, linkedDigits.length - 10);
+  return countryCode || null;
 }
 
 function resolveSessionReplyableJid(
@@ -1876,6 +2132,32 @@ function normalizeLiveContactName(value: string | null | undefined) {
   }
 
   return words.join(" ").trim();
+}
+
+function normalizeLiveIdentityKey(value: string | null | undefined) {
+  const normalized = normalizeLiveContactName(value);
+  if (!normalized) {
+    return "";
+  }
+
+  return normalized.replace(/\s+/g, "");
+}
+
+function collectLiveIdentityKeys(values: Array<string | null | undefined>) {
+  const keys = new Set<string>();
+  for (const value of values) {
+    const normalized = normalizeLiveContactName(value);
+    if (normalized) {
+      keys.add(normalized);
+    }
+
+    const compact = normalizeLiveIdentityKey(value);
+    if (compact) {
+      keys.add(compact);
+    }
+  }
+
+  return keys;
 }
 
 function uniqueSanitizedStrings(values: Array<string | null | undefined>) {
@@ -2141,6 +2423,163 @@ function applySessionPhoneShare(
   }
 
   return true;
+}
+
+function maybeApplySelfLidIdentityBridge(
+  record: SessionRecord,
+  message: WAMessage,
+  historyEntry: SessionHistoryEntry | null,
+) {
+  if (!record.phone || record.ownerIdentityKeys.size === 0) {
+    return false;
+  }
+
+  const remoteLid = toReplyableJid(message.key.remoteJid ?? null);
+  if (!remoteLid || !isLidChatJid(remoteLid)) {
+    return false;
+  }
+
+  const alreadyResolved = resolveSessionReplyableJid(record, remoteLid);
+  if (alreadyResolved && isDirectChatJid(alreadyResolved)) {
+    return false;
+  }
+
+  const selfDirectJid = jidFromPhone(record.phone);
+  if (!selfDirectJid) {
+    return false;
+  }
+
+  const remoteContact = record.contacts.get(remoteLid);
+  const candidateKeys = collectLiveIdentityKeys([
+    historyEntry?.contact_name ?? null,
+    message.pushName ?? null,
+    remoteContact?.displayName ?? null,
+    ...(remoteContact?.aliases ?? []),
+  ]);
+  const matchedIdentity = [...candidateKeys].some((key) => record.ownerIdentityKeys.has(key));
+  if (!matchedIdentity) {
+    return false;
+  }
+
+  return applySessionPhoneShare(record, remoteLid, selfDirectJid);
+}
+
+async function hydrateSessionSelfLidMappingsFromStore(
+  userId: string,
+  record: SessionRecord,
+  reason: string,
+  options: {
+    specificLid?: string | null | undefined;
+    limit?: number;
+  } = {},
+) {
+  if (!isActiveSessionRecord(userId, record) || !record.phone || record.ownerIdentityKeys.size === 0) {
+    return false;
+  }
+
+  const selfDirectJid = jidFromPhone(record.phone);
+  if (!selfDirectJid) {
+    return false;
+  }
+
+  const normalizedSpecificLid = toReplyableJid(options.specificLid ?? null);
+  const specificLid =
+    normalizedSpecificLid && isLidChatJid(normalizedSpecificLid)
+      ? normalizedSpecificLid
+      : null;
+  const rawLimit = typeof options.limit === "number" && Number.isFinite(options.limit)
+    ? Math.trunc(options.limit)
+    : 120;
+  const limit = Math.max(1, Math.min(500, rawLimit));
+
+  const directPromise = db()
+    .from("whatsapp_contacts")
+    .select("jid,phone_number,contact_name,notify_name,verified_name")
+    .eq("user_id", userId)
+    .eq("jid", selfDirectJid)
+    .limit(1)
+    .catch(() => ({ data: [] as DurableWhatsAppContactRow[] }));
+
+  const lidPromise = (() => {
+    let query = db()
+      .from("whatsapp_contacts")
+      .select("jid,phone_number,contact_name,notify_name,verified_name")
+      .eq("user_id", userId);
+
+    if (specificLid) {
+      query = query.eq("jid", specificLid);
+    } else {
+      query = query
+        .like("jid", "%@lid")
+        .limit(limit);
+    }
+
+    return query.catch(() => ({ data: [] as DurableWhatsAppContactRow[] }));
+  })();
+
+  const [directResult, lidResult] = await Promise.all([directPromise, lidPromise]);
+  const directRows = Array.isArray(directResult.data) ? directResult.data : [];
+  const lidRows = Array.isArray(lidResult.data) ? lidResult.data : [];
+  if (!lidRows.length) {
+    return false;
+  }
+
+  const ownerIdentityKeys = new Set<string>(record.ownerIdentityKeys);
+  const directIdentityKeys = collectLiveIdentityKeys([
+    record.phone,
+    selfDirectJid,
+    ...directRows.flatMap((row) => [
+      row.phone_number ?? null,
+      row.contact_name ?? null,
+      row.notify_name ?? null,
+      row.verified_name ?? null,
+    ]),
+  ]);
+  for (const key of directIdentityKeys) {
+    ownerIdentityKeys.add(key);
+  }
+
+  if (ownerIdentityKeys.size === 0) {
+    return false;
+  }
+
+  let changed = false;
+  let bridgedCount = 0;
+
+  for (const row of lidRows) {
+    const lidJid = toReplyableJid(row.jid ?? null);
+    if (!lidJid || !isLidChatJid(lidJid)) {
+      continue;
+    }
+
+    const identityKeys = collectLiveIdentityKeys([
+      row.phone_number ?? null,
+      row.contact_name ?? null,
+      row.notify_name ?? null,
+      row.verified_name ?? null,
+    ]);
+    const isOwnerLid = [...identityKeys].some((key) => ownerIdentityKeys.has(key));
+    if (!isOwnerLid) {
+      continue;
+    }
+
+    if (applySessionPhoneShare(record, lidJid, selfDirectJid)) {
+      changed = true;
+      bridgedCount += 1;
+    }
+  }
+
+  if (changed) {
+    touchSessionActivity(record);
+    persistSessionSyncCheckpoint(userId, record);
+    scheduleSessionContactSnapshotPersist(userId, record, `${reason}.durable-self-lid`);
+    scheduleSessionHistorySnapshotPersist(userId, record, `${reason}.durable-self-lid`, 200);
+    console.log(
+      `[agent] Hydrated ${bridgedCount} durable self-chat LID mapping(s) for ${userId} after ${reason}`,
+    );
+  }
+
+  return changed;
 }
 
 function syncSessionContactSeeds(
@@ -2759,6 +3198,20 @@ function processSessionHistorySync(
   const sourceLabel = `history.sync.${String(payload.syncType ?? "unknown")}`;
 
   try {
+    for (const chat of chats) {
+      const phoneShare = extractWhatsAppPhoneShareFromChat(chat);
+      if (phoneShare) {
+        applySessionPhoneShare(record, phoneShare.lidJid, phoneShare.directJid);
+      }
+    }
+
+    for (const message of messages) {
+      const phoneShare = extractWhatsAppPhoneShareFromMessage(message);
+      if (phoneShare) {
+        applySessionPhoneShare(record, phoneShare.lidJid, phoneShare.directJid);
+      }
+    }
+
     const seeds = [
       ...(contacts
         .map((contact) => safeBuildHistoryContactSeed(contact, sourceLabel))
@@ -3068,11 +3521,49 @@ function scoreSessionContactAlias(alias: string, normalizedQuery: string) {
   return Math.round(liveContactSimilarity(alias, normalizedQuery) * 100);
 }
 
+const SELF_CONTACT_QUERY_PATTERN = /\b(me|myself|self|my chat|my own|my number|my whatsapp|to me|to myself)\b/i;
+
+function isExplicitSelfContactQuery(rawName: string) {
+  const normalized = sanitizeContactName(rawName);
+  if (!normalized) {
+    return false;
+  }
+
+  return SELF_CONTACT_QUERY_PATTERN.test(normalized);
+}
+
+function isSessionSelfRecipient(
+  record: SessionRecord,
+  input: { phone: string | null; jid: string | null; name?: string | null },
+) {
+  const selfPhone = normalizePhone(record.phone);
+  const recipientPhone = normalizePhone(input.phone);
+  if (selfPhone && recipientPhone && selfPhone === recipientPhone) {
+    return true;
+  }
+
+  const rawName = String(input.name ?? "").trim();
+  if (
+    rawName
+    && (
+      /\(\s*you\s*\)$/i.test(rawName)
+      || /^you$/i.test(rawName)
+      || /^me$/i.test(rawName)
+      || /\bmessage yourself\b/i.test(rawName)
+    )
+  ) {
+    return true;
+  }
+
+  return getChatType(input.jid, record) === "self";
+}
+
 function resolveSessionContact(record: SessionRecord, rawName: string): SessionContactResolveResult | null {
   const queryVariants = getLiveContactQueryVariants(rawName);
   if (!queryVariants.length) {
     return null;
   }
+  const allowSelfMatch = isExplicitSelfContactQuery(rawName);
 
   const matches: Array<SessionContactMatch & { qualityRank: number; memberCount: number }> = [];
   const identities = buildClawCloudWhatsAppContactIdentityGraph(
@@ -3112,23 +3603,33 @@ function resolveSessionContact(record: SessionRecord, rawName: string): SessionC
     });
   }
 
-  matches.sort((left, right) =>
+  const filteredMatches = allowSelfMatch
+    ? matches
+    : matches.filter((candidate) =>
+      !isSessionSelfRecipient(record, {
+        phone: candidate.phone,
+        jid: candidate.jid ?? null,
+        name: candidate.name,
+      })
+    );
+
+  filteredMatches.sort((left, right) =>
     right.score - left.score
     || right.qualityRank - left.qualityRank
     || right.memberCount - left.memberCount
     || right.name.length - left.name.length,
   );
 
-  if (!matches.length) {
+  if (!filteredMatches.length) {
     return null;
   }
 
-  if (matches.length === 1) {
-    return { type: "found", contact: matches[0]! };
+  if (filteredMatches.length === 1) {
+    return { type: "found", contact: filteredMatches[0]! };
   }
 
-  const top = matches[0]!;
-  const runnerUp = matches[1]!;
+  const top = filteredMatches[0]!;
+  const runnerUp = filteredMatches[1]!;
   if (
     top.score >= 100
     || top.score - runnerUp.score > 8
@@ -3139,7 +3640,7 @@ function resolveSessionContact(record: SessionRecord, rawName: string): SessionC
 
   return {
     type: "ambiguous",
-    matches: matches.slice(0, 4),
+    matches: filteredMatches.slice(0, 4),
   };
 }
 
@@ -3178,10 +3679,11 @@ function buildSyncSeedFromBaileysContact(contact: Partial<WAContact>): WhatsAppC
 }
 
 function buildSyncSeedFromMessage(message: WAMessage): WhatsAppContactSyncInput | null {
+  const phoneShare = extractWhatsAppPhoneShareFromMessage(message);
   const replyableJid = toReplyableJid(message.key.remoteJid ?? null);
   const participantJid = toReplyableJid(message.key.participant ?? null);
-  const jid = participantJid ?? replyableJid;
-  const phoneNumber = phoneFromJid(jid);
+  const jid = phoneShare?.directJid ?? participantJid ?? replyableJid;
+  const phoneNumber = phoneFromJid(phoneShare?.directJid ?? jid);
   const nameAliases = uniqueSanitizedStrings([
     sanitizeContactName(message.pushName),
     sanitizeContactName(message.message?.contactMessage?.displayName),
@@ -3216,7 +3718,12 @@ function buildSyncSeedFromMessage(message: WAMessage): WhatsAppContactSyncInput 
 }
 
 function buildSyncSeedFromChat(chat: Record<string, unknown>): WhatsAppContactSyncInput | null {
-  const jid = toReplyableJid(chat.id);
+  const phoneShare = extractWhatsAppPhoneShareFromChat(chat);
+  const jid =
+    phoneShare?.directJid
+    ?? toReplyableJid(chat.id)
+    ?? toReplyableJid(typeof chat.pnJid === "string" ? chat.pnJid : null)
+    ?? toReplyableJid(typeof chat.lidJid === "string" ? chat.lidJid : null);
   const phoneNumber = jid ? phoneFromJid(jid) : null;
   const nameAliases = uniqueSanitizedStrings([
     typeof chat.name === "string" ? chat.name : null,
@@ -3355,7 +3862,7 @@ function resolveReplyJid(
     return rawTarget;
   }
 
-  const candidate = toReplyableJid(targetJid);
+  const candidate = resolveSessionReplyableJid(session, targetJid);
   if (candidate) {
     return candidate;
   }
@@ -3383,6 +3890,34 @@ async function loadPreferredChatJid(userId: string) {
   }
 
   return jidFromPhone(data?.account_email);
+}
+
+async function loadSessionOwnerIdentityKeys(userId: string) {
+  const [userResult, accountResult] = await Promise.all([
+    db()
+      .from("users")
+      .select("full_name,email")
+      .eq("id", userId)
+      .maybeSingle()
+      .catch(() => ({ data: null as { full_name?: string | null; email?: string | null } | null })),
+    db()
+      .from("connected_accounts")
+      .select("display_name,account_email")
+      .eq("user_id", userId)
+      .eq("provider", "whatsapp")
+      .maybeSingle()
+      .catch(() => ({ data: null as { display_name?: string | null; account_email?: string | null } | null })),
+  ]);
+
+  const emailLocalPart = String(userResult.data?.email ?? "").split("@")[0] ?? "";
+  const accountLocalPart = String(accountResult.data?.account_email ?? "").split("@")[0] ?? "";
+
+  return collectLiveIdentityKeys([
+    userResult.data?.full_name ?? null,
+    accountResult.data?.display_name ?? null,
+    emailLocalPart || null,
+    accountLocalPart || null,
+  ]);
 }
 
 async function persistPreferredChatTarget(
@@ -3513,6 +4048,24 @@ async function sendWelcome(sock: WASocket, phone: string, userId?: string) {
   if (sent?.key?.id) {
     outboundIds.add(sent.key.id);
   }
+}
+
+function resolveAssistantSelfReplyTarget(
+  session: SessionRecord | null | undefined,
+  targetJid?: string | null,
+) {
+  if (!session?.phone) {
+    return null;
+  }
+
+  const jid = resolveReplyJid(session, targetJid);
+  if (!jid) {
+    return null;
+  }
+
+  return isWhatsAppResolvedSelfChat(session.phone, targetJid ?? null, jid)
+    ? jid
+    : null;
 }
 
 function getMentionedJids(message: WAMessage): string[] {
@@ -3885,8 +4438,11 @@ async function sendReply(
     return false;
   }
 
-  const jid = resolveReplyJid(session, targetJid);
+  const jid = resolveAssistantSelfReplyTarget(session, targetJid);
   if (!jid) {
+    console.warn(
+      `[agent] Blocked non-self assistant reply for ${userId}: explicit user command required for ${targetJid ?? "default-target"}`,
+    );
     return false;
   }
 
@@ -4003,7 +4559,7 @@ async function sendReplyLegacy(
     return false;
   }
 
-  const jid = resolveReplyJid(session, targetJid);
+  const jid = resolveAssistantSelfReplyTarget(session, targetJid);
   if (!jid) {
     return false;
   }
@@ -4115,6 +4671,42 @@ async function runDirectAgentReply(userId: string, message: string): Promise<str
   }
 }
 
+async function markPassiveExternalWhatsAppChatOnly(
+  userId: string,
+  logFields: ReturnType<typeof buildMessageLogFields>,
+  messageType: string,
+) {
+  await markLatestWhatsAppThreadState({
+    userId,
+    remoteJid: logFields.remote_jid,
+    remotePhone: logFields.remote_phone,
+    needsReply: false,
+    approvalState: "blocked",
+    priority: "normal",
+    sensitivity: "normal",
+    replyConfidence: null,
+    auditPayload: {
+      passive_sync_only: true,
+      reason: PASSIVE_EXTERNAL_WHATSAPP_REASON,
+      message_type: messageType,
+      chat_type: logFields.chat_type,
+      blocked_at: new Date().toISOString(),
+    },
+  }).catch(() => null);
+
+  await writeWhatsAppAuditLog(userId, {
+    eventType: "autonomous_action_blocked",
+    actor: "system",
+    summary: `Passive sync only for ${logFields.contact_name || logFields.remote_phone || "external chat"}.`,
+    targetValue: logFields.remote_jid ?? logFields.remote_phone,
+    metadata: {
+      reason: PASSIVE_EXTERNAL_WHATSAPP_REASON,
+      message_type: messageType,
+      chat_type: logFields.chat_type,
+    },
+  }).catch(() => null);
+}
+
 async function handleInbound(
   userId: string,
   text: string,
@@ -4155,48 +4747,21 @@ async function handleInbound(
     );
 
   const safeRemoteJid = toReplyableJid(remoteJid);
+  const resolvedRemoteJid = session ? resolveSessionReplyableJid(session, safeRemoteJid) : safeRemoteJid;
 
-  if (session && safeRemoteJid && shouldRememberAssistantSelfChat(session.phone, safeRemoteJid)) {
-    session.lastChatJid = safeRemoteJid;
+  if (session && resolvedRemoteJid && shouldRememberAssistantSelfChat(session.phone, resolvedRemoteJid)) {
+    session.lastChatJid = resolvedRemoteJid;
     sessions.set(userId, session);
-    void persistPreferredChatTarget(userId, session.phone, safeRemoteJid);
+    void persistPreferredChatTarget(userId, session.phone, resolvedRemoteJid);
   }
 
   const jid =
     (session ? resolveReplyJid(session, remoteJid) : null) ||
-    safeRemoteJid ||
+    resolvedRemoteJid ||
     (session ? resolveReplyJid(session) : null);
 
   if (shouldRequireExplicitUserCommandForWhatsAppChat(logFields.chat_type)) {
-    await markLatestWhatsAppThreadState({
-      userId,
-      remoteJid: logFields.remote_jid,
-      remotePhone: logFields.remote_phone,
-      needsReply: false,
-      approvalState: "blocked",
-      priority: "normal",
-      sensitivity: "normal",
-      replyConfidence: null,
-      auditPayload: {
-        passive_sync_only: true,
-        reason: "Explicit user command is required before ClawCloud can read, reply, or act in other WhatsApp chats.",
-        message_type: messageType,
-        chat_type: logFields.chat_type,
-        blocked_at: new Date().toISOString(),
-      },
-    }).catch(() => null);
-
-    await writeWhatsAppAuditLog(userId, {
-      eventType: "autonomous_action_blocked",
-      actor: "system",
-      summary: `Passive sync only for ${logFields.contact_name || logFields.remote_phone || "external chat"}.`,
-      targetValue: logFields.remote_jid ?? logFields.remote_phone,
-      metadata: {
-        reason: "Explicit user command is required before ClawCloud can read, reply, or act in other WhatsApp chats.",
-        message_type: messageType,
-        chat_type: logFields.chat_type,
-      },
-    }).catch(() => null);
+    await markPassiveExternalWhatsAppChatOnly(userId, logFields, messageType);
 
     return;
   }
@@ -4310,43 +4875,6 @@ async function handleInbound(
 
   if (jid && session) {
     void session.sock.sendPresenceUpdate("paused", jid).catch(() => null);
-  }
-
-  if (decision.action === "queue" && finalReply) {
-    const approval = await queueWhatsAppReplyApproval({
-      userId,
-      remoteJid: logFields.remote_jid,
-      remotePhone: logFields.remote_phone,
-      contactName: workspaceContact.displayName || logFields.contact_name,
-      sourceMessage: text,
-      draftReply: finalReply,
-      sensitivity,
-      confidence: replyConfidence,
-      reason: decision.reason,
-      priority,
-      auditPayload: {
-        contact_tags: workspaceContact.tags,
-        message_type: messageType,
-        chat_type: logFields.chat_type,
-      },
-    }).catch((error) => {
-      console.error(
-        `[agent] Failed to queue WhatsApp approval for ${userId}:`,
-        error instanceof Error ? error.message : error,
-      );
-      return null;
-    });
-
-    if (approval && session?.phone) {
-      await sendReply(
-        userId,
-        buildWhatsAppApprovalNotice(approval),
-        jidFromPhone(session.phone),
-      ).catch(() => null);
-    }
-    void scheduleWorkflows(false);
-    void processDueWorkflows();
-    return;
   }
 
   if (decision.action === "block") {
@@ -4550,7 +5078,10 @@ async function buildDisconnectedRuntimeStatus(userId: string): Promise<ClawCloud
 
 async function connectSession(userId: string): Promise<SessionRecord> {
   assertConfigured();
-  const preferredChatJid = await loadPreferredChatJid(userId);
+  const [preferredChatJid, ownerIdentityKeys] = await Promise.all([
+    loadPreferredChatJid(userId),
+    loadSessionOwnerIdentityKeys(userId),
+  ]);
   const recoveryCheckpoint = readSessionRecoveryCheckpoint(userId);
   const syncCheckpoint = readSessionSyncCheckpoint(userId);
   const restoredHistoryCursors = restoreSessionHistoryResumeCursors(syncCheckpoint);
@@ -4591,6 +5122,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
     qrIssuedAt: null,
     phone: recoveryCheckpoint?.phone ?? null,
     lastChatJid: preferredChatJid,
+    ownerIdentityKeys,
     startedAt: Date.now(),
     connectedAt: recoveryCheckpoint?.connectedAt ? Date.parse(recoveryCheckpoint.connectedAt) : null,
     lastActivityAt: recoveryCheckpoint?.lastActivityAt ? Date.parse(recoveryCheckpoint.lastActivityAt) : Date.now(),
@@ -4690,6 +5222,13 @@ async function connectSession(userId: string): Promise<SessionRecord> {
   });
 
   sock.ev.on("chats.upsert", (chats) => {
+    for (const chat of chats) {
+      const phoneShare = extractWhatsAppPhoneShareFromChat(chat as Record<string, unknown>);
+      if (phoneShare) {
+        applySessionPhoneShare(record, phoneShare.lidJid, phoneShare.directJid);
+      }
+    }
+
     const seeds = chats
       .map((chat) => safeBuildHistoryChatSeed(chat as Record<string, unknown>, "chats.upsert"))
       .filter(Boolean) as WhatsAppContactSyncInput[];
@@ -4699,6 +5238,13 @@ async function connectSession(userId: string): Promise<SessionRecord> {
   });
 
   sock.ev.on("chats.update", (chats) => {
+    for (const chat of chats) {
+      const phoneShare = extractWhatsAppPhoneShareFromChat(chat as Record<string, unknown>);
+      if (phoneShare) {
+        applySessionPhoneShare(record, phoneShare.lidJid, phoneShare.directJid);
+      }
+    }
+
     const seeds = chats
       .map((chat) => safeBuildHistoryChatSeed(chat as Record<string, unknown>, "chats.update"))
       .filter(Boolean) as WhatsAppContactSyncInput[];
@@ -4772,6 +5318,16 @@ async function connectSession(userId: string): Promise<SessionRecord> {
 
       current.lastChatJid = jidFromPhone(phone);
       sessions.set(userId, current);
+      void hydrateSessionSelfLidMappingsFromStore(
+        userId,
+        current,
+        "connection.open.self-store-bridge",
+      ).catch((error) =>
+        console.error(
+          `[agent] Failed to hydrate durable self-chat LID mappings for ${userId}:`,
+          error instanceof Error ? error.message : error,
+        ),
+      );
 
       void bootstrapSessionWorkspace(userId, current, "connection.open");
       for (const delay of CONTACT_REFRESH_FOLLOWUP_DELAYS_MS) {
@@ -4853,9 +5409,10 @@ async function connectSession(userId: string): Promise<SessionRecord> {
 
         const remoteJid = message.key.remoteJid ?? null;
         const safeRemoteJid = toReplyableJid(remoteJid);
+        const resolvedRemoteJid = resolveSessionReplyableJid(current, safeRemoteJid);
         const isGroupMessage = Boolean(remoteJid && isGroupChatJid(remoteJid));
         const mentionedJids = isGroupMessage ? getMentionedJids(message) : [];
-        let replyTargetJid = safeRemoteJid;
+        let replyTargetJid = resolvedRemoteJid;
         let whatsAppSettings: WhatsAppSettings | null = null;
 
         if (isGroupMessage) {
@@ -4877,13 +5434,26 @@ async function connectSession(userId: string): Promise<SessionRecord> {
             continue;
           }
 
-          replyTargetJid = remoteJid ?? safeRemoteJid;
+          replyTargetJid = remoteJid ?? resolvedRemoteJid;
         }
 
         const messageId = message.key.id ?? "";
         if (messageId && outboundIds.has(messageId)) {
           outboundIds.delete(messageId);
           continue;
+        }
+
+        const messagePhoneShare = extractWhatsAppPhoneShareFromMessage(message);
+        if (messagePhoneShare) {
+          const changed = applySessionPhoneShare(
+            current,
+            messagePhoneShare.lidJid,
+            messagePhoneShare.directJid,
+          );
+          if (changed) {
+            scheduleSessionContactSnapshotPersist(userId, current, "messages.upsert.phone-share");
+            scheduleSessionHistorySnapshotPersist(userId, current, "messages.upsert.phone-share", 200);
+          }
         }
 
         const syncSeed = safeBuildHistoryMessageSeed(message, "messages.upsert");
@@ -4903,7 +5473,27 @@ async function connectSession(userId: string): Promise<SessionRecord> {
           scheduleSessionHistorySnapshotPersist(userId, record, "message");
         }
 
-        if (message.key.fromMe && !isSelfChat(message, current)) {
+        let treatAsSelfChat = isSelfChat(message, current);
+        if (message.key.fromMe && !treatAsSelfChat) {
+          let bridgedSelfChat = maybeApplySelfLidIdentityBridge(current, message, historyEntry);
+          if (!bridgedSelfChat && safeRemoteJid && isLidChatJid(safeRemoteJid)) {
+            bridgedSelfChat = await hydrateSessionSelfLidMappingsFromStore(
+              userId,
+              current,
+              "messages.upsert.self-store-bridge",
+              { specificLid: safeRemoteJid, limit: 1 },
+            );
+          }
+          if (bridgedSelfChat) {
+            scheduleSessionContactSnapshotPersist(userId, current, "messages.upsert.self-identity-bridge");
+            scheduleSessionHistorySnapshotPersist(userId, current, "messages.upsert.self-identity-bridge", 200);
+            treatAsSelfChat = isSelfChat(message, current);
+            replyTargetJid = resolveSessionReplyableJid(current, safeRemoteJid) ?? replyTargetJid;
+            console.log(`[agent] Applied self-chat identity bridge for ${userId}: ${safeRemoteJid ?? "unknown"} -> ${replyTargetJid ?? "unknown"}`);
+          }
+        }
+
+        if (message.key.fromMe && !treatAsSelfChat) {
           if (historyEntry) {
             void persistSessionHistorySnapshot(userId, record, "message.fromMe").catch((error) =>
               console.error(
@@ -4918,6 +5508,22 @@ async function connectSession(userId: string): Promise<SessionRecord> {
         if (!message.key.fromMe && !replyTargetJid) {
           continue;
         }
+
+        const assistantSelfTargetJid = resolveAssistantSelfReplyTarget(current, replyTargetJid);
+        if (!message.key.fromMe && !assistantSelfTargetJid) {
+          const passiveLogFields = buildMessageLogFields(
+            message,
+            replyTargetJid ?? remoteJid,
+            current,
+          );
+          await markPassiveExternalWhatsAppChatOnly(
+            userId,
+            passiveLogFields,
+            getInboundMessageType(message),
+          );
+          continue;
+        }
+        replyTargetJid = assistantSelfTargetJid ?? replyTargetJid;
 
         let text =
           message.message?.conversation ||
@@ -5484,17 +6090,37 @@ function shouldRegenerateQr(session: SessionRecord, forceRefresh: boolean) {
 }
 
 function isSelfChat(message: { key?: { remoteJid?: string | null } }, session: SessionRecord) {
-  return isWhatsAppSelfChatJid(message.key?.remoteJid, session.phone);
+  const remoteJid = message.key?.remoteJid ?? null;
+  const resolvedJid = resolveSessionReplyableJid(session, remoteJid);
+  return isWhatsAppResolvedSelfChat(session.phone, remoteJid, resolvedJid);
 }
 
 function findSessionByPhone(phone: string) {
-  const digits = phone.replace(/\D/g, "");
+  const digits = normalizePhone(phone);
+  if (!digits) {
+    return null;
+  }
+
+  let suffixMatch: { userId: string; session: SessionRecord } | null = null;
   for (const [userId, session] of sessions.entries()) {
-    if (session.phone?.replace(/\D/g, "") === digits) {
+    const sessionPhone = normalizePhone(session.phone);
+    if (!sessionPhone) {
+      continue;
+    }
+
+    if (sessionPhone === digits) {
       return { userId, session };
     }
+
+    if (
+      digits.length >= 7
+      && (sessionPhone.endsWith(digits) || digits.endsWith(sessionPhone))
+    ) {
+      suffixMatch = suffixMatch ?? { userId, session };
+    }
   }
-  return null;
+
+  return suffixMatch;
 }
 
 registerClawCloudWhatsAppRuntime({
@@ -5507,11 +6133,32 @@ registerClawCloudWhatsAppRuntime({
       return false;
     }
 
-    const normalizedPhone = phone ? phone.replace(/\D/g, "") : "";
-    const targetJid = jid || (normalizedPhone ? `${normalizedPhone}@s.whatsapp.net` : "");
+    const outboundTarget = buildOutboundDirectTarget({
+      record: session,
+      phone,
+      jid: jid ?? null,
+    });
+    let normalizedPhone = outboundTarget.phone ?? "";
+    if (normalizedPhone.length === 10) {
+      const dialCode = await resolveWhatsAppDialCodeForUser(resolvedSession?.userId ?? null, session);
+      if (dialCode) {
+        normalizedPhone = `${dialCode}${normalizedPhone}`;
+      }
+    }
+    const targetJid = (
+      outboundTarget.jid && isLidChatJid(outboundTarget.jid)
+        ? outboundTarget.jid
+        : (normalizedPhone ? `${normalizedPhone}@s.whatsapp.net` : outboundTarget.jid)
+    ) ?? "";
     if (!targetJid) {
       return false;
     }
+    const registrationCheck = await resolveRegisteredWhatsAppTargetJid(session.sock, targetJid);
+    if (!registrationCheck.exists) {
+      return false;
+    }
+    const checkedTargetJid = registrationCheck.jid;
+    const checkedTargetPhone = phoneFromJid(checkedTargetJid) ?? normalizedPhone ?? phoneFromJid(targetJid);
 
     const tracking: TrackedWhatsAppSendInput | null = resolvedSession?.userId
       ? {
@@ -5520,8 +6167,8 @@ registerClawCloudWhatsAppRuntime({
         approvalId: approvalId ?? null,
         workflowRunId: workflowRunId ?? null,
         idempotencyKey: idempotencyKey ?? null,
-        jid: targetJid,
-        phone: normalizedPhone || phoneFromJid(targetJid),
+        jid: checkedTargetJid,
+        phone: checkedTargetPhone,
         contactName: sanitizeContactName(contactName),
         message,
         metadata: normalizeTrackedWhatsAppMetadata(metadata),
@@ -5535,7 +6182,7 @@ registerClawCloudWhatsAppRuntime({
       return false;
     }
 
-    const waMessageIds = await sendStreamingMessage(session.sock, targetJid, message);
+    const waMessageIds = await sendStreamingMessage(session.sock, checkedTargetJid, message);
     if (tracking) {
       await recordTrackedWhatsAppSendSuccess({
         ...tracking,
@@ -5543,7 +6190,7 @@ registerClawCloudWhatsAppRuntime({
       }, waMessageIds, 1);
     }
     if (resolvedSession?.userId) {
-      void logOutbound(resolvedSession.userId, message, targetJid, sanitizeContactName(contactName), waMessageIds);
+      void logOutbound(resolvedSession.userId, message, checkedTargetJid, sanitizeContactName(contactName), waMessageIds);
     }
     return true;
   },
@@ -5776,6 +6423,10 @@ app.post("/wa/send", auth, async (req, res) => {
   const workflowRunId = typeof req.body.workflowRunId === "string" ? req.body.workflowRunId.trim() || null : null;
   const idempotencyKey = typeof req.body.idempotencyKey === "string" ? req.body.idempotencyKey.trim() || null : null;
   const metadata = normalizeTrackedWhatsAppMetadata(req.body.metadata);
+  const waitForAckMs = Number.isFinite(Number(req.body.waitForAckMs))
+    ? Math.max(0, Math.min(15_000, Math.trunc(Number(req.body.waitForAckMs))))
+    : 0;
+  const requireRegisteredNumber = req.body.requireRegisteredNumber !== false;
 
   if ((!phone && !jid) || !message) {
     res.status(400).json({ error: "phone or jid, plus message, required" });
@@ -5791,7 +6442,41 @@ app.post("/wa/send", auth, async (req, res) => {
     return;
   }
 
-  const targetJid = jid || `${phone.replace(/\D/g, "")}@s.whatsapp.net`;
+  const outboundTarget = buildOutboundDirectTarget({
+    record: session,
+    phone,
+    jid,
+  });
+  let targetPhone = outboundTarget.phone ?? phoneFromJid(outboundTarget.jid);
+  if (targetPhone && targetPhone.length === 10) {
+    const dialCode = await resolveWhatsAppDialCodeForUser(resolvedSession?.userId ?? null, session);
+    if (dialCode) {
+      targetPhone = `${dialCode}${targetPhone}`;
+    }
+  }
+
+  const targetJid = outboundTarget.jid && isLidChatJid(outboundTarget.jid)
+    ? outboundTarget.jid
+    : (targetPhone ? `${targetPhone}@s.whatsapp.net` : outboundTarget.jid);
+  if (!targetJid) {
+    res.status(400).json({ error: "Invalid WhatsApp target. Provide a valid phone or jid." });
+    return;
+  }
+  const registrationCheck = requireRegisteredNumber
+    ? await resolveRegisteredWhatsAppTargetJid(session.sock, targetJid)
+    : { exists: true as const, jid: targetJid, warning: null as string | null, reason: null as "not_registered" | "verification_unavailable" | null };
+
+  if (!registrationCheck.exists) {
+    if (registrationCheck.reason === "verification_unavailable") {
+      res.status(503).json({ error: "Could not verify the target number on WhatsApp right now. Please retry in a few seconds." });
+      return;
+    }
+    res.status(404).json({ error: "The target number is not registered on WhatsApp." });
+    return;
+  }
+
+  const checkedTargetJid = registrationCheck.jid;
+  const checkedTargetPhone = phoneFromJid(checkedTargetJid) ?? targetPhone ?? null;
   const tracking: TrackedWhatsAppSendInput | null = resolvedSession?.userId
     ? {
       userId: resolvedSession.userId,
@@ -5799,8 +6484,8 @@ app.post("/wa/send", auth, async (req, res) => {
       approvalId,
       workflowRunId,
       idempotencyKey,
-      jid: targetJid,
-      phone: phone.replace(/\D/g, "") || phoneFromJid(targetJid),
+      jid: checkedTargetJid,
+      phone: checkedTargetPhone,
       contactName,
       message,
       metadata,
@@ -5808,10 +6493,30 @@ app.post("/wa/send", auth, async (req, res) => {
     : null;
   const trackedOutbound = tracking ? await prepareTrackedWhatsAppOutbound(tracking) : null;
   if (trackedOutbound?.status === "sent" || trackedOutbound?.status === "delivered" || trackedOutbound?.status === "read") {
+    const summary = buildOutboundAckSummary(trackedOutbound.status);
+    const waited = (waitForAckMs > 0 && tracking?.userId)
+      ? await waitForTrackedOutboundStatus({
+        userId: tracking.userId,
+        idempotencyKey: trackedOutbound.idempotency_key,
+        timeoutMs: waitForAckMs,
+      })
+      : null;
+    const finalSummary = waited ?? summary;
+    if (finalSummary.failed) {
+      res.status(502).json({ error: "WhatsApp reported a delivery error for this message." });
+      return;
+    }
+
     res.json({
       success: true,
       deduped: true,
       messageIds: trackedOutbound.wa_message_ids,
+      targetJid: checkedTargetJid,
+      targetPhone: checkedTargetPhone,
+      ackStatus: finalSummary.ackStatus,
+      sentAccepted: finalSummary.sentAccepted,
+      deliveryConfirmed: finalSummary.deliveryConfirmed,
+      warning: registrationCheck.warning,
     });
     return;
   }
@@ -5821,7 +6526,7 @@ app.post("/wa/send", auth, async (req, res) => {
   }
 
   try {
-    const waMessageIds = await sendStreamingMessage(session.sock, targetJid, message);
+    const waMessageIds = await sendStreamingMessage(session.sock, checkedTargetJid, message);
     if (tracking) {
       await recordTrackedWhatsAppSendSuccess({
         ...tracking,
@@ -5829,9 +6534,33 @@ app.post("/wa/send", auth, async (req, res) => {
       }, waMessageIds, 1);
     }
     if (resolvedSession?.userId) {
-      void logOutbound(resolvedSession.userId, message, targetJid, contactName, waMessageIds);
+      void logOutbound(resolvedSession.userId, message, checkedTargetJid, contactName, waMessageIds);
     }
-    res.json({ success: true, messageIds: waMessageIds });
+
+    const immediateSummary = buildOutboundAckSummary("sent");
+    const waitedSummary = (waitForAckMs > 0 && tracking?.userId)
+      ? await waitForTrackedOutboundStatus({
+        userId: tracking.userId,
+        idempotencyKey: trackedOutbound?.idempotency_key ?? tracking.idempotencyKey ?? null,
+        timeoutMs: waitForAckMs,
+      })
+      : null;
+    const finalSummary = waitedSummary ?? immediateSummary;
+    if (finalSummary.failed) {
+      res.status(502).json({ error: "WhatsApp reported a delivery error for this message." });
+      return;
+    }
+
+    res.json({
+      success: true,
+      messageIds: waMessageIds,
+      targetJid: checkedTargetJid,
+      targetPhone: checkedTargetPhone,
+      ackStatus: finalSummary.ackStatus,
+      sentAccepted: finalSummary.sentAccepted,
+      deliveryConfirmed: finalSummary.deliveryConfirmed,
+      warning: registrationCheck.warning,
+    });
   } catch (error) {
     if (tracking) {
       await recordTrackedWhatsAppSendFailure({

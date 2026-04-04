@@ -3,6 +3,7 @@ import {
   isGoogleWorkspaceOauthConfigured,
   isGoogleWorkspaceExtendedConnectEnabled,
   isGoogleWorkspacePublicConnectEnabled,
+  isGoogleWorkspaceSetupLiteMode,
 } from "@/lib/env";
 
 function normalizeEmail(value: string | null | undefined) {
@@ -14,7 +15,7 @@ function isWorkspaceOauthConfigured() {
 }
 
 function isWorkspaceConnectForcedToLiteOnly() {
-  return env.GOOGLE_WORKSPACE_SETUP_LITE_ONLY || env.GOOGLE_WORKSPACE_TEMPORARY_HOLD;
+  return isGoogleWorkspaceSetupLiteMode();
 }
 
 export function isGoogleWorkspaceTestUser(email: string | null | undefined) {

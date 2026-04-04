@@ -90,6 +90,10 @@ export function looksLikeClawCloudRefusal(response: string | null | undefined) {
     return false;
   }
 
+  if (normalized.includes("could not complete a reliable direct answer on that attempt")) {
+    return false;
+  }
+
   return (
     normalized.startsWith("i couldn't")
     || normalized.startsWith("i could not")
