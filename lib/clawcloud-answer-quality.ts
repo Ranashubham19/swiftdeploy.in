@@ -1269,10 +1269,13 @@ export function buildClawCloudLowConfidenceReply(
     !profile.isHighStakes
     && profile.domain === "general"
     && /^(?:what(?:'s| is| are)|define|explain|describe|meaning of|difference between|compare|vs\.?|versus)\b/i.test(question.trim());
+  const scopeLead = needsScopedPrecisionLead
+    ? "This question needs one clearer scope detail for a precise answer."
+    : "One missing scope detail will let me answer this directly and accurately.";
   const lines = [
-    "I could not complete a reliable direct answer on that attempt.",
+    "Scoped answer needed",
     "",
-    ...(needsScopedPrecisionLead ? ["This question needs one clearer scope detail for a precise answer.", ""] : []),
+    scopeLead,
     detailHint,
   ];
 

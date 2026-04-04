@@ -877,6 +877,7 @@ function normalizeLocaleRequest(value: string) {
   return value
     .trim()
     .replace(/^other[:\s]+/i, "")
+    .replace(/^(?:in|into)\s+/i, "")
     .replace(/\s+(?:unless|except|but|and)\b[\s\S]*$/i, "")
     .replace(/[.!?]+$/g, "")
     .trim();

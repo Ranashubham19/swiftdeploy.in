@@ -19,6 +19,10 @@ import {
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import { createClient } from "@supabase/supabase-js";
+import {
+  buildClawCloudAnswerQualityProfile,
+  buildClawCloudLowConfidenceReply,
+} from "./lib/clawcloud-answer-quality";
 import { transcribeAudioBuffer, isWhisperAvailable } from "./lib/clawcloud-whisper";
 import { analyseImage, isVisionAvailable, formatVisionReply } from "./lib/clawcloud-vision";
 import {
@@ -4992,8 +4996,15 @@ async function handleInbound(
   }
 
   if (!finalReply || isEmptyOrFallback(finalReply, text)) {
-    console.warn(`[agent] Using builtin fallback for ${userId}`);
-    finalReply = buildEmergencyProfessionalFallback(text);
+    console.warn(`[agent] Using scoped recovery reply for ${userId}`);
+    finalReply = buildClawCloudLowConfidenceReply(
+      text,
+      buildClawCloudAnswerQualityProfile({
+        question: text,
+        intent: "general",
+        category: "general",
+      }),
+    );
   }
 
   const sensitivity = detectWhatsAppSensitivity(`${text}\n${finalReply}`);

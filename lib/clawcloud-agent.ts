@@ -3098,6 +3098,7 @@ function normalizeRomanHindiCapabilityPrompt(text: string) {
     .replace(/\bskti\b/g, "sakti")
     .replace(/\bor\b/g, "aur")
     .replace(/\bthik\b/g, "theek")
+    .replace(/\bwhat\s+cat\s+can\s+you\s+do\b/g, "what can you do")
     .replace(/\s+/g, " ");
 }
 
@@ -3314,7 +3315,7 @@ function looksLikeClawCloudCapabilityQuestion(message: string) {
     return true;
   }
 
-  if (/\b(what can you do|what do you do|your (features|capabilities|commands)|how (to use|do i use)|help me with|who are you|what are you|what's your purpose|show me (your )?features)\b/.test(text)) {
+  if (/\b((?:what\s+(?:all\s+)?can\s+you\s+do)|what do you do|your (features|capabilities|commands)|how (to use|do i use)|help me with|who are you|what are you|what's your purpose|show me (your )?features)\b/.test(text)) {
     return true;
   }
 
@@ -18862,7 +18863,7 @@ function shouldBypassWhatsAppActiveContactSessionRouting(message: string) {
     return true;
   }
 
-  if (/^(?:help|show help|what can you do)\b/i.test(trimmed)) {
+  if (looksLikeClawCloudCapabilityQuestion(trimmed)) {
     return true;
   }
 

@@ -2821,8 +2821,10 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
       category: "law",
     }),
   );
+  assert.match(lowConfidenceReply, /Scoped answer needed/i);
   assert.match(lowConfidenceReply, /lawyer/i);
   assert.doesNotMatch(lowConfidenceReply, /not confident enough/i);
+  assert.doesNotMatch(lowConfidenceReply, /could not complete a reliable direct answer/i);
   assert.doesNotMatch(lowConfidenceReply, /\bReason:/i);
   assert.equal(looksLikeClawCloudRefusal(lowConfidenceReply), false);
 
@@ -2858,6 +2860,7 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
       category: "general",
     }),
   );
+  assert.match(definitionLowConfidenceReply, /Scoped answer needed/i);
   assert.match(definitionLowConfidenceReply, /exact term plus the domain/i);
 
   const storyLowConfidenceReply = buildClawCloudLowConfidenceReply(
@@ -2870,7 +2873,8 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
   );
   assert.match(storyLowConfidenceReply, /multiple works with the title/i);
   assert.doesNotMatch(storyLowConfidenceReply, /topic, tone, and target length/i);
-  assert.match(storyLowConfidenceReply, /could not complete a reliable direct answer/i);
+  assert.match(storyLowConfidenceReply, /Scoped answer needed/i);
+  assert.doesNotMatch(storyLowConfidenceReply, /could not complete a reliable direct answer/i);
   assert.doesNotMatch(storyLowConfidenceReply, /needs one key detail or clearer scope/i);
 
   const kalkiLowConfidenceReply = buildClawCloudLowConfidenceReply(
@@ -2892,7 +2896,9 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
       category: "general",
     }),
   );
-  assert.match(technicalLowConfidenceReply, /could not complete a reliable direct answer/i);
+  assert.match(technicalLowConfidenceReply, /Scoped answer needed/i);
+  assert.match(technicalLowConfidenceReply, /clearer scope detail|direct comparison/i);
+  assert.doesNotMatch(technicalLowConfidenceReply, /could not complete a reliable direct answer/i);
   assert.doesNotMatch(technicalLowConfidenceReply, /needs one key detail or clearer scope/i);
 
   assert.equal(
@@ -3279,6 +3285,12 @@ test("locale preference commands are explicit and do not depend on email domains
     type: "set",
     locale: "th",
     label: "Thai",
+  });
+
+  assert.deepEqual(detectLocalePreferenceCommand("in chinese only"), {
+    type: "set",
+    locale: "zh",
+    label: "Chinese (Simplified)",
   });
 
   assert.deepEqual(detectLocalePreferenceCommand("what is my language"), {
@@ -7548,6 +7560,7 @@ test("workspace knowledge questions stay explanatory instead of triggering live 
 
 test("assistant capability prompts across Hinglish and other languages stay on the help route", () => {
   assert.deepEqual(detectIntentForTest("what can you do"), { type: "help", category: "help" });
+  assert.deepEqual(detectIntentForTest("what cat can you do"), { type: "help", category: "help" });
   assert.deepEqual(detectIntentForTest("aap kya kya kr skte hai"), { type: "help", category: "help" });
   assert.deepEqual(detectIntentForTest("tum kya kya kar skte ho"), { type: "help", category: "help" });
   assert.deepEqual(detectIntentForTest("mujhe kya kya help kar skte ho"), { type: "help", category: "help" });
