@@ -1180,7 +1180,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
     : disconnectedAccountDetail;
   const whatsappSettingFallback = previewMode ? "Preview defaults" : "Live status unavailable";
   const automationModeDisplay = hasLiveDashboardData
-    ? titleCaseWords(whatsappSettings?.automationMode ?? "read_only")
+    ? titleCaseWords(whatsappSettings?.automationMode ?? "auto_reply")
     : whatsappSettingFallback;
   const replyToneDisplay = hasLiveDashboardData
     ? titleCaseWords(whatsappSettings?.replyMode ?? "balanced")

@@ -1,4 +1,5 @@
 export type WhatsAppAutomationMode =
+  | "auto_reply"
   | "read_only"
   | "suggest_only"
   | "approve_before_send";
@@ -282,7 +283,7 @@ export type WhatsAppInboxSummary = {
 };
 
 export const defaultWhatsAppSettings: WhatsAppSettings = {
-  automationMode: "read_only",
+  automationMode: "auto_reply",
   replyMode: "balanced",
   groupReplyMode: "never",
   requireApprovalForSensitive: false,

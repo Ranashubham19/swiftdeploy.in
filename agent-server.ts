@@ -57,13 +57,13 @@ import {
 } from "./lib/clawcloud-whatsapp-contacts";
 import {
   applyWhatsAppReplyMode,
+  decideWhatsAppReplyAction,
   detectWhatsAppSensitivity,
   getWhatsAppPriorityForMessage,
   getWhatsAppSettings,
   markLatestWhatsAppThreadState,
   normalizeWhatsAppPriority,
   scoreWhatsAppReplyConfidence,
-  shouldRequireExplicitUserCommandForWhatsAppChat,
   writeWhatsAppAuditLog,
 } from "./lib/clawcloud-whatsapp-control";
 import {
@@ -123,11 +123,12 @@ import {
   resolveDefaultAssistantChatJid,
   shouldRememberAssistantSelfChat,
 } from "./lib/clawcloud-whatsapp-routing";
-import type {
-  WhatsAppContactPriority,
-  WhatsAppOutboundStatus,
-  WhatsAppOutboundSource,
-  WhatsAppSettings,
+import {
+  defaultWhatsAppSettings,
+  type WhatsAppContactPriority,
+  type WhatsAppOutboundStatus,
+  type WhatsAppOutboundSource,
+  type WhatsAppSettings,
 } from "./lib/clawcloud-whatsapp-workspace-types";
 
 loadEnvConfig(process.cwd());
@@ -4107,6 +4108,10 @@ function resolveAssistantSelfReplyTarget(
     return null;
   }
 
+  if (targetJid) {
+    return jid;
+  }
+
   return isWhatsAppResolvedSelfChat(session.phone, targetJid ?? null, jid)
     ? jid
     : null;
@@ -4810,18 +4815,13 @@ async function handleInbound(
     resolvedRemoteJid ||
     (session ? resolveReplyJid(session) : null);
 
-  if (shouldRequireExplicitUserCommandForWhatsAppChat(logFields.chat_type)) {
-    await markPassiveExternalWhatsAppChatOnly(userId, logFields, messageType);
-
-    return;
-  }
+  const settings = settingsOverride ?? await getWhatsAppSettings(userId).catch(() => defaultWhatsAppSettings);
 
   if (jid && session) {
     void session.sock.sendPresenceUpdate("composing", jid).catch(() => null);
   }
 
   let finalReply: string | null = null;
-  const settings = settingsOverride ?? await getWhatsAppSettings(userId).catch(() => null);
   const workspaceContact = await loadWhatsAppWorkspaceContact(
     userId,
     logFields.remote_jid,
@@ -4891,10 +4891,14 @@ async function handleInbound(
     sensitivity,
     isGroupMessage: logFields.chat_type === "group",
   });
-  const decision = {
-    action: "send" as const,
-    reason: "Explicit user command in the assistant self chat.",
-  };
+  const userTimeZone = await getUserWhatsAppTimeZone(userId).catch(() => null);
+  const decision = decideWhatsAppReplyAction({
+    settings,
+    sensitivity,
+    isGroupMessage: logFields.chat_type === "group",
+    isKnownContact: workspaceContact.isKnown,
+    timeZone: userTimeZone,
+  });
   finalReply = applyWhatsAppReplyMode(finalReply, settings?.replyMode ?? "balanced");
   const scheduleWorkflows = (replySent: boolean) =>
     scheduleWhatsAppWorkflowRunsFromInbound({
@@ -4949,6 +4953,42 @@ async function handleInbound(
       eventType: "reply_blocked",
       actor: "system",
       summary: `Blocked WhatsApp auto-reply for ${workspaceContact.displayName || logFields.contact_name || logFields.remote_phone || "contact"}.`,
+      targetValue: logFields.remote_jid ?? logFields.remote_phone,
+      metadata: {
+        reason: decision.reason,
+        sensitivity,
+        priority,
+        message_type: messageType,
+        chat_type: logFields.chat_type,
+      },
+    }).catch(() => null);
+    void scheduleWorkflows(false);
+    void processDueWorkflows();
+    return;
+  }
+
+  if (decision.action === "queue") {
+    await markLatestWhatsAppThreadState({
+      userId,
+      remoteJid: logFields.remote_jid,
+      remotePhone: logFields.remote_phone,
+      needsReply: true,
+      approvalState: "pending",
+      priority,
+      sensitivity,
+      replyConfidence,
+      auditPayload: {
+        reason: decision.reason,
+        contact_tags: workspaceContact.tags,
+        message_type: messageType,
+        queued_at: new Date().toISOString(),
+      },
+    }).catch(() => null);
+
+    await writeWhatsAppAuditLog(userId, {
+      eventType: "reply_queued",
+      actor: "system",
+      summary: `Queued WhatsApp auto-reply for ${workspaceContact.displayName || logFields.contact_name || logFields.remote_phone || "contact"}.`,
       targetValue: logFields.remote_jid ?? logFields.remote_phone,
       metadata: {
         reason: decision.reason,

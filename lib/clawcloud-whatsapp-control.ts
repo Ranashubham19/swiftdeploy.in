@@ -15,6 +15,7 @@ import {
 } from "@/lib/clawcloud-whatsapp-workspace-types";
 
 const automationModes = new Set<WhatsAppAutomationMode>([
+  "auto_reply",
   "read_only",
   "suggest_only",
   "approve_before_send",
@@ -167,7 +168,7 @@ function normalizeSettings(value: unknown): WhatsAppSettings {
       ? (raw.automationMode as WhatsAppAutomationMode)
       : defaultWhatsAppSettings.automationMode;
   const automationMode = requestedAutomationMode === "approve_before_send"
-    ? "read_only"
+    ? "auto_reply"
     : requestedAutomationMode;
   const replyMode = typeof raw.replyMode === "string" && replyModes.has(raw.replyMode as WhatsAppReplyMode)
     ? (raw.replyMode as WhatsAppReplyMode)
