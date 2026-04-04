@@ -7367,6 +7367,28 @@ function extractModeOverride(text: string): {
   return { cleaned: text.trim(), explicit: false };
 }
 
+/**
+ * Strip the [WhatsApp workspace context] prefix injected by agent-server's
+ * buildWhatsAppRoutingContext() so that intent detection, greeting checks,
+ * and quick-path routing work on the actual user message text.
+ */
+function stripWhatsAppRoutingContextPrefix(text: string): string {
+  if (!text.startsWith("[WhatsApp workspace context]")) {
+    return text;
+  }
+  // The format is:
+  //   [WhatsApp workspace context]
+  //   - note1
+  //   - note2
+  //
+  //   <actual user message>
+  const idx = text.indexOf("\n\n");
+  if (idx === -1) {
+    return text;
+  }
+  return text.slice(idx + 2).trim();
+}
+
 function shouldUseDeepMode(intent: IntentType, text: string) {
   const normalized = text.toLowerCase();
   let score = 0;
@@ -12610,6 +12632,10 @@ async function routeInboundAgentMessageCore(
     }
   }
 
+  // Extract the raw user message from WhatsApp routing context wrapper
+  // so greeting detection and quick-path checks work on the actual user text.
+  const rawUserMessage = stripWhatsAppRoutingContextPrefix(trimmed);
+
   const preflightActiveContactSessionCommand = parseWhatsAppActiveContactSessionCommand(trimmed);
   const preflightSendMessageCommand = parseSendMessageCommand(trimmed);
   const preflightWhatsAppHistoryQuestion = looksLikeWhatsAppHistoryQuestion(trimmed);
@@ -13062,9 +13088,9 @@ async function routeInboundAgentMessageCore(
     );
   }
 
-  const directConversationSignal = detectDirectConversationSignal(trimmed);
+  const directConversationSignal = detectDirectConversationSignal(rawUserMessage);
   if (directConversationSignal) {
-    const replyLanguage = await resolveReplyLocale(trimmed);
+    const replyLanguage = await resolveReplyLocale(rawUserMessage);
     const directConversationReply = buildDeterministicConversationReply(
       directConversationSignal,
       replyLanguage.locale,
@@ -13075,8 +13101,8 @@ async function routeInboundAgentMessageCore(
     return finalizeEarlyTranslated(directConversationReply, "general", "general");
   }
 
-  if (looksLikeClawCloudCapabilityQuestion(trimmed)) {
-    const replyLanguage = await resolveReplyLocale(trimmed);
+  if (looksLikeClawCloudCapabilityQuestion(rawUserMessage)) {
+    const replyLanguage = await resolveReplyLocale(rawUserMessage);
     return finalizeEarlyTranslated(
       buildLocalizedCapabilityReply(trimmed, replyLanguage.locale, {
         preserveRomanScript: replyLanguage.preserveRomanScript,
