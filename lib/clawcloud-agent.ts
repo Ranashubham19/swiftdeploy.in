@@ -6658,12 +6658,12 @@ async function buildProfessionalRecoveryReply(input: {
 
 const FAST_REPLY_TOTAL_BUDGET_MS = 16_000;
 const DEEP_REPLY_TOTAL_BUDGET_MS = 28_000;
-const INBOUND_AGENT_ROUTE_TIMEOUT_MS = 12_000;
-const INBOUND_AGENT_ROUTE_DIRECT_TIMEOUT_MS = 10_000;
-const INBOUND_AGENT_ROUTE_OPERATIONAL_TIMEOUT_MS = 8_000;
-const INBOUND_AGENT_ROUTE_DEEP_TIMEOUT_MS = 14_000;
-const INBOUND_AGENT_ROUTE_LIVE_TIMEOUT_MS = 10_000;
-const NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS = 300;
+const INBOUND_AGENT_ROUTE_TIMEOUT_MS = 25_000;
+const INBOUND_AGENT_ROUTE_DIRECT_TIMEOUT_MS = 20_000;
+const INBOUND_AGENT_ROUTE_OPERATIONAL_TIMEOUT_MS = 15_000;
+const INBOUND_AGENT_ROUTE_DEEP_TIMEOUT_MS = 30_000;
+const INBOUND_AGENT_ROUTE_LIVE_TIMEOUT_MS = 20_000;
+const NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS = 400;
 
 type InboundRouteTimeoutPolicy = {
   kind: "default" | "direct_knowledge" | "operational" | "live_research" | "deep_reasoning";
@@ -12632,9 +12632,13 @@ async function routeInboundAgentMessageCore(
     }
   }
 
-  // Extract the raw user message from WhatsApp routing context wrapper
-  // so greeting detection and quick-path checks work on the actual user text.
-  const rawUserMessage = stripWhatsAppRoutingContextPrefix(trimmed);
+  // Strip the [WhatsApp workspace context] prefix from trimmed so that ALL
+  // intent detection, greeting checks, preflight commands, and AI routing
+  // work on the actual user message — not the wrapped routing metadata.
+  // Keep the full wrapped text only for AI model context (passed via message param).
+  const fullContextMessage = trimmed;
+  trimmed = stripWhatsAppRoutingContextPrefix(trimmed);
+  const rawUserMessage = trimmed;
 
   const preflightActiveContactSessionCommand = parseWhatsAppActiveContactSessionCommand(trimmed);
   const preflightSendMessageCommand = parseSendMessageCommand(trimmed);

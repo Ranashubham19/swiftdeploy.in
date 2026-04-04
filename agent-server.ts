@@ -137,8 +137,8 @@ const QR_WAIT_TIMEOUT_MS = 1_500;
 const QR_WAIT_POLL_MS = 120;
 const QR_CONNECTING_RESET_MS = 2_000;
 const WA_VERSION_CACHE_MS = 30 * 60_000;
-const DIRECT_REPLY_TIMEOUT_MS = 12_000;
-const HTTP_REPLY_TIMEOUT_MS = 14_000;
+const DIRECT_REPLY_TIMEOUT_MS = 25_000;
+const HTTP_REPLY_TIMEOUT_MS = 30_000;
 const STREAM_REPLY_MIN_LENGTH = Math.max(
   40,
   Number.parseInt(process.env.WA_STREAM_REPLY_MIN_LENGTH ?? "80", 10) || 80,
@@ -4420,11 +4420,15 @@ function buildEmergencyProfessionalFallback(message: string) {
     ].join("\n");
   }
 
+  // For any unmatched question, provide a helpful acknowledgment
+  // that doesn't ask the user to repeat themselves
+  const shortQuestion = text.length > 80 ? text.slice(0, 80) + "..." : text;
   return [
-    "I can help with this.",
+    `Processing your question about: _${shortQuestion}_`,
     "",
-    "Send your exact question in one line and include key detail (topic or location).",
-    "Example: *What is the Mariana Trench?* or *Weather in Mumbai today*.",
+    "I'm working on getting you an accurate answer. If this takes a moment, the AI model may be under high load.",
+    "",
+    "Please try again in a few seconds if you don't receive a full answer.",
   ].join("\n");
 }
 
