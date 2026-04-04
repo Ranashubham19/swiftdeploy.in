@@ -77,7 +77,7 @@ import {
 import { detectOfficialPricingQuery } from "@/lib/clawcloud-official-pricing";
 import { classifyIntentWithConfidence, resolveIntentOverlap } from "@/lib/clawcloud-intent-confidence";
 import { detectAiModelRoutingDecision, type AiModelRoutingDecision } from "@/lib/clawcloud-ai-model-routing";
-import { detectExpertMode, EXPERT_MODE_PROMPTS, WHATSAPP_BRAIN } from "@/lib/super-brain";
+import { detectExpertMode, EXPERT_MODE_PROMPTS } from "@/lib/super-brain";
 import {
   buildClawCloudModelAuditTrail,
   completeClawCloudPrompt,
@@ -1249,14 +1249,40 @@ const RECOVERY_MODELS: Partial<Record<IntentType, string[]>> = {
   ],
 };
 
+const PROFESSIONAL_RESPONSE_BRAIN = [
+  "You are ClawCloud AI on WhatsApp.",
+  "Write like a calm senior expert: direct, precise, warm, and composed.",
+  "Answer the user in a professional, trustworthy style without hype or self-promotion.",
+  "Do not repeat the question back. Do not use filler openers. Do not add unnecessary follow-up offers.",
+  "Keep answers easy to scan on mobile with short paragraphs and only the formatting that genuinely helps.",
+].join("\n");
+
+const PROFESSIONAL_FAST_BRAIN = [
+  "FAST MODE:",
+  "- Lead with the answer in the first line.",
+  "- Match the requested depth: keep short answers short, but do not leave gaps in the explanation.",
+  "- Use exact names, numbers, and dates when known. If a detail is uncertain, say so briefly instead of guessing.",
+  "- Prefer clean prose first. Use bullets or sections only when they improve clarity.",
+  "- End cleanly after the answer.",
+].join("\n");
+
+const PROFESSIONAL_DEEP_BRAIN = [
+  "DEEP MODE:",
+  "- Lead with the answer or recommendation, then support it with the reasoning.",
+  "- State assumptions explicitly and call out the ones that materially affect the conclusion.",
+  "- Cover key tradeoffs, edge cases, risks, and failure modes for complex topics.",
+  "- For technical or analytical work, show enough reasoning for the user to trust the result without turning the answer into raw scratch work.",
+  "- Stay thorough, practical, and professional rather than theatrical.",
+].join("\n");
+
 const AUTO_DEEP_FAST_HEADSTART_MS: Partial<Record<IntentType, number>> = {
-  coding: 1_400,
-  math: 1_200,
-  research: 1_200,
-  general: 1_000,
-  spending: 1_000,
-  email: 1_000,
-  creative: 1_000,
+  coding: 650,
+  math: 450,
+  research: 450,
+  general: 250,
+  spending: 250,
+  email: 250,
+  creative: 250,
 };
 
 async function getHistory(userId: string, limit = 30) {
@@ -1294,7 +1320,8 @@ async function emergencyDirectAnswer(
 ): Promise<string> {
   const reply = await completeClawCloudPrompt({
     system: [
-      WHATSAPP_BRAIN,
+      PROFESSIONAL_RESPONSE_BRAIN,
+      PROFESSIONAL_DEEP_BRAIN,
       "",
       "EMERGENCY DIRECT ANSWER MODE:",
       "All live web search attempts have failed. You MUST answer this question using your training knowledge.",
@@ -1342,8 +1369,8 @@ function buildSmartSystem(
 ) {
   const expertMode = detectExpertMode(question ?? intent, intent);
   const expertPrompt = EXPERT_MODE_PROMPTS[expertMode];
-  const modeBrain = mode === "deep" ? DEEP_BRAIN : FAST_BRAIN;
-  const brain = [WHATSAPP_BRAIN, modeBrain, expertPrompt].filter(Boolean).join("\n\n");
+  const modeBrain = mode === "deep" ? PROFESSIONAL_DEEP_BRAIN : PROFESSIONAL_FAST_BRAIN;
+  const brain = [PROFESSIONAL_RESPONSE_BRAIN, modeBrain, expertPrompt].filter(Boolean).join("\n\n");
   const ext = (mode === "deep" ? DEEP_EXT : FAST_EXT)[intent]
     ?? (mode === "deep" ? DEEP_EXT : FAST_EXT).research;
   const strictFinalAnswerInstruction = [
@@ -7150,6 +7177,34 @@ function shouldPersistModelAuditTrail(trail: ClawCloudModelAuditTrail | null | u
   );
 }
 
+function smartReplyTemperature(intent: IntentType, mode: ResponseMode) {
+  if (intent === "creative") {
+    return mode === "deep" ? 0.4 : 0.32;
+  }
+
+  if (intent === "greeting") {
+    return 0.28;
+  }
+
+  if (
+    intent === "coding"
+    || intent === "math"
+    || intent === "science"
+    || intent === "health"
+    || intent === "law"
+    || intent === "finance"
+    || intent === "technology"
+  ) {
+    return mode === "deep" ? 0.14 : 0.1;
+  }
+
+  if (intent === "research" || intent === "explain" || intent === "history" || intent === "economics") {
+    return mode === "deep" ? 0.18 : 0.14;
+  }
+
+  return mode === "deep" ? 0.2 : 0.16;
+}
+
 async function smartReplyDetailed(
   userId: string,
   message: string,
@@ -7180,7 +7235,7 @@ async function smartReplyDetailed(
       preferredModels,
       fallback: FAST_FALLBACK,
       skipCache: true,
-      temperature: 0.75,
+      temperature: smartReplyTemperature(intent, "fast"),
     });
     const reply = await ensureProfessionalReply({
       userId,
@@ -7206,7 +7261,7 @@ async function smartReplyDetailed(
     preferredModels,
     fallback: DEEP_FALLBACK,
     skipCache: true,
-    temperature: 0.85,
+    temperature: smartReplyTemperature(intent, "deep"),
   });
 
   if (explicitMode || forceDeepOnly) {
@@ -7236,7 +7291,7 @@ async function smartReplyDetailed(
       preferredModels,
       fallback: FAST_FALLBACK,
       skipCache: true,
-      temperature: 0.75,
+      temperature: smartReplyTemperature(intent, "fast"),
     });
     const reply = await ensureProfessionalReply({
       userId,
@@ -7264,7 +7319,7 @@ async function smartReplyDetailed(
       preferredModels,
       fallback: FAST_FALLBACK,
       skipCache: true,
-      temperature: 0.75,
+      temperature: smartReplyTemperature(intent, "fast"),
     });
   })();
 
@@ -7327,7 +7382,11 @@ async function smartReplyDetailed(
 
 async function fastAck(instruction: string): Promise<string> {
   return completeClawCloudFast({
-    system: BRAIN + "\n\nGive a SHORT acknowledgement (1-2 lines MAX). Professional, warm, specific. Use *bold* and 1 emoji. NEVER say 'Hi! I'm your ClawCloud AI assistant'.",
+    system: [
+      PROFESSIONAL_RESPONSE_BRAIN,
+      PROFESSIONAL_FAST_BRAIN,
+      "Give a short acknowledgement in 1-2 lines. Keep it warm, specific, and professional.",
+    ].join("\n\n"),
     user: instruction,
     maxTokens: 100,
     fallback: "✅ On it! Give me a moment...",
@@ -7339,9 +7398,11 @@ async function fastAck(instruction: string): Promise<string> {
 
 async function fastAckQuick(instruction: string): Promise<string> {
   return completeClawCloudFast({
-    system:
-      FAST_BRAIN +
-      "\n\nGive a short acknowledgement in 1-2 lines max. Professional, warm, and specific. Use *bold* only if it helps.",
+    system: [
+      PROFESSIONAL_RESPONSE_BRAIN,
+      PROFESSIONAL_FAST_BRAIN,
+      "Give a short acknowledgement in 1-2 lines. Keep it professional, warm, and specific.",
+    ].join("\n\n"),
     user: instruction,
     maxTokens: 60,
     fallback: "*On it.* Give me a moment...",

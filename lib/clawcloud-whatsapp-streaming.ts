@@ -2,6 +2,21 @@ function clampNumber(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
+function coalesceWhatsAppStreamChunks(chunks: string[], maxChunks = 6) {
+  if (chunks.length <= maxChunks) {
+    return chunks;
+  }
+
+  const groupSize = Math.ceil(chunks.length / maxChunks);
+  const merged: string[] = [];
+
+  for (let index = 0; index < chunks.length; index += groupSize) {
+    merged.push(chunks.slice(index, index + groupSize).join("\n\n").trim());
+  }
+
+  return merged;
+}
+
 /**
  * Split a WhatsApp reply into small, granular chunks for Meta AI-style
  * word-by-word typing delivery. Each chunk is a logical "sentence" or
@@ -44,7 +59,7 @@ export function splitWhatsAppStreamChunks(text: string): string[] {
     }
 
     // Short sections (under 120 chars) — keep as single chunk for snappy delivery
-    if (trimmed.length <= 120) {
+    if (trimmed.length <= 160) {
       chunks.push(trimmed);
       continue;
     }
@@ -65,7 +80,7 @@ export function splitWhatsAppStreamChunks(text: string): string[] {
           continue;
         }
         currentGroup.push(t);
-        if (currentGroup.length >= 3) {
+        if (currentGroup.length >= 4) {
           chunks.push(currentGroup.join("\n"));
           currentGroup = [];
         }
@@ -81,7 +96,7 @@ export function splitWhatsAppStreamChunks(text: string): string[] {
     let current = "";
     for (const sentence of sentences) {
       const candidate = current ? `${current} ${sentence}` : sentence;
-      if (candidate.length > 150 && current) {
+      if (candidate.length > 220 && current) {
         chunks.push(current.trim());
         current = sentence;
       } else {
@@ -94,7 +109,7 @@ export function splitWhatsAppStreamChunks(text: string): string[] {
     }
   }
 
-  return chunks.filter(Boolean);
+  return coalesceWhatsAppStreamChunks(chunks.filter(Boolean));
 }
 
 /**
@@ -104,23 +119,23 @@ export function splitWhatsAppStreamChunks(text: string): string[] {
 export function whatsAppChunkDelayMs(chunk: string) {
   // Code blocks: longer pause to simulate "processing"
   if (chunk.startsWith("```")) {
-    return clampNumber(600 + chunk.length * 1.5, 800, 2_800);
+    return clampNumber(260 + chunk.length * 0.6, 320, 900);
   }
 
   // Section headers: quick flash
   if (/^\*[^*]+\*$/.test(chunk.trim())) {
-    return clampNumber(300, 250, 500);
+    return clampNumber(140, 120, 220);
   }
 
   // Bullet groups: moderate pace
   if (/^[•\-]/.test(chunk.trim())) {
     const bulletCount = (chunk.match(/^[•\-]/gm) || []).length;
-    return clampNumber(350 + bulletCount * 120, 400, 1_200);
+    return clampNumber(180 + bulletCount * 90, 220, 650);
   }
 
   // Regular text: word-count based for natural reading pace
   const words = chunk.split(/\s+/).filter(Boolean).length;
-  return clampNumber(350 + words * 40, 450, 1_600);
+  return clampNumber(120 + words * 18, 180, 650);
 }
 
 /**
@@ -129,16 +144,16 @@ export function whatsAppChunkDelayMs(chunk: string) {
  */
 export function whatsAppInitialTypingDelayMs(text: string) {
   const len = text.trim().length;
-  if (len < 80) return 500;
-  if (len < 220) return 800;
-  if (len < 600) return 1_100;
-  return 1_500;
+  if (len < 80) return 120;
+  if (len < 220) return 180;
+  if (len < 600) return 240;
+  return 320;
 }
 
 /**
  * Whether a reply should use staged (typing-style) delivery.
  * Lower threshold = more messages get the typing effect.
  */
-export function shouldStageWhatsAppReply(text: string, minLength = 80) {
+export function shouldStageWhatsAppReply(text: string, minLength = 24) {
   return text.replace(/\s+/g, " ").trim().length >= minLength;
 }

@@ -61,6 +61,13 @@ type AgentMessagePayload = {
   } | null;
 };
 
+type BotReplyOptions = {
+  appAccessConsent?: DashboardJournalAppAccessConsent | null;
+  conversationStyleRequest?: DashboardJournalConversationStyleRequest | null;
+  liveAnswerBundle?: ClawCloudAnswerBundle | null;
+  modelAuditTrail?: ClawCloudModelAuditTrail | null;
+};
+
 type ActivityItem = {
   id: string;
   tone: "green" | "blue" | "amber";
@@ -2018,15 +2025,36 @@ export function DashboardShell({ config }: DashboardShellProps) {
     responseTimersRef.current.push(timer);
   }
 
+  function buildTypedReplyFrames(text: string) {
+    const tokens = text.match(/\S+\s*/g) ?? [text];
+    if (!tokens.length) {
+      return [text];
+    }
+
+    const targetFrames = Math.min(14, Math.max(3, Math.ceil(tokens.length / 4)));
+    const tokensPerFrame = Math.max(1, Math.ceil(tokens.length / targetFrames));
+    const frames: string[] = [];
+
+    for (let index = 0; index < tokens.length; index += tokensPerFrame) {
+      frames.push(tokens.slice(0, index + tokensPerFrame).join("").trimEnd());
+    }
+
+    const finalFrame = text.trimEnd();
+    if (frames.length === 0 || frames[frames.length - 1] !== finalFrame) {
+      frames.push(finalFrame);
+    }
+
+    return frames;
+  }
+
+  function typedReplyDurationMs(text: string) {
+    return Math.min(1100, Math.max(260, Math.round(text.length * 1.8)));
+  }
+
   function appendJournalMessage(
     role: ChatMessage["role"],
     text: string,
-    options?: {
-      appAccessConsent?: DashboardJournalAppAccessConsent | null;
-      conversationStyleRequest?: DashboardJournalConversationStyleRequest | null;
-      liveAnswerBundle?: ClawCloudAnswerBundle | null;
-      modelAuditTrail?: ClawCloudModelAuditTrail | null;
-    },
+    options?: BotReplyOptions,
   ) {
     const createdAt = new Date().toISOString();
     const dateKey = getDashboardJournalDateKey(new Date(createdAt));
@@ -2056,6 +2084,61 @@ export function DashboardShell({ config }: DashboardShellProps) {
       ]);
     });
     setActiveJournalId(nextThreadId);
+    return nextMessage.id;
+  }
+
+  function updateJournalMessageText(
+    messageId: string,
+    text: string,
+    options?: BotReplyOptions,
+  ) {
+    setJournalThreads((current) =>
+      sortDashboardJournalThreads(
+        current.map((thread) => ({
+          ...thread,
+          messages: thread.messages.map((message) =>
+            message.id === messageId
+              ? normalizeDashboardJournalMessage({
+                  ...message,
+                  text,
+                  appAccessConsent: options?.appAccessConsent ?? message.appAccessConsent ?? null,
+                  conversationStyleRequest:
+                    options?.conversationStyleRequest ?? message.conversationStyleRequest ?? null,
+                  liveAnswerBundle: options?.liveAnswerBundle ?? message.liveAnswerBundle ?? null,
+                  modelAuditTrail: options?.modelAuditTrail ?? message.modelAuditTrail ?? null,
+                })
+              : message,
+          ),
+        })),
+      ),
+    );
+  }
+
+  function showTypedJournalBotReply(text: string, options?: BotReplyOptions) {
+    clearPendingResponses();
+    const frames = buildTypedReplyFrames(text);
+    const firstFrame = frames[0] ?? text;
+    setTypingVisible(true);
+    const messageId = appendJournalMessage("bot", firstFrame);
+
+    if (frames.length <= 1) {
+      updateJournalMessageText(messageId, text, options);
+      setTypingVisible(false);
+      return;
+    }
+
+    setTypingVisible(true);
+    const stepDelayMs = Math.max(60, Math.round(typedReplyDurationMs(text) / (frames.length - 1)));
+
+    frames.slice(1).forEach((frame, index) => {
+      const isLast = index === frames.length - 2;
+      queueResponse(() => {
+        updateJournalMessageText(messageId, frame, isLast ? options : undefined);
+        if (isLast) {
+          setTypingVisible(false);
+        }
+      }, stepDelayMs * (index + 1));
+    });
   }
 
   function updateJournalConsentStatus(
@@ -2494,7 +2577,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
       );
 
       if (payload.response?.trim()) {
-        appendJournalMessage("bot", payload.response.trim(), {
+        showTypedJournalBotReply(payload.response.trim(), {
           liveAnswerBundle: payload.liveAnswerBundle ?? null,
           modelAuditTrail: payload.modelAuditTrail ?? null,
         });
@@ -2559,7 +2642,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
       updateJournalConversationStyleStatus(request.token, style);
 
       if (payload.response?.trim()) {
-        appendJournalMessage("bot", payload.response.trim(), {
+        showTypedJournalBotReply(payload.response.trim(), {
           appAccessConsent: payload.consentRequest
             ? {
                 ...payload.consentRequest,
@@ -2628,16 +2711,14 @@ export function DashboardShell({ config }: DashboardShellProps) {
 
       const payload = (await response.json().catch(() => ({}))) as AgentMessagePayload;
 
-      setTypingVisible(false);
-
       if (!response.ok) {
+        setTypingVisible(false);
         appendJournalMessage("bot", payload.error || "Sorry, I could not complete that request.");
         showToast(payload.error || "Command failed.");
         return;
       }
 
-      appendJournalMessage(
-        "bot",
+      showTypedJournalBotReply(
         payload.response?.trim() || "Sorry, I could not generate a response for that yet.",
         {
           liveAnswerBundle: payload.liveAnswerBundle ?? null,

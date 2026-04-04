@@ -1981,6 +1981,37 @@ async function orchestrateClawCloudPrompt(input: {
       `[ai] ${input.responseMode} ${input.intent} generator batch -> ${batch.map((candidate) => candidate.model).join(" | ")}`,
     );
 
+    if (!planner.judgeEnabled) {
+      const batchResult = await runCandidateBatch({
+        messages: input.messages,
+        maxTokens: input.maxTokens,
+        temperature: input.temperature,
+        candidates: batch,
+        intent: input.intent,
+        userQuestion: input.userQuestion,
+      });
+
+      failures.push(...batchResult.failures);
+
+      if (batchResult.winner) {
+        successes.push(batchResult.winner);
+        return {
+          answer: batchResult.winner.out,
+          trace: {
+            intent: input.intent,
+            responseMode: input.responseMode,
+            planner,
+            selectedBy: "single_success",
+            selectedModel: batchResult.winner.candidate.model,
+            candidates: buildCandidateTrace(successes, failures, batchResult.winner.candidate.model),
+            judge: null,
+          },
+        };
+      }
+
+      continue;
+    }
+
     const batchResult = await runCandidateCollectionBatch({
       messages: input.messages,
       maxTokens: input.maxTokens,
@@ -1992,22 +2023,6 @@ async function orchestrateClawCloudPrompt(input: {
 
     successes.push(...batchResult.successes);
     failures.push(...batchResult.failures);
-
-    if (!planner.judgeEnabled && successes.length > 0) {
-      const winner = rankGeneratedCandidates(successes)[0] ?? null;
-      return {
-        answer: winner?.out ?? null,
-        trace: {
-          intent: input.intent,
-          responseMode: input.responseMode,
-          planner,
-          selectedBy: winner ? "single_success" : "fallback",
-          selectedModel: winner?.candidate.model ?? null,
-          candidates: buildCandidateTrace(successes, failures, winner?.candidate.model ?? null),
-          judge: null,
-        },
-      };
-    }
 
     if (successes.length >= planner.targetResponses) {
       break;
@@ -2187,14 +2202,21 @@ async function runCandidateBatch(input: {
   maxTokens: number;
   temperature: number;
   candidates: ModelCandidate[];
-}): Promise<string | null> {
+  intent: IntentType;
+  userQuestion: string;
+}): Promise<{
+  winner: ModelGenerationResult | null;
+  failures: ClawCloudModelCandidateTrace[];
+}> {
   for (const candidate of input.candidates) {
     console.log(`[ai] trying ${candidate.model}`);
   }
 
   const controllers = input.candidates.map(() => new AbortController());
+  const failures = new Map<number, ClawCloudModelCandidateTrace>();
 
   const attempts = input.candidates.map((candidate, index) => (async () => {
+    const startedAt = Date.now();
     const out = await _call(
       input.messages,
       input.maxTokens,
@@ -2203,14 +2225,34 @@ async function runCandidateBatch(input: {
       input.temperature,
       controllers[index].signal,
     );
+    const latencyMs = Date.now() - startedAt;
 
     if (out) {
       markModelSuccess(candidate.healthKey);
-      return { candidate, out, index };
+      return {
+        candidate,
+        out,
+        index,
+        latencyMs,
+        heuristicScore: scoreClawCloudModelResponse({
+          intent: input.intent,
+          response: out,
+          userQuestion: input.userQuestion,
+        }),
+        preview: buildCandidatePreview(out),
+      };
     }
 
     if (!controllers[index].signal.aborted) {
       markModelFailure(candidate.healthKey);
+      failures.set(index, {
+        model: candidate.model,
+        tier: candidate.tier,
+        status: "failed",
+        latencyMs,
+        heuristicScore: null,
+        preview: null,
+      });
       console.warn(`[ai] ${candidate.model} failed, trying next model...`);
     }
 
@@ -2224,12 +2266,24 @@ async function runCandidateBatch(input: {
         controllers[index].abort();
       }
     }
-    return winner.out;
+    return {
+      winner: {
+        candidate: winner.candidate,
+        out: winner.out,
+        latencyMs: winner.latencyMs,
+        heuristicScore: winner.heuristicScore,
+        preview: winner.preview,
+      },
+      failures: [...failures.values()],
+    };
   } catch {
     for (const controller of controllers) {
       controller.abort();
     }
-    return null;
+    return {
+      winner: null,
+      failures: [...failures.values()],
+    };
   }
 }
 
@@ -2560,7 +2614,7 @@ export async function completeClawCloudFast(input: {
     "general",
   );
 
-  let out: string | null = null;
+  let out: Awaited<ReturnType<typeof runCandidateBatch>> | null = null;
   const deadline = Date.now() + INTENT_MAX_TOTAL_MS.greeting;
   for (let offset = 0; offset < ackCandidates.length; offset += 2) {
     const remainingMs = deadline - Date.now();
@@ -2578,13 +2632,15 @@ export async function completeClawCloudFast(input: {
     out = await runCandidateBatch({
       messages: msgs,
       maxTokens: input.maxTokens ?? 150,
-      temperature: 0.3,
+      temperature: 0.18,
       candidates: batch,
+      intent: "greeting",
+      userQuestion: input.user,
     });
-    if (out) {
+    if (out.winner?.out) {
       break;
     }
   }
 
-  return out?.trim() || input.fallback;
+  return out?.winner?.out?.trim() || input.fallback;
 }

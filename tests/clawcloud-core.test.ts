@@ -3228,35 +3228,35 @@ test("primary conversation lane keeps normal follow-ups on direct chat instead o
 test("inbound route timeout policy is category-aware", () => {
   const direct = getInboundRouteTimeoutPolicyForTest("why is the sky blue");
   assert.equal(direct.kind, "direct_knowledge");
-  assert.equal(direct.timeoutMs, 60000);
+  assert.equal(direct.timeoutMs, 20000);
 
   const standaloneDirect = getInboundRouteTimeoutPolicyForTest("overview of photosynthesis");
   assert.equal(standaloneDirect.kind, "direct_knowledge");
-  assert.equal(standaloneDirect.timeoutMs, 60000);
+  assert.equal(standaloneDirect.timeoutMs, 20000);
 
   const spanishDirect = getInboundRouteTimeoutPolicyForTest("¿Puedes explicar la fotosíntesis de forma simple?");
   assert.equal(spanishDirect.kind, "direct_knowledge");
-  assert.equal(spanishDirect.timeoutMs, 60000);
+  assert.equal(spanishDirect.timeoutMs, 20000);
 
   const kannadaDirect = getInboundRouteTimeoutPolicyForTest("10 ನಾಡು ಕನ್ನಡ ಸಾಹಿತ್ಯದ ಕವಿಗಳ ಬಗ್ಗೆ ಗೊಬ್ಬಿ ಬರೆಯಿರಿ");
   assert.equal(kannadaDirect.kind, "direct_knowledge");
-  assert.equal(kannadaDirect.timeoutMs, 60000);
+  assert.equal(kannadaDirect.timeoutMs, 20000);
 
   const live = getInboundRouteTimeoutPolicyForTest("latest news about ai");
   assert.equal(live.kind, "live_research");
-  assert.equal(live.timeoutMs, 36000);
+  assert.equal(live.timeoutMs, 20000);
 
   const operational = getInboundRouteTimeoutPolicyForTest("show my gmail inbox");
   assert.equal(operational.kind, "operational");
-  assert.equal(operational.timeoutMs, 50000);
+  assert.equal(operational.timeoutMs, 15000);
 
   const deep = getInboundRouteTimeoutPolicyForTest("deep: explain transformers");
   assert.equal(deep.kind, "deep_reasoning");
-  assert.equal(deep.timeoutMs, 55000);
+  assert.equal(deep.timeoutMs, 30000);
 
   const groupedDeep = getInboundRouteTimeoutPolicyForTest("[Group message from product team] deep: what is artificial intelligence");
   assert.equal(groupedDeep.kind, "deep_reasoning");
-  assert.equal(groupedDeep.timeoutMs, 55000);
+  assert.equal(groupedDeep.timeoutMs, 30000);
 });
 
 test("locale preference commands are explicit and do not depend on email domains", () => {

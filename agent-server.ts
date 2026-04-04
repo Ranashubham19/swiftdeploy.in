@@ -140,8 +140,8 @@ const WA_VERSION_CACHE_MS = 30 * 60_000;
 const DIRECT_REPLY_TIMEOUT_MS = 25_000;
 const HTTP_REPLY_TIMEOUT_MS = 30_000;
 const STREAM_REPLY_MIN_LENGTH = Math.max(
-  40,
-  Number.parseInt(process.env.WA_STREAM_REPLY_MIN_LENGTH ?? "80", 10) || 80,
+  20,
+  Number.parseInt(process.env.WA_STREAM_REPLY_MIN_LENGTH ?? "24", 10) || 24,
 );
 const SESSION_WATCHDOG_STALE_MS = 3 * 60_000;
 const SESSION_WATCHDOG_INTERVAL_MS = 5 * 60_000;
