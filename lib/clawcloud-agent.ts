@@ -1283,13 +1283,13 @@ const PROFESSIONAL_DEEP_BRAIN = [
 ].join("\n");
 
 const AUTO_DEEP_FAST_HEADSTART_MS: Partial<Record<IntentType, number>> = {
-  coding: 650,
-  math: 450,
-  research: 450,
-  general: 250,
-  spending: 250,
-  email: 250,
-  creative: 250,
+  coding: 150,
+  math: 100,
+  research: 100,
+  general: 0,
+  spending: 0,
+  email: 0,
+  creative: 0,
 };
 
 async function getHistory(userId: string, limit = 30) {
@@ -2168,7 +2168,7 @@ function usefulReplyResult(
 }
 
 function autoDeepFastHeadstartMs(intent: IntentType) {
-  return AUTO_DEEP_FAST_HEADSTART_MS[intent] ?? 1_000;
+  return AUTO_DEEP_FAST_HEADSTART_MS[intent] ?? 100;
 }
 
 function isInternalRecoverySignalReply(reply: string | null | undefined) {
@@ -7102,8 +7102,8 @@ async function buildProfessionalRecoveryReply(input: {
   return answer.trim();
 }
 
-const FAST_REPLY_TOTAL_BUDGET_MS = 16_000;
-const DEEP_REPLY_TOTAL_BUDGET_MS = 28_000;
+const FAST_REPLY_TOTAL_BUDGET_MS = 12_000;
+const DEEP_REPLY_TOTAL_BUDGET_MS = 20_000;
 const INBOUND_AGENT_ROUTE_TIMEOUT_MS = 25_000;
 const INBOUND_AGENT_ROUTE_DIRECT_TIMEOUT_MS = 20_000;
 const INBOUND_AGENT_ROUTE_OPERATIONAL_TIMEOUT_MS = 15_000;
@@ -20455,6 +20455,22 @@ export async function scheduleClawCloudTasks(userId: string) {
   const { data } = await getClawCloudSupabaseAdmin()
     .from("agent_tasks").select("*").eq("user_id", userId).eq("is_enabled", true);
   return data ?? [];
+}
+
+/**
+ * Server-level emergency fallback — generates a direct answer when all paths fail.
+ * Called from agent-server.ts as an absolute last resort before sending to WhatsApp.
+ */
+export async function emergencyDirectAnswerForServer(question: string): Promise<string | null> {
+  try {
+    const reply = await emergencyDirectAnswer(question, [], "");
+    if (reply?.trim() && !isVisibleFallbackReply(reply) && !isInternalRecoverySignalReply(reply)) {
+      return reply.trim();
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 export async function routeInboundAgentMessage(

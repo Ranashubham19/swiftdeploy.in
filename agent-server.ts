@@ -145,8 +145,8 @@ const WHATSAPP_QR_STALE_AFTER_MS = 75_000;
 const WHATSAPP_QR_RENDER_WIDTH = 640;
 const WHATSAPP_QR_RENDER_MARGIN = 4;
 const WA_VERSION_CACHE_MS = 30 * 60_000;
-const DIRECT_REPLY_TIMEOUT_MS = 25_000;
-const HTTP_REPLY_TIMEOUT_MS = 30_000;
+const DIRECT_REPLY_TIMEOUT_MS = 18_000;
+const HTTP_REPLY_TIMEOUT_MS = 22_000;
 const STREAM_REPLY_MIN_LENGTH = Math.max(
   20,
   Number.parseInt(process.env.WA_STREAM_REPLY_MIN_LENGTH ?? "24", 10) || 24,
@@ -5007,15 +5007,26 @@ async function handleInbound(
   }
 
   if (!finalReply || isEmptyOrFallback(finalReply, text)) {
-    console.warn(`[agent] Using scoped recovery reply for ${userId}`);
-    finalReply = buildClawCloudLowConfidenceReply(
-      text,
-      buildClawCloudAnswerQualityProfile({
-        question: text,
-        intent: "general",
-        category: "general",
-      }),
-    );
+    console.warn(`[agent] All paths failed for ${userId} — using direct emergency answer`);
+    // Try one more time with a direct AI call instead of returning an internal signal
+    try {
+      const { emergencyDirectAnswerForServer } = await import("./lib/clawcloud-agent");
+      const emergencyReply = await Promise.race([
+        emergencyDirectAnswerForServer?.(text) ?? Promise.resolve(null),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 8_000)),
+      ]);
+      if (emergencyReply?.trim() && !isEmptyOrFallback(emergencyReply, text)) {
+        finalReply = emergencyReply.trim();
+        console.log(`[agent] Emergency direct answer succeeded for ${userId} (${finalReply.length} chars)`);
+      }
+    } catch {
+      // ignore emergency answer failure
+    }
+  }
+
+  // Absolute last resort — never send internal signals or empty replies
+  if (!finalReply || isEmptyOrFallback(finalReply, text) || finalReply.includes("__LOW_CONFIDENCE")) {
+    finalReply = "I'm processing your request. Please try again in a moment.";
   }
 
   const sensitivity = detectWhatsAppSensitivity(`${text}\n${finalReply}`);
@@ -5807,10 +5818,9 @@ async function connectSession(userId: string): Promise<SessionRecord> {
             [
               "🖼️ *Image received!*",
               "",
-              "Image analysis isn't configured on this deployment yet.",
-              "Add `NVIDIA_API_KEY` or `OPENAI_API_KEY` to enable vision support.",
+              "Image analysis is temporarily unavailable.",
               "",
-              "_Tip: You can also describe the image in text and I'll help you from there._",
+              "_Tip: You can describe the image in text and I'll help you from there._",
             ].join("\n"),
             replyTargetJid,
           );
@@ -5857,7 +5867,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
         } else {
           await sendReply(
             userId,
-            "I received your voice note, but voice transcription is not configured yet. Add `GROQ_API_KEY` to enable voice notes.",
+            "I received your voice note, but voice transcription is temporarily unavailable. Please type your message instead.",
             replyTargetJid,
           );
           mediaHandled = true;
@@ -5969,10 +5979,10 @@ async function connectSession(userId: string): Promise<SessionRecord> {
             [
               "🎥 *Video received!*",
               "",
-              "Video analysis is not configured on this deployment yet.",
+              "Video analysis is temporarily unavailable.",
               "",
-              "To enable it, add an ffmpeg binary plus voice or vision support.",
-              "• Send me the *audio only* as a voice note - I'll transcribe it",
+              "Try one of these instead:",
+              "• Send me the *audio only* as a voice note",
               "• *Type your question* and I'll answer immediately",
               "• Share a *YouTube link* and I'll summarise the video for you",
             ].join("\n"),
