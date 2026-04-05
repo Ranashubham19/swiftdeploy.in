@@ -1509,7 +1509,13 @@ function sanitizeOutboundWhatsAppMessage(raw: string): string {
   // Strip [Group message …] wrappers
   text = text.replace(/^\[Group message[^\]]*\]\s*/i, "");
 
-  return text.replace(/\n{3,}/g, "\n\n").trim();
+  // ABSOLUTE SAFETY: internal signals must NEVER reach a WhatsApp chat
+  const cleaned = text.replace(/\n{3,}/g, "\n\n").trim();
+  if (/^__[A-Z_]+__$/.test(cleaned) || cleaned.includes("__LOW_CONFIDENCE_RECOVERY_SIGNAL__")) {
+    return "";
+  }
+
+  return cleaned;
 }
 
 async function sendStreamingMessage(sock: WASocket, jid: string, fullText: string) {
@@ -4379,6 +4385,9 @@ function isEmptyOrFallback(reply: string | null | undefined, sourceMessage?: str
     ||
     lower.includes("__fast_fallback") ||
     lower.includes("__deep_fallback") ||
+    lower.includes("__low_confidence_recovery_signal__") ||
+    lower.includes("__no_live_data_internal_signal__") ||
+    /^__[a-z_]+__$/i.test(reply.trim()) ||
     lower.includes("could not produce a reliable answer") ||
     lower.includes("send the question again and i will retry") ||
     lower.includes("let me try that again") ||
@@ -4419,10 +4428,23 @@ function isEmptyOrFallback(reply: string | null | undefined, sourceMessage?: str
     // Vision/translation prompt leak
     lower.startsWith("you need me to translate") ||
     lower.startsWith("you want me to translate") ||
+    lower.startsWith("got it—provide the exact text") ||
+    lower.startsWith("got it — provide the exact text") ||
+    lower.includes("provide the exact text you need translated") ||
+    lower.includes("paste the exact english text you want rendered") ||
+    lower.includes("i'll deliver the translation immediately") ||
+    lower.includes("i'll return a clean, natural") ||
     lower.includes("preserving the original tone, warmth") ||
     lower.includes("preserving the original tone and level") ||
     lower.includes("keeping specific details like names, numbers") ||
-    (lower.includes("translate a given text") && lower.includes("preserving"))
+    (lower.includes("translate a given text") && lower.includes("preserving")) ||
+    (lower.includes("provide") && lower.includes("text") && lower.includes("translated into")) ||
+    // Chat reading refusals
+    lower.includes("can't access or retrieve private whatsapp") ||
+    lower.includes("cannot access or retrieve private whatsapp") ||
+    lower.includes("can't access private whatsapp chats") ||
+    (lower.includes("end-to-end encrypted") && lower.includes("don't store") && lower.includes("message")) ||
+    lower.includes("open the chat in whatsapp and scroll")
   );
 }
 

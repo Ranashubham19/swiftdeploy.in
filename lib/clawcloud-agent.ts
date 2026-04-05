@@ -1254,7 +1254,9 @@ const RECOVERY_MODELS: Partial<Record<IntentType, string[]>> = {
 
 const PROFESSIONAL_RESPONSE_BRAIN = [
   "You are ClawCloud AI on WhatsApp.",
-  "You CAN send WhatsApp messages to contacts, set reminders, read emails, manage calendar, and search the web.",
+  "You CAN send WhatsApp messages to contacts, read WhatsApp chat history, set reminders, read emails, manage calendar, and search the web.",
+  "You HAVE access to synced WhatsApp messages and contacts. You CAN read and summarize chat history with any contact.",
+  "NEVER say 'I can't access private WhatsApp chats' or 'I cannot retrieve messages' — you HAVE synced message history and CAN show it.",
   "NEVER say 'I'm not capable of sending messages' or 'I cannot send messages' — you ARE connected to WhatsApp and CAN send.",
   "Write like a calm senior expert: direct, precise, warm, and composed.",
   "Answer the user in a professional, trustworthy style without hype or self-promotion.",
@@ -1783,6 +1785,17 @@ function shouldUseMultilingualRoutingBridge(
 ) {
   const trimmed = message.trim();
   if (!trimmed) {
+    return false;
+  }
+
+  const strictRoute = detectStrictIntentRoute(trimmed);
+  if (
+    strictRoute?.locked
+    && (
+      STRICT_ROUTE_APP_ACCESS_CATEGORIES.has(strictRoute.intent.category)
+      || strictRoute.intent.category === "personal_tool_clarify"
+    )
+  ) {
     return false;
   }
 
@@ -2368,6 +2381,24 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || (normalized.includes("translate a given text") && normalized.includes("preserving"))
     || (normalized.startsWith("you need me to") && normalized.includes("translate"))
     || (normalized.startsWith("you want me to") && normalized.includes("preserving"))
+    || normalized.startsWith("got it—provide the exact text")
+    || normalized.startsWith("got it — provide the exact text")
+    || normalized.includes("provide the exact text you need translated")
+    || normalized.includes("i'll deliver the translation immediately")
+    || normalized.includes("paste the exact english text you want rendered")
+    || normalized.includes("i'll return a clean, natural")
+    || (normalized.includes("provide") && normalized.includes("text") && normalized.includes("translated into"))
+    // Chat reading refusal patterns — bot HAS synced messages
+    || normalized.includes("can't access or retrieve private whatsapp")
+    || normalized.includes("cannot access or retrieve private whatsapp")
+    || normalized.includes("can't access private whatsapp chats")
+    || normalized.includes("cannot access private whatsapp chats")
+    || normalized.includes("whatsapp threads are end-to-end encrypted and you don't store")
+    || normalized.includes("end-to-end encrypted and you don't store message content")
+    || normalized.includes("open the chat with")
+    || (normalized.includes("end-to-end encrypted") && normalized.includes("don't store") && normalized.includes("message"))
+    || (normalized.includes("can't display the full") && normalized.includes("transcript because whatsapp"))
+    || normalized.includes("open the chat in whatsapp and scroll")
     // Live source diagnostic leaks
     || normalized.includes("i could not get a clean live source")
     || normalized.includes("name the exact topic plus")
@@ -2510,7 +2541,7 @@ async function finalizeAgentReply(input: {
       || input.category === "send_message"
       || input.category === "whatsapp_contacts_sync"
     )
-    && /\b(?:exact whatsapp contact|exact contact name|right chat|option number|full number|active contact mode|stop talking to|talk to .+ on my behalf|which .+ should i use|strong whatsapp match|reply with the exact contact name|whatsapp history lane|whatsapp send lane|whatsapp contact-mode lane|synced whatsapp messages)\b/i.test(sanitizedReply);
+    && /\b(?:exact whatsapp contact|exact contact name|right chat|option number|full number|active contact mode|stop talking to|talk to .+ on my behalf|which .+ should i use|strong whatsapp match|reply with the exact contact name|whatsapp history lane|whatsapp send lane|whatsapp contact-mode lane|synced whatsapp messages|messages reviewed for this summary|latest visible message|professional brief|there are no synced messages for it yet)\b/i.test(sanitizedReply);
   const polishedReply = shouldPreserveOperationalWhatsAppReply
     ? sanitizedReply
     : polishClawCloudAnswerStyle(
@@ -2563,15 +2594,28 @@ async function finalizeAgentReply(input: {
       : replyWithDisclaimer;
   }
 
-  const finalReply = await enforceClawCloudReplyLanguage({
-    message: translatedReply,
-    locale: finalReplyLanguageResolution.locale,
-    preserveRomanScript: finalReplyLanguageResolution.preserveRomanScript,
-    targetLanguageName: specialReplyLanguage?.targetLanguageName,
-  }).catch(() => buildClawCloudReplyLanguageFallback(
-    specialReplyLanguage?.targetLanguageName,
-    translatedReply,
-  ));
+  const shouldSkipFinalLanguageRewrite =
+    input.alreadyTranslated
+    && (
+      input.category === "send_message"
+      || input.category === "whatsapp_history"
+      || input.category === "save_contact"
+      || input.category === "whatsapp_contacts_sync"
+      || input.category === "whatsapp_settings_status"
+      || input.category === "whatsapp_settings_update"
+    );
+
+  const finalReply = shouldSkipFinalLanguageRewrite
+    ? translatedReply
+    : await enforceClawCloudReplyLanguage({
+      message: translatedReply,
+      locale: finalReplyLanguageResolution.locale,
+      preserveRomanScript: finalReplyLanguageResolution.preserveRomanScript,
+      targetLanguageName: specialReplyLanguage?.targetLanguageName,
+    }).catch(() => buildClawCloudReplyLanguageFallback(
+      specialReplyLanguage?.targetLanguageName,
+      translatedReply,
+    ));
   const normalizedFinalReply = normalizeReplyForClawCloudDisplay(finalReply);
 
   void logIntentAnalytics(
@@ -12692,7 +12736,10 @@ async function routeInboundAgentMessageResultCore(
   });
 }
 
-async function buildInboundAgentTimeoutResult(message: string): Promise<RouteInboundAgentMessageResult> {
+async function buildInboundAgentTimeoutResult(
+  userId: string,
+  message: string,
+): Promise<RouteInboundAgentMessageResult> {
   const normalizedMessage = normalizeInboundMessageForConsent(message);
   if (!normalizedMessage) {
     return { response: null, liveAnswerBundle: null };
@@ -12702,6 +12749,13 @@ async function buildInboundAgentTimeoutResult(message: string): Promise<RouteInb
     message: normalizedMessage,
     preferredLocale: "en",
   });
+  const activeContactStatusRecovery = await resolveWhatsAppActiveContactStatusRecoveryResult({
+    userId,
+    message,
+  });
+  if (activeContactStatusRecovery) {
+    return activeContactStatusRecovery;
+  }
   const activeContactFallback = buildWhatsAppActiveContactOperationalFallback(normalizedMessage);
   if (activeContactFallback) {
     const localizedActiveContactFallback =
@@ -12892,10 +12946,23 @@ async function applyEndToEndReplyLanguageLock(input: {
   }
 
   const normalizedMessage = normalizeInboundMessageForConsent(input.message) || input.message;
+  const activeContactSessionCommand = parseWhatsAppActiveContactSessionCommand(normalizedMessage);
+  const shouldPreserveOperationalWhatsAppHistoryReply =
+    looksLikeWhatsAppHistoryQuestion(normalizedMessage)
+    && /\b(?:whatsapp history lane|exact contact name|full number|option number|synced whatsapp messages|latest visible message|messages reviewed for this summary|professional brief|there are no synced messages for it yet|I couldn't find matching WhatsApp messages)\b/i.test(rawResponse);
+  const shouldPreserveOperationalWhatsAppActiveContactReply =
+    activeContactSessionCommand.type !== "none"
+    && /\b(?:active contact mode|active contact:|stop talking to|stopped active contact mode for|no active contact mode is running right now|abhi active contact:|koi active contact mode abhi chal nahi raha hai|ke liye active contact mode band kar diya gaya hai)\b/i.test(rawResponse);
+  if (
+    shouldPreserveOperationalWhatsAppHistoryReply
+    || shouldPreserveOperationalWhatsAppActiveContactReply
+  ) {
+    return input.result;
+  }
+
   const preferredLocale = resolveSupportedLocale(
     await getUserLocale(input.userId).catch(() => "en"),
   ) ?? "en";
-  const activeContactSessionCommand = parseWhatsAppActiveContactSessionCommand(normalizedMessage);
   if (
     activeContactSessionCommand.type !== "none"
     && looksLikeRomanHinglishActiveContactCommand(normalizedMessage)
@@ -13032,7 +13099,7 @@ export async function routeInboundAgentMessageResult(
       (): RouteInboundAgentMessageResult => ({ response: null as unknown as string, liveAnswerBundle: null, modelAuditTrail: null }),
     ),
     new Promise<RouteInboundAgentMessageResult>((resolve) => {
-      setTimeout(() => resolve(buildInboundAgentTimeoutResult(message)), timeoutPolicy.timeoutMs);
+      setTimeout(() => resolve(buildInboundAgentTimeoutResult(userId, message)), timeoutPolicy.timeoutMs);
     }),
   ]);
 
@@ -13040,6 +13107,16 @@ export async function routeInboundAgentMessageResult(
   // make one last emergency AI call rather than sending garbage to the user
   const resp = result.response?.trim() ?? "";
   if (!resp || isVisibleFallbackReply(resp) || isLowQualityTemplateReply(resp) || resp.length < 20) {
+    const activeContactStatusRecovery = await resolveWhatsAppActiveContactStatusRecoveryResult({
+      userId,
+      message,
+      liveAnswerBundle: result.liveAnswerBundle ?? null,
+      modelAuditTrail: result.modelAuditTrail ?? null,
+    });
+    if (activeContactStatusRecovery) {
+      return activeContactStatusRecovery;
+    }
+
     const activeContactFallback = buildWhatsAppActiveContactOperationalFallback(message);
     if (activeContactFallback) {
       return applyEndToEndReplyLanguageLock({
@@ -13474,18 +13551,7 @@ async function routeInboundAgentMessageCore(
   }
 
   const whatsAppSettings = await getWhatsAppSettings(userId).catch(() => null);
-  // Auto-expire active contact sessions after 30 minutes of inactivity
-  const ACTIVE_CONTACT_SESSION_TTL_MS = 30 * 60_000;
-  const rawActiveContactSession = whatsAppSettings?.activeContactSession ?? null;
-  const activeContactSession =
-    rawActiveContactSession?.startedAt
-    && Date.now() - new Date(rawActiveContactSession.startedAt).getTime() > ACTIVE_CONTACT_SESSION_TTL_MS
-      ? (() => {
-        void clearWhatsAppActiveContactSession(userId).catch(() => null);
-        console.log(`[agent] Auto-expired active contact session for ${userId} (${rawActiveContactSession.contactName})`);
-        return null;
-      })()
-      : rawActiveContactSession;
+  const activeContactSession = await resolveCurrentWhatsAppActiveContactSession(userId, whatsAppSettings);
   const activeContactSessionCommand = parseWhatsAppActiveContactSessionCommand(trimmed);
   const forceRomanHinglishActiveContactReply = activeContactSessionCommand.type !== "none"
     && looksLikeRomanHinglishActiveContactCommand(trimmed);
@@ -14940,7 +15006,7 @@ async function routeInboundAgentMessageCore(
 
     case "whatsapp_history": {
       const reply = await buildWhatsAppHistoryReply(userId, trimmed, responseLocale);
-      return finalizeRaw(reply, "send_message", "whatsapp_history");
+      return finalizeTranslated(reply, "send_message", "whatsapp_history");
     }
 
     case "send_message": {
@@ -18651,7 +18717,40 @@ export function parseWhatsAppActiveContactSessionCommandForTest(text: string) {
   return parseWhatsAppActiveContactSessionCommand(text);
 }
 
+export function buildWhatsAppActiveContactStatusRecoveryPlanForTest(input: {
+  message: string;
+  session: WhatsAppActiveContactSession | null;
+  preferredLocale: SupportedLocale;
+}) {
+  return buildWhatsAppActiveContactStatusRecoveryPlan(input);
+}
+
 const WHATSAPP_PENDING_CONTACT_RESOLUTION_TTL_MS = 15 * 60 * 1_000;
+
+function escapeClawCloudRegex(value: string) {
+  return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function replaceRequestedContactInPrompt(
+  originalPrompt: string,
+  requestedName: string,
+  selectedLabel: string,
+) {
+  const trimmedPrompt = String(originalPrompt ?? "").trim();
+  const trimmedRequestedName = String(requestedName ?? "").trim();
+  const trimmedSelectedLabel = String(selectedLabel ?? "").trim();
+  if (!trimmedPrompt || !trimmedRequestedName || !trimmedSelectedLabel) {
+    return trimmedPrompt;
+  }
+
+  const escapedRequestedName = escapeClawCloudRegex(trimmedRequestedName).replace(/\s+/g, "\\s+");
+  const exactNamePattern = new RegExp(`\\b${escapedRequestedName}\\b`, "i");
+  if (exactNamePattern.test(trimmedPrompt)) {
+    return trimmedPrompt.replace(exactNamePattern, trimmedSelectedLabel);
+  }
+
+  return trimmedPrompt;
+}
 
 function buildWhatsAppPendingContactResumePrompt(
   kind: WhatsAppPendingContactResolution["kind"],
@@ -18667,14 +18766,39 @@ function buildWhatsAppPendingContactResumePrompt(
     case "send_message": {
       const parsed = parseSendMessageCommand(originalPrompt);
       const messageText = parsed?.message?.trim();
+      const requestedName =
+        parsed?.kind === "contacts"
+          ? parsed.contactNames[0] ?? parsed.contactName
+          : parsed?.contactName;
+      const shouldPreviewFirst = shouldPreviewRecipientTargetedWhatsAppDraft(originalPrompt);
       if (!messageText) {
         return `Send message to ${selectedLabel}: Hello`;
       }
+
+      if (shouldPreviewFirst) {
+        const resumePrompt = replaceRequestedContactInPrompt(
+          originalPrompt,
+          requestedName ?? "",
+          selectedLabel,
+        );
+        if (resumePrompt.trim()) {
+          return resumePrompt;
+        }
+      }
+
       return `Send message to ${selectedLabel}: ${messageText}`;
     }
     default:
       return originalPrompt;
   }
+}
+
+export function buildWhatsAppPendingContactResumePromptForTest(
+  kind: WhatsAppPendingContactResolution["kind"],
+  option: WhatsAppPendingContactOption,
+  originalPrompt: string,
+) {
+  return buildWhatsAppPendingContactResumePrompt(kind, option, originalPrompt);
 }
 
 function buildWhatsAppPendingContactResolutionReply(
@@ -18905,6 +19029,31 @@ function dedupeWhatsAppPendingContactMatches(
   });
 }
 
+function formatWhatsAppHistoryResolvedNoRowsReply(input: {
+  requestedName: string;
+  resolvedName: string;
+  phone?: string | null;
+}) {
+  const targetLabel = input.phone
+    ? `${input.resolvedName} (+${input.phone})`
+    : input.resolvedName;
+
+  return [
+    `I couldn't find synced WhatsApp messages for "${input.requestedName}" yet.`,
+    "",
+    `I checked the chat matched as ${targetLabel}, but there are no synced messages for it yet.`,
+    "Try a keyword from the chat, a date hint, or ask for the latest visible message.",
+  ].join("\n");
+}
+
+export function formatWhatsAppHistoryResolvedNoRowsReplyForTest(input: {
+  requestedName: string;
+  resolvedName: string;
+  phone?: string | null;
+}) {
+  return formatWhatsAppHistoryResolvedNoRowsReply(input);
+}
+
 async function buildWhatsAppHistoryNoRowsReply(input: {
   userId: string;
   promptText: string;
@@ -18945,7 +19094,7 @@ async function buildWhatsAppHistoryNoRowsReply(input: {
   }
 
   const uniqueRetryMatches = dedupeWhatsAppPendingContactMatches(retryMatches);
-  if (uniqueRetryMatches.length) {
+  if (uniqueRetryMatches.length > 1) {
     await rememberWhatsAppPendingContactResolution({
       userId: input.userId,
       kind: "whatsapp_history",
@@ -18968,8 +19117,21 @@ async function buildWhatsAppHistoryNoRowsReply(input: {
     ].join("\n");
   }
 
+  if (uniqueRetryMatches.length === 1) {
+    const match = uniqueRetryMatches[0]!;
+    return formatWhatsAppHistoryResolvedNoRowsReply({
+      requestedName,
+      resolvedName: match.name,
+      phone: match.phone ?? null,
+    });
+  }
+
   if (input.resolvedContactName) {
-    return `I couldn't find matching WhatsApp messages from ${input.resolvedContactName}. Try a more specific contact name or a keyword from the message.`;
+    return formatWhatsAppHistoryResolvedNoRowsReply({
+      requestedName,
+      resolvedName: input.resolvedContactName,
+      phone: input.resolvedContactScope?.phone ?? null,
+    });
   }
 
   return "I couldn't find matching WhatsApp messages. Tell me the contact name or a keyword from the chat and I'll check it.";
@@ -19282,10 +19444,109 @@ function formatWhatsAppActiveContactSessionTarget(session: WhatsAppActiveContact
     : session.contactName;
 }
 
+async function resolveCurrentWhatsAppActiveContactSession(
+  userId: string,
+  whatsAppSettings?: Awaited<ReturnType<typeof getWhatsAppSettings>> | null,
+) {
+  const settings = typeof whatsAppSettings === "undefined"
+    ? await getWhatsAppSettings(userId).catch(() => null)
+    : whatsAppSettings;
+  const ACTIVE_CONTACT_SESSION_TTL_MS = 30 * 60_000;
+  const rawActiveContactSession = settings?.activeContactSession ?? null;
+  const startedAtMs = rawActiveContactSession?.startedAt
+    ? new Date(rawActiveContactSession.startedAt).getTime()
+    : Number.NaN;
+
+  if (
+    rawActiveContactSession?.startedAt
+    && Number.isFinite(startedAtMs)
+    && Date.now() - startedAtMs > ACTIVE_CONTACT_SESSION_TTL_MS
+  ) {
+    void clearWhatsAppActiveContactSession(userId).catch(() => null);
+    console.log(
+      `[agent] Auto-expired active contact session for ${userId} (${rawActiveContactSession.contactName})`,
+    );
+    return null;
+  }
+
+  return rawActiveContactSession;
+}
+
 function shouldUseRomanHinglishForActiveContactReply(
   resolution: ClawCloudReplyLanguageResolution,
 ) {
   return resolution.preserveRomanScript && resolution.locale === "en";
+}
+
+type WhatsAppActiveContactStatusRecoveryPlan = {
+  locale: SupportedLocale;
+  preserveRomanScript: boolean;
+  alreadyTranslated: boolean;
+  reply: string;
+};
+
+function buildWhatsAppActiveContactStatusRecoveryPlan(input: {
+  message: string;
+  session: WhatsAppActiveContactSession | null;
+  preferredLocale: SupportedLocale;
+}): WhatsAppActiveContactStatusRecoveryPlan | null {
+  const normalizedMessage = normalizeInboundMessageForConsent(input.message) || input.message;
+  if (parseWhatsAppActiveContactSessionCommand(normalizedMessage).type !== "status") {
+    return null;
+  }
+
+  const replyLanguage = looksLikeRomanHinglishActiveContactCommand(normalizedMessage)
+    ? buildForcedRomanHinglishReplyLanguageResolution()
+    : resolveClawCloudReplyLanguage({
+      message: normalizedMessage,
+      preferredLocale: input.preferredLocale,
+    });
+  const useRomanHinglish = shouldUseRomanHinglishForActiveContactReply(replyLanguage);
+
+  return {
+    locale: replyLanguage.locale,
+    preserveRomanScript: useRomanHinglish,
+    alreadyTranslated: useRomanHinglish || replyLanguage.locale === "en",
+    reply: buildWhatsAppActiveContactSessionStatusReply(input.session, useRomanHinglish),
+  };
+}
+
+async function resolveWhatsAppActiveContactStatusRecoveryResult(input: {
+  userId: string;
+  message: string;
+  liveAnswerBundle?: ClawCloudAnswerBundle | null;
+  modelAuditTrail?: ClawCloudModelAuditTrail | null;
+}): Promise<RouteInboundAgentMessageResult | null> {
+  const preferredLocale = resolveSupportedLocale(
+    await withSoftTimeout(
+      getUserLocale(input.userId).catch(() => "en" as SupportedLocale),
+      "en" as SupportedLocale,
+      NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS,
+    ),
+  ) ?? "en";
+  const activeContactSession = await resolveCurrentWhatsAppActiveContactSession(input.userId);
+  const recoveryPlan = buildWhatsAppActiveContactStatusRecoveryPlan({
+    message: input.message,
+    session: activeContactSession,
+    preferredLocale,
+  });
+  if (!recoveryPlan) {
+    return null;
+  }
+
+  return finalizeAgentReply({
+    userId: input.userId,
+    locale: recoveryPlan.locale,
+    preserveRomanScript: recoveryPlan.preserveRomanScript,
+    question: normalizeInboundMessageForConsent(input.message) || input.message,
+    intent: "send_message",
+    category: "send_message",
+    startedAt: Date.now(),
+    reply: recoveryPlan.reply,
+    alreadyTranslated: recoveryPlan.alreadyTranslated,
+    liveAnswerBundle: input.liveAnswerBundle ?? null,
+    modelAuditTrail: input.modelAuditTrail ?? null,
+  });
 }
 
 function buildWhatsAppActiveContactOperationalFallback(message: string) {
@@ -19582,6 +19843,68 @@ function formatWhatsAppSendSafetyReply(
   }
 }
 
+function shouldPreviewRecipientTargetedWhatsAppDraft(originalRequest: string) {
+  const normalized = normalizeClawCloudUnderstandingMessage(
+    stripClawCloudConversationalLeadIn(String(originalRequest ?? "")),
+  )
+    .toLowerCase()
+    .trim();
+  if (!normalized) {
+    return false;
+  }
+
+  if (/\b(?:do\s+not|don't|without)\s+send\b/i.test(normalized)) {
+    return true;
+  }
+
+  const explicitImmediateSend =
+    /\b(?:send|sned|snd|reply|replly|tell)\b/i.test(normalized)
+    || /^(?:message|mesage|msg|whatsapp|whatsap|whatsaap|wa)\b/i.test(normalized)
+    || /\b(?:bhej(?:\s*(?:do|de|dena|dijiye|na))|send\s*(?:kar(?:o|do|na)?))\b/i.test(normalized);
+  return [
+    /\b(?:draft|preview)\b/,
+    /\bshow\b.{0,48}\b(?:draft|message|text|reply|wish)\b/,
+    /\breview\b.{0,48}\b(?:draft|message|text|reply|wish)\b/,
+    /\bcompose\b.{0,48}\b(?:draft|message|text|reply|wish)\b/,
+    /\bprepare\b.{0,48}\b(?:draft|message|text|reply|wish)\b/,
+    /\bwrite\b.{0,48}\b(?:message|text|reply|wish|note)\b/,
+    /\b(?:message|text|reply|wish|note)\b.{0,48}\bwrite\b/,
+    /\blikh(?:\s*(?:ke|kar))?\s*(?:do|de|dena|dijiye|kar(?:o|na)?)\b/,
+    /\bfor\s+approval\b/,
+    /\bbefore\s+sending\b/,
+  ].some((pattern) => pattern.test(normalized)) && !explicitImmediateSend;
+}
+
+export function shouldPreviewRecipientTargetedWhatsAppDraftForTest(originalRequest: string) {
+  return shouldPreviewRecipientTargetedWhatsAppDraft(originalRequest);
+}
+
+function buildWhatsAppSendAmbiguousContactReply(
+  requestedName: string,
+  matches: Parameters<typeof formatAmbiguousReply>[1],
+  options?: {
+    willSendImmediately?: boolean;
+  },
+) {
+  return [
+    formatAmbiguousReply(requestedName, matches),
+    "",
+    options?.willSendImmediately === false
+      ? "Once you tell me the exact contact, I will prepare the message for the right chat."
+      : "Once you tell me the exact contact, I will send this message to the right chat.",
+  ].join("\n");
+}
+
+export function buildWhatsAppSendAmbiguousContactReplyForTest(
+  requestedName: string,
+  matches: Parameters<typeof formatAmbiguousReply>[1],
+  options?: {
+    willSendImmediately?: boolean;
+  },
+) {
+  return buildWhatsAppSendAmbiguousContactReply(requestedName, matches, options);
+}
+
 async function handleSendMessageToContactProfessional(
   userId: string,
   text: string,
@@ -19739,7 +20062,9 @@ async function handleSendMessageToContactProfessional(
         });
       }
       return translateMessage(
-        formatAmbiguousReply(requestedName, resolved.matches),
+        buildWhatsAppSendAmbiguousContactReply(requestedName, resolved.matches, {
+          willSendImmediately: !shouldPreviewRecipientTargetedWhatsAppDraft(text),
+        }),
         locale,
       );
     }
@@ -19810,12 +20135,11 @@ async function handleSendMessageToContactProfessional(
   );
 
   if (canAutoSendSingleRecipient && singleRecipient) {
-    // Check if the user's command is a "draft/write for" request (likh do, write for, etc.)
-    // vs a direct "send X to Y" command. Draft requests show preview first.
-    const isDraftRequest = /\b(?:likh|likho|likhna|likhdo|write|draft|compose|banao|bana)\b/i.test(text)
-      && !/\b(?:bhej|send|snd|sned|forward)\b/i.test(text);
+    // Draft-style prompts stay in review.
+    // Only explicit send/reply/message phrasing should send immediately.
+    const shouldPreviewFirst = shouldPreviewRecipientTargetedWhatsAppDraft(text);
 
-    if (isDraftRequest) {
+    if (shouldPreviewFirst) {
       // Show draft and ask for confirmation before sending
       await rememberWhatsAppPendingContactResolution({
         userId,
