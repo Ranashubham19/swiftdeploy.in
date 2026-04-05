@@ -1514,45 +1514,17 @@ function sanitizeOutboundWhatsAppMessage(raw: string): string {
 
 async function sendStreamingMessage(sock: WASocket, jid: string, fullText: string) {
   const trimmed = sanitizeOutboundWhatsAppMessage(fullText);
-  const chunks = splitWhatsAppStreamChunks(trimmed);
   const messageIds: string[] = [];
 
-  // Show "typing..." indicator before first message — like Meta AI's thinking pause
+  // Show "typing..." indicator before sending — natural thinking pause
   await sock.sendPresenceUpdate("composing", jid).catch(() => null);
   await new Promise((resolve) => setTimeout(resolve, whatsAppInitialTypingDelayMs(trimmed)));
 
-  if (chunks.length <= 1) {
-    const sent = await sock.sendMessage(jid, { text: trimmed });
-    if (sent?.key?.id) {
-      outboundIds.add(sent.key.id);
-      messageIds.push(sent.key.id);
-    }
-    await sock.sendPresenceUpdate("paused", jid).catch(() => null);
-    return messageIds;
-  }
-
-  for (let index = 0; index < chunks.length; index += 1) {
-    const chunk = chunks[index] ?? "";
-    const isLast = index === chunks.length - 1;
-
-    if (index > 0) {
-      // Show "typing..." between each chunk for natural word-by-word feel
-      await sock.sendPresenceUpdate("composing", jid).catch(() => null);
-      await new Promise((resolve) => setTimeout(resolve, whatsAppChunkDelayMs(chunk)));
-    }
-
-    const sent = await sock.sendMessage(jid, { text: chunk });
-    if (sent?.key?.id) {
-      outboundIds.add(sent.key.id);
-      messageIds.push(sent.key.id);
-    }
-
-    // Keep "typing..." visible between chunks so it feels continuous
-    if (!isLast) {
-      await sock.sendPresenceUpdate("composing", jid).catch(() => null);
-      // Small breathing pause between send and next typing indicator
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    }
+  // Always send as a SINGLE message box — no splitting into multiple bubbles
+  const sent = await sock.sendMessage(jid, { text: trimmed });
+  if (sent?.key?.id) {
+    outboundIds.add(sent.key.id);
+    messageIds.push(sent.key.id);
   }
 
   await sock.sendPresenceUpdate("paused", jid).catch(() => null);

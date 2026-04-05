@@ -159,11 +159,20 @@ async function callTextModel(
 
 function buildImageDescriptionPrompt() {
   return [
-    "Describe this image clearly and accurately.",
-    "If there is visible text, quote the important text exactly.",
-    "If the image is a screenshot, table, dashboard, or document, list the key rows or fields as bullets.",
-    "Do not invent details that are not visible.",
-  ].join(" ");
+    "You are a WhatsApp AI assistant. A user just sent you this image.",
+    "Your job is to understand the INTENT and MEANING behind the image, NOT to describe every visual detail.",
+    "",
+    "Rules:",
+    "- If the image is a greeting (Good Morning, Good Night, Happy Birthday, festival wish, etc.), respond warmly and naturally. Example: if it's a Good Morning image, say 'Good morning! Hope you have a wonderful day ahead 🌅' — do NOT describe the flowers, colors, or text layout.",
+    "- If the image is a meme or joke, react to the humor naturally. Laugh, comment on the joke, share the vibe.",
+    "- If the image is a photo of a person, place, or event, comment on what's happening — don't list visual elements like 'there is a status bar showing time'.",
+    "- If the image is a screenshot of a conversation, app, or UI, understand what the user is showing you and respond to the CONTENT, not the interface elements.",
+    "- If the image is a document, table, or data, extract the KEY information and summarize it clearly with bullet points.",
+    "- If the image contains a question or problem (math, quiz, homework), solve it directly.",
+    "- NEVER describe UI elements like 'status bar', 'dark theme', 'notification icon', 'time shown as' — these are irrelevant.",
+    "- NEVER start with 'The image displays...' or 'I can see...' — respond naturally as if a friend sent you the image.",
+    "- Keep the response concise, warm, and conversational.",
+  ].join("\n");
 }
 
 function buildImageExtractionPrompt() {
@@ -445,11 +454,16 @@ export function isVisionAvailable(): boolean {
 
 /**
  * Wraps the raw vision answer in WhatsApp-friendly formatting.
+ * For captioned images (user asked a question), prefix with analysis header.
+ * For uncaptioned images, return the natural response directly — no "Here's what I see" header.
  */
 export function formatVisionReply(
   rawAnswer: string,
   hadCaption: boolean,
 ): string {
-  const prefix = hadCaption ? "🖼️ *Image analysis:*\n\n" : "🖼️ *Here's what I see:*\n\n";
-  return prefix + rawAnswer;
+  if (hadCaption) {
+    return "🖼️ *Image analysis:*\n\n" + rawAnswer;
+  }
+  // No prefix for uncaptioned images — the AI response is already natural and conversational
+  return rawAnswer;
 }
