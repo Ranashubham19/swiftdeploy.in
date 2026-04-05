@@ -159,19 +159,31 @@ async function callTextModel(
 
 function buildImageDescriptionPrompt() {
   return [
-    "You are a WhatsApp AI assistant. A user just sent you this image.",
-    "Your job is to understand the INTENT and MEANING behind the image, NOT to describe every visual detail.",
+    "You are a WhatsApp AI assistant. A user just sent you this image on WhatsApp.",
+    "RESPOND to the image like a smart friend would — understand WHAT the image means and reply accordingly.",
     "",
-    "Rules:",
-    "- If the image is a greeting (Good Morning, Good Night, Happy Birthday, festival wish, etc.), respond warmly and naturally. Example: if it's a Good Morning image, say 'Good morning! Hope you have a wonderful day ahead 🌅' — do NOT describe the flowers, colors, or text layout.",
-    "- If the image is a meme or joke, react to the humor naturally. Laugh, comment on the joke, share the vibe.",
-    "- If the image is a photo of a person, place, or event, comment on what's happening — don't list visual elements like 'there is a status bar showing time'.",
-    "- If the image is a screenshot of a conversation, app, or UI, understand what the user is showing you and respond to the CONTENT, not the interface elements.",
-    "- If the image is a document, table, or data, extract the KEY information and summarize it clearly with bullet points.",
-    "- If the image contains a question or problem (math, quiz, homework), solve it directly.",
-    "- NEVER describe UI elements like 'status bar', 'dark theme', 'notification icon', 'time shown as' — these are irrelevant.",
-    "- NEVER start with 'The image displays...' or 'I can see...' — respond naturally as if a friend sent you the image.",
-    "- Keep the response concise, warm, and conversational.",
+    "CRITICAL RULES:",
+    "1. GREETING IMAGES (Good Morning/सुप्रभात/Good Night/शुभ रात्रि/Happy Birthday/festival wishes/motivational quotes):",
+    "   → Reply with a warm greeting in the SAME LANGUAGE as the text in the image.",
+    "   → Example: Image says 'सुप्रभात' with Hindi poetry → Reply: 'सुप्रभात! 🌅 आपका दिन मंगलमय हो। बहुत सुंदर संदेश!'",
+    "   → Example: Image says 'Good Morning' → Reply: 'Good morning! Wishing you a beautiful day ahead! 🌞'",
+    "   → Do NOT translate the text. Do NOT describe flowers, birds, or backgrounds. Just greet back warmly.",
+    "",
+    "2. MEMES/JOKES → React to the humor. Laugh, comment on the joke.",
+    "3. PHOTOS of people/places/events → Comment on what's happening, not visual details.",
+    "4. SCREENSHOTS of apps/chats/UI → Respond to the CONTENT shown, ignore UI elements.",
+    "5. DOCUMENTS/TABLES/DATA → Extract KEY information with bullet points.",
+    "6. QUESTIONS/PROBLEMS (math, quiz, homework) → Solve directly.",
+    "7. MOTIVATIONAL/INSPIRATIONAL quotes → Acknowledge the message positively in the same language.",
+    "",
+    "STRICTLY FORBIDDEN:",
+    "- NEVER say 'The image contains...', 'The image displays...', 'I can see...', 'It is accompanied by...'",
+    "- NEVER describe visual elements: colors, backgrounds, birds, flowers, fonts, layout, watermarks, website URLs",
+    "- NEVER mention 'status bar', 'dark theme', 'notification icon', 'blurred background'",
+    "- NEVER translate or transcribe the text unless asked — just RESPOND to its meaning",
+    "- NEVER give a second paragraph about what the image 'suggests' or 'indicates'",
+    "",
+    "Your response must be SHORT (2-4 sentences max), warm, and natural — like replying to a friend on WhatsApp.",
   ].join("\n");
 }
 
@@ -453,6 +465,40 @@ export function isVisionAvailable(): boolean {
 }
 
 /**
+ * Clean up vision model output — strip description-style phrasing that leaked
+ * through despite prompt instructions.
+ */
+function cleanVisionResponse(raw: string): string {
+  let cleaned = raw;
+
+  // Strip description-style opening phrases
+  const descriptionPrefixes = [
+    /^the image (?:contains|displays|shows|depicts|features|is)\b[^.]*\.\s*/i,
+    /^this image (?:contains|displays|shows|depicts|features|is)\b[^.]*\.\s*/i,
+    /^i (?:can see|see|notice)\b[^.]*\.\s*/i,
+    /^it is accompanied by\b[^.]*\.\s*/i,
+    /^the (?:overall )?(?:image|picture|photo) (?:appears to be|seems to be|looks like)\b[^.]*\.\s*/i,
+  ];
+
+  for (const prefix of descriptionPrefixes) {
+    cleaned = cleaned.replace(prefix, "");
+  }
+
+  // Strip trailing sentences that describe visual elements
+  const trailingDescriptions = [
+    /\.\s*(?:The website|The watermark|The URL|A website)\s+"?[^"]*"?\s+is (?:also )?visible\.?\s*$/i,
+    /\.\s*It is accompanied by[^.]*\.?\s*$/i,
+    /\.\s*The (?:background|image|photo) (?:shows|features|has|contains)[^.]*\.?\s*$/i,
+  ];
+
+  for (const trailing of trailingDescriptions) {
+    cleaned = cleaned.replace(trailing, ".");
+  }
+
+  return cleaned.trim();
+}
+
+/**
  * Wraps the raw vision answer in WhatsApp-friendly formatting.
  * For captioned images (user asked a question), prefix with analysis header.
  * For uncaptioned images, return the natural response directly — no "Here's what I see" header.
@@ -461,9 +507,11 @@ export function formatVisionReply(
   rawAnswer: string,
   hadCaption: boolean,
 ): string {
+  const cleaned = cleanVisionResponse(rawAnswer);
+
   if (hadCaption) {
-    return "🖼️ *Image analysis:*\n\n" + rawAnswer;
+    return "🖼️ *Image analysis:*\n\n" + cleaned;
   }
   // No prefix for uncaptioned images — the AI response is already natural and conversational
-  return rawAnswer;
+  return cleaned;
 }
