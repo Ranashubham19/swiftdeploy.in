@@ -11,7 +11,10 @@ import {
 } from "@/lib/clawcloud-india-normalization";
 import { getUserLocale, translateMessage } from "@/lib/clawcloud-i18n";
 import { getUpiTransactions } from "@/lib/clawcloud-upi";
-import { sendClawCloudWhatsAppMessage } from "@/lib/clawcloud-whatsapp";
+import {
+  sendClawCloudWhatsAppMessage,
+  type ClawCloudWhatsAppSelfDeliveryMode,
+} from "@/lib/clawcloud-whatsapp";
 
 type SpendEntry = {
   merchant: string;
@@ -334,7 +337,10 @@ function buildWeeklySummary(entries: SpendEntry[]): SpendSummary {
   return buildSpendSummary(entries, 7, "Last 7 days");
 }
 
-export async function runWeeklySpendSummary(userId: string) {
+export async function runWeeklySpendSummary(
+  userId: string,
+  deliveryMode: ClawCloudWhatsAppSelfDeliveryMode = "background",
+) {
   const locale = await getUserLocale(userId);
   const sourceData = await fetchSpendSources(userId, 30);
   const { emails, upiTransactions, gmailLimited, reconnectRequired } = sourceData;
@@ -343,8 +349,14 @@ export async function runWeeklySpendSummary(userId: string) {
     const message = reconnectRequired
       ? buildGoogleReconnectRequiredReply("Gmail")
       : buildSpendDataUnavailableReply("the last 30 days", gmailLimited);
-    await sendClawCloudWhatsAppMessage(userId, await translateMessage(message, locale));
-    await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+    const delivered = await sendClawCloudWhatsAppMessage(
+      userId,
+      await translateMessage(message, locale),
+      { deliveryMode },
+    );
+    if (delivered) {
+      await upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 });
+    }
     return {
       transactions: 0,
       total: 0,
@@ -382,12 +394,14 @@ export async function runWeeklySpendSummary(userId: string) {
     locale,
   );
 
-  await sendClawCloudWhatsAppMessage(userId, translatedMessage);
-  await upsertAnalyticsDaily(userId, {
-    emails_processed: emails.length,
-    tasks_run: 1,
-    wa_messages_sent: 1,
-  });
+  const delivered = await sendClawCloudWhatsAppMessage(userId, translatedMessage, { deliveryMode });
+  if (delivered) {
+    await upsertAnalyticsDaily(userId, {
+      emails_processed: emails.length,
+      tasks_run: 1,
+      wa_messages_sent: 1,
+    });
+  }
 
   return {
     transactions: weeklySummary.entries.length,

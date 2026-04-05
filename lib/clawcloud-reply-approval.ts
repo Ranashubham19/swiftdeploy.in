@@ -13,7 +13,10 @@ import { getUserLocale, translateMessage } from "@/lib/clawcloud-i18n";
 import { parseOutboundReviewDecision } from "@/lib/clawcloud-outbound-review";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 import { extractJsonObject, safeJsonParse } from "@/lib/utils";
-import { sendClawCloudWhatsAppMessage } from "@/lib/clawcloud-whatsapp";
+import {
+  sendClawCloudWhatsAppMessage,
+  type ClawCloudWhatsAppSelfDeliveryMode,
+} from "@/lib/clawcloud-whatsapp";
 
 export type ApprovalStatus = "pending" | "sent" | "skipped" | "edit_requested";
 
@@ -679,7 +682,11 @@ export async function handleLatestReplyApprovalReview(userId: string, message: s
   }
 }
 
-export async function sendReplyApprovalRequests(userId: string, maxEmails = 3) {
+export async function sendReplyApprovalRequests(
+  userId: string,
+  maxEmails = 3,
+  deliveryMode: ClawCloudWhatsAppSelfDeliveryMode = "background",
+) {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const locale = await getUserLocale(userId);
   const requestedCount = Math.min(Math.max(maxEmails, 1), 10);
@@ -694,6 +701,7 @@ export async function sendReplyApprovalRequests(userId: string, maxEmails = 3) {
       await sendClawCloudWhatsAppMessage(
         userId,
         await translateMessage(buildGoogleReconnectRequiredReply("Gmail"), locale),
+        { deliveryMode },
       );
       return { queued: 0 };
     }
@@ -701,6 +709,7 @@ export async function sendReplyApprovalRequests(userId: string, maxEmails = 3) {
       await sendClawCloudWhatsAppMessage(
         userId,
         await translateMessage(buildGoogleNotConnectedReply("Gmail"), locale),
+        { deliveryMode },
       );
       return { queued: 0 };
     }
@@ -712,7 +721,7 @@ export async function sendReplyApprovalRequests(userId: string, maxEmails = 3) {
       "📭 *No emails need replies right now.*\n\nYour inbox looks clear of actionable messages. I will keep checking.",
       locale,
     );
-    await sendClawCloudWhatsAppMessage(userId, message);
+    await sendClawCloudWhatsAppMessage(userId, message, { deliveryMode });
     return { queued: 0 };
   }
 
@@ -725,11 +734,12 @@ export async function sendReplyApprovalRequests(userId: string, maxEmails = 3) {
       "📭 *No human emails need replies right now.*\n\nI found messages, but they were automated notifications or newsletters.",
       locale,
     );
-    await sendClawCloudWhatsAppMessage(userId, message);
+    await sendClawCloudWhatsAppMessage(userId, message, { deliveryMode });
     return { queued: 0 };
   }
 
   let queued = 0;
+  let notificationsSent = 0;
 
   for (const email of actionableEmails.slice(0, requestedCount)) {
     const { data: existingApproval } = await supabaseAdmin
@@ -783,7 +793,12 @@ export async function sendReplyApprovalRequests(userId: string, maxEmails = 3) {
       `• \`SKIP ${shortId}\` - ignore this email`,
     ].join("\n");
 
-    await sendClawCloudWhatsAppMessage(userId, await translateMessage(message, locale));
+    const delivered = await sendClawCloudWhatsAppMessage(userId, await translateMessage(message, locale), {
+      deliveryMode,
+    });
+    if (delivered) {
+      notificationsSent += 1;
+    }
     queued += 1;
   }
 
@@ -792,13 +807,13 @@ export async function sendReplyApprovalRequests(userId: string, maxEmails = 3) {
       "📭 *All matching drafts are already pending or sent.*\n\nNo new reply approvals need your review right now.",
       locale,
     );
-    await sendClawCloudWhatsAppMessage(userId, message);
+    await sendClawCloudWhatsAppMessage(userId, message, { deliveryMode });
     return { queued: 0 };
   }
 
   await upsertAnalyticsDaily(userId, {
     drafts_created: queued,
-    wa_messages_sent: queued,
+    wa_messages_sent: notificationsSent,
   });
 
   return { queued };

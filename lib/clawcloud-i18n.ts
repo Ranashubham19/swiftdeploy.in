@@ -322,7 +322,7 @@ const LATIN_LANGUAGE_PATTERNS: Array<{ locale: SupportedLocale; pattern: RegExp 
   { locale: "ro", pattern: /\b(?:bună|mulțumesc|multumesc|vă rog|ajutor|explică|de ce|azi|știri|stiri|vreme|cât|unde|când|cine|este|sunt|poate|face|spune|oraș|țară|lume)\b/i },
   { locale: "hu", pattern: /\b(?:szia|köszönöm|kérem|segítség|magyarázd|miért|ma|hírek|időjárás|mennyi|hol|mikor|ki|van|lehet|csinál|mond|tud|város|ország|világ)\b/i },
   { locale: "cs", pattern: /\b(?:ahoj|děkuji|dekuji|prosím|pomoc|vysvětli|proč|dnes|zprávy|počasí|kolik|kde|kdy|kdo|je|jsou|může|dělat|říct|město|země|svět)\b/i },
-  { locale: "fi", pattern: /\b(?:hei|kiitos|ole hyvä|auta|selitä|miksi|tänään|uutiset|sää|paljonko|missä|milloin|kuka|on|ovat|voi|tehdä|sanoa|kaupunki|maa|maailma)\b/i },
+  { locale: "fi", pattern: /\b(?:hei|kiitos|ole hyvä|auta|selitä|miksi|tänään|uutiset|sää|paljonko|missä|milloin|kuka|on|ovat|voi|tehdä|sanoa|kaupunki|maailma)\b/i },
   { locale: "sv", pattern: /\b(?:hej|tack|snälla|hjälp|förklara|varför|idag|nyheter|väder|hur mycket|var|när|vem|är|kan|göra|säga|stad|land|värld)\b/i },
   { locale: "no", pattern: /\b(?:hei|takk|vennligst|hjelp|forklar|hvorfor|i dag|nyheter|vær|hvor mye|hvor|når|hvem|er|kan|gjøre|si|by|land|verden)\b/i },
   { locale: "da", pattern: /\b(?:hej|tak|venligst|hjælp|forklar|hvorfor|i dag|nyheder|vejr|hvor meget|hvor|hvornår|hvem|er|kan|gøre|sige|by|land|verden)\b/i },
@@ -600,6 +600,74 @@ export function extractExplicitReplyLocaleRequests(message: string): SupportedLo
   }
 
   return locales.length >= 2 ? locales : [];
+}
+
+function isResolvableExplicitReplyLanguageCandidate(value: string) {
+  const cleaned = String(value ?? "")
+    .replace(/\bnatural\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) {
+    return false;
+  }
+
+  if (SANSKRIT_EXPLICIT_LANGUAGE_RE.test(cleaned)) {
+    return true;
+  }
+
+  if (HINGLISH_EXPLICIT_LANGUAGE_RE.test(normalizeLocaleAlias(cleaned))) {
+    return true;
+  }
+
+  if (resolveExplicitReplyLocaleToken(cleaned)) {
+    return true;
+  }
+
+  const parts = cleaned
+    .split(MULTI_LOCALE_SEPARATOR_RE)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (parts.length < 2) {
+    return false;
+  }
+
+  const resolvedCount = parts
+    .map((part) => resolveExplicitReplyLocaleToken(part))
+    .filter((locale): locale is SupportedLocale => Boolean(locale))
+    .length;
+
+  return resolvedCount >= 2;
+}
+
+export function stripExplicitReplyLocaleRequestForContent(message: string) {
+  const normalized = normalizeMessageForLanguageDetection(message);
+  if (!normalized) {
+    return "";
+  }
+
+  const stripMatch = (pattern: RegExp, value: string) => {
+    const match = value.match(pattern);
+    const candidate = match?.[1]?.trim() ?? "";
+    if (!candidate || !isResolvableExplicitReplyLanguageCandidate(candidate)) {
+      return value;
+    }
+
+    const stripped = value
+      .replace(match?.[0] ?? "", "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    return stripped || value;
+  };
+
+  const withoutTrailingLanguage = stripMatch(TRAILING_REPLY_LANGUAGE_REQUEST_RE, normalized);
+  const withoutMidSentenceLanguage =
+    withoutTrailingLanguage === normalized
+      ? stripMatch(MID_SENTENCE_REPLY_LANGUAGE_REQUEST_RE, normalized)
+      : withoutTrailingLanguage;
+
+  return withoutMidSentenceLanguage;
 }
 
 function looksLikeEnglishMessage(normalized: string) {

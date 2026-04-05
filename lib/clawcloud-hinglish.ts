@@ -48,6 +48,7 @@ const HINGLISH_WORDS = new Set([
   "samjhao",
   "samajhna",
   "dekho",
+  "likh",
   "likho",
   "bhejna",
   "bhejo",
@@ -120,6 +121,7 @@ const HINGLISH_WORDS = new Set([
   "aurat",
   "baccha",
   "dost",
+  "ko",
   "dii",
   "didi",
   "bhai",
@@ -202,6 +204,10 @@ const HINGLISH_PHRASES = [
   /\b(?:ab|abhi)\s+(?:mere|meri)\s+(?:taraf\s+se|behalf\s+(?:me|mai|mein|par|pe))\s+(?:aap\s+)?[\w'.-]+\s+se\s+baat\s+kar(?:o|na|enge|karenge|karange|rahe|rhe)\b/i,
   /\b[\w'.-]+\s+se\s+(?:mere|meri)\s+(?:taraf\s+se|behalf\s+(?:me|mai|mein|par|pe))\s+baat\s+kar(?:o|na|enge|karenge|karange)\b/i,
   /\b[\w'.-]+\s+se\s+baat\s+karna\s+band\s+karo\b/i,
+  /\b.+\s+likh(?:\s*(?:ke|kar))?\s*(?:bhej|send)?\s*(?:do|de|dena|dijiye|kar(?:o|na)?)\s+.+\s+(?:ko|k)\b/i,
+  /\b.+\s+bhej(?:\s*(?:do|de|dena|dijiye|na))\s+.+\s+(?:ko|k)\b/i,
+  /\b.+\s+(?:ko|k)\s+.+\s+likh(?:\s*(?:ke|kar))?\s*(?:bhej|send)?\s*(?:do|de|dena|dijiye|kar(?:o|na)?)\b/i,
+  /\b.+\s+(?:ko|k)\s+.+\s+bhej(?:\s*(?:do|de|dena|dijiye|na))\b/i,
 ];
 
 export function detectHinglish(message: string): boolean {

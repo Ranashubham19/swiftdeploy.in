@@ -339,7 +339,7 @@ function buildAmbiguityPrompt(queryName: string, matches: ContactMatch[]): strin
         : `*${index + 1}.* ${match.name} (${describeContactMatchReason(match)})`,
     ),
     "",
-    "Tell me the exact contact name or full number and I will queue the right chat.",
+    "Tell me the exact contact name or full number and I will use the right chat.",
     'Example: _Send "Hello" to Raj Sharma_',
   ].join("\n");
 }

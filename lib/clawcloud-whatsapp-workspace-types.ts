@@ -283,7 +283,7 @@ export type WhatsAppInboxSummary = {
 };
 
 export const defaultWhatsAppSettings: WhatsAppSettings = {
-  automationMode: "auto_reply",
+  automationMode: "read_only",
   replyMode: "balanced",
   groupReplyMode: "never",
   requireApprovalForSensitive: false,

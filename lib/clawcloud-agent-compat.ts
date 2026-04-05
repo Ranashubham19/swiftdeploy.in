@@ -762,6 +762,7 @@ export async function runDueClawCloudTasks(): Promise<{
           userId: task.user_id,
           taskType: normalizedTaskType,
           bypassEnabledCheck: true,
+          deliveryMode: "background",
         });
         fired.push({
           userId: task.user_id,
@@ -798,10 +799,14 @@ export async function runDueClawCloudTasks(): Promise<{
     }
 
     try {
-      await sendClawCloudWhatsAppMessage(
+      const delivered = await sendClawCloudWhatsAppMessage(
         reminder.user_id,
         formatReminderFireMessage(reminder),
+        { deliveryMode: "background" },
       );
+      if (!delivered) {
+        continue;
+      }
       await fireReminder(reminder);
       await upsertAnalyticsDaily(reminder.user_id, { tasks_run: 1, wa_messages_sent: 1 });
 
@@ -884,6 +889,7 @@ export async function runDueClawCloudTasks(): Promise<{
             hangoutLink: event.hangoutLink ?? null,
             attendees: parseCalendarAttendees(event as unknown as Record<string, unknown>),
             minutesBefore,
+            deliveryMode: "background",
           });
 
           if (briefingSent) {

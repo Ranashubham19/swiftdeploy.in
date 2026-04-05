@@ -3,7 +3,10 @@ import { upsertAnalyticsDaily } from "@/lib/clawcloud-analytics";
 import { getClawCloudCalendarEvents, getClawCloudGmailMessages } from "@/lib/clawcloud-google";
 import { getUserLocale, translateMessage } from "@/lib/clawcloud-i18n";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
-import { sendClawCloudWhatsAppMessage } from "@/lib/clawcloud-whatsapp";
+import {
+  sendClawCloudWhatsAppMessage,
+  type ClawCloudWhatsAppSelfDeliveryMode,
+} from "@/lib/clawcloud-whatsapp";
 
 type TaskRunSummary = {
   taskType: string;
@@ -246,7 +249,10 @@ async function buildEveningSummaryMessage(input: {
   return polishSummaryMessage(lines.join("\n"), locale).catch(() => lines.join("\n"));
 }
 
-export async function sendEveningSummary(userId: string): Promise<{ message: string }> {
+export async function sendEveningSummary(
+  userId: string,
+  deliveryMode: ClawCloudWhatsAppSelfDeliveryMode = "background",
+): Promise<{ message: string; delivered: boolean }> {
   const locale = await getUserLocale(userId);
   const timeZone = await getUserTimezone(userId);
 
@@ -280,12 +286,14 @@ export async function sendEveningSummary(userId: string): Promise<{ message: str
   });
   const translated = await translateMessage(message, locale);
 
-  await sendClawCloudWhatsAppMessage(userId, translated);
-  await upsertAnalyticsDaily(userId, {
-    emails_processed: todayEmails.length,
-    tasks_run: 1,
-    wa_messages_sent: 1,
-  });
+  const delivered = await sendClawCloudWhatsAppMessage(userId, translated, { deliveryMode });
+  if (delivered) {
+    await upsertAnalyticsDaily(userId, {
+      emails_processed: todayEmails.length,
+      tasks_run: 1,
+      wa_messages_sent: 1,
+    });
+  }
 
-  return { message: translated };
+  return { message: translated, delivered };
 }

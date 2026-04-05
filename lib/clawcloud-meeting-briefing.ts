@@ -7,7 +7,10 @@ import {
 } from "@/lib/clawcloud-google";
 import { getUserLocale, translateMessage } from "@/lib/clawcloud-i18n";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
-import { sendClawCloudWhatsAppMessage } from "@/lib/clawcloud-whatsapp";
+import {
+  sendClawCloudWhatsAppMessage,
+  type ClawCloudWhatsAppSelfDeliveryMode,
+} from "@/lib/clawcloud-whatsapp";
 
 export type CalendarAttendee = {
   email: string;
@@ -29,6 +32,7 @@ type MeetingBriefingInput = {
   hangoutLink?: string | null;
   attendees: CalendarAttendee[];
   minutesBefore?: number;
+  deliveryMode?: ClawCloudWhatsAppSelfDeliveryMode;
 };
 
 const MAX_THREADS_PER_ATTENDEE = 3;
@@ -300,10 +304,15 @@ export async function sendMeetingBriefing(input: MeetingBriefingInput): Promise<
     emailContexts,
   });
 
-  await sendClawCloudWhatsAppMessage(
+  const delivered = await sendClawCloudWhatsAppMessage(
     input.userId,
     await translateMessage(briefing, locale),
+    { deliveryMode: input.deliveryMode ?? "background" },
   );
+  if (!delivered) {
+    return false;
+  }
+
   await markBriefingSent(input.userId, input.eventId);
   await upsertAnalyticsDaily(input.userId, { tasks_run: 1, wa_messages_sent: 1 });
   return true;

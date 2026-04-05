@@ -52,8 +52,8 @@ function parseTime(value: string) {
 
 function buildSettingsSummary(settings: Awaited<ReturnType<typeof getWhatsAppSettings>>) {
   const autonomousReplySummary =
-    settings.automationMode === "auto_reply"
-      ? "On - ClawCloud can reply automatically in direct chats after someone messages you."
+    settings.automationMode === "suggest_only"
+      ? "Off for sending - ClawCloud can prepare suggestions, but it will not send anything automatically."
       : "Off - ClawCloud only reads or sends there after your explicit command.";
 
   return [
@@ -75,9 +75,6 @@ function buildSettingsSummary(settings: Awaited<ReturnType<typeof getWhatsAppSet
 
 function parseAutomationMode(text: string) {
   const normalized = text.toLowerCase();
-  if (/\b(auto(?:\s*[- ]?\s*)?reply|automatic(?:\s+reply| replies)?|live)\b/.test(normalized)) {
-    return "auto_reply" as const;
-  }
   if (/\bsuggest(?:\s+only)?\b/.test(normalized)) return "suggest_only" as const;
   if (/\bread(?:\s+only)?\b/.test(normalized)) return "read_only" as const;
   return null;
@@ -195,12 +192,15 @@ export async function handleWhatsAppSettingsCommand(userId: string, text: string
   }
 
   if (/\b(automation mode|whatsapp mode|mode)\b/.test(normalized)) {
+    if (/\b(auto(?:\s*[- ]?\s*)?reply|automatic(?:\s+reply| replies)?|live)\b/.test(normalized)) {
+      return "Autonomous auto-reply mode is retired. ClawCloud will only send after your explicit command. Use suggest only or read only instead.";
+    }
     if (/\bapprove(?:\s+before\s+send)?\b/.test(normalized)) {
-      return "Approve-before-send mode is retired. Use auto reply, suggest only, or read only instead.";
+      return "Approve-before-send mode is retired. Use suggest only or read only instead.";
     }
     const automationMode = parseAutomationMode(text);
     if (!automationMode) {
-      return "Tell me the WhatsApp mode you want: auto reply, suggest only, or read only.";
+      return "Tell me the WhatsApp mode you want: suggest only or read only.";
     }
     patch.automationMode = automationMode;
   }
@@ -261,7 +261,6 @@ export async function handleWhatsAppSettingsCommand(userId: string, text: string
       "I can update your WhatsApp assistant settings.",
       "",
       "Examples:",
-      "_Set WhatsApp mode to auto reply_",
       "_Set WhatsApp mode to suggest only_",
       "_Set WhatsApp mode to read only_",
       "_Set reply tone to professional_",

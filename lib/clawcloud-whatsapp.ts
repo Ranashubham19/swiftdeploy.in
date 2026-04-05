@@ -721,7 +721,29 @@ export async function refreshClawCloudWhatsAppContacts(userId: string) {
   };
 }
 
-export async function sendClawCloudWhatsAppMessage(userId: string, message: string) {
+export type ClawCloudWhatsAppSelfDeliveryMode = "explicit_user_request" | "background";
+
+export function shouldDeliverClawCloudWhatsAppSelfMessage(input?: {
+  deliveryMode?: ClawCloudWhatsAppSelfDeliveryMode | null;
+}) {
+  return input?.deliveryMode === "explicit_user_request";
+}
+
+export async function sendClawCloudWhatsAppMessage(
+  userId: string,
+  message: string,
+  options?: {
+    deliveryMode?: ClawCloudWhatsAppSelfDeliveryMode | null;
+  },
+) {
+  if (!message.trim()) {
+    return false;
+  }
+
+  if (!shouldDeliverClawCloudWhatsAppSelfMessage(options)) {
+    return false;
+  }
+
   const primaryResponse = await agentServerFetch(`/wa/send-user/${encodeURIComponent(userId)}`, {
     method: "POST",
     body: JSON.stringify({ message }),

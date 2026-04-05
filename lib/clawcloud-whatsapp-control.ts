@@ -167,8 +167,11 @@ function normalizeSettings(value: unknown): WhatsAppSettings {
     typeof raw.automationMode === "string" && automationModes.has(raw.automationMode as WhatsAppAutomationMode)
       ? (raw.automationMode as WhatsAppAutomationMode)
       : defaultWhatsAppSettings.automationMode;
-  const automationMode = requestedAutomationMode === "approve_before_send"
-    ? "auto_reply"
+  const automationMode = (
+    requestedAutomationMode === "auto_reply"
+    || requestedAutomationMode === "approve_before_send"
+  )
+    ? "read_only"
     : requestedAutomationMode;
   const replyMode = typeof raw.replyMode === "string" && replyModes.has(raw.replyMode as WhatsAppReplyMode)
     ? (raw.replyMode as WhatsAppReplyMode)
@@ -447,10 +450,15 @@ export function isWithinWhatsAppQuietHours(
 export function decideWhatsAppReplyAction(input: {
   settings: WhatsAppSettings;
   sensitivity: WhatsAppSensitivity;
+  chatType?: "direct" | "group" | "self" | "broadcast" | "unknown";
   isGroupMessage: boolean;
   isKnownContact?: boolean;
   timeZone?: string | null;
 }) {
+  if (input.chatType === "self") {
+    return { action: "send" as const, reason: "Owner self-chat should always receive direct answers." };
+  }
+
   if (input.isGroupMessage) {
     if (!input.settings.allowGroupReplies || input.settings.groupReplyMode === "never") {
       return { action: "block" as const, reason: "Group replies are disabled." };
@@ -474,10 +482,13 @@ export function decideWhatsAppReplyAction(input: {
     return { action: "queue" as const, reason: "Automation mode is suggest-only." };
   }
 
-  if (input.settings.automationMode === "approve_before_send") {
+  if (
+    input.settings.automationMode === "auto_reply"
+    || input.settings.automationMode === "approve_before_send"
+  ) {
     return {
       action: "block" as const,
-      reason: "Approval-gated outbound mode is retired. A direct user command is required before ClawCloud sends anything.",
+      reason: "Autonomous outbound mode is retired. A direct user command is required before ClawCloud sends anything.",
     };
   }
 

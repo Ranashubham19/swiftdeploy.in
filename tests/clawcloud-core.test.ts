@@ -66,6 +66,7 @@ import {
   buildWhatsAppHistoryBackfillContacts,
   prepareWhatsAppContactUpsertRows,
 } from "@/lib/clawcloud-whatsapp-contacts";
+import { listRetiredWhatsAppOwnerUserIds } from "@/lib/clawcloud-whatsapp-owner-handoff";
 import {
   defaultWhatsAppSettings,
   type WhatsAppHistoryEntry,
@@ -73,6 +74,7 @@ import {
 import {
   decideWhatsAppReplyAction,
   isWithinWhatsAppQuietHours,
+  sanitizeWhatsAppSettingsPatch,
   shouldRequireExplicitUserCommandForWhatsAppChat,
 } from "@/lib/clawcloud-whatsapp-control";
 import { buildWhatsAppWorkspaceDeletePlanForTest } from "@/lib/clawcloud-whatsapp-governance";
@@ -107,6 +109,7 @@ import {
 } from "@/lib/clawcloud-whatsapp-storage";
 import { buildClawCloudWhatsAppContactIdentityGraph } from "@/lib/clawcloud-whatsapp-contact-identity";
 import { scheduleWhatsAppWorkflowRunsFromInbound } from "@/lib/clawcloud-whatsapp-workflows";
+import { shouldDeliverClawCloudWhatsAppSelfMessage } from "@/lib/clawcloud-whatsapp";
 import {
   dedupeWhatsAppHistoryRowsForTest,
   filterWhatsAppHistoryRowsForResolvedContactForTest,
@@ -153,6 +156,7 @@ import {
   inferClawCloudMessageLocale,
   resolveClawCloudReplyLanguage,
   buildClawCloudReplyLanguageInstruction,
+  stripExplicitReplyLocaleRequestForContent,
 } from "@/lib/clawcloud-i18n";
 import { resolveSupportedLocale } from "@/lib/clawcloud-locales";
 import { detectHinglish } from "@/lib/clawcloud-hinglish";
@@ -172,15 +176,23 @@ import {
   buildLocalizedDeterministicKnownStoryReplyForTest,
   buildCodingFallbackV2,
   buildTimeboxedProfessionalReplyForTest,
+  formatWhatsAppHistoryResolvedNoRowsReplyForTest,
+  buildWhatsAppPendingContactResumePromptForTest,
+  buildWhatsAppSendAmbiguousContactReplyForTest,
   maybePromoteVisibleResponseWithLiveBundleForTest,
   maybeBuildDeterministicProfessionalGreetingDraftForTest,
   maybeBuildDeterministicStructuredWhatsAppDraftForTest,
+  maybeBuildDeterministicWhatsAppActiveContactReplyForTest,
   autoCorrectWhatsAppOutgoingMessageForTest,
+  buildWhatsAppActiveContactStatusRecoveryPlanForTest,
+  buildWhatsAppActiveContactSendReceiptForTest,
+  detectWhatsAppActiveContactQuotedIncomingMessageForTest,
   looksLikeAssistantReplyRepairRequestForTest,
   parseWhatsAppActiveContactSessionCommandForTest,
   resolveWhatsAppPendingContactSelectionForTest,
   resolveWhatsAppActiveContactDraftLanguageForTest,
   resolveWhatsAppDraftingModeForTest,
+  shouldPreviewRecipientTargetedWhatsAppDraftForTest,
   detectPendingApprovalContextQuestionForTest,
   detectIntentForTest,
   inferAnswerLengthProfileForTest,
@@ -453,18 +465,56 @@ test("whatsapp workspace bootstrap runs for newly linked accounts with missing c
   }), false);
 });
 
-test("whatsapp defaults allow direct auto-replies while keeping outbound guardrails in place", () => {
-  assert.equal(defaultWhatsAppSettings.automationMode, "auto_reply");
+test("whatsapp defaults stay read-only and require an explicit user request before self-chat delivery", () => {
+  assert.equal(defaultWhatsAppSettings.automationMode, "read_only");
   assert.equal(defaultWhatsAppSettings.allowGroupReplies, false);
   assert.equal(defaultWhatsAppSettings.groupReplyMode, "never");
   assert.equal(defaultWhatsAppSettings.allowWorkflowAutoSend, false);
   assert.equal(defaultWhatsAppSettings.activeContactSession, null);
+  assert.equal(shouldDeliverClawCloudWhatsAppSelfMessage(), false);
+  assert.equal(
+    shouldDeliverClawCloudWhatsAppSelfMessage({ deliveryMode: "background" }),
+    false,
+  );
+  assert.equal(
+    shouldDeliverClawCloudWhatsAppSelfMessage({ deliveryMode: "explicit_user_request" }),
+    true,
+  );
 
   assert.equal(shouldRequireExplicitUserCommandForWhatsAppChat("self"), false);
   assert.equal(shouldRequireExplicitUserCommandForWhatsAppChat("direct"), true);
   assert.equal(shouldRequireExplicitUserCommandForWhatsAppChat("group"), true);
   assert.equal(shouldRequireExplicitUserCommandForWhatsAppChat("broadcast"), true);
   assert.equal(shouldRequireExplicitUserCommandForWhatsAppChat("unknown"), true);
+});
+
+test("whatsapp settings sanitize legacy autonomous modes back to read-only", () => {
+  assert.equal(
+    sanitizeWhatsAppSettingsPatch({ automationMode: "auto_reply" }).automationMode,
+    "read_only",
+  );
+  assert.equal(
+    sanitizeWhatsAppSettingsPatch({ automationMode: "approve_before_send" }).automationMode,
+    "read_only",
+  );
+});
+
+test("whatsapp reply action blocks legacy autonomous auto-reply mode", () => {
+  assert.deepEqual(
+    decideWhatsAppReplyAction({
+      settings: {
+        ...defaultWhatsAppSettings,
+        automationMode: "auto_reply",
+      },
+      sensitivity: "normal",
+      isGroupMessage: false,
+      isKnownContact: true,
+    }),
+    {
+      action: "block",
+      reason: "Autonomous outbound mode is retired. A direct user command is required before ClawCloud sends anything.",
+    },
+  );
 });
 
 test("whatsapp outbound lifecycle helpers stay deterministic and dedupe-safe", () => {
@@ -542,6 +592,27 @@ test("whatsapp quiet hours and group controls keep reply actions conservative", 
       isKnownContact: true,
     }),
     { action: "block", reason: "Group replies are disabled." },
+  );
+});
+
+test("whatsapp self chat bypasses passive defaults and answers directly", () => {
+  assert.deepEqual(
+    decideWhatsAppReplyAction({
+      settings: {
+        ...defaultWhatsAppSettings,
+        automationMode: "read_only",
+        quietHoursStart: "00:00",
+        quietHoursEnd: "00:00",
+      },
+      sensitivity: "normal",
+      chatType: "self",
+      isGroupMessage: false,
+      isKnownContact: true,
+    }),
+    {
+      action: "send",
+      reason: "Owner self-chat should always receive direct answers.",
+    },
   );
 });
 
@@ -2041,6 +2112,58 @@ test("setup status prefers the most recent active WhatsApp account when duplicat
   assert.equal(state.whatsappPhone, "918091392311");
 });
 
+test("newly scanned WhatsApp owner retires older duplicate owners for the same phone", () => {
+  const retired = listRetiredWhatsAppOwnerUserIds({
+    activeUserId: "new-user",
+    activePhone: "+91 80913 92311",
+    accounts: [
+      {
+        user_id: "new-user",
+        phone_number: "918091392311",
+        connected_at: "2026-04-05T12:00:00.000Z",
+      },
+      {
+        user_id: "old-user-a",
+        phone_number: "918091392311",
+        connected_at: "2026-04-01T12:00:00.000Z",
+        last_used_at: "2026-04-01T12:05:00.000Z",
+      },
+      {
+        user_id: "old-user-b",
+        account_email: "918091392311",
+        connected_at: "2026-03-30T10:00:00.000Z",
+        last_used_at: "2026-03-30T10:05:00.000Z",
+      },
+      {
+        user_id: "different-phone-user",
+        phone_number: "919999888877",
+        connected_at: "2026-04-04T12:00:00.000Z",
+      },
+    ],
+  });
+
+  assert.deepEqual(retired, ["old-user-a", "old-user-b"]);
+});
+
+test("newly scanned WhatsApp owner does not retire unrelated users when the phone differs", () => {
+  const retired = listRetiredWhatsAppOwnerUserIds({
+    activeUserId: "new-user",
+    activePhone: "918091392311",
+    accounts: [
+      {
+        user_id: "new-user",
+        phone_number: "918091392311",
+      },
+      {
+        user_id: "other-user",
+        phone_number: "919111111111",
+      },
+    ],
+  });
+
+  assert.deepEqual(retired, []);
+});
+
 test("authoritative Google account selection prefers the most recent active Gmail row over stale duplicates", () => {
   const account = pickAuthoritativeClawCloudGoogleAccount([
     {
@@ -3315,6 +3438,10 @@ test("reply language resolver mirrors the user's current message language when i
     extractExplicitReplyLocaleRequests("give me the story of 365 days in brazalian and chinese"),
     ["pt", "zh"],
   );
+  assert.equal(
+    stripExplicitReplyLocaleRequestForContent("tell me the news of today of usa in turkish"),
+    "tell me the news of today of usa",
+  );
   assert.equal(resolveSupportedLocale("brazalian"), "pt");
   assert.equal(resolveSupportedLocale("chineese"), "zh");
   assert.equal(
@@ -3431,6 +3558,20 @@ test("reply language resolver catches common Hinglish shorthand in capability pr
   const resolution = resolveClawCloudReplyLanguage({
     message,
     preferredLocale: "en",
+  });
+
+  assert.equal(resolution.locale, "en");
+  assert.equal(resolution.source, "hinglish_message");
+  assert.equal(resolution.preserveRomanScript, true);
+});
+
+test("reply language resolver does not misread Hinglish Maa drafting prompts as Finnish", () => {
+  const message = "ek good afternoon message likh do maa ko";
+  assert.equal(detectHinglish(message), true);
+
+  const resolution = resolveClawCloudReplyLanguage({
+    message,
+    preferredLocale: "fi",
   });
 
   assert.equal(resolution.locale, "en");
@@ -3714,6 +3855,23 @@ test("multilingual routing bridge promotes native-language prompts onto direct a
   assert.equal(
     detectMultilingualNativeAnswerLaneIntentForTest("Show my Gmail inbox."),
     null,
+  );
+});
+
+test("multilingual routing bridge stays out of locked WhatsApp send prompts", () => {
+  const prompt = "ek good afternoon message likh do maa ko";
+  const strictRoute = detectStrictIntentRouteForTest(prompt);
+  assert.deepEqual(strictRoute?.intent, { type: "send_message", category: "send_message" });
+  assert.equal(strictRoute?.locked, true);
+
+  assert.equal(
+    shouldUseMultilingualRoutingBridgeForTest(prompt, {
+      locale: "hi",
+      source: "mirrored_message",
+      detectedLocale: "hi",
+      preserveRomanScript: false,
+    }),
+    false,
   );
 });
 
@@ -4576,6 +4734,47 @@ test("send-message parsing understands abstract drafting requests for both send 
   assert.equal(replyParsed?.message, "a polite apology note for the delay");
 });
 
+test("send-message parsing understands Hinglish recipient-targeted write prompts", () => {
+  const messageFirst = parseSendMessageCommand("ek good afternoon message likh do maa ko");
+  assert.ok(messageFirst);
+  assert.equal(messageFirst?.kind, "contacts");
+  assert.equal(normalizeContactName(messageFirst?.contactName ?? ""), "maa");
+  assert.equal(messageFirst?.message, "good afternoon message");
+
+  const recipientFirst = parseSendMessageCommand("maa ko ek good afternoon message likh do");
+  assert.ok(recipientFirst);
+  assert.equal(recipientFirst?.kind, "contacts");
+  assert.equal(normalizeContactName(recipientFirst?.contactName ?? ""), "maa");
+  assert.equal(recipientFirst?.message, "ek good afternoon message");
+});
+
+test("recipient-targeted write prompts stay in preview mode while explicit send commands still send", () => {
+  assert.equal(
+    shouldPreviewRecipientTargetedWhatsAppDraftForTest("ek good afternoon message likh do maa ko"),
+    true,
+  );
+  assert.equal(
+    shouldPreviewRecipientTargetedWhatsAppDraftForTest("write a professional good afternoon message to maa"),
+    true,
+  );
+  assert.equal(
+    shouldPreviewRecipientTargetedWhatsAppDraftForTest("draft a professional good afternoon message to maa"),
+    true,
+  );
+  assert.equal(
+    shouldPreviewRecipientTargetedWhatsAppDraftForTest("show me a draft good afternoon message for maa"),
+    true,
+  );
+  assert.equal(
+    shouldPreviewRecipientTargetedWhatsAppDraftForTest("send a professional good afternoon message to maa"),
+    false,
+  );
+  assert.equal(
+    shouldPreviewRecipientTargetedWhatsAppDraftForTest("maa ko good afternoon bhej do"),
+    false,
+  );
+});
+
 test("send-message parsing ignores internal style markers during approval replay", () => {
   const parsed = parseSendMessageCommand(
     "[[clawcloud-style:professional]] send a professional thanku note to Priyanka for helping me in my todays exam and that to in hindi",
@@ -4613,6 +4812,75 @@ test("ambiguous whatsapp contact replies ask which exact named contact to use", 
   assert.match(reply, /Which Priyanka should I use\?/);
   assert.match(reply, /\*1\.\* Priyanka Ludhiana - \+919876396534/);
   assert.match(reply, /\*2\.\* Priyanka Sharma - \+919812345678/);
+});
+
+test("ambiguous whatsapp send replies promise to resume the same send after exact contact selection", () => {
+  const reply = buildWhatsAppSendAmbiguousContactReplyForTest("Maa", [
+    {
+      name: "Maa Home",
+      phone: "919876543210",
+      aliases: ["maa home"],
+      score: 0.95,
+      exact: true,
+      matchBasis: "exact",
+    },
+    {
+      name: "Maa Work",
+      phone: "919812345678",
+      aliases: ["maa work"],
+      score: 0.95,
+      exact: true,
+      matchBasis: "exact",
+    },
+  ]);
+
+  assert.match(reply, /I found more than one strong WhatsApp match for "Maa"\./);
+  assert.match(reply, /Tell me the exact contact name or full number and I will use the right chat\./);
+  assert.match(reply, /Once you tell me the exact contact, I will send this message to the right chat\./);
+});
+
+test("ambiguous whatsapp draft replies promise to prepare the message instead of sending it immediately", () => {
+  const reply = buildWhatsAppSendAmbiguousContactReplyForTest(
+    "Maa",
+    [
+      {
+        name: "Maa Home",
+        phone: "919876543210",
+        aliases: ["maa home"],
+        score: 0.95,
+        exact: true,
+        matchBasis: "exact",
+      },
+      {
+        name: "Maa Work",
+        phone: "919812345678",
+        aliases: ["maa work"],
+        score: 0.95,
+        exact: true,
+        matchBasis: "exact",
+      },
+    ],
+    {
+      willSendImmediately: false,
+    },
+  );
+
+  assert.match(reply, /Once you tell me the exact contact, I will prepare the message for the right chat\./);
+  assert.doesNotMatch(reply, /I will send this message to the right chat\./);
+});
+
+test("pending contact resume keeps draft prompts as drafts after contact disambiguation", () => {
+  const resumePrompt = buildWhatsAppPendingContactResumePromptForTest(
+    "send_message",
+    {
+      name: "Maa Home",
+      phone: "919876543210",
+      jid: null,
+    },
+    "ek good afternoon message likh do maa ko",
+  );
+
+  assert.equal(resumePrompt, "ek good afternoon message likh do Maa Home ko");
 });
 
 test("contact ranking drops fuzzy near-miss names when stronger exact-name matches exist", () => {
@@ -4930,6 +5198,20 @@ test("pending WhatsApp contact resolution understands exact-name and go-for foll
   );
 });
 
+test("resolved WhatsApp history no-rows replies do not reopen a one-contact selection loop", () => {
+  const reply = formatWhatsAppHistoryResolvedNoRowsReplyForTest({
+    requestedName: "hansraj",
+    resolvedName: "Hansraj Lpu",
+    phone: "918949826240",
+  });
+
+  assert.match(reply, /I couldn't find synced WhatsApp messages for "hansraj" yet\./i);
+  assert.match(reply, /I checked the chat matched as Hansraj Lpu \(\+918949826240\)/i);
+  assert.match(reply, /there are no synced messages for it yet/i);
+  assert.match(reply, /latest visible message/i);
+  assert.doesNotMatch(reply, /Reply with the exact contact name, full number, or option number/i);
+});
+
 test("recent WhatsApp clarification turns can classify a loose follow-up contact choice", () => {
   assert.equal(
     inferRecentWhatsAppContactFollowUpIntentForTest([
@@ -5070,6 +5352,38 @@ test("active-contact Hinglish status and stop replies stay in Roman Hinglish thr
   assert.doesNotMatch(afterStop.response ?? "", /No active contact mode is running right now/i);
 });
 
+test("active-contact status recovery plan rebuilds real status replies instead of generic fallback copy", () => {
+  const activeSession = {
+    contactName: "Hansraj Lpu",
+    phone: "918949826240",
+    jid: "918949826240@s.whatsapp.net",
+    startedAt: "2026-04-05T17:20:00.000Z",
+    sourceMessage: "from now onward you will talk with hansraj lpu on my behalf",
+  };
+
+  const englishPlan = buildWhatsAppActiveContactStatusRecoveryPlanForTest({
+    message: "Who are you talking to right now?",
+    session: activeSession,
+    preferredLocale: "en",
+  });
+  assert.ok(englishPlan);
+  assert.equal(englishPlan?.locale, "en");
+  assert.equal(englishPlan?.alreadyTranslated, true);
+  assert.match(englishPlan?.reply ?? "", /Active contact mode:\s*\*Hansraj Lpu \(\+918949826240\)\*/i);
+  assert.doesNotMatch(englishPlan?.reply ?? "", /could not check active contact mode/i);
+
+  const hinglishPlan = buildWhatsAppActiveContactStatusRecoveryPlanForTest({
+    message: "abhi kis se baat kar rahe ho",
+    session: activeSession,
+    preferredLocale: "en",
+  });
+  assert.ok(hinglishPlan);
+  assert.equal(hinglishPlan?.locale, "en");
+  assert.equal(hinglishPlan?.preserveRomanScript, true);
+  assert.match(hinglishPlan?.reply ?? "", /Abhi active contact:\s*\*Hansraj Lpu \(\+918949826240\)\*/i);
+  assert.doesNotMatch(hinglishPlan?.reply ?? "", /status check nahi kar paaya/i);
+});
+
 test("active contact mode adapts to the contact's recent language unless a message explicitly overrides it", () => {
   const hinglishContact = resolveWhatsAppActiveContactDraftLanguageForTest({
     currentMessage: "Please tell her I will be 10 minutes late.",
@@ -5115,6 +5429,57 @@ test("active contact mode adapts to the contact's recent language unless a messa
   assert.equal(thaiContact.selection, "contact_history");
   assert.equal(thaiContact.resolution.locale, "th");
   assert.equal(thaiContact.resolution.preserveRomanScript, false);
+});
+
+test("active contact mode detects copied inbound chat lines so it can reply instead of echoing them", async () => {
+  assert.equal(
+    detectWhatsAppActiveContactQuotedIncomingMessageForTest("Kesa hai tu.", ["Hlo shuu", "Kesa hai tu"]),
+    "Kesa hai tu",
+  );
+  assert.equal(
+    detectWhatsAppActiveContactQuotedIncomingMessageForTest("Main theek hoon, tu bata?", ["Hlo shuu", "Kesa hai tu"]),
+    null,
+  );
+
+  const reply = await maybeBuildDeterministicWhatsAppActiveContactReplyForTest({
+    contactName: "didi",
+    matchedInboundMessage: "Kesa hai tu.",
+    locale: "en",
+    languageResolution: {
+      locale: "en",
+      source: "hinglish_message",
+      detectedLocale: "hi",
+      preserveRomanScript: true,
+    },
+  });
+
+  assert.equal(reply, "Main theek hoon, tu bata?");
+});
+
+test("active contact send receipts stay short and mirror the user's message language", async () => {
+  const session = {
+    contactName: "didi",
+    phone: "917876831969",
+    jid: "917876831969@s.whatsapp.net",
+    startedAt: "2026-04-05T11:00:00.000Z",
+    sourceMessage: "from now onward talk to dii on my behalf",
+  };
+
+  const hinglishReceipt = await buildWhatsAppActiveContactSendReceiptForTest({
+    message: "Kesa hai tu.",
+    session,
+    locale: "en",
+    generatedReplyFromInbound: true,
+  });
+  assert.equal(hinglishReceipt, "didi ko reply bhej diya.");
+
+  const englishReceipt = await buildWhatsAppActiveContactSendReceiptForTest({
+    message: "Please tell her I will call later.",
+    session,
+    locale: "en",
+    generatedReplyFromInbound: false,
+  });
+  assert.equal(englishReceipt, "Sent to didi.");
 });
 
 test("contact ranking resolves family aliases from synced WhatsApp names and recent chat history", () => {
@@ -5910,6 +6275,10 @@ test("vague live news requests build headline-focused queries", () => {
   const queries = buildNewsQueries("news of today");
   assert.ok(queries.some((query) => /headlines/i.test(query)));
   assert.ok(queries.some((query) => /reuters|bbc|ap/i.test(query)));
+
+  const translatedCountryQueries = buildNewsQueries("tell me the news of today of usa in turkish");
+  assert.ok(translatedCountryQueries.some((query) => /united states|usa/i.test(query)));
+  assert.ok(translatedCountryQueries.every((query) => !/\bturkish\b/i.test(query)));
 
   const caseQueries = buildNewsQueries("tarun holi delhi case");
   assert.ok(caseQueries.some((query) => /case explained/i.test(query)));

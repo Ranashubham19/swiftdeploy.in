@@ -120,6 +120,8 @@ import {
   whatsAppChunkDelayMs,
   whatsAppInitialTypingDelayMs,
 } from "./lib/clawcloud-whatsapp-streaming";
+import { deleteWhatsAppWorkspaceData } from "./lib/clawcloud-whatsapp-governance";
+import { listRetiredWhatsAppOwnerUserIds } from "./lib/clawcloud-whatsapp-owner-handoff";
 import {
   extractWhatsAppPhoneShareFromChat,
   extractWhatsAppPhoneShareFromMessage,
@@ -5040,10 +5042,14 @@ async function handleInbound(
   const decision = decideWhatsAppReplyAction({
     settings,
     sensitivity,
+    chatType: logFields.chat_type,
     isGroupMessage: logFields.chat_type === "group",
     isKnownContact: workspaceContact.isKnown,
     timeZone: userTimeZone,
   });
+  console.log(
+    `[agent] Reply decision for ${userId}: action=${decision.action} chatType=${logFields.chat_type} jid=${jid ?? "none"} reason=${decision.reason}`,
+  );
   finalReply = applyWhatsAppReplyMode(finalReply, settings?.replyMode ?? "balanced");
   const scheduleWorkflows = (replySent: boolean) =>
     scheduleWhatsAppWorkflowRunsFromInbound({
@@ -5175,6 +5181,9 @@ async function handleInbound(
     }).catch(() => null);
 
     if (sent) {
+      console.log(
+        `[agent] Reply sent for ${userId}: chatType=${logFields.chat_type} target=${logFields.remote_jid ?? logFields.remote_phone ?? jid}`,
+      );
       await writeWhatsAppAuditLog(userId, {
         eventType: "reply_sent",
         actor: "system",
@@ -5215,6 +5224,84 @@ async function getActiveUserIds(): Promise<string[]> {
     .eq("is_active", true);
 
   return (data ?? []).map((row) => String(row.user_id ?? "").trim()).filter(Boolean);
+}
+
+async function retireDuplicateWhatsAppOwners(activeUserId: string, phone: string | null | undefined) {
+  const normalizedPhone = normalizePhone(phone);
+  if (!activeUserId || !normalizedPhone) {
+    return [] as string[];
+  }
+
+  const { data, error } = await db()
+    .from("connected_accounts")
+    .select("user_id, phone_number, account_email, connected_at, last_used_at")
+    .eq("provider", "whatsapp");
+
+  if (error) {
+    console.error(
+      `[agent] Failed to scan duplicate WhatsApp owners for ${activeUserId}:`,
+      error.message,
+    );
+    return [];
+  }
+
+  const retiredUserIds = listRetiredWhatsAppOwnerUserIds({
+    activeUserId,
+    activePhone: normalizedPhone,
+    accounts: (data ?? []) as Array<{
+      user_id?: string | null;
+      phone_number?: string | null;
+      account_email?: string | null;
+      connected_at?: string | null;
+      last_used_at?: string | null;
+    }>,
+  });
+
+  for (const retiredUserId of retiredUserIds) {
+    try {
+      await discardSession(retiredUserId, sessions.get(retiredUserId), {
+        deleteAuth: true,
+        logout: true,
+      });
+    } catch (error) {
+      console.error(
+        `[agent] Failed to discard duplicate WhatsApp session for ${retiredUserId}:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+
+    try {
+      await deleteWhatsAppWorkspaceData({
+        userId: retiredUserId,
+        mode: "all",
+      });
+    } catch (error) {
+      console.error(
+        `[agent] Failed to delete duplicate WhatsApp workspace for ${retiredUserId}:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+
+    const { error: deleteError } = await db()
+      .from("connected_accounts")
+      .delete()
+      .eq("user_id", retiredUserId)
+      .eq("provider", "whatsapp");
+
+    if (deleteError) {
+      console.error(
+        `[agent] Failed to delete duplicate WhatsApp connected account for ${retiredUserId}:`,
+        deleteError.message,
+      );
+      continue;
+    }
+
+    console.log(
+      `[agent] Retired duplicate WhatsApp owner ${retiredUserId} after promoting ${activeUserId} (${normalizedPhone})`,
+    );
+  }
+
+  return retiredUserIds;
 }
 
 async function buildDisconnectedRuntimeStatus(userId: string): Promise<ClawCloudWhatsAppRuntimeStatus> {
@@ -5550,6 +5637,13 @@ async function connectSession(userId: string): Promise<SessionRecord> {
           { onConflict: "user_id,provider" },
         )
         .catch(() => null);
+
+      const retiredUserIds = await retireDuplicateWhatsAppOwners(userId, phone);
+      if (retiredUserIds.length > 0) {
+        console.log(
+          `[agent] Promoted WhatsApp owner ${userId} and retired ${retiredUserIds.length} duplicate owner(s): ${retiredUserIds.join(", ")}`,
+        );
+      }
 
       current.lastChatJid = jidFromPhone(phone);
       sessions.set(userId, current);

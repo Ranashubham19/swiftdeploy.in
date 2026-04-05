@@ -225,6 +225,7 @@ import {
   resolveClawCloudWhatsAppContact,
   sendClawCloudWhatsAppMessage,
   sendClawCloudWhatsAppToPhone,
+  type ClawCloudWhatsAppSelfDeliveryMode,
 } from "@/lib/clawcloud-whatsapp";
 import {
   analyzeSendMessageCommandSafety,
@@ -331,6 +332,7 @@ type AgentTaskRow = {
 type RunTaskInput = {
   userId: string; taskType: ClawCloudTaskType;
   userMessage?: string | null; bypassEnabledCheck?: boolean;
+  deliveryMode?: ClawCloudWhatsAppSelfDeliveryMode;
 };
 
 type SupabaseAdminClient = ReturnType<typeof getClawCloudSupabaseAdmin>;
@@ -12033,7 +12035,12 @@ function runTaskFireAndForget(
 ) {
   void (async () => {
     try {
-      await runClawCloudTask({ userId, taskType, userMessage });
+      await runClawCloudTask({
+        userId,
+        taskType,
+        userMessage,
+        deliveryMode: "explicit_user_request",
+      });
     } catch (error) {
       await notifyBackgroundTaskFailure(userId, locale, taskLabel, error);
     }
@@ -16277,7 +16284,11 @@ async function runMorningBriefingLegacy(userId: string, config: ClawCloudTaskCon
   return { emailCount: emails.length, eventCount: events.length, message: msg };
 }
 
-async function runMorningBriefing(userId: string, config: ClawCloudTaskConfig) {
+async function runMorningBriefing(
+  userId: string,
+  config: ClawCloudTaskConfig,
+  deliveryMode: ClawCloudWhatsAppSelfDeliveryMode = "background",
+) {
   const [emails, events, locale, memoryFacts, reminders, topCommands] = await Promise.all([
     getClawCloudGmailMessages(userId, {
       query: "is:unread",
@@ -16413,19 +16424,33 @@ async function runMorningBriefing(userId: string, config: ClawCloudTaskConfig) {
     fallback,
   });
 
-  await sendClawCloudWhatsAppMessage(userId, msg);
+  const delivered = await sendClawCloudWhatsAppMessage(userId, msg, { deliveryMode });
   try { await sendClawCloudTelegramMessage(userId, msg); } catch { /* optional */ }
-  void upsertAnalyticsDaily(userId, { emails_processed: emails.length, tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
+  if (delivered) {
+    void upsertAnalyticsDaily(userId, { emails_processed: emails.length, tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
+  }
   return { emailCount: emails.length, eventCount: events.length, reminderCount: reminderSummary.length, message: msg };
 }
 
-async function runDraftReplies(userId: string, config: ClawCloudTaskConfig, userMessage: string | null | undefined) {
+async function runDraftReplies(
+  userId: string,
+  config: ClawCloudTaskConfig,
+  userMessage: string | null | undefined,
+  deliveryMode: ClawCloudWhatsAppSelfDeliveryMode = "background",
+) {
   void userMessage;
-  const { sent } = await sendLatestGmailRepliesOnCommand(userId, Number(config.max_drafts ?? 3));
-  return { queued: sent };
+  const result = await sendLatestGmailRepliesOnCommand(userId, Number(config.max_drafts ?? 3));
+  if (result.reply.trim()) {
+    await sendClawCloudWhatsAppMessage(userId, result.reply, { deliveryMode });
+  }
+  return { queued: result.sent, answer: result.reply };
 }
 
-async function runMeetingReminders(userId: string, config: ClawCloudTaskConfig) {
+async function runMeetingReminders(
+  userId: string,
+  config: ClawCloudTaskConfig,
+  deliveryMode: ClawCloudWhatsAppSelfDeliveryMode = "background",
+) {
   const minutesBefore = Number(config.minutes_before ?? 30);
   const windowStart = new Date(Date.now() + (minutesBefore - 2) * 60_000);
   const windowEnd = new Date(Date.now() + (minutesBefore + 5) * 60_000);
@@ -16456,6 +16481,7 @@ async function runMeetingReminders(userId: string, config: ClawCloudTaskConfig) 
       hangoutLink: event.hangoutLink ?? null,
       attendees: parseCalendarAttendees(event as unknown as Record<string, unknown>),
       minutesBefore,
+      deliveryMode,
     });
 
     if (sent) {
@@ -16466,16 +16492,25 @@ async function runMeetingReminders(userId: string, config: ClawCloudTaskConfig) 
   return { eventCount: events.length, briefingsSent };
 }
 
-async function runEmailSearch(userId: string, userMessage: string | null | undefined) {
+async function runEmailSearch(
+  userId: string,
+  userMessage: string | null | undefined,
+  deliveryMode: ClawCloudWhatsAppSelfDeliveryMode = "background",
+) {
   const locale = await getUserLocale(userId);
   const result = await buildEmailSearchReply(userId, userMessage, locale);
-  await sendClawCloudWhatsAppMessage(userId, result.reply);
-  void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
+  const delivered = await sendClawCloudWhatsAppMessage(userId, result.reply, { deliveryMode });
+  if (delivered) {
+    void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
+  }
   return { found: result.found, reconnectRequired: result.reconnectRequired, answer: result.reply };
 }
 
-async function runEveningSummary(userId: string) {
-  return sendEveningSummary(userId);
+async function runEveningSummary(
+  userId: string,
+  deliveryMode: ClawCloudWhatsAppSelfDeliveryMode = "background",
+) {
+  return sendEveningSummary(userId, deliveryMode);
 }
 
 async function getUserReminderTimezone(userId: string) {
@@ -16489,14 +16524,18 @@ async function getUserReminderTimezone(userId: string) {
   return (data?.timezone as string | undefined) ?? "Asia/Kolkata";
 }
 
-async function runCustomReminder(userId: string, userMessage: string | null | undefined) {
+async function runCustomReminder(
+  userId: string,
+  userMessage: string | null | undefined,
+  deliveryMode: ClawCloudWhatsAppSelfDeliveryMode = "background",
+) {
   const raw = userMessage?.trim() ?? "";
   if (!raw) throw new Error("Reminder requires a message.");
 
   const userTimezone = await getUserReminderTimezone(userId);
   const parsed = await parseReminderAI(raw, userTimezone);
   if (!parsed) {
-    await sendClawCloudWhatsAppMessage(
+    const delivered = await sendClawCloudWhatsAppMessage(
       userId,
       [
         "⏰ *I couldn't parse that reminder.*",
@@ -16506,8 +16545,11 @@ async function runCustomReminder(userId: string, userMessage: string | null | un
         "• _Remind me in 30 minutes to take medicine_",
         "• _Remind me tomorrow to send the report_",
       ].join("\n"),
+      { deliveryMode },
     );
-    void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
+    if (delivered) {
+      void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
+    }
     return { set: false };
   }
 
@@ -16520,23 +16562,29 @@ async function runCustomReminder(userId: string, userMessage: string | null | un
       raw,
     );
     const reminders = await listActiveReminders(userId).catch(() => [saved]);
-    await sendClawCloudWhatsAppMessage(
+    const delivered = await sendClawCloudWhatsAppMessage(
       userId,
       formatReminderSetReply(saved, reminders.length, userTimezone),
+      { deliveryMode },
     );
+    if (delivered) {
+      void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to save reminder.";
-    await sendClawCloudWhatsAppMessage(
+    const delivered = await sendClawCloudWhatsAppMessage(
       userId,
       /active reminders/i.test(message)
         ? `⚠️ *${message}*\n\nReply _show reminders_ to manage them.`
         : "❌ *I couldn't save that reminder right now.*",
+      { deliveryMode },
     );
-    void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
+    if (delivered) {
+      void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
+    }
     return { set: false };
   }
 
-  void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
   return { set: true, fireAt: parsed.fireAt, reminderText: parsed.reminderText };
 }
 
@@ -19307,6 +19355,81 @@ async function resolveWhatsAppActiveContactDraftLanguageFromHistory(input: {
   });
 }
 
+async function loadRecentInboundWhatsAppActiveContactMessages(input: {
+  userId: string;
+  session: WhatsAppActiveContactSession;
+}) {
+  const history = await listWhatsAppHistory({
+    userId: input.userId,
+    resolvedContact: {
+      phone: input.session.phone,
+      jid: input.session.jid,
+      aliases: [input.session.contactName, input.session.phone ?? "", input.session.jid ?? ""].filter(Boolean),
+    },
+    contactExactOnly: true,
+    chatType: "direct",
+    direction: "inbound",
+    limit: 12,
+  }).catch(() => ({ rows: [] }));
+
+  return history.rows
+    .map((row) => String(row.content ?? "").trim())
+    .filter(Boolean);
+}
+
+function normalizeWhatsAppActiveContactQuotedIncomingMessage(value: string) {
+  return normalizeClawCloudUnderstandingMessage(String(value ?? ""))
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function detectWhatsAppActiveContactQuotedIncomingMessage(
+  currentMessage: string,
+  contactMessages: string[],
+) {
+  const normalizedCurrent = normalizeWhatsAppActiveContactQuotedIncomingMessage(currentMessage);
+  if (!normalizedCurrent) {
+    return null;
+  }
+
+  const currentWordCount = normalizedCurrent.split(/\s+/).filter(Boolean).length;
+  if (currentWordCount > 14) {
+    return null;
+  }
+
+  for (const contactMessage of contactMessages) {
+    const normalizedContact = normalizeWhatsAppActiveContactQuotedIncomingMessage(contactMessage);
+    if (!normalizedContact) {
+      continue;
+    }
+
+    if (normalizedCurrent === normalizedContact) {
+      return contactMessage.trim();
+    }
+
+    if (
+      normalizedCurrent.length >= 8
+      && (
+        normalizedCurrent.includes(normalizedContact)
+        || normalizedContact.includes(normalizedCurrent)
+      )
+    ) {
+      return contactMessage.trim();
+    }
+  }
+
+  return null;
+}
+
+export function detectWhatsAppActiveContactQuotedIncomingMessageForTest(
+  currentMessage: string,
+  contactMessages: string[],
+) {
+  return detectWhatsAppActiveContactQuotedIncomingMessage(currentMessage, contactMessages);
+}
+
 function formatWhatsAppActiveContactDraftLanguageLabel(choice: WhatsAppActiveContactDraftLanguageChoice) {
   if (choice.resolution.preserveRomanScript && choice.resolution.locale === "en") {
     return "Hinglish (Roman script)";
@@ -19442,6 +19565,187 @@ function formatWhatsAppActiveContactSessionTarget(session: WhatsAppActiveContact
   return session.phone
     ? `${session.contactName} (+${session.phone})`
     : session.contactName;
+}
+
+function inferWhatsAppActiveContactSecondPersonTone(message: string) {
+  const normalized = normalizeWhatsAppActiveContactQuotedIncomingMessage(message);
+  if (!normalized) {
+    return "neutral" as const;
+  }
+
+  if (/\baap\b/.test(normalized)) return "aap" as const;
+  if (/\btum\b/.test(normalized)) return "tum" as const;
+  if (/\btu\b/.test(normalized)) return "tu" as const;
+  return "neutral" as const;
+}
+
+async function maybeBuildDeterministicWhatsAppActiveContactReply(input: {
+  contactName: string;
+  matchedInboundMessage: string;
+  locale: SupportedLocale;
+  languageResolution: ClawCloudReplyLanguageResolution;
+}) {
+  const normalized = normalizeWhatsAppActiveContactQuotedIncomingMessage(input.matchedInboundMessage);
+  if (!normalized) {
+    return null;
+  }
+
+  const recipientName = extractPrimaryRecipientNameForGreeting(input.contactName) ?? input.contactName;
+  const secondPersonTone = inferWhatsAppActiveContactSecondPersonTone(input.matchedInboundMessage);
+
+  if (/^(?:hi+|hello+|hey+|hlo+|helo+|good morning|good afternoon|good evening|good night|namaste)$/.test(normalized)) {
+    if (input.languageResolution.preserveRomanScript && input.languageResolution.locale === "en") {
+      return recipientName
+        ? `Hlo ${recipientName}, kaisi ho?`
+        : "Hlo, kaisi ho?";
+    }
+
+    const englishReply = recipientName
+      ? `Hi ${recipientName}, how are you?`
+      : "Hi, how are you?";
+    if (input.languageResolution.locale === "en") {
+      return englishReply;
+    }
+
+    return translateMessage(englishReply, input.languageResolution.locale, {
+      force: true,
+      preserveRomanScript: input.languageResolution.preserveRomanScript,
+      targetLanguageName: input.languageResolution.targetLanguageName,
+    }).catch(() => englishReply);
+  }
+
+  if (
+    /\b(?:how are you|how r you|how are u|kesa hai tu|kaisa hai tu|kesi ho|kaisi ho|kaise ho|kese ho|kaisa hai|kaisi hai|tum kaise ho|aap kaise ho)\b/.test(normalized)
+  ) {
+    if (input.languageResolution.preserveRomanScript && input.languageResolution.locale === "en") {
+      if (secondPersonTone === "aap") return "Main theek hoon, aap bataiye?";
+      if (secondPersonTone === "tum") return "Main theek hoon, tum batao?";
+      return "Main theek hoon, tu bata?";
+    }
+
+    const englishReply = secondPersonTone === "aap"
+      ? "I am doing well. How are you?"
+      : "I am good. How are you?";
+    if (input.languageResolution.locale === "en") {
+      return englishReply;
+    }
+
+    return translateMessage(englishReply, input.languageResolution.locale, {
+      force: true,
+      preserveRomanScript: input.languageResolution.preserveRomanScript,
+      targetLanguageName: input.languageResolution.targetLanguageName,
+    }).catch(() => englishReply);
+  }
+
+  return null;
+}
+
+export async function maybeBuildDeterministicWhatsAppActiveContactReplyForTest(input: {
+  contactName: string;
+  matchedInboundMessage: string;
+  locale: SupportedLocale;
+  languageResolution: ClawCloudReplyLanguageResolution;
+}) {
+  return maybeBuildDeterministicWhatsAppActiveContactReply(input);
+}
+
+async function generateWhatsAppActiveContactConversationalReply(input: {
+  currentMessage: string;
+  matchedInboundMessage: string;
+  recipientLabel: string;
+  conversationStyle: ClawCloudConversationStyle;
+  locale: SupportedLocale;
+  languageResolution: ClawCloudReplyLanguageResolution;
+}) {
+  const deterministicReply = await maybeBuildDeterministicWhatsAppActiveContactReply({
+    contactName: input.recipientLabel,
+    matchedInboundMessage: input.matchedInboundMessage,
+    locale: input.locale,
+    languageResolution: input.languageResolution,
+  });
+  if (deterministicReply) {
+    return deterministicReply;
+  }
+
+  const draftLanguageLabel = localeNames[input.languageResolution.locale] ?? "English";
+  const languageInstruction = input.languageResolution.preserveRomanScript
+    ? input.languageResolution.locale === "en"
+      ? "Write the final reply in natural Hinglish using Roman script only."
+      : `Write the final reply in ${draftLanguageLabel} using natural Roman script only.`
+    : `Write the final reply in ${draftLanguageLabel}.`;
+  const drafted = await completeClawCloudPrompt({
+    system: [
+      "You write the next WhatsApp reply in an ongoing one-to-one personal chat.",
+      "Return only the next reply text from the user's side.",
+      "Treat the other person's latest message as the thing you are replying to now.",
+      "Do not repeat their message back verbatim.",
+      "Do not explain what you are doing, label the reply, or add quotation marks.",
+      "Keep the reply natural, human, and emotionally appropriate for a real chat.",
+      "If the other person's message is casual, family-style, or friendly, keep the reply equally casual and natural even if the user's default style is professional.",
+      "Prefer a short conversational reply unless the incoming message clearly requires more detail.",
+      languageInstruction,
+    ].join("\n"),
+    user: [
+      `Recipient: ${input.recipientLabel}`,
+      `Other person's latest message: ${input.matchedInboundMessage}`,
+      `User typed in self chat: ${input.currentMessage}`,
+      "Write the best next reply the user should send now.",
+    ].join("\n\n"),
+    intent: "send_message",
+    maxTokens: 90,
+    fallback: input.currentMessage,
+  }).catch((error) => {
+    console.error("[agent] generateWhatsAppActiveContactConversationalReply failed:", error);
+    return input.currentMessage;
+  });
+
+  const candidateReply = sanitizeStyledWhatsAppDraftForHumanDelivery(drafted.trim() || input.currentMessage);
+  return enforceClawCloudReplyLanguage({
+    message: candidateReply,
+    locale: input.languageResolution.locale,
+    preserveRomanScript: input.languageResolution.preserveRomanScript,
+    targetLanguageName: input.languageResolution.targetLanguageName,
+  }).catch(() => candidateReply);
+}
+
+async function buildWhatsAppActiveContactSendReceipt(input: {
+  message: string;
+  session: WhatsAppActiveContactSession;
+  locale: SupportedLocale;
+  generatedReplyFromInbound: boolean;
+}) {
+  const resolution = resolveClawCloudReplyLanguage({
+    message: input.message,
+    preferredLocale: input.locale,
+  });
+  const baseMessage = input.generatedReplyFromInbound
+    ? `Reply sent to ${input.session.contactName}.`
+    : `Sent to ${input.session.contactName}.`;
+
+  if (resolution.preserveRomanScript && resolution.locale === "en") {
+    return input.generatedReplyFromInbound
+      ? `${input.session.contactName} ko reply bhej diya.`
+      : `${input.session.contactName} ko bhej diya.`;
+  }
+
+  if (resolution.locale === "en") {
+    return baseMessage;
+  }
+
+  return translateMessage(baseMessage, resolution.locale, {
+    force: true,
+    preserveRomanScript: resolution.preserveRomanScript,
+    targetLanguageName: resolution.targetLanguageName,
+  }).catch(() => baseMessage);
+}
+
+export async function buildWhatsAppActiveContactSendReceiptForTest(input: {
+  message: string;
+  session: WhatsAppActiveContactSession;
+  locale: SupportedLocale;
+  generatedReplyFromInbound: boolean;
+}) {
+  return buildWhatsAppActiveContactSendReceipt(input);
 }
 
 async function resolveCurrentWhatsAppActiveContactSession(
@@ -19733,22 +20037,37 @@ async function sendWhatsAppMessageThroughActiveContactSession(input: {
     ].join("\n");
   }
 
-  const draftLanguageChoice = await resolveWhatsAppActiveContactDraftLanguageFromHistory({
+  const recentInboundMessages = await loadRecentInboundWhatsAppActiveContactMessages({
     userId: input.userId,
-    currentMessage: input.message,
-    preferredLocale: input.locale,
     session: input.session,
   });
-  const draftLanguageResolution = draftLanguageChoice.resolution;
-  const draftLanguageLabel = formatWhatsAppActiveContactDraftLanguageLabel(draftLanguageChoice);
-  const draftedMessage = await generateStyledWhatsAppDraft({
-    originalRequest: input.message,
-    requestedMessage: input.message,
-    recipientLabel: input.session.contactName,
-    conversationStyle: input.conversationStyle,
-    locale: draftLanguageResolution.locale,
-    languageResolution: draftLanguageResolution,
+  const draftLanguageChoice = resolveWhatsAppActiveContactDraftLanguage({
+    currentMessage: input.message,
+    preferredLocale: input.locale,
+    contactMessages: recentInboundMessages,
   });
+  const draftLanguageResolution = draftLanguageChoice.resolution;
+  const matchedInboundMessage = detectWhatsAppActiveContactQuotedIncomingMessage(
+    input.message,
+    recentInboundMessages,
+  );
+  const draftedMessage = matchedInboundMessage
+    ? await generateWhatsAppActiveContactConversationalReply({
+      currentMessage: input.message,
+      matchedInboundMessage,
+      recipientLabel: input.session.contactName,
+      conversationStyle: input.conversationStyle,
+      locale: draftLanguageResolution.locale,
+      languageResolution: draftLanguageResolution,
+    })
+    : await generateStyledWhatsAppDraft({
+      originalRequest: input.message,
+      requestedMessage: input.message,
+      recipientLabel: input.session.contactName,
+      conversationStyle: input.conversationStyle,
+      locale: draftLanguageResolution.locale,
+      languageResolution: draftLanguageResolution,
+    });
 
   try {
     const sendResult = await sendClawCloudWhatsAppToPhone(input.session.phone, draftedMessage, {
@@ -19764,31 +20083,22 @@ async function sendWhatsAppMessageThroughActiveContactSession(input: {
         active_contact_name: input.session.contactName,
         active_contact_started_at: input.session.startedAt,
         original_request: input.message,
+        generated_reply_from_inbound: Boolean(matchedInboundMessage),
+        matched_inbound_message: matchedInboundMessage ?? null,
         draft_language_locale: draftLanguageResolution.locale,
         draft_language_detected_locale: draftLanguageResolution.detectedLocale,
         draft_language_preserve_roman_script: draftLanguageResolution.preserveRomanScript,
         draft_language_selection: draftLanguageChoice.selection,
-        draft_language_label: draftLanguageLabel,
+        draft_language_label: formatWhatsAppActiveContactDraftLanguageLabel(draftLanguageChoice),
       },
     });
     void upsertAnalyticsDaily(input.userId, { wa_messages_sent: 1, tasks_run: 1 }).catch(() => null);
-    const targetLabel = formatWhatsAppActiveContactSessionTarget(input.session);
-    const languageLine = draftLanguageChoice.selection === "contact_history"
-      ? `Language used: ${draftLanguageLabel}, adapted from ${input.session.contactName}'s recent chat language.`
-      : draftLanguageChoice.selection === "explicit_request"
-        ? `Language used: ${draftLanguageLabel}, based on your explicit language request for this message.`
-        : `Language used: ${draftLanguageLabel}.`;
-    return [
-      sendResult.deliveryConfirmed
-        ? `Message delivered to ${targetLabel}.`
-        : `Message submitted to WhatsApp for ${targetLabel}. Delivery confirmation is pending.`,
-      "",
-      languageLine,
-      "",
-      `Sent text: "${draftedMessage}"`,
-      "",
-      `Active contact mode is still on for ${input.session.contactName}. Say _Stop talking to ${input.session.contactName}_ when you want me to stop.`,
-    ].join("\n");
+    return buildWhatsAppActiveContactSendReceipt({
+      message: input.message,
+      session: input.session,
+      locale: input.locale,
+      generatedReplyFromInbound: Boolean(matchedInboundMessage),
+    });
   } catch (error) {
     console.error("[agent] active contact session send failed:", error);
     return [
@@ -20348,6 +20658,7 @@ async function handleSaveContactCommand(
 
 export async function runClawCloudTask(input: RunTaskInput) {
   const db = getClawCloudSupabaseAdmin();
+  const deliveryMode = input.deliveryMode ?? "background";
   let task = await getTaskRow(input.userId, input.taskType);
   if (!task && input.taskType === "custom_reminder") {
     const { data, error } = await db
@@ -20386,6 +20697,7 @@ export async function runClawCloudTask(input: RunTaskInput) {
         limit,
         upgradeUrl: getClawCloudPricingUrl(),
       }),
+      { deliveryMode },
     );
     throw new Error("Daily limit reached.");
 
@@ -20405,6 +20717,7 @@ export async function runClawCloudTask(input: RunTaskInput) {
         "🚀 *Want unlimited runs?*",
         `Upgrade to ${nextPlan} -> ${upgradeUrl}`,
       ].join("\n"),
+      { deliveryMode },
     );
     throw new Error("Daily limit reached.");
   }
@@ -20419,13 +20732,13 @@ export async function runClawCloudTask(input: RunTaskInput) {
   try {
     let result: Record<string, unknown>;
     switch (input.taskType) {
-      case "morning_briefing":    result = await runMorningBriefing(input.userId, task.config ?? {}); break;
-      case "draft_replies":       result = await runDraftReplies(input.userId, task.config ?? {}, input.userMessage); break;
-      case "meeting_reminders":   result = await runMeetingReminders(input.userId, task.config ?? {}); break;
-      case "email_search":        result = await runEmailSearch(input.userId, input.userMessage); break;
-      case "evening_summary":     result = await runEveningSummary(input.userId); break;
-      case "custom_reminder":     result = await runCustomReminder(input.userId, input.userMessage); break;
-      case "weekly_spend_summary": result = await runWeeklySpendSummary(input.userId); break;
+      case "morning_briefing":    result = await runMorningBriefing(input.userId, task.config ?? {}, deliveryMode); break;
+      case "draft_replies":       result = await runDraftReplies(input.userId, task.config ?? {}, input.userMessage, deliveryMode); break;
+      case "meeting_reminders":   result = await runMeetingReminders(input.userId, task.config ?? {}, deliveryMode); break;
+      case "email_search":        result = await runEmailSearch(input.userId, input.userMessage, deliveryMode); break;
+      case "evening_summary":     result = await runEveningSummary(input.userId, deliveryMode); break;
+      case "custom_reminder":     result = await runCustomReminder(input.userId, input.userMessage, deliveryMode); break;
+      case "weekly_spend_summary": result = await runWeeklySpendSummary(input.userId, deliveryMode); break;
       default: throw new Error(`Unknown task: ${input.taskType}`);
     }
 
@@ -20448,7 +20761,7 @@ export async function runClawCloudTask(input: RunTaskInput) {
 export async function runClawCloudMorningBriefing(userId: string) {
   const task = await getTaskRow(userId, "morning_briefing");
   if (!task) throw new Error("Morning briefing not configured.");
-  return runMorningBriefing(userId, task.config ?? {});
+  return runMorningBriefing(userId, task.config ?? {}, "background");
 }
 
 export async function scheduleClawCloudTasks(userId: string) {

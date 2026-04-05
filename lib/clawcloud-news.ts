@@ -38,6 +38,7 @@ import {
   detectAiModelRoutingDecision,
   type AiModelRoutingDecision,
 } from "@/lib/clawcloud-ai-model-routing";
+import { stripExplicitReplyLocaleRequestForContent } from "@/lib/clawcloud-i18n";
 import { searchInternetWithDiagnostics } from "@/lib/search";
 import { extractExplicitQuestionYear } from "@/lib/clawcloud-time-scope";
 import type { ClawCloudAnswerBundle, ClawCloudEvidenceItem, ClawCloudTextAnswerResult } from "@/lib/types";
@@ -1260,10 +1261,37 @@ function currentYear(): string {
 }
 
 function cleanedTopic(question: string) {
-  return normalizeRegionalQuestion(question)
-    .replace(/^(tell me about|give me (the )?(latest|news|update) on|what('?s| is) (the )?(latest|news|status) on|latest|recent|breaking|search for|look up)\s+/i, "")
+  const contentScopedQuestion = normalizeRegionalQuestion(
+    stripExplicitReplyLocaleRequestForContent(question),
+  );
+  const strippedLead = contentScopedQuestion
+    .replace(/^(tell me|give me|show me|search for|look up)\s+/i, "")
+    .replace(/^(tell me about|give me (the )?(latest|news|update) on|what('?s| is) (the )?(latest|news|status) on|latest|recent|breaking)\s+/i, "")
     .replace(/\?+$/, "")
     .trim();
+
+  const reducedNewsScaffold = strippedLead
+    .replace(/\b(?:the|news|headlines?|top stories|story|stories|update|updates|today|todays|today's|latest|current|right now|of|for|about|on)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const regionMention = reducedNewsScaffold
+    ? detectClawCloudRegionMention(reducedNewsScaffold)
+    : null;
+
+  if (regionMention?.kind === "country") {
+    const aliasPattern = new RegExp(
+      `\\b(?:${regionMention.region.aliases
+        .map((alias) => alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        .join("|")})\\b`,
+      "gi",
+    );
+    const subjectWithoutRegion = reducedNewsScaffold.replace(aliasPattern, " ").replace(/\s+/g, " ").trim();
+    if (!subjectWithoutRegion) {
+      return regionMention.region.countryName;
+    }
+  }
+
+  return strippedLead;
 }
 
 type SearchLocaleHint = {

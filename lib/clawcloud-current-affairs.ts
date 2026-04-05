@@ -1,4 +1,5 @@
 import { normalizeRegionalQuestion } from "@/lib/clawcloud-region-context";
+import { stripExplicitReplyLocaleRequestForContent } from "@/lib/clawcloud-i18n";
 
 const CURRENT_AFFAIRS_ACTOR_PATTERN =
   /\b(us|u\.?\s*s\.?\s*a?\.?|united states|america|white house|washington|state department|pentagon|trump|president|iran|iranian|israel|china|taiwan|russia|ukraine|india|pakistan|hamas|hezbollah|houthi|houthis|cuba|cuban|venezuela|venezuelan|north korea|south korea|japan|nato|united nations|un|eu|european union|saudi|uae|emirates|gcc|tehran|beijing|moscow|kyiv|havana)\b/i;
@@ -67,7 +68,7 @@ const CURRENT_AFFAIRS_SCIENCE_ANALYSIS_PATTERN =
   /\b(theoretically possible|prove|disprove|justify|formal proof|counterexample|formal boundary|analy[sz]e|simulate itself|simulate the universe|exact quantum state)\b/i;
 
 function normalizeCurrentAffairsQuestion(question: string) {
-  return normalizeRegionalQuestion(question)
+  return normalizeRegionalQuestion(stripExplicitReplyLocaleRequestForContent(question))
     .replace(/\babhi\b/gi, "right now")
     .replace(/\baaj\b/gi, "today")
     .replace(/\b(yudh|jang|jung|ladai|larai)\b/gi, "war")
