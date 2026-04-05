@@ -5681,6 +5681,18 @@ test("dii does not treat unrelated di-prefix WhatsApp names as strong matches", 
       jid: "918755061396@s.whatsapp.net",
       aliases: ["Anmol Dixit Bh 6", "Dixit"],
     },
+    {
+      name: "Gaurav Sir Cdec",
+      phone: "919817995052",
+      jid: "919817995052@s.whatsapp.net",
+      aliases: ["Gaurav Sir Cdec", "Sir"],
+    },
+    {
+      name: "Sidharth Singer",
+      phone: "918279965754",
+      jid: "918279965754@s.whatsapp.net",
+      aliases: ["Sidharth Singer", "Singer"],
+    },
   ]);
 
   assert.equal(result.type, "not_found");

@@ -311,19 +311,21 @@ function scoreContact(queryVariants: string[], storedName: string, primaryQuery:
       }
     }
 
-    best = pickBetterContactScore(best, {
-      score: similarity(query, normalizedStored),
-      exact: false,
-      matchedAlias: storedName,
-      matchBasis: "fuzzy",
-    });
+    if (query === primaryQuery) {
+      best = pickBetterContactScore(best, {
+        score: similarity(query, normalizedStored),
+        exact: false,
+        matchedAlias: storedName,
+        matchBasis: "fuzzy",
+      });
 
-    best = pickBetterContactScore(best, {
-      score: similarity(query, storedWords[0] ?? normalizedStored) * 0.9,
-      exact: false,
-      matchedAlias: storedWords[0] ?? storedName,
-      matchBasis: "fuzzy",
-    });
+      best = pickBetterContactScore(best, {
+        score: similarity(query, storedWords[0] ?? normalizedStored) * 0.9,
+        exact: false,
+        matchedAlias: storedWords[0] ?? storedName,
+        matchBasis: "fuzzy",
+      });
+    }
   }
 
   return best ?? {
