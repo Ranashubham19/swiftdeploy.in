@@ -78,6 +78,7 @@ import {
   ensureWhatsAppOutboundMessage,
   getWhatsAppOutboundMessage,
   markWhatsAppOutboundAckByWaMessageId,
+  shouldRetryUndeliveredWhatsAppOutbound,
   transitionWhatsAppOutboundMessage,
   type WhatsAppMessageAckStatus,
 } from "./lib/clawcloud-whatsapp-outbound";
@@ -91,6 +92,7 @@ import {
   summarizeClawCloudWhatsAppHistoryCoverage,
 } from "./lib/clawcloud-whatsapp-history-plan";
 import { buildClawCloudWhatsAppContactIdentityGraph } from "./lib/clawcloud-whatsapp-contact-identity";
+import { buildWhatsAppReceiptDerivedAliasMap } from "./lib/clawcloud-whatsapp-contact-alias-receipts";
 import {
   computeClawCloudWhatsAppSyncProgress,
   deriveClawCloudWhatsAppRuntimeHealth,
@@ -1632,6 +1634,11 @@ function mapOutboundStatusToAckStatus(status: WhatsAppOutboundStatus | null | un
   return null;
 }
 
+const WHATSAPP_UNCONFIRMED_RESEND_AFTER_MS = (() => {
+  const configured = Number.parseInt(process.env.WA_OUTBOUND_PENDING_RETRY_MS ?? "", 10);
+  return Number.isFinite(configured) ? Math.max(10_000, configured) : 30_000;
+})();
+
 function buildOutboundAckSummary(status: WhatsAppOutboundStatus | null | undefined) {
   const ackStatus = mapOutboundStatusToAckStatus(status);
   return {
@@ -1673,6 +1680,77 @@ async function waitForTrackedOutboundStatus(input: {
   }
 
   return lastStatus ? buildOutboundAckSummary(lastStatus) : null;
+}
+
+async function reconcileTrackedOutboundBeforeSend(input: {
+  tracking: TrackedWhatsAppSendInput | null;
+  trackedOutbound: Awaited<ReturnType<typeof prepareTrackedWhatsAppOutbound>>;
+  waitForAckMs: number;
+  retryRequestedVia: string;
+}) {
+  const trackedOutbound = input.trackedOutbound;
+  if (!trackedOutbound) {
+    return {
+      trackedOutbound: null,
+      summary: null,
+      retriedUndelivered: false,
+    };
+  }
+
+  if (trackedOutbound.status === "sent") {
+    if (shouldRetryUndeliveredWhatsAppOutbound(trackedOutbound, {
+      minPendingMs: WHATSAPP_UNCONFIRMED_RESEND_AFTER_MS,
+    })) {
+      const retried = input.tracking?.userId
+        ? await transitionWhatsAppOutboundMessage({
+          userId: input.tracking.userId,
+          outboundMessageId: trackedOutbound.id,
+          nextStatus: "retrying",
+          metadata: {
+            retry_reason: "delivery_unconfirmed",
+            retry_requested_at: new Date().toISOString(),
+            retry_requested_via: input.retryRequestedVia,
+          },
+        }).catch(() => trackedOutbound)
+        : trackedOutbound;
+
+      return {
+        trackedOutbound: retried ?? trackedOutbound,
+        summary: null,
+        retriedUndelivered: true,
+      };
+    }
+
+    const summary = buildOutboundAckSummary(trackedOutbound.status);
+    const waited = (input.waitForAckMs > 0 && input.tracking?.userId)
+      ? await waitForTrackedOutboundStatus({
+        userId: input.tracking.userId,
+        idempotencyKey: trackedOutbound.idempotency_key,
+        timeoutMs: input.waitForAckMs,
+      })
+      : null;
+
+    return {
+      trackedOutbound,
+      summary: waited ?? summary,
+      retriedUndelivered: false,
+    };
+  }
+
+  if (trackedOutbound.status === "delivered" || trackedOutbound.status === "read") {
+    const summary = buildOutboundAckSummary(trackedOutbound.status);
+    return {
+      trackedOutbound,
+      summary,
+      retriedUndelivered: false,
+    };
+  }
+
+  return {
+    trackedOutbound,
+    summary: null,
+    retriedUndelivered: false,
+  };
 }
 
 async function resolveRegisteredWhatsAppTargetJid(sock: WASocket, targetJid: string) {
@@ -3593,18 +3671,36 @@ function resolveSessionContact(record: SessionRecord, rawName: string): SessionC
     return null;
   }
   const allowSelfMatch = isExplicitSelfContactQuery(rawName);
+  const receiptDerivedAliases = buildWhatsAppReceiptDerivedAliasMap(
+    [...record.historyRows.values()].map((row) => ({
+      content: row.content,
+      direction: row.direction,
+      chatType: row.chat_type,
+      remotePhone: row.remote_phone,
+      remoteJid: row.remote_jid,
+    })),
+  );
 
   const matches: Array<SessionContactMatch & { qualityRank: number; memberCount: number }> = [];
   const identities = buildClawCloudWhatsAppContactIdentityGraph(
-    [...record.contacts.values()].map((entry) => ({
-      jid: entry.jid,
-      phone: entry.phone,
-      displayName: entry.displayName,
-      aliases: entry.aliases,
-      messageCount: entry.messageCount,
-      lastMessageAt: entry.lastMessageAt ? new Date(entry.lastMessageAt).toISOString() : null,
-      lastSeenAt: entry.updatedAt ? new Date(entry.updatedAt).toISOString() : null,
-    })),
+    [
+      ...[...record.contacts.values()].map((entry) => ({
+        jid: entry.jid,
+        phone: entry.phone,
+        displayName: entry.displayName,
+        aliases: entry.aliases,
+        messageCount: entry.messageCount,
+        lastMessageAt: entry.lastMessageAt ? new Date(entry.lastMessageAt).toISOString() : null,
+        lastSeenAt: entry.updatedAt ? new Date(entry.updatedAt).toISOString() : null,
+      })),
+      ...[...receiptDerivedAliases.entries()].map(([phone, aliases]) => ({
+        jid: `${phone}@s.whatsapp.net`,
+        phone,
+        displayName: aliases[0] ?? phone,
+        aliases,
+        identityKey: `phone:${phone}`,
+      })),
+    ],
   );
 
   for (const identity of identities) {
@@ -6451,14 +6547,44 @@ function findSessionByPhone(phone: string) {
   return suffixMatch;
 }
 
+function findScopedSessionByUserId(userId: string | null | undefined) {
+  const normalizedUserId = String(userId ?? "").trim();
+  if (!normalizedUserId) {
+    return null;
+  }
+
+  const session = sessions.get(normalizedUserId) ?? null;
+  if (!session) {
+    return null;
+  }
+
+  return {
+    userId: normalizedUserId,
+    session,
+  };
+}
+
 registerClawCloudWhatsAppRuntime({
-  async send({ userId, phone, jid, message, contactName, source, approvalId, workflowRunId, idempotencyKey, metadata }) {
+  async send({
+    userId,
+    phone,
+    jid,
+    message,
+    contactName,
+    source,
+    approvalId,
+    workflowRunId,
+    idempotencyKey,
+    metadata,
+    waitForAckMs,
+    requireRegisteredNumber,
+  }) {
     const resolvedSession = userId
-      ? { userId, session: sessions.get(userId) ?? null }
+      ? findScopedSessionByUserId(userId)
       : (phone ? findSessionByPhone(phone) : null);
-    const session = resolvedSession?.session ?? [...sessions.values()][0] ?? null;
+    const session = resolvedSession?.session ?? (!userId ? [...sessions.values()][0] ?? null : null);
     if (!session) {
-      return false;
+      throw new Error(userId ? "No active WhatsApp session for this user." : "No active WhatsApp session.");
     }
 
     const outboundTarget = buildOutboundDirectTarget({
@@ -6479,14 +6605,22 @@ registerClawCloudWhatsAppRuntime({
         : (normalizedPhone ? `${normalizedPhone}@s.whatsapp.net` : outboundTarget.jid)
     ) ?? "";
     if (!targetJid) {
-      return false;
+      throw new Error("Invalid WhatsApp target.");
     }
-    const registrationCheck = await resolveRegisteredWhatsAppTargetJid(session.sock, targetJid);
+    const registrationCheck = requireRegisteredNumber === false
+      ? { exists: true as const, jid: targetJid, warning: null as string | null, reason: null as "not_registered" | "verification_unavailable" | null }
+      : await resolveRegisteredWhatsAppTargetJid(session.sock, targetJid);
     if (!registrationCheck.exists) {
-      return false;
+      if (registrationCheck.reason === "verification_unavailable") {
+        throw new Error("Could not verify the target number on WhatsApp right now. Please retry in a few seconds.");
+      }
+      throw new Error("The target number is not registered on WhatsApp.");
     }
     const checkedTargetJid = registrationCheck.jid;
     const checkedTargetPhone = phoneFromJid(checkedTargetJid) ?? normalizedPhone ?? phoneFromJid(targetJid);
+    const boundedWaitForAckMs = typeof waitForAckMs === "number" && Number.isFinite(waitForAckMs)
+      ? Math.max(0, Math.min(15_000, Math.trunc(waitForAckMs)))
+      : 0;
 
     const tracking: TrackedWhatsAppSendInput | null = resolvedSession?.userId
       ? {
@@ -6502,25 +6636,83 @@ registerClawCloudWhatsAppRuntime({
         metadata: normalizeTrackedWhatsAppMetadata(metadata),
       }
       : null;
-    const trackedOutbound = tracking ? await prepareTrackedWhatsAppOutbound(tracking) : null;
-    if (trackedOutbound?.status === "sent" || trackedOutbound?.status === "delivered" || trackedOutbound?.status === "read") {
-      return true;
+    const initialTrackedOutbound = tracking ? await prepareTrackedWhatsAppOutbound(tracking) : null;
+    const reconciled = await reconcileTrackedOutboundBeforeSend({
+      tracking,
+      trackedOutbound: initialTrackedOutbound,
+      waitForAckMs: boundedWaitForAckMs,
+      retryRequestedVia: "local_runtime_send",
+    });
+    const trackedOutbound = reconciled.trackedOutbound;
+    if (reconciled.summary) {
+      if (reconciled.summary.failed) {
+        throw new Error("WhatsApp reported a delivery error for this message.");
+      }
+
+      return {
+        success: true as const,
+        messageIds: trackedOutbound?.wa_message_ids ?? [],
+        targetJid: checkedTargetJid,
+        targetPhone: checkedTargetPhone ?? null,
+        deduped: true,
+        retriedUndelivered: false,
+        ackStatus: reconciled.summary.ackStatus,
+        sentAccepted: reconciled.summary.sentAccepted,
+        deliveryConfirmed: reconciled.summary.deliveryConfirmed,
+        warning: registrationCheck.warning,
+      };
     }
     if (trackedOutbound?.status === "skipped" || trackedOutbound?.status === "cancelled") {
-      return false;
+      throw new Error("WhatsApp outbound message was cancelled before send.");
     }
 
-    const waMessageIds = await sendStreamingMessage(session.sock, checkedTargetJid, message);
-    if (tracking) {
-      await recordTrackedWhatsAppSendSuccess({
-        ...tracking,
-        idempotencyKey: trackedOutbound?.idempotency_key ?? tracking.idempotencyKey,
-      }, waMessageIds, 1);
+    const attemptCount = Math.max(1, (trackedOutbound?.attempt_count ?? 0) + 1);
+    try {
+      const waMessageIds = await sendStreamingMessage(session.sock, checkedTargetJid, message);
+      if (tracking) {
+        await recordTrackedWhatsAppSendSuccess({
+          ...tracking,
+          idempotencyKey: trackedOutbound?.idempotency_key ?? tracking.idempotencyKey,
+        }, waMessageIds, attemptCount);
+      }
+      if (resolvedSession?.userId) {
+        void logOutbound(resolvedSession.userId, message, checkedTargetJid, sanitizeContactName(contactName), waMessageIds);
+      }
+
+      const immediateSummary = buildOutboundAckSummary("sent");
+      const waitedSummary = (boundedWaitForAckMs > 0 && tracking?.userId)
+        ? await waitForTrackedOutboundStatus({
+          userId: tracking.userId,
+          idempotencyKey: trackedOutbound?.idempotency_key ?? tracking.idempotencyKey ?? null,
+          timeoutMs: boundedWaitForAckMs,
+        })
+        : null;
+      const finalSummary = waitedSummary ?? immediateSummary;
+      if (finalSummary.failed) {
+        throw new Error("WhatsApp reported a delivery error for this message.");
+      }
+
+      return {
+        success: true as const,
+        messageIds: waMessageIds,
+        targetJid: checkedTargetJid,
+        targetPhone: checkedTargetPhone ?? null,
+        deduped: false,
+        retriedUndelivered: reconciled.retriedUndelivered,
+        ackStatus: finalSummary.ackStatus,
+        sentAccepted: finalSummary.sentAccepted,
+        deliveryConfirmed: finalSummary.deliveryConfirmed,
+        warning: registrationCheck.warning,
+      };
+    } catch (error) {
+      if (tracking) {
+        await recordTrackedWhatsAppSendFailure({
+          ...tracking,
+          idempotencyKey: trackedOutbound?.idempotency_key ?? tracking.idempotencyKey,
+        }, attemptCount, error instanceof Error ? error.message : "Failed to send WhatsApp message.", true);
+      }
+      throw error;
     }
-    if (resolvedSession?.userId) {
-      void logOutbound(resolvedSession.userId, message, checkedTargetJid, sanitizeContactName(contactName), waMessageIds);
-    }
-    return true;
   },
   async resolveContact({ userId, contactName }) {
     const session = sessions.get(userId) ?? null;
@@ -6762,11 +6954,11 @@ app.post("/wa/send", auth, async (req, res) => {
   }
 
   const resolvedSession = userId
-    ? { userId, session: sessions.get(userId) ?? null }
+    ? findScopedSessionByUserId(userId)
     : (phone ? findSessionByPhone(phone) : null);
-  const session = resolvedSession?.session ?? [...sessions.values()][0] ?? null;
+  const session = resolvedSession?.session ?? (!userId ? [...sessions.values()][0] ?? null : null);
   if (!session) {
-    res.status(503).json({ error: "No active session" });
+    res.status(503).json({ error: userId ? "No active session for this user" : "No active session" });
     return;
   }
 
@@ -6819,17 +7011,16 @@ app.post("/wa/send", auth, async (req, res) => {
       metadata,
     }
     : null;
-  const trackedOutbound = tracking ? await prepareTrackedWhatsAppOutbound(tracking) : null;
-  if (trackedOutbound?.status === "sent" || trackedOutbound?.status === "delivered" || trackedOutbound?.status === "read") {
-    const summary = buildOutboundAckSummary(trackedOutbound.status);
-    const waited = (waitForAckMs > 0 && tracking?.userId)
-      ? await waitForTrackedOutboundStatus({
-        userId: tracking.userId,
-        idempotencyKey: trackedOutbound.idempotency_key,
-        timeoutMs: waitForAckMs,
-      })
-      : null;
-    const finalSummary = waited ?? summary;
+  const initialTrackedOutbound = tracking ? await prepareTrackedWhatsAppOutbound(tracking) : null;
+  const reconciled = await reconcileTrackedOutboundBeforeSend({
+    tracking,
+    trackedOutbound: initialTrackedOutbound,
+    waitForAckMs,
+    retryRequestedVia: "api_send",
+  });
+  const trackedOutbound = reconciled.trackedOutbound;
+  if (reconciled.summary) {
+    const finalSummary = reconciled.summary;
     if (finalSummary.failed) {
       res.status(502).json({ error: "WhatsApp reported a delivery error for this message." });
       return;
@@ -6841,6 +7032,7 @@ app.post("/wa/send", auth, async (req, res) => {
       messageIds: trackedOutbound.wa_message_ids,
       targetJid: checkedTargetJid,
       targetPhone: checkedTargetPhone,
+      retriedUndelivered: false,
       ackStatus: finalSummary.ackStatus,
       sentAccepted: finalSummary.sentAccepted,
       deliveryConfirmed: finalSummary.deliveryConfirmed,
@@ -6854,12 +7046,13 @@ app.post("/wa/send", auth, async (req, res) => {
   }
 
   try {
+    const attemptCount = Math.max(1, (trackedOutbound?.attempt_count ?? 0) + 1);
     const waMessageIds = await sendStreamingMessage(session.sock, checkedTargetJid, message);
     if (tracking) {
       await recordTrackedWhatsAppSendSuccess({
         ...tracking,
         idempotencyKey: trackedOutbound?.idempotency_key ?? tracking.idempotencyKey,
-      }, waMessageIds, 1);
+      }, waMessageIds, attemptCount);
     }
     if (resolvedSession?.userId) {
       void logOutbound(resolvedSession.userId, message, checkedTargetJid, contactName, waMessageIds);
@@ -6884,17 +7077,19 @@ app.post("/wa/send", auth, async (req, res) => {
       messageIds: waMessageIds,
       targetJid: checkedTargetJid,
       targetPhone: checkedTargetPhone,
+      retriedUndelivered: reconciled.retriedUndelivered,
       ackStatus: finalSummary.ackStatus,
       sentAccepted: finalSummary.sentAccepted,
       deliveryConfirmed: finalSummary.deliveryConfirmed,
       warning: registrationCheck.warning,
     });
   } catch (error) {
+    const attemptCount = Math.max(1, (trackedOutbound?.attempt_count ?? 0) + 1);
     if (tracking) {
       await recordTrackedWhatsAppSendFailure({
         ...tracking,
         idempotencyKey: trackedOutbound?.idempotency_key ?? tracking.idempotencyKey,
-      }, 1, error instanceof Error ? error.message : "Failed to send WhatsApp message.", true);
+      }, attemptCount, error instanceof Error ? error.message : "Failed to send WhatsApp message.", true);
     }
     throw error;
   }

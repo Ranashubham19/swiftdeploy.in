@@ -43,11 +43,19 @@ export type ClawCloudWhatsAppSendResult = {
   targetJid: string | null;
   targetPhone: string | null;
   deduped: boolean;
+  retriedUndelivered: boolean;
   ackStatus: ClawCloudWhatsAppAckStatus | null;
   sentAccepted: boolean;
   deliveryConfirmed: boolean;
   warning: string | null;
 };
+
+export type ClawCloudWhatsAppSendDisposition =
+  | "delivered"
+  | "submitted_pending"
+  | "resubmitted_pending"
+  | "already_pending"
+  | "already_delivered";
 
 export type ClawCloudWhatsAppWorkspaceState = {
   connected: boolean;
@@ -124,7 +132,9 @@ type LocalWhatsAppRuntime = {
     workflowRunId?: string | null;
     idempotencyKey?: string | null;
     metadata?: Record<string, unknown> | null;
-  }) => Promise<boolean>;
+    waitForAckMs?: number | null;
+    requireRegisteredNumber?: boolean | null;
+  }) => Promise<ClawCloudWhatsAppSendResult>;
   resolveContact?: (input: {
     userId: string;
     contactName: string;
@@ -150,6 +160,28 @@ let localWhatsAppRuntime: LocalWhatsAppRuntime | null = null;
 
 export function registerClawCloudWhatsAppRuntime(runtime: LocalWhatsAppRuntime) {
   localWhatsAppRuntime = runtime;
+}
+
+export function classifyClawCloudWhatsAppSendResult(
+  result: Pick<ClawCloudWhatsAppSendResult, "deduped" | "retriedUndelivered" | "sentAccepted" | "deliveryConfirmed">,
+): ClawCloudWhatsAppSendDisposition {
+  if (result.deduped && result.deliveryConfirmed) {
+    return "already_delivered";
+  }
+
+  if (result.deliveryConfirmed) {
+    return "delivered";
+  }
+
+  if (result.deduped && result.sentAccepted) {
+    return "already_pending";
+  }
+
+  if (result.retriedUndelivered && result.sentAccepted) {
+    return "resubmitted_pending";
+  }
+
+  return "submitted_pending";
 }
 
 function normalizeAgentServerUrl(url: string) {
@@ -516,7 +548,7 @@ export async function sendClawCloudWhatsAppToPhone(
 
   if (!getAgentServerBaseUrl() || !env.AGENT_SECRET) {
     if (localWhatsAppRuntime?.send) {
-      const ok = await localWhatsAppRuntime.send({
+      return localWhatsAppRuntime.send({
         userId: options?.userId ?? null,
         phone,
         jid: options?.jid ?? null,
@@ -527,21 +559,9 @@ export async function sendClawCloudWhatsAppToPhone(
         workflowRunId: options?.workflowRunId ?? null,
         idempotencyKey: options?.idempotencyKey ?? null,
         metadata: options?.metadata ?? null,
+        waitForAckMs: options?.waitForAckMs ?? null,
+        requireRegisteredNumber: options?.requireRegisteredNumber ?? true,
       });
-      if (!ok) {
-        throw new Error("Failed to send WhatsApp message.");
-      }
-      return {
-        success: true as const,
-        messageIds: [],
-        targetJid: options?.jid ?? null,
-        targetPhone: phone ?? null,
-        deduped: false,
-        ackStatus: null,
-        sentAccepted: true,
-        deliveryConfirmed: false,
-        warning: null,
-      };
     }
   }
 
@@ -567,6 +587,7 @@ export async function sendClawCloudWhatsAppToPhone(
     error?: string;
     success?: boolean;
     deduped?: boolean;
+    retriedUndelivered?: boolean;
     messageIds?: string[];
     targetJid?: string | null;
     targetPhone?: string | null;
@@ -599,6 +620,7 @@ export async function sendClawCloudWhatsAppToPhone(
     targetJid: json.targetJid ?? options?.jid ?? null,
     targetPhone: json.targetPhone ?? phone ?? null,
     deduped: Boolean(json.deduped),
+    retriedUndelivered: Boolean(json.retriedUndelivered),
     ackStatus,
     sentAccepted: Boolean(json.sentAccepted ?? (ackStatus === "server_ack" || ackStatus === "delivery_ack" || ackStatus === "read")),
     deliveryConfirmed: Boolean(json.deliveryConfirmed ?? (ackStatus === "delivery_ack" || ackStatus === "read")),

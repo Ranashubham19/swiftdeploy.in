@@ -3,7 +3,12 @@ import { completeClawCloudPrompt } from "@/lib/clawcloud-ai";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 import { getUserLocale, translateMessage } from "@/lib/clawcloud-i18n";
 import { parseOutboundReviewDecision } from "@/lib/clawcloud-outbound-review";
-import { sendClawCloudWhatsAppToPhone } from "@/lib/clawcloud-whatsapp";
+import {
+  classifyClawCloudWhatsAppSendResult,
+  sendClawCloudWhatsAppToPhone,
+  type ClawCloudWhatsAppSendDisposition,
+  type ClawCloudWhatsAppSendResult,
+} from "@/lib/clawcloud-whatsapp";
 import {
   ensureWhatsAppOutboundMessage,
   transitionWhatsAppOutboundMessage,
@@ -32,6 +37,11 @@ type QueueWhatsAppReplyApprovalInput = {
   priority: WhatsAppContactPriority;
   auditPayload?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+};
+
+export type WhatsAppApprovalUpdateResult = {
+  approval: WhatsAppReplyApproval;
+  sendResult: ClawCloudWhatsAppSendResult | null;
 };
 
 function shortId(id: string) {
@@ -69,6 +79,106 @@ function looksLikeExplicitBroadcastApproval(message: string) {
   const normalized = message.trim().replace(/\s+/g, " ").toLowerCase();
   return /^(?:yes|okay|ok|confirm|approve|send)\b/.test(normalized)
     && /\b(?:all|everyone|broadcast)\b/.test(normalized);
+}
+
+function buildApprovedWhatsAppReplyStatusLine(
+  targetLabel: string,
+  sendResult: ClawCloudWhatsAppSendResult,
+) {
+  switch (classifyClawCloudWhatsAppSendResult(sendResult)) {
+    case "already_delivered":
+      return `An identical approved WhatsApp reply was already delivered to ${targetLabel}. I did not queue a duplicate.`;
+    case "already_pending":
+      return `An identical approved WhatsApp reply for ${targetLabel} is already pending delivery. I did not queue a duplicate.`;
+    case "resubmitted_pending":
+      return `Resubmitted the approved WhatsApp reply to WhatsApp for ${targetLabel} because the earlier attempt was still unconfirmed. Delivery confirmation is pending.`;
+    case "submitted_pending":
+      return `Submitted the approved WhatsApp reply to WhatsApp for ${targetLabel}. Delivery confirmation is pending.`;
+    case "delivered":
+    default:
+      return `Delivered the approved WhatsApp reply to ${targetLabel}.`;
+  }
+}
+
+function summarizeApprovedWhatsAppReplyResults(input: {
+  results: Array<{
+    label: string;
+    disposition: ClawCloudWhatsAppSendDisposition;
+  }>;
+}) {
+  const counts = {
+    delivered: 0,
+    submittedPending: 0,
+    resubmittedPending: 0,
+    alreadyPending: 0,
+    alreadyDelivered: 0,
+  };
+
+  for (const result of input.results) {
+    switch (result.disposition) {
+      case "already_delivered":
+        counts.alreadyDelivered += 1;
+        break;
+      case "already_pending":
+        counts.alreadyPending += 1;
+        break;
+      case "resubmitted_pending":
+        counts.resubmittedPending += 1;
+        break;
+      case "submitted_pending":
+        counts.submittedPending += 1;
+        break;
+      case "delivered":
+      default:
+        counts.delivered += 1;
+        break;
+    }
+  }
+
+  const total = input.results.length;
+  if (total === 1) {
+    const only = input.results[0];
+    if (!only) {
+      return "Processed the approved WhatsApp reply.";
+    }
+
+    switch (only.disposition) {
+      case "already_delivered":
+        return `An identical approved WhatsApp reply was already delivered to ${only.label}. I did not queue a duplicate.`;
+      case "already_pending":
+        return `An identical approved WhatsApp reply for ${only.label} is already pending delivery. I did not queue a duplicate.`;
+      case "resubmitted_pending":
+        return `Resubmitted the approved WhatsApp reply to WhatsApp for ${only.label} because the earlier attempt was still unconfirmed. Delivery confirmation is pending.`;
+      case "submitted_pending":
+        return `Submitted the approved WhatsApp reply to WhatsApp for ${only.label}. Delivery confirmation is pending.`;
+      case "delivered":
+      default:
+        return `Delivered the approved WhatsApp reply to ${only.label}.`;
+    }
+  }
+
+  if (counts.delivered === total) {
+    return `Delivered the approved WhatsApp replies to ${total} contacts.`;
+  }
+
+  const fragments: string[] = [];
+  if (counts.delivered) {
+    fragments.push(`${counts.delivered} delivered`);
+  }
+  if (counts.submittedPending) {
+    fragments.push(`${counts.submittedPending} submitted with delivery pending`);
+  }
+  if (counts.resubmittedPending) {
+    fragments.push(`${counts.resubmittedPending} resubmitted after an older unconfirmed attempt`);
+  }
+  if (counts.alreadyPending) {
+    fragments.push(`${counts.alreadyPending} already pending from an identical earlier reply`);
+  }
+  if (counts.alreadyDelivered) {
+    fragments.push(`${counts.alreadyDelivered} already delivered earlier with no duplicate queued`);
+  }
+
+  return `Processed the approved WhatsApp replies for ${total} contacts: ${fragments.join(", ")}.`;
 }
 
 function buildWhatsAppDraftRewritePrompt(
@@ -282,7 +392,7 @@ export async function updateWhatsAppReplyApproval(
     action: "send" | "skip";
     draftReply?: string;
   },
-) {
+): Promise<WhatsAppApprovalUpdateResult> {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const { data, error } = await supabaseAdmin
     .from("whatsapp_reply_approvals")
@@ -371,7 +481,10 @@ export async function updateWhatsAppReplyApproval(
       }).catch(() => null);
     }
 
-    return updated as WhatsAppReplyApproval;
+    return {
+      approval: updated as WhatsAppReplyApproval,
+      sendResult: null,
+    };
   }
 
   const draftReply = input.draftReply?.trim() || approval.draft_reply;
@@ -406,7 +519,7 @@ export async function updateWhatsAppReplyApproval(
     }).catch(() => null);
   }
 
-  await sendClawCloudWhatsAppToPhone(approval.remote_phone, draftReply, {
+  const sendResult = await sendClawCloudWhatsAppToPhone(approval.remote_phone, draftReply, {
     userId,
     contactName: approval.contact_name,
     jid: approval.remote_jid,
@@ -470,17 +583,23 @@ export async function updateWhatsAppReplyApproval(
   await writeWhatsAppAuditLog(userId, {
     eventType: "reply_sent",
     actor: "user",
-    summary: `Sent approved WhatsApp reply to ${approval.contact_name || approval.remote_phone || "contact"}.`,
+    summary: buildApprovedWhatsAppReplyStatusLine(
+      approval.contact_name || approval.remote_phone || "contact",
+      sendResult,
+    ),
     targetValue: approval.remote_jid ?? approval.remote_phone,
     metadata: {
       approval_id: approval.id,
       edited: nextStatus === "edited",
-      },
-    }).catch(() => null);
+    },
+  }).catch(() => null);
 
   await syncWorkflowRunFromApproval(userId, approval, "send").catch(() => null);
 
-  return updated as WhatsAppReplyApproval;
+  return {
+    approval: updated as WhatsAppReplyApproval,
+    sendResult,
+  };
 }
 
 export async function handleLatestWhatsAppApprovalReview(userId: string, message: string) {
@@ -550,8 +669,18 @@ export async function handleLatestWhatsAppApprovalReview(userId: string, message
     };
   }
 
+  const sendResults: Array<{
+    label: string;
+    disposition: ClawCloudWhatsAppSendDisposition;
+  }> = [];
   for (const approval of group.approvals) {
-    await updateWhatsAppReplyApproval(userId, approval.id, { action: "send" });
+    const result = await updateWhatsAppReplyApproval(userId, approval.id, { action: "send" });
+    if (result.sendResult) {
+      sendResults.push({
+        label: approval.contact_name || approval.remote_phone || "that contact",
+        disposition: classifyClawCloudWhatsAppSendResult(result.sendResult),
+      });
+    }
   }
   await upsertAnalyticsDaily(userId, {
     tasks_run: 1,
@@ -561,7 +690,9 @@ export async function handleLatestWhatsAppApprovalReview(userId: string, message
   return {
     handled: true,
     response: await translateMessage(
-      `Sent the approved WhatsApp ${group.approvals.length === 1 ? "message" : "messages"} to ${label}.`,
+      sendResults.length
+        ? summarizeApprovedWhatsAppReplyResults({ results: sendResults })
+        : `Processed the approved WhatsApp ${group.approvals.length === 1 ? "reply" : "replies"} for ${label}.`,
       locale,
     ),
     createdAt: group.latestCreatedAt,
@@ -606,7 +737,7 @@ export async function handleWhatsAppApprovalCommand(userId: string, message: str
   }
 
   const finalDraft = editMatch?.[2]?.trim() || approval.draft_reply;
-  await updateWhatsAppReplyApproval(userId, approval.id, {
+  const result = await updateWhatsAppReplyApproval(userId, approval.id, {
     action: "send",
     draftReply: finalDraft,
   });
@@ -614,7 +745,12 @@ export async function handleWhatsAppApprovalCommand(userId: string, message: str
   return {
     handled: true,
     response: await translateMessage(
-      `Sent the WhatsApp reply to ${approval.contact_name || approval.remote_phone || "that contact"}.`,
+      result.sendResult
+        ? buildApprovedWhatsAppReplyStatusLine(
+          approval.contact_name || approval.remote_phone || "that contact",
+          result.sendResult,
+        )
+        : `Processed the WhatsApp reply for ${approval.contact_name || approval.remote_phone || "that contact"}.`,
       locale,
     ),
   };

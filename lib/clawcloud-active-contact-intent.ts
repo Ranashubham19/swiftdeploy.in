@@ -40,6 +40,7 @@ export const ACTIVE_CONTACT_START_PATTERNS = [
       + ACTIVE_CONTACT_TRAILING_PUNCTUATION,
     "iu",
   ),
+  /^(?:kya\s+)?(?:ab\s+se\s+)?(?:(?:aap|app|tum|tu)\s+)?(?:meri|mere)\s+(?:taraf|tarf)\s+se\s+(.+?)\s+se\s+(?:baat|chat|reply)\s+kar(?:o|iye|na|oge|enge|ange|ega|egi)?[\u3002.!?\uFF01\uFF1F]*$/iu,
   /^(?:kya\s+)?(?:(?:aap|app|tum|tu)\s+)?(?:ab\s+se\s+)?(?:meri|mere)\s+(?:taraf\s+se|behalf\s+(?:me|mai|mein))\s+(.+?)\s+se\s+(?:baat|chat|reply)\s+kar(?:o|iye|na|oge|enge|ange|ega|egi)?[\u3002.!?\uFF01\uFF1F]*$/iu,
   /^(?:kya\s+)?(?:ab\s+se\s+)?(?:(?:aap|app|tum|tu)\s+)?(?:meri|mere)\s+(?:taraf\s+se|behalf\s+(?:me|mai|mein))\s+(.+?)\s+se\s+(?:baat|chat|reply)\s+kar(?:o|iye|na|oge|enge|ange|ega|egi)?[\u3002.!?\uFF01\uFF1F]*$/iu,
   /^(?:kya\s+)?(?:se\s+)?(?:(?:aap|app|tum|tu)\s+)?(?:meri|mere)\s+(?:taraf\s+se|behalf\s+(?:me|mai|mein))\s+(.+?)\s+se\s+(?:baat|chat|reply)\s+kar(?:o|iye|na|oge|enge|ange|ega|egi)?[\u3002.!?\uFF01\uFF1F]*$/iu,
@@ -96,6 +97,23 @@ const ACTIVE_CONTACT_TARGET_PREFIX_RE =
 const ACTIVE_CONTACT_INVALID_TARGET_RE =
   /^(?:everyone|everybody|all|all contacts?|all chats?|all messages?|all questions?|the world|the internet|google|gmail|whatsapp|chatgpt|clawcloud)$/iu;
 
+function buildActiveContactStartCandidates(value: string) {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return [];
+  }
+
+  const stripped = stripClawCloudConversationalLeadIn(raw);
+  const normalizedRaw = normalizeClawCloudUnderstandingMessage(raw).trim();
+  const normalizedStripped = normalizedRaw
+    ? stripClawCloudConversationalLeadIn(normalizedRaw)
+    : "";
+
+  return Array.from(
+    new Set([raw, stripped, normalizedRaw, normalizedStripped].filter(Boolean)),
+  );
+}
+
 function normalizeActiveContactStartTarget(value: string) {
   const cleaned = String(value ?? "")
     .replace(ACTIVE_CONTACT_TARGET_PREFIX_RE, "")
@@ -114,15 +132,10 @@ function normalizeActiveContactStartTarget(value: string) {
 }
 
 export function extractActiveContactStartCommand(value: string) {
-  const trimmed = stripClawCloudConversationalLeadIn(String(value ?? "").trim());
-  if (!trimmed) {
+  const candidates = buildActiveContactStartCandidates(value);
+  if (!candidates.length) {
     return null;
   }
-
-  const understood = stripClawCloudConversationalLeadIn(
-    normalizeClawCloudUnderstandingMessage(trimmed).trim(),
-  );
-  const candidates = Array.from(new Set([trimmed, understood].filter(Boolean)));
 
   for (const candidate of candidates) {
     for (const pattern of ACTIVE_CONTACT_START_PATTERNS) {

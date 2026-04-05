@@ -102,6 +102,9 @@ const EXPLICIT_LOCALE_NOISE_TOKENS = new Set([
   "a",
   "an",
   "the",
+  "on",
+  "via",
+  "using",
   "answer",
   "answers",
   "reply",
@@ -133,6 +136,12 @@ const EXPLICIT_LOCALE_NOISE_TOKENS = new Set([
   "natural",
   "fluently",
   "please",
+  "whatsapp",
+  "whatsap",
+  "whatsaap",
+  "wa",
+  "chat",
+  "platform",
 ]);
 
 const SANSKRIT_EXPLICIT_LANGUAGE_RE =

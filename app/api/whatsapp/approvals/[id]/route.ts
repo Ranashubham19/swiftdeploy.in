@@ -32,11 +32,14 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       );
     }
 
-    const approval = await updateWhatsAppReplyApproval(auth.user.id, id, {
+    const result = await updateWhatsAppReplyApproval(auth.user.id, id, {
       action: body.action,
       draftReply: body.draftReply,
     });
-    return NextResponse.json({ approval });
+    return NextResponse.json({
+      approval: result.approval,
+      sendResult: result.sendResult,
+    });
   } catch (error) {
     return NextResponse.json(
       { error: getClawCloudErrorMessage(error) },

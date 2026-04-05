@@ -220,11 +220,15 @@ import {
   recordClawCloudChatRun,
 } from "@/lib/clawcloud-usage";
 import {
+  classifyClawCloudWhatsAppSendResult,
   getClawCloudWhatsAppAccount,
+  getClawCloudWhatsAppRuntimeStatus,
   refreshClawCloudWhatsAppContacts,
   resolveClawCloudWhatsAppContact,
   sendClawCloudWhatsAppMessage,
   sendClawCloudWhatsAppToPhone,
+  type ClawCloudWhatsAppSendDisposition,
+  type ClawCloudWhatsAppSendResult,
   type ClawCloudWhatsAppSelfDeliveryMode,
 } from "@/lib/clawcloud-whatsapp";
 import {
@@ -7108,6 +7112,7 @@ const FAST_REPLY_TOTAL_BUDGET_MS = 12_000;
 const DEEP_REPLY_TOTAL_BUDGET_MS = 20_000;
 const INBOUND_AGENT_ROUTE_TIMEOUT_MS = 25_000;
 const INBOUND_AGENT_ROUTE_DIRECT_TIMEOUT_MS = 20_000;
+const INBOUND_AGENT_ROUTE_ACTIVE_CONTACT_TIMEOUT_MS = 25_000;
 const INBOUND_AGENT_ROUTE_OPERATIONAL_TIMEOUT_MS = 15_000;
 const INBOUND_AGENT_ROUTE_DEEP_TIMEOUT_MS = 30_000;
 const INBOUND_AGENT_ROUTE_LIVE_TIMEOUT_MS = 20_000;
@@ -7141,7 +7146,7 @@ function resolveInboundRouteTimeoutPolicy(message: string): InboundRouteTimeoutP
   }
 
   if (parseWhatsAppActiveContactSessionCommand(trimmed).type !== "none") {
-    return { kind: "operational", timeoutMs: INBOUND_AGENT_ROUTE_OPERATIONAL_TIMEOUT_MS };
+    return { kind: "operational", timeoutMs: INBOUND_AGENT_ROUTE_ACTIVE_CONTACT_TIMEOUT_MS };
   }
 
   if (looksLikeStructuredTechnicalChallengePrompt(trimmed)) {
@@ -8694,6 +8699,7 @@ function looksLikeWhatsAppContactConversationLookup(text: string) {
     || /\bwa\b/.test(lower);
   const hasStrongConversationSurface =
     /\b(?:messages|chat|conversation|history|texts)\b/.test(lower)
+    || /\b(?:converation|converstion|convesation)\b/.test(lower)
     || /\b(?:conversation|chat|history)\s+(?:summary|recap|brief|overview)\b/.test(lower)
     || /\b(?:summary|summari[sz]e|recap|brief|overview)\s+(?:the\s+)?(?:conversation|chat|history|messages?|texts?)\b/.test(lower);
   const hasWeakSingleMessageSurface =
@@ -8724,7 +8730,7 @@ function looksLikeWhatsAppContactConversationLookup(text: string) {
     || /\b(?:phone|mobile|whatsapp\s*number|wa\s*number)\b/.test(lower)
     || /\+?\d[\d\s().-]{6,}\d\b/.test(lower)
     || hasNamedConversationPattern
-    || Boolean(extractWhatsAppHistoryContactHint(lower));
+    || Boolean(resolveWhatsAppHistoryContactHint(lower));
 
   return (
     (
@@ -9396,6 +9402,65 @@ function normalizePersonalLookupHint(value: string | null | undefined) {
   return trimPersonalLookupBoundaryStopwords(cleaned);
 }
 
+const WHATSAPP_HISTORY_HINT_BLOCKLIST = new Set([
+  "message",
+  "messages",
+  "chat",
+  "conversation",
+  "converation",
+  "history",
+  "text",
+  "texts",
+  "summary",
+  "summarize",
+  "recap",
+  "overview",
+  "brief",
+  "contact",
+  "number",
+  "phone",
+  "keyword",
+  "query",
+  "context",
+  "content",
+  "there",
+  "them",
+  "it",
+  "someone",
+  "anyone",
+  "person",
+  "people",
+]);
+
+function isPlausibleWhatsAppHistoryContactHint(value: string | null | undefined) {
+  const normalized = normalizePersonalLookupHint(value);
+  if (!normalized) {
+    return false;
+  }
+
+  if (looksLikeRelativeWhatsAppContactHint(normalized)) {
+    return true;
+  }
+
+  if (extractPhoneDigitsForLookup(normalized)) {
+    return true;
+  }
+
+  const tokens = normalized
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+  if (!tokens.length || tokens.length > 6) {
+    return false;
+  }
+
+  if (tokens.every((token) => WHATSAPP_HISTORY_HINT_BLOCKLIST.has(token.toLowerCase()))) {
+    return false;
+  }
+
+  return /[\p{L}\p{N}]/u.test(normalized);
+}
+
 function extractWhatsAppHistoryContactHint(raw: string) {
   const normalizedRaw = stripClawCloudConversationalLeadIn(raw);
   const patterns = [
@@ -9431,12 +9496,35 @@ function extractWhatsAppHistoryContactHint(raw: string) {
   for (const pattern of patterns) {
     const match = normalizedRaw.match(pattern);
     const candidate = normalizePersonalLookupHint(match?.[1]);
-    if (candidate) {
+    if (isPlausibleWhatsAppHistoryContactHint(candidate)) {
       return candidate;
     }
   }
 
   return null;
+}
+
+function extractLooseWhatsAppHistoryContactHint(raw: string) {
+  const normalizedRaw = stripClawCloudConversationalLeadIn(raw);
+  const patterns = [
+    /\b(?:of\s+me\s+with|between\s+me\s+and)\s+(.+?)(?=\s+\b(?:about|regarding|today|yesterday|this week|last week|last \d+\s+days?|in|on)\b|$)/i,
+    /\bwith\s+(.+?)(?=\s+\b(?:about|regarding|today|yesterday|this week|last week|last \d+\s+days?|in|on)\b|$)/i,
+    /\bfrom\s+(.+?)(?=\s+\b(?:about|regarding|today|yesterday|this week|last week|last \d+\s+days?|in|on)\b|$)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalizedRaw.match(pattern);
+    const candidate = normalizePersonalLookupHint(match?.[1]);
+    if (isPlausibleWhatsAppHistoryContactHint(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function resolveWhatsAppHistoryContactHint(raw: string) {
+  return extractWhatsAppHistoryContactHint(raw) ?? extractLooseWhatsAppHistoryContactHint(raw);
 }
 
 function extractWhatsAppHistoryQueryHint(raw: string) {
@@ -9485,7 +9573,7 @@ async function resolveRecentWhatsAppOutboundTarget(userId: string) {
 
 export function extractWhatsAppHistoryHintsForTest(raw: string) {
   return {
-    contactHint: extractWhatsAppHistoryContactHint(raw),
+    contactHint: resolveWhatsAppHistoryContactHint(raw),
     queryHint: extractWhatsAppHistoryQueryHint(raw),
     direction: detectWhatsAppHistoryDirection(raw),
   };
@@ -10250,7 +10338,12 @@ async function isWhatsAppConnected(userId: string) {
     .eq("is_active", true)
     .catch(() => ({ count: 0 }));
 
-  return (count ?? 0) > 0;
+  if ((count ?? 0) > 0) {
+    return true;
+  }
+
+  const runtimeStatus = await getClawCloudWhatsAppRuntimeStatus(userId).catch(() => null);
+  return Boolean(runtimeStatus?.connected && !runtimeStatus?.requiresReauth);
 }
 
 function formatWhatsAppMessageTimestamp(value: string | null | undefined, timezone = "Asia/Kolkata") {
@@ -10504,7 +10597,7 @@ async function buildWhatsAppHistoryReply(
   const requestedCount = extractRequestedEmailCount(promptText, 5);
   const wantsFullConversation = /\b(?:all|full|entire|complete)\b[\s\w]{0,20}\b(?:messages?|chat|conversation|history|texts?)\b/i.test(promptText)
     || /\b(?:messages?|chat|conversation|history|texts?)\b[\s\w]{0,20}\b(?:all|full|entire|complete)\b/i.test(promptText);
-  const contactHint = extractWhatsAppHistoryContactHint(promptText);
+  const contactHint = resolveWhatsAppHistoryContactHint(promptText);
   const queryHint = extractWhatsAppHistoryQueryHint(promptText);
   const direction = detectWhatsAppHistoryDirection(promptText);
   const inlinePhone = extractPhoneDigitsForLookup(promptText);
@@ -10512,12 +10605,13 @@ async function buildWhatsAppHistoryReply(
   const timezone = "Asia/Kolkata";
 
   let resolvedContactName = contactHint;
-  let contactSearchValue = contactHint;
+  let contactSearchValue: string | null = null;
   let resolvedContactScope: {
     phone?: string | null;
     jid?: string | null;
     aliases?: string[];
   } | null = null;
+  let blockBroadHistoryFallback = false;
 
   const contactHintPhone = extractPhoneDigitsForLookup(contactHint);
   const relativeContactHint = looksLikeRelativeWhatsAppContactHint(contactHint);
@@ -10572,10 +10666,8 @@ async function buildWhatsAppHistoryReply(
       }
 
       if (fuzzyResult.type === "not_found") {
-        // Fall back to stored WhatsApp history label search before giving up.
-        // This keeps history lookups usable even when live synced contacts are stale.
         resolvedContactName = contactHint;
-        contactSearchValue = contactHint;
+        blockBroadHistoryFallback = true;
       }
 
       if (fuzzyResult.type === "found") {
@@ -10597,17 +10689,19 @@ async function buildWhatsAppHistoryReply(
     }
   }
 
-  let history = await listWhatsAppHistory({
-    userId,
-    contact: resolvedContactScope ? null : contactSearchValue,
-    resolvedContact: resolvedContactScope,
-    query: queryHint,
-    direction,
-    limit: historyLimit,
-  }).catch(() => null);
+  let history = blockBroadHistoryFallback
+    ? null
+    : await listWhatsAppHistory({
+      userId,
+      contact: resolvedContactScope ? null : contactSearchValue,
+      resolvedContact: resolvedContactScope,
+      query: queryHint,
+      direction,
+      limit: historyLimit,
+    }).catch(() => null);
 
   let rows = history?.rows ?? [];
-  if (!rows.length) {
+  if (!rows.length && !blockBroadHistoryFallback) {
     await clearWhatsAppPendingContactResolution(userId).catch(() => null);
     if (!(await isWhatsAppConnected(userId))) {
       return translateHistoryReply(
@@ -10644,6 +10738,7 @@ async function buildWhatsAppHistoryReply(
         contactHint,
         resolvedContactName,
         resolvedContactScope,
+        requireVerifiedContactMatch: blockBroadHistoryFallback,
       }),
     );
   }
@@ -12555,12 +12650,14 @@ async function routeInboundAgentMessageResultCore(
     ?? detectExplicitConversationStyleOverride(normalizedMessage)
     ?? "professional";
 
-  const preflightWhatsAppSettings = await getWhatsAppSettings(userId).catch(() => null);
   const shouldBypassPendingContactSelection =
     activeContactSessionCommand.type !== "none"
     || parseSendMessageCommand(normalizedMessage) !== null
     || parseSaveContactCommand(normalizedMessage) !== null
     || detectWhatsAppSettingsCommandIntent(normalizedMessage) !== null;
+  const preflightWhatsAppSettings = shouldBypassPendingContactSelection
+    ? null
+    : await getWhatsAppSettings(userId).catch(() => null);
   const pendingContactSelection = shouldBypassPendingContactSelection
     ? { type: "none" } as const
     : resolveWhatsAppPendingContactSelection({
@@ -12650,6 +12747,15 @@ async function routeInboundAgentMessageResultCore(
       liveAnswerBundle: null,
       modelAuditTrail: null,
     };
+  }
+
+  if (
+    activeContactSessionCommand.type !== "none"
+    && (options?.skipAppAccessConsent || isClawCloudApprovalFreeModeEnabled())
+  ) {
+    return routeInboundAgentMessageCore(userId, normalizedMessage, {
+      conversationStyle: baselineConversationStyle,
+    });
   }
 
   // ── Non-Latin Greeting Fast-Path (before any DB calls) ──
@@ -17380,9 +17486,11 @@ async function handleSendMessageToContact(
       },
     });
     void upsertAnalyticsDaily(userId, { wa_messages_sent: 1, tasks_run: 1 }).catch(() => null);
-    const statusLine = sendResult.deliveryConfirmed
-      ? `✅ *Message delivered to ${resolvedName}!*`
-      : `✅ *Message submitted to WhatsApp for ${resolvedName}.* Delivery confirmation is pending.`;
+    const statusLine = `*${buildWhatsAppSingleSendStatusLine({
+      sendResult,
+      targetLabel: resolvedName,
+      action: "message",
+    })}*`;
     return translateMessage(
       [
         statusLine,
@@ -17568,7 +17676,7 @@ function isConfidentRecipientNameMatch(input: {
   }
 
   if (input.matchBasis === "word" && input.score >= 0.9 && overlapCount >= 1) {
-    return true;
+    return requestedTokens.length === 1;
   }
 
   if (
@@ -17577,7 +17685,7 @@ function isConfidentRecipientNameMatch(input: {
     && requestedTokens[0].length >= 4
     && input.score >= 0.93
   ) {
-    return true;
+    return requestedTokens.length === 1;
   }
 
   if (input.matchBasis === "fuzzy" && input.score >= 0.97 && requestedTokens.length > 1) {
@@ -17585,6 +17693,16 @@ function isConfidentRecipientNameMatch(input: {
   }
 
   return false;
+}
+
+export function isConfidentRecipientNameMatchForTest(input: {
+  requestedName: string;
+  resolvedName: string;
+  exact: boolean;
+  score: number;
+  matchBasis: "exact" | "prefix" | "word" | "fuzzy" | null;
+}) {
+  return isConfidentRecipientNameMatch(input);
 }
 
 async function resolveWhatsAppRecipientWithRetry(
@@ -18554,7 +18672,7 @@ function cleanWhatsAppActiveContactSessionContactName(value: string) {
     /^(?:ab\s+(?=(?:meri|mere)\s+(?:taraf\s+se|behalf\b)))+/i,
     /^(?:ab\s+se\s+)+/i,
     /^(?:(?:aap|app|tum|tu|please)\s+)+/i,
-    /^(?:(?:meri|mere)\s+(?:taraf\s+se|behalf\s+(?:me|mai|mein|par|pe))\s+)+/i,
+    /^(?:(?:meri|mere)\s+(?:(?:taraf|tarf)\s+se|behalf\s+(?:me|mai|mein|par|pe))\s+)+/i,
     /^(?:from\s+now\s+on\s+)+/i,
     /^(?:on\s+my\s+behalf\s+)+/i,
     /^(?:for\s+me\s+)+/i,
@@ -18715,15 +18833,19 @@ const ACTIVE_CONTACT_STOP_PATTERNS = [
 ];
 
 function parseWhatsAppActiveContactSessionCommand(text: string): WhatsAppActiveContactSessionCommand {
-  const trimmed = stripClawCloudConversationalLeadIn(String(text ?? "").trim());
-  if (!trimmed) {
+  const raw = String(text ?? "").trim();
+  if (!raw) {
     return { type: "none" };
   }
 
+  const trimmed = stripClawCloudConversationalLeadIn(raw);
   const understood = stripClawCloudConversationalLeadIn(
     normalizeClawCloudUnderstandingMessage(trimmed).trim(),
   );
-  const candidates = Array.from(new Set([trimmed, understood].filter(Boolean)));
+  const rawUnderstood = normalizeClawCloudUnderstandingMessage(raw).trim();
+  const candidates = Array.from(
+    new Set([raw, trimmed, rawUnderstood, understood].filter(Boolean)),
+  );
 
   for (const candidate of candidates) {
     if (ACTIVE_CONTACT_STATUS_PATTERNS.some((pattern) => pattern.test(candidate))) {
@@ -18887,6 +19009,13 @@ function normalizeWhatsAppPendingContactSelectionText(value: string) {
     .trim();
 }
 
+function stripWhatsAppPendingContactSelectionTrailingNoise(value: string) {
+  return String(value ?? "")
+    .replace(/\b(?:say|saying|send|sending|reply|replying|message|messages|msg|text|texts|chat|please|pls|plz|now|right\s+now)\b(?:\s+\b(?:say|saying|send|sending|reply|replying|message|messages|msg|text|texts|chat|please|pls|plz|now|right\s+now)\b)*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function matchWhatsAppPendingContactSelectionByIndex(
   text: string,
   options: WhatsAppPendingContactOption[],
@@ -18931,23 +19060,47 @@ function matchWhatsAppPendingContactSelectionByLabel(
   text: string,
   options: WhatsAppPendingContactOption[],
 ) {
-  const normalized = normalizeContactName(text);
-  if (!normalized) {
-    return null;
+  const digits = normalizeWhatsAppPhoneDigits(text);
+  const normalizedVariants = [...new Set([
+    normalizeContactName(text),
+    normalizeContactName(stripWhatsAppPendingContactSelectionTrailingNoise(text)),
+  ].filter(Boolean))];
+
+  for (const option of options) {
+    if (!digits) {
+      continue;
+    }
+
+    const optionDigits = normalizeWhatsAppPhoneDigits(option.phone);
+    if (optionDigits && (digits === optionDigits || digits === optionDigits.slice(-10))) {
+      return option;
+    }
   }
 
-  const digits = normalizeWhatsAppPhoneDigits(text);
-  for (const option of options) {
-    if (digits) {
-      const optionDigits = normalizeWhatsAppPhoneDigits(option.phone);
-      if (optionDigits && (digits === optionDigits || digits === optionDigits.slice(-10))) {
+  for (const normalized of normalizedVariants) {
+    for (const option of options) {
+      if (normalizeContactName(option.name) === normalized) {
         return option;
       }
     }
+  }
 
-    if (normalizeContactName(option.name) === normalized) {
-      return option;
-    }
+  const strongTokenMatches = normalizedVariants
+    .map((normalized) => {
+      const requestedTokens = normalizeRecipientNameTokens(normalized);
+      if (requestedTokens.length < 2) {
+        return [] as WhatsAppPendingContactOption[];
+      }
+
+      return options.filter((option) => {
+        const optionTokens = normalizeRecipientNameTokens(option.name);
+        return requestedTokens.every((token) => optionTokens.includes(token));
+      });
+    })
+    .find((matches) => matches.length > 0);
+
+  if (strongTokenMatches?.length === 1) {
+    return strongTokenMatches[0] ?? null;
   }
 
   return null;
@@ -18998,7 +19151,9 @@ function resolveWhatsAppPendingContactSelection(input: {
     };
   }
 
-  const normalizedSelection = normalizeContactName(trimmed);
+  const normalizedSelection = normalizeContactName(
+    stripWhatsAppPendingContactSelectionTrailingNoise(trimmed),
+  );
   const looksLikeCandidateMention = pending.options.some((pendingOption) => {
     const optionTokens = normalizeContactName(pendingOption.name)
       .split(/\s+/)
@@ -19102,6 +19257,23 @@ export function formatWhatsAppHistoryResolvedNoRowsReplyForTest(input: {
   return formatWhatsAppHistoryResolvedNoRowsReply(input);
 }
 
+function formatWhatsAppHistoryUnverifiedContactReply(input: {
+  requestedName: string;
+}) {
+  return [
+    `I couldn't verify a synced WhatsApp contact named "${input.requestedName}".`,
+    "",
+    "I did not summarize unrelated chats or unknown-number threads for this request.",
+    "Reply with the exact contact name as saved in WhatsApp or the full phone number, and I will check only that verified chat.",
+  ].join("\n");
+}
+
+export function formatWhatsAppHistoryUnverifiedContactReplyForTest(input: {
+  requestedName: string;
+}) {
+  return formatWhatsAppHistoryUnverifiedContactReply(input);
+}
+
 async function buildWhatsAppHistoryNoRowsReply(input: {
   userId: string;
   promptText: string;
@@ -19112,9 +19284,16 @@ async function buildWhatsAppHistoryNoRowsReply(input: {
     jid?: string | null;
     aliases?: string[];
   } | null;
+  requireVerifiedContactMatch?: boolean;
 }) {
   const retryMatches: Array<{ name: string; phone?: string | null; jid?: string | null }> = [];
   const requestedName = input.contactHint || input.resolvedContactName || "that contact";
+
+  if (input.requireVerifiedContactMatch) {
+    return formatWhatsAppHistoryUnverifiedContactReply({
+      requestedName,
+    });
+  }
 
   if (input.resolvedContactName) {
     retryMatches.push({
@@ -19708,24 +19887,183 @@ async function generateWhatsAppActiveContactConversationalReply(input: {
   }).catch(() => candidateReply);
 }
 
+function buildWhatsAppSendActionLabel(action: "message" | "reply") {
+  return action === "reply" ? "Reply" : "Message";
+}
+
+function buildWhatsAppSingleSendStatusLine(input: {
+  sendResult: ClawCloudWhatsAppSendResult;
+  targetLabel: string;
+  action: "message" | "reply";
+}) {
+  const actionLabel = buildWhatsAppSendActionLabel(input.action);
+  const disposition = classifyClawCloudWhatsAppSendResult(input.sendResult);
+
+  switch (disposition) {
+    case "already_delivered":
+      return `An identical ${input.action} was already delivered to ${input.targetLabel}. I did not queue a duplicate.`;
+    case "already_pending":
+      return `An identical ${input.action} for ${input.targetLabel} is already pending delivery. I did not queue a duplicate.`;
+    case "resubmitted_pending":
+      return `${actionLabel} resubmitted to WhatsApp for ${input.targetLabel} because the earlier attempt was still unconfirmed. Delivery confirmation is pending.`;
+    case "submitted_pending":
+      return `${actionLabel} submitted to WhatsApp for ${input.targetLabel}. Delivery confirmation is pending.`;
+    case "delivered":
+    default:
+      return `${actionLabel} delivered to ${input.targetLabel}.`;
+  }
+}
+
+function buildWhatsAppBatchRecipientStatusLabel(input: {
+  sendResult: ClawCloudWhatsAppSendResult;
+  action: "message" | "reply";
+}) {
+  const actionWord = input.action === "reply" ? "reply" : "message";
+  const disposition = classifyClawCloudWhatsAppSendResult(input.sendResult);
+
+  switch (disposition) {
+    case "already_delivered":
+      return `identical ${actionWord} already delivered`;
+    case "already_pending":
+      return `identical ${actionWord} already pending`;
+    case "resubmitted_pending":
+      return `${actionWord} resubmitted, delivery pending`;
+    case "submitted_pending":
+      return `${actionWord} submitted, delivery pending`;
+    case "delivered":
+    default:
+      return `${actionWord} delivered`;
+  }
+}
+
+function summarizeWhatsAppBatchSendDisposition(input: {
+  sendResults: Array<{
+    label: string;
+    disposition: ClawCloudWhatsAppSendDisposition;
+  }>;
+  action: "message" | "reply";
+}) {
+  const actionWordSingular = input.action === "reply" ? "reply" : "message";
+  const actionWordPlural = input.action === "reply" ? "replies" : "messages";
+  const actionLabelPlural = input.action === "reply" ? "Replies" : "Messages";
+  const counts = {
+    delivered: 0,
+    submittedPending: 0,
+    resubmittedPending: 0,
+    alreadyPending: 0,
+    alreadyDelivered: 0,
+  };
+
+  for (const result of input.sendResults) {
+    switch (result.disposition) {
+      case "already_delivered":
+        counts.alreadyDelivered += 1;
+        break;
+      case "already_pending":
+        counts.alreadyPending += 1;
+        break;
+      case "resubmitted_pending":
+        counts.resubmittedPending += 1;
+        break;
+      case "submitted_pending":
+        counts.submittedPending += 1;
+        break;
+      case "delivered":
+      default:
+        counts.delivered += 1;
+        break;
+    }
+  }
+
+  const total = input.sendResults.length;
+  if (total === 1) {
+    const only = input.sendResults[0];
+    if (!only) {
+      return `${buildWhatsAppSendActionLabel(input.action)} processed.`;
+    }
+
+    switch (only.disposition) {
+      case "already_delivered":
+        return `An identical ${actionWordSingular} was already delivered to ${only.label}. I did not queue a duplicate.`;
+      case "already_pending":
+        return `An identical ${actionWordSingular} for ${only.label} is already pending delivery. I did not queue a duplicate.`;
+      case "resubmitted_pending":
+        return `${buildWhatsAppSendActionLabel(input.action)} resubmitted to WhatsApp for ${only.label} because the earlier attempt was still unconfirmed. Delivery confirmation is pending.`;
+      case "submitted_pending":
+        return `${buildWhatsAppSendActionLabel(input.action)} submitted to WhatsApp for ${only.label}. Delivery confirmation is pending.`;
+      case "delivered":
+      default:
+        return `${buildWhatsAppSendActionLabel(input.action)} delivered to ${only.label}.`;
+    }
+  }
+
+  if (counts.delivered === total) {
+    return `${actionLabelPlural} delivered to ${total} contacts.`;
+  }
+
+  const fragments: string[] = [];
+  if (counts.delivered) {
+    fragments.push(`${counts.delivered} delivered`);
+  }
+  if (counts.submittedPending) {
+    fragments.push(`${counts.submittedPending} submitted with delivery pending`);
+  }
+  if (counts.resubmittedPending) {
+    fragments.push(`${counts.resubmittedPending} resubmitted after an older unconfirmed attempt`);
+  }
+  if (counts.alreadyPending) {
+    fragments.push(`${counts.alreadyPending} already pending from an identical earlier ${actionWordSingular}`);
+  }
+  if (counts.alreadyDelivered) {
+    fragments.push(`${counts.alreadyDelivered} already delivered earlier with no duplicate queued`);
+  }
+
+  return `WhatsApp ${actionWordPlural} processed for ${total} contacts: ${fragments.join(", ")}.`;
+}
+
 async function buildWhatsAppActiveContactSendReceipt(input: {
   message: string;
   session: WhatsAppActiveContactSession;
   locale: SupportedLocale;
   generatedReplyFromInbound: boolean;
+  sendResult: ClawCloudWhatsAppSendResult;
 }) {
   const resolution = resolveClawCloudReplyLanguage({
     message: input.message,
     preferredLocale: input.locale,
   });
-  const baseMessage = input.generatedReplyFromInbound
-    ? `Reply sent to ${input.session.contactName}.`
-    : `Sent to ${input.session.contactName}.`;
+  const action = input.generatedReplyFromInbound ? "reply" : "message";
+  const disposition = classifyClawCloudWhatsAppSendResult(input.sendResult);
+  const baseMessage = buildWhatsAppSingleSendStatusLine({
+    sendResult: input.sendResult,
+    targetLabel: input.session.contactName,
+    action,
+  });
 
   if (resolution.preserveRomanScript && resolution.locale === "en") {
-    return input.generatedReplyFromInbound
-      ? `${input.session.contactName} ko reply bhej diya.`
-      : `${input.session.contactName} ko bhej diya.`;
+    switch (disposition) {
+      case "already_delivered":
+        return input.generatedReplyFromInbound
+          ? `${input.session.contactName} ko wahi reply pehle hi deliver ho chuka hai. Maine duplicate nahi bheja.`
+          : `${input.session.contactName} ko wahi message pehle hi deliver ho chuka hai. Maine duplicate nahi bheja.`;
+      case "already_pending":
+        return input.generatedReplyFromInbound
+          ? `${input.session.contactName} ke liye wahi reply pehle se pending hai. Maine duplicate nahi bheja.`
+          : `${input.session.contactName} ke liye wahi message pehle se pending hai. Maine duplicate nahi bheja.`;
+      case "resubmitted_pending":
+        return input.generatedReplyFromInbound
+          ? `${input.session.contactName} ko reply dobara WhatsApp par bheja hai. Delivery confirm hone ka wait hai.`
+          : `${input.session.contactName} ko message dobara WhatsApp par bheja hai. Delivery confirm hone ka wait hai.`;
+      case "submitted_pending":
+        return input.generatedReplyFromInbound
+          ? `${input.session.contactName} ko reply WhatsApp par bhej diya. Delivery confirm hone ka wait hai.`
+          : `${input.session.contactName} ko message WhatsApp par bhej diya. Delivery confirm hone ka wait hai.`;
+      case "delivered":
+      default:
+        return input.generatedReplyFromInbound
+          ? `${input.session.contactName} ko reply deliver ho gaya.`
+          : `${input.session.contactName} ko message deliver ho gaya.`;
+    }
   }
 
   if (resolution.locale === "en") {
@@ -19744,6 +20082,7 @@ export async function buildWhatsAppActiveContactSendReceiptForTest(input: {
   session: WhatsAppActiveContactSession;
   locale: SupportedLocale;
   generatedReplyFromInbound: boolean;
+  sendResult: ClawCloudWhatsAppSendResult;
 }) {
   return buildWhatsAppActiveContactSendReceipt(input);
 }
@@ -19865,14 +20204,14 @@ function buildWhatsAppActiveContactOperationalFallback(message: string) {
     case "start":
       return useRomanHinglish
         ? [
-          "Main abhi active contact mode start nahi kar paaya.",
+          "Main active contact mode ko abhi time par confirm nahi kar paaya.",
           "",
-          "WhatsApp reconnect karke ya thodi der baad wahi command phir try karo.",
+          "Contact verify karne ke liye wahi command ek baar phir try karo.",
         ].join("\n")
         : [
-          "I could not activate active contact mode right now.",
+          "I could not confirm active contact mode in time.",
           "",
-          "Please reconnect WhatsApp or try the same command again in a moment.",
+          "Please try the same command again so I can verify the contact cleanly.",
         ].join("\n");
     case "status":
       return useRomanHinglish
@@ -20098,6 +20437,7 @@ async function sendWhatsAppMessageThroughActiveContactSession(input: {
       session: input.session,
       locale: input.locale,
       generatedReplyFromInbound: Boolean(matchedInboundMessage),
+      sendResult,
     });
   } catch (error) {
     console.error("[agent] active contact session send failed:", error);
@@ -20276,9 +20616,11 @@ async function handleSendMessageToContactProfessional(
         },
       });
       void upsertAnalyticsDaily(userId, { wa_messages_sent: 1, tasks_run: 1 }).catch(() => null);
-      const statusLine = sendResult.deliveryConfirmed
-        ? `Message delivered to +${parsed.phone}.`
-        : `Message submitted to WhatsApp for +${parsed.phone}. Delivery confirmation is pending.`;
+      const statusLine = buildWhatsAppSingleSendStatusLine({
+        sendResult,
+        targetLabel: `+${parsed.phone}`,
+        action: "message",
+      });
       return translateMessage(
         [
           statusLine,
@@ -20497,9 +20839,11 @@ async function handleSendMessageToContactProfessional(
       });
       void upsertAnalyticsDaily(userId, { wa_messages_sent: 1, tasks_run: 1 }).catch(() => null);
       const recipientLabel = `${singleRecipient.name}${singleRecipient.phone ? ` (+${singleRecipient.phone})` : ""}`;
-      const statusLine = sendResult.deliveryConfirmed
-        ? `✅ Message delivered to ${recipientLabel}.`
-        : `✅ Message sent to ${recipientLabel}. Delivery confirmation is pending.`;
+      const statusLine = `✅ ${buildWhatsAppSingleSendStatusLine({
+        sendResult,
+        targetLabel: recipientLabel,
+        action: "message",
+      })}`;
       return translateMessage(
         [
           statusLine,
@@ -20533,12 +20877,19 @@ async function handleSendMessageToContactProfessional(
     );
   }
 
-  const sentRecipients: string[] = [];
+  const sentRecipients: Array<{
+    label: string;
+    sendResult: ClawCloudWhatsAppSendResult;
+    disposition: ClawCloudWhatsAppSendDisposition;
+  }> = [];
   const failedRecipients: string[] = [];
 
   for (const recipient of recipients) {
+    const recipientLabel = recipient.phone
+      ? `${recipient.name} (+${recipient.phone})`
+      : recipient.name;
     try {
-      await sendClawCloudWhatsAppToPhone(recipient.phone, professionalDraft, {
+      const sendResult = await sendClawCloudWhatsAppToPhone(recipient.phone, professionalDraft, {
         userId,
         contactName: recipient.name,
         jid: recipient.jid,
@@ -20554,18 +20905,14 @@ async function handleSendMessageToContactProfessional(
           contact_match_score: recipient.score,
         },
       });
-      sentRecipients.push(
-        recipient.phone
-          ? `${recipient.name} (+${recipient.phone})`
-          : recipient.name,
-      );
+      sentRecipients.push({
+        label: recipientLabel,
+        sendResult,
+        disposition: classifyClawCloudWhatsAppSendResult(sendResult),
+      });
     } catch (error) {
       console.error("[agent] multi-recipient direct send failed:", error);
-      failedRecipients.push(
-        recipient.phone
-          ? `${recipient.name} (+${recipient.phone})`
-          : recipient.name,
-      );
+      failedRecipients.push(recipientLabel);
     }
   }
 
@@ -20586,15 +20933,23 @@ async function handleSendMessageToContactProfessional(
   }).catch(() => null);
 
   const lines = [
-    sentRecipients.length === 1
-      ? `Message sent to ${sentRecipients[0]}.`
-      : `Messages sent to ${sentRecipients.length} contacts.`,
+    summarizeWhatsAppBatchSendDisposition({
+      sendResults: sentRecipients.map(({ label, disposition }) => ({ label, disposition })),
+      action: "message",
+    }),
     "",
     `Sent text: "${professionalDraft}"`,
   ];
 
   if (sentRecipients.length > 1) {
-    lines.push("", "Recipients:", ...sentRecipients.map((entry) => `- ${entry}`));
+    lines.push(
+      "",
+      "Recipients:",
+      ...sentRecipients.map((entry) => `- ${entry.label}: ${buildWhatsAppBatchRecipientStatusLabel({
+        sendResult: entry.sendResult,
+        action: "message",
+      })}`),
+    );
   }
 
   if (failedRecipients.length) {

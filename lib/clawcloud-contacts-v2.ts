@@ -5,6 +5,7 @@ import {
   normalizePhone,
 } from "@/lib/clawcloud-contacts";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
+import { buildWhatsAppReceiptDerivedAliasMap } from "@/lib/clawcloud-whatsapp-contact-alias-receipts";
 import { buildClawCloudWhatsAppContactIdentityGraph } from "@/lib/clawcloud-whatsapp-contact-identity";
 import { loadFallbackSyncedWhatsAppContacts } from "@/lib/clawcloud-whatsapp-contacts";
 
@@ -250,21 +251,57 @@ function pickBetterContactScore(current: ContactScoreDetail | null, next: Contac
   return current;
 }
 
+function namesShareTokenLoosely(left: string, right: string) {
+  return left === right || left.startsWith(right) || right.startsWith(left);
+}
+
 function scoreContact(queryVariants: string[], storedName: string, primaryQuery: string): ContactScoreDetail {
   const normalizedStored = normalizeName(storedName);
   const storedWords = normalizedStored.split(/\s+/).filter(Boolean);
+  const primaryQueryWords = primaryQuery.split(/\s+/).filter(Boolean);
   const compactPrimaryQuery = primaryQuery.replace(/\s+/g, "");
+  const compactStored = normalizedStored.replace(/\s+/g, "");
+  const hasCompositePrimaryQuery = primaryQueryWords.length > 1;
+  const storedContainsAllPrimaryWords = hasCompositePrimaryQuery
+    && primaryQueryWords.every((queryWord) => storedWords.some((storedWord) => namesShareTokenLoosely(storedWord, queryWord)));
   let best: ContactScoreDetail | null = null;
+
+  if (storedContainsAllPrimaryWords) {
+    best = pickBetterContactScore(best, {
+      score:
+        normalizedStored.startsWith(primaryQuery) || compactStored.startsWith(compactPrimaryQuery)
+          ? STARTS_WITH_SCORE + 0.04
+          : WORD_MATCH_SCORE + 0.06,
+      exact: false,
+      matchedAlias: storedName,
+      matchBasis:
+        normalizedStored.startsWith(primaryQuery) || compactStored.startsWith(compactPrimaryQuery)
+          ? "prefix"
+          : "word",
+    });
+  }
 
   for (const query of queryVariants) {
     if (!query) continue;
+    const queryWords = query.split(/\s+/).filter(Boolean);
+    const compactQuery = query.replace(/\s+/g, "");
+    const isFullQueryExact =
+      Boolean(primaryQuery)
+      && (query === primaryQuery || compactQuery === compactPrimaryQuery);
+    const isLooseSingleWordVariant = queryWords.length === 1 && !isFullQueryExact;
+    const blocksCompositeStructuredFallback =
+      hasCompositePrimaryQuery
+      && !storedContainsAllPrimaryWords
+      && (
+        isLooseSingleWordVariant
+        || (compactQuery === compactPrimaryQuery && query !== primaryQuery)
+      );
+
+    if (hasCompositePrimaryQuery && isLooseSingleWordVariant && !storedContainsAllPrimaryWords) {
+      continue;
+    }
 
     if (normalizedStored === query) {
-      const compactQuery = query.replace(/\s+/g, "");
-      const isFullQueryExact =
-        Boolean(primaryQuery)
-        && (query === primaryQuery || compactQuery === compactPrimaryQuery);
-
       if (isFullQueryExact) {
         return {
           score: EXACT_SCORE,
@@ -283,7 +320,9 @@ function scoreContact(queryVariants: string[], storedName: string, primaryQuery:
       continue;
     }
 
-    const allowLoosePartialMatch = query.length >= PARTIAL_MATCH_QUERY_MIN_LENGTH;
+    const allowLoosePartialMatch =
+      query.length >= PARTIAL_MATCH_QUERY_MIN_LENGTH
+      && !blocksCompositeStructuredFallback;
 
     if (
       allowLoosePartialMatch
@@ -298,7 +337,15 @@ function scoreContact(queryVariants: string[], storedName: string, primaryQuery:
       continue;
     }
 
-    if (allowLoosePartialMatch) {
+    const allowLooseWordFallback =
+      allowLoosePartialMatch
+      && !(
+        hasCompositePrimaryQuery
+        && !storedContainsAllPrimaryWords
+        && isFullQueryExact
+      );
+
+    if (allowLooseWordFallback) {
       for (const word of storedWords) {
         if (word === query || word.startsWith(query) || query.startsWith(word)) {
           best = pickBetterContactScore(best, {
@@ -551,6 +598,15 @@ async function loadWhatsAppContactCandidates(userId: string): Promise<ContactSea
   const contacts = ((contactsResult.data ?? []) as WhatsAppContactRow[]).filter(Boolean);
   const messages = ((messagesResult.data ?? []) as WhatsAppMessageRow[]).filter(Boolean);
   const inferredHistoryAliases = buildHistoryDerivedWhatsAppAliases(messages);
+  const receiptDerivedAliases = buildWhatsAppReceiptDerivedAliasMap(
+    messages.map((message) => ({
+      content: message.content,
+      direction: message.direction,
+      chatType: message.chat_type,
+      remotePhone: message.remote_phone,
+      remoteJid: message.remote_jid,
+    })),
+  );
   const identities = buildClawCloudWhatsAppContactIdentityGraph([
     ...contacts.map((contact) => ({
       jid: contact.jid,
@@ -582,6 +638,13 @@ async function loadWhatsAppContactCandidates(userId: string): Promise<ContactSea
       ]),
       identityKey: contact.identity_key,
       identityJids: contact.identity_jids,
+    })),
+    ...[...receiptDerivedAliases.entries()].map(([phone, aliases]) => ({
+      jid: `${phone}@s.whatsapp.net`,
+      phone,
+      displayName: formatContactDisplayName(aliases[0] ?? phone),
+      aliases,
+      identityKey: `phone:${phone}`,
     })),
   ]);
 

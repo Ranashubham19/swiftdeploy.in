@@ -86,6 +86,7 @@ import {
   buildWhatsAppOutboundIdempotencyKey,
   isWhatsAppOutboundFinalizedStatus,
   resolveWhatsAppOutboundStatusFromAckStatus,
+  shouldRetryUndeliveredWhatsAppOutbound,
 } from "@/lib/clawcloud-whatsapp-outbound";
 import { buildClawCloudLiveAnswerAuditTrail } from "@/lib/clawcloud-privacy-lifecycle";
 import {
@@ -106,6 +107,7 @@ import {
   deriveClawCloudWhatsAppChatSyncCompleteness,
   summarizeClawCloudWhatsAppHistoryCoverage,
 } from "@/lib/clawcloud-whatsapp-history-plan";
+import { buildWhatsAppReceiptDerivedAliasMapForTest } from "@/lib/clawcloud-whatsapp-contact-alias-receipts";
 import {
   buildClawCloudWhatsAppSessionStorageHealth,
   isClawCloudWhatsAppPersistentVolumePath,
@@ -113,7 +115,10 @@ import {
 } from "@/lib/clawcloud-whatsapp-storage";
 import { buildClawCloudWhatsAppContactIdentityGraph } from "@/lib/clawcloud-whatsapp-contact-identity";
 import { scheduleWhatsAppWorkflowRunsFromInbound } from "@/lib/clawcloud-whatsapp-workflows";
-import { shouldDeliverClawCloudWhatsAppSelfMessage } from "@/lib/clawcloud-whatsapp";
+import {
+  classifyClawCloudWhatsAppSendResult,
+  shouldDeliverClawCloudWhatsAppSelfMessage,
+} from "@/lib/clawcloud-whatsapp";
 import {
   dedupeWhatsAppHistoryRowsForTest,
   filterWhatsAppHistoryRowsForResolvedContactForTest,
@@ -181,6 +186,8 @@ import {
   buildCodingFallbackV2,
   buildTimeboxedProfessionalReplyForTest,
   formatWhatsAppHistoryResolvedNoRowsReplyForTest,
+  formatWhatsAppHistoryUnverifiedContactReplyForTest,
+  isConfidentRecipientNameMatchForTest,
   buildWhatsAppPendingContactResumePromptForTest,
   buildWhatsAppSendAmbiguousContactReplyForTest,
   maybePromoteVisibleResponseWithLiveBundleForTest,
@@ -555,6 +562,63 @@ test("whatsapp outbound lifecycle helpers stay deterministic and dedupe-safe", (
   assert.equal(resolveWhatsAppOutboundStatusFromAckStatus("pending"), "retrying");
   assert.equal(isWhatsAppOutboundFinalizedStatus("read"), true);
   assert.equal(isWhatsAppOutboundFinalizedStatus("delivered"), false);
+  assert.equal(
+    shouldRetryUndeliveredWhatsAppOutbound({
+      status: "sent",
+      delivered_at: null,
+      read_at: null,
+      failed_at: null,
+      updated_at: "2026-04-05T10:00:00.000Z",
+      sent_at: "2026-04-05T10:00:00.000Z",
+      created_at: "2026-04-05T09:59:58.000Z",
+    }, {
+      nowMs: Date.parse("2026-04-05T10:00:45.000Z"),
+      minPendingMs: 30_000,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldRetryUndeliveredWhatsAppOutbound({
+      status: "sent",
+      delivered_at: null,
+      read_at: null,
+      failed_at: null,
+      updated_at: "2026-04-05T10:00:20.000Z",
+      sent_at: "2026-04-05T10:00:00.000Z",
+      created_at: "2026-04-05T09:59:58.000Z",
+    }, {
+      nowMs: Date.parse("2026-04-05T10:00:45.000Z"),
+      minPendingMs: 30_000,
+    }),
+    false,
+  );
+});
+
+test("whatsapp send result classification distinguishes pending retries from duplicates", () => {
+  assert.equal(classifyClawCloudWhatsAppSendResult({
+    deduped: false,
+    retriedUndelivered: false,
+    sentAccepted: true,
+    deliveryConfirmed: true,
+  }), "delivered");
+  assert.equal(classifyClawCloudWhatsAppSendResult({
+    deduped: false,
+    retriedUndelivered: true,
+    sentAccepted: true,
+    deliveryConfirmed: false,
+  }), "resubmitted_pending");
+  assert.equal(classifyClawCloudWhatsAppSendResult({
+    deduped: true,
+    retriedUndelivered: false,
+    sentAccepted: true,
+    deliveryConfirmed: false,
+  }), "already_pending");
+  assert.equal(classifyClawCloudWhatsAppSendResult({
+    deduped: true,
+    retriedUndelivered: false,
+    sentAccepted: true,
+    deliveryConfirmed: true,
+  }), "already_delivered");
 });
 
 test("whatsapp quiet hours and group controls keep reply actions conservative", () => {
@@ -3377,6 +3441,10 @@ test("inbound route timeout policy is category-aware", () => {
   assert.equal(operational.kind, "operational");
   assert.equal(operational.timeoutMs, 15000);
 
+  const activeContact = getInboundRouteTimeoutPolicyForTest("ab se app meri tarf se dii se baat karoge");
+  assert.equal(activeContact.kind, "operational");
+  assert.equal(activeContact.timeoutMs, 25000);
+
   const deep = getInboundRouteTimeoutPolicyForTest("deep: explain transformers");
   assert.equal(deep.kind, "deep_reasoning");
   assert.equal(deep.timeoutMs, 30000);
@@ -3657,6 +3725,20 @@ test("reply language extraction understands noisy WhatsApp send prompts with exp
   });
 
   assert.equal(resolution.locale, "hi");
+  assert.equal(resolution.source, "explicit_request");
+});
+
+test("reply language extraction keeps WhatsApp platform words from swallowing the requested output language", () => {
+  const message = "send a professional thank-you greeting to Aman in Thai on WhatsApp";
+
+  assert.equal(extractExplicitReplyLocaleRequest(message), "th");
+
+  const resolution = resolveClawCloudReplyLanguage({
+    message,
+    preferredLocale: "en",
+  });
+
+  assert.equal(resolution.locale, "th");
   assert.equal(resolution.source, "explicit_request");
 });
 
@@ -4921,6 +5003,66 @@ test("contact ranking drops fuzzy near-miss names when stronger exact-name match
   }
 });
 
+test("contact ranking prefers the full multi-word person over shared first-name contacts", () => {
+  const result = rankContactCandidates("Aman Rajput", [
+    {
+      name: "Aman Gupta Bh3",
+      phone: "919399357485",
+      jid: "919399357485@s.whatsapp.net",
+      aliases: ["Aman Gupta Bh3"],
+      identityKey: "phone:919399357485",
+    },
+    {
+      name: "Aman Classmate",
+      phone: "919650123620",
+      jid: "919650123620@s.whatsapp.net",
+      aliases: ["Aman Classmate"],
+      identityKey: "phone:919650123620",
+    },
+    {
+      name: "Aman Rajput Up",
+      phone: "917236008923",
+      jid: "917236008923@s.whatsapp.net",
+      aliases: ["Aman Rajput Up"],
+      identityKey: "phone:917236008923",
+    },
+  ]);
+
+  assert.equal(result.type, "found");
+  if (result.type === "found") {
+    assert.equal(result.contact.name, "Aman Rajput Up");
+    assert.equal(result.contact.phone, "917236008923");
+    assert.equal(result.contact.matchBasis, "prefix");
+  }
+});
+
+test("contact ranking stays ambiguous when multiple contacts satisfy the full multi-word name", () => {
+  const result = rankContactCandidates("Aman Rajput", [
+    {
+      name: "Aman Rajput Up",
+      phone: "917236008923",
+      jid: "917236008923@s.whatsapp.net",
+      aliases: ["Aman Rajput Up"],
+      identityKey: "phone:917236008923",
+    },
+    {
+      name: "Rajput Aman Office",
+      phone: "919111222333",
+      jid: "919111222333@s.whatsapp.net",
+      aliases: ["Rajput Aman Office"],
+      identityKey: "phone:919111222333",
+    },
+  ]);
+
+  assert.equal(result.type, "ambiguous");
+  if (result.type === "ambiguous") {
+    assert.deepEqual(
+      result.matches.map((match) => match.name),
+      ["Aman Rajput Up", "Rajput Aman Office"],
+    );
+  }
+});
+
 test("send-message safety blocks scheduled, conditional, and ambiguous recipient commands without breaking normal drafts", () => {
   const scheduled = analyzeSendMessageCommandSafety('Send "Good morning" to Maa tomorrow at 8am');
   assert.ok(scheduled && !scheduled.allowed);
@@ -5024,6 +5166,10 @@ test("active contact mode parses professional handoff commands and only proxies 
   );
   assert.deepEqual(
     parseWhatsAppActiveContactSessionCommandForTest("ab mere behalf me dii se baat karange"),
+    { type: "start", contactName: "dii" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("ab se app meri tarf se dii se baat karoge"),
     { type: "start", contactName: "dii" },
   );
   assert.deepEqual(
@@ -5215,6 +5361,17 @@ test("resolved WhatsApp history no-rows replies do not reopen a one-contact sele
   assert.doesNotMatch(reply, /Reply with the exact contact name, full number, or option number/i);
 });
 
+test("unverified WhatsApp history no-rows replies refuse to guess from unrelated chats", () => {
+  const reply = formatWhatsAppHistoryUnverifiedContactReplyForTest({
+    requestedName: "Ff",
+  });
+
+  assert.match(reply, /I couldn't verify a synced WhatsApp contact named "Ff"\./i);
+  assert.match(reply, /I did not summarize unrelated chats or unknown-number threads/i);
+  assert.match(reply, /exact contact name as saved in WhatsApp or the full phone number/i);
+  assert.doesNotMatch(reply, /I checked the chat matched as/i);
+});
+
 test("recent WhatsApp clarification turns can classify a loose follow-up contact choice", () => {
   assert.equal(
     inferRecentWhatsAppContactFollowUpIntentForTest([
@@ -5230,6 +5387,88 @@ test("recent WhatsApp clarification turns can classify a loose follow-up contact
     extractWhatsAppLooseContactFollowUpTargetForTest("go for hansraj lpu"),
     "hansraj lpu",
   );
+});
+
+test("pending WhatsApp contact selection accepts a unique exact-name follow-up even with trailing send noise", () => {
+  const pending = {
+    kind: "send_message" as const,
+    requestedName: "Aman",
+    resumePrompt: "Send a professional thank-you greeting to Aman in Thai on WhatsApp",
+    createdAt: new Date().toISOString(),
+    options: [
+      {
+        name: "Aman Rajput",
+        phone: "919111111111",
+        jid: "919111111111@s.whatsapp.net",
+      },
+      {
+        name: "Aman Classmate",
+        phone: "919222222222",
+        jid: "919222222222@s.whatsapp.net",
+      },
+    ],
+  };
+
+  assert.deepEqual(
+    resolveWhatsAppPendingContactSelectionForTest({
+      message: "Aman Rajput say",
+      pending,
+    }),
+    {
+      type: "selected",
+      option: pending.options[0],
+      resumePrompt: "Send message to Aman Rajput: a professional thank-you greeting in Thai on WhatsApp",
+    },
+  );
+});
+
+test("pending WhatsApp contact selection does not auto-pick when the follow-up still names only a shared token", () => {
+  const pending = {
+    kind: "send_message" as const,
+    requestedName: "Aman",
+    resumePrompt: "Send a professional thank-you greeting to Aman in Thai on WhatsApp",
+    createdAt: new Date().toISOString(),
+    options: [
+      {
+        name: "Aman Rajput",
+        phone: "919111111111",
+        jid: "919111111111@s.whatsapp.net",
+      },
+      {
+        name: "Aman Classmate",
+        phone: "919222222222",
+        jid: "919222222222@s.whatsapp.net",
+      },
+    ],
+  };
+
+  assert.deepEqual(
+    resolveWhatsAppPendingContactSelectionForTest({
+      message: "Aman say",
+      pending,
+    }),
+    {
+      type: "remind",
+    },
+  );
+});
+
+test("recipient confidence rejects partial multi-token word matches that could hit the wrong contact", () => {
+  assert.equal(isConfidentRecipientNameMatchForTest({
+    requestedName: "Aman Rajput",
+    resolvedName: "Aman Classmate",
+    exact: false,
+    score: 0.91,
+    matchBasis: "word",
+  }), false);
+
+  assert.equal(isConfidentRecipientNameMatchForTest({
+    requestedName: "Aman",
+    resolvedName: "Aman Classmate",
+    exact: false,
+    score: 0.91,
+    matchBasis: "word",
+  }), true);
 });
 
 test("full inbound route prioritizes active-contact status and stop commands over casual chat fallbacks", async () => {
@@ -5473,16 +5712,40 @@ test("active contact send receipts stay short and mirror the user's message lang
     session,
     locale: "en",
     generatedReplyFromInbound: true,
+    sendResult: {
+      success: true,
+      messageIds: ["wamid-1"],
+      targetJid: session.jid,
+      targetPhone: session.phone,
+      deduped: false,
+      retriedUndelivered: false,
+      ackStatus: "server_ack",
+      sentAccepted: true,
+      deliveryConfirmed: false,
+      warning: null,
+    },
   });
-  assert.equal(hinglishReceipt, "didi ko reply bhej diya.");
+  assert.equal(hinglishReceipt, "didi ko reply WhatsApp par bhej diya. Delivery confirm hone ka wait hai.");
 
   const englishReceipt = await buildWhatsAppActiveContactSendReceiptForTest({
     message: "Please tell her I will call later.",
     session,
     locale: "en",
     generatedReplyFromInbound: false,
+    sendResult: {
+      success: true,
+      messageIds: ["wamid-2"],
+      targetJid: session.jid,
+      targetPhone: session.phone,
+      deduped: false,
+      retriedUndelivered: false,
+      ackStatus: "delivery_ack",
+      sentAccepted: true,
+      deliveryConfirmed: true,
+      warning: null,
+    },
   });
-  assert.equal(englishReceipt, "Sent to didi.");
+  assert.equal(englishReceipt, "Message delivered to didi.");
 });
 
 test("contact ranking resolves family aliases from synced WhatsApp names and recent chat history", () => {
@@ -5652,6 +5915,56 @@ test("history-derived didi aliases beat weak di-prefix WhatsApp names", () => {
   if (resolved.type === "found") {
     assert.equal(resolved.contact.name, "Didi");
     assert.equal(resolved.contact.phone, "917876831969");
+  }
+});
+
+test("self-chat WhatsApp delivery receipts recover durable aliases for numeric contacts", () => {
+  const receiptAliases = buildWhatsAppReceiptDerivedAliasMapForTest([
+    {
+      direction: "outbound",
+      chatType: "direct",
+      remotePhone: "918091392311",
+      remoteJid: "918091392311@s.whatsapp.net",
+      content: [
+        "Message delivered to didi (+917876831969).",
+        "",
+        "Language used: Hinglish (Roman script), adapted from didi's recent chat language.",
+        "",
+        'Sent text: "Kesa hai tu."',
+      ].join("\n"),
+    },
+  ]);
+
+  assert.deepEqual(receiptAliases["917876831969"], ["didi"]);
+
+  const resolved = rankContactCandidates("dii", [
+    {
+      name: "917876831969",
+      phone: "917876831969",
+      jid: "917876831969@s.whatsapp.net",
+      aliases: ["917876831969", ...(receiptAliases["917876831969"] ?? [])],
+      identityKey: "phone:917876831969",
+    },
+    {
+      name: "Divya Prakash Classmate",
+      phone: "917979819955",
+      jid: "917979819955@s.whatsapp.net",
+      aliases: ["Divya Prakash Classmate", "Divya"],
+      identityKey: "phone:917979819955",
+    },
+    {
+      name: "Mansi Dixit Class Mate",
+      phone: "917988685681",
+      jid: "917988685681@s.whatsapp.net",
+      aliases: ["Mansi Dixit Class Mate", "Dixit"],
+      identityKey: "phone:917988685681",
+    },
+  ]);
+
+  assert.equal(resolved.type, "found");
+  if (resolved.type === "found") {
+    assert.equal(resolved.contact.phone, "917876831969");
+    assert.equal(resolved.contact.matchBasis, "exact");
   }
 });
 
@@ -5933,6 +6246,14 @@ test("strict intent routing locks operational WhatsApp commands before generic h
 
 test("strict intent routing locks direct contact-message lookups to WhatsApp history when the phrasing names the chat target", () => {
   const route = detectStrictIntentRouteForTest("read and tell me the message of jaideep");
+  assert.ok(route);
+  assert.equal(route?.intent.category, "whatsapp_history");
+  assert.equal(route?.confidence, "medium");
+  assert.equal(route?.clarificationReply, null);
+});
+
+test("strict intent routing keeps typoed contact-conversation prompts in the WhatsApp history lane", () => {
+  const route = detectStrictIntentRouteForTest("read the converation of me with Ff");
   assert.ok(route);
   assert.equal(route?.intent.category, "whatsapp_history");
   assert.equal(route?.confidence, "medium");
@@ -7865,6 +8186,14 @@ test("whatsapp history hint extraction understands natural contact-conversation 
     extractWhatsAppHistoryHintsForTest("rajnish ke messages summarize karo"),
     {
       contactHint: "rajnish",
+      queryHint: null,
+      direction: null,
+    },
+  );
+  assert.deepEqual(
+    extractWhatsAppHistoryHintsForTest("read the converation of me with Ff"),
+    {
+      contactHint: "Ff",
       queryHint: null,
       direction: null,
     },

@@ -147,6 +147,54 @@ export function resolveWhatsAppOutboundStatusFromAckStatus(
           : "retrying";
 }
 
+function parseTimestampMs(value: string | null | undefined) {
+  if (!value) {
+    return Number.NaN;
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+export function isWhatsAppOutboundAwaitingDelivery(
+  outbound: Pick<WhatsAppOutboundMessage, "status" | "delivered_at" | "read_at" | "failed_at">,
+) {
+  return outbound.status === "sent"
+    && !outbound.delivered_at
+    && !outbound.read_at
+    && !outbound.failed_at;
+}
+
+export function shouldRetryUndeliveredWhatsAppOutbound(
+  outbound: Pick<WhatsAppOutboundMessage, "status" | "delivered_at" | "read_at" | "failed_at" | "updated_at" | "sent_at" | "created_at">,
+  options?: {
+    nowMs?: number;
+    minPendingMs?: number;
+  },
+) {
+  if (!isWhatsAppOutboundAwaitingDelivery(outbound)) {
+    return false;
+  }
+
+  const nowMs = typeof options?.nowMs === "number" && Number.isFinite(options.nowMs)
+    ? options.nowMs
+    : Date.now();
+  const minPendingMs = typeof options?.minPendingMs === "number" && Number.isFinite(options.minPendingMs)
+    ? Math.max(5_000, Math.trunc(options.minPendingMs))
+    : 30_000;
+  const referenceCandidates = [
+    parseTimestampMs(outbound.updated_at),
+    parseTimestampMs(outbound.sent_at),
+    parseTimestampMs(outbound.created_at),
+  ];
+  const referenceMs = referenceCandidates.find((value) => Number.isFinite(value));
+  if (typeof referenceMs !== "number" || !Number.isFinite(referenceMs)) {
+    return false;
+  }
+
+  return nowMs - referenceMs >= minPendingMs;
+}
+
 export function buildWhatsAppOutboundIdempotencyKey(input: {
   userId: string;
   source: WhatsAppOutboundSource;
