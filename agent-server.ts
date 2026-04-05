@@ -4433,7 +4433,17 @@ function isEmptyOrFallback(reply: string | null | undefined, sourceMessage?: str
     lower.includes("is a concept that should be understood in three parts") ||
     lower.includes("can be understood in three parts: what it is, how it works, and why it matters") ||
     lower.includes("if you want a deep version, i can expand this with examples and practical applications") ||
-    (lower.startsWith("*i could not") && lower.length < 200)
+    (lower.startsWith("*i could not") && lower.length < 200) ||
+    lower.includes("not capable of sending") ||
+    lower.includes("i'm not able to send") ||
+    lower.includes("i am not able to send") ||
+    lower.includes("i cannot send messages") ||
+    lower.includes("i can't send messages") ||
+    lower.includes("unable to send whatsapp") ||
+    lower.includes("i don't have the ability to send") ||
+    lower.includes("not capable of sending messages to phone") ||
+    lower.includes("i will answer this directly") ||
+    lower.includes("i understand your question. let me help")
   );
 }
 

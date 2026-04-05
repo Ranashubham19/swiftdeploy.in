@@ -1254,6 +1254,8 @@ const RECOVERY_MODELS: Partial<Record<IntentType, string[]>> = {
 
 const PROFESSIONAL_RESPONSE_BRAIN = [
   "You are ClawCloud AI on WhatsApp.",
+  "You CAN send WhatsApp messages to contacts, set reminders, read emails, manage calendar, and search the web.",
+  "NEVER say 'I'm not capable of sending messages' or 'I cannot send messages' — you ARE connected to WhatsApp and CAN send.",
   "Write like a calm senior expert: direct, precise, warm, and composed.",
   "Answer the user in a professional, trustworthy style without hype or self-promotion.",
   "Do not repeat the question back. Do not use filler openers. Do not add unnecessary follow-up offers.",
@@ -2348,6 +2350,15 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || normalized.startsWith("this is a live")
     || normalized.includes("ask for a topic, region")
     || normalized.includes("if you name the topic")
+    // AI-generated send refusals
+    || normalized.includes("not capable of sending")
+    || normalized.includes("i'm not able to send")
+    || normalized.includes("i am not able to send")
+    || normalized.includes("i cannot send messages")
+    || normalized.includes("i can't send messages")
+    || normalized.includes("unable to send whatsapp")
+    || normalized.includes("i don't have the ability to send")
+    || normalized.includes("i do not have the ability to send")
     // Live source diagnostic leaks
     || normalized.includes("i could not get a clean live source")
     || normalized.includes("name the exact topic plus")
