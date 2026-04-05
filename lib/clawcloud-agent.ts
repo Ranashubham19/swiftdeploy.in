@@ -2416,6 +2416,15 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || normalized.includes("i do not have internet access")
     || normalized.includes("i can't browse the web")
     || normalized.includes("i cannot browse the web")
+    // Translation pipeline leaks
+    || normalized.includes("no translation was provided")
+    || normalized.includes("no translation was provided in the prompt")
+    || normalized.includes("translation was not provided")
+    // Processing fallback
+    || normalized.includes("i'm processing your request")
+    || normalized.includes("processing your question about:")
+    || normalized.includes("please try again in a moment")
+    || normalized.includes("please try again in a few seconds if you don't receive")
   );
 }
 
@@ -2527,10 +2536,11 @@ async function finalizeAgentReply(input: {
         replyForFinalization = emergencyReply.trim();
       } else {
         // All live + emergency paths failed — use deterministic fallback chain
-        replyForFinalization =
+        const deterministicFallback =
           buildDeterministicExplainReply(input.question)
-          || buildDeterministicChatFallback(input.question, input.intent as IntentType)
-          || "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
+          || buildDeterministicChatFallback(input.question, input.intent as IntentType);
+        replyForFinalization = deterministicFallback
+          || `I'm temporarily unable to process this fully. Please try asking again — my AI backend refreshes quickly.`;
       }
     }
   }

@@ -51,6 +51,9 @@ const TRANSLATION_FAILURE_REPLY_PATTERNS = [
   /\bshare the exact topic or full problem statement\b/i,
   /\bshare the exact name, date, version, or location\b/i,
   /\bshare the topic, tone, and target length\b/i,
+  /\bno translation was provided\b/i,
+  /\bno translation was provided in the prompt\b/i,
+  /\btranslation was not provided\b/i,
 ];
 
 export type LocalePreferenceCommand =

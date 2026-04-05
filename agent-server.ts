@@ -4542,7 +4542,14 @@ function isEmptyOrFallback(reply: string | null | undefined, sourceMessage?: str
     lower.includes("cannot access or retrieve private whatsapp") ||
     lower.includes("can't access private whatsapp chats") ||
     (lower.includes("end-to-end encrypted") && lower.includes("don't store") && lower.includes("message")) ||
-    lower.includes("open the chat in whatsapp and scroll")
+    lower.includes("open the chat in whatsapp and scroll") ||
+    // Translation pipeline leaks
+    lower.includes("no translation was provided") ||
+    lower.includes("no translation was provided in the prompt") ||
+    lower.includes("translation was not provided") ||
+    // Processing fallback
+    lower.includes("i'm processing your request") ||
+    lower.includes("processing your question about:")
   );
 }
 
@@ -4630,19 +4637,19 @@ function buildEmergencyProfessionalFallback(message: string) {
 
   if (/\b(code|program|algorithm|n[-\s]?queen|debug|python|javascript|java|c\+\+)\b/.test(text)) {
     return [
-      "💻 *Coding Mode Active*",
+      "💻 *Coding Mode*",
       "",
-      "I can write a full working solution.",
-      "Send the exact problem statement, and I will return complete runnable code in one response.",
+      "I'm temporarily unable to connect to my AI backend to generate code right now.",
+      "Please try your request again in a few seconds — I'll have the complete solution ready.",
     ].join("\n");
   }
 
   if (/\b(weather|whether|temperature|forecast|rain|humidity|wind|aqi)\b/.test(text)) {
     return [
-      "🌦️ *Weather Update*",
+      "🌦️ *Weather*",
       "",
-      "Please send your city name for an accurate forecast.",
-      "Example: _Weather today in Delhi_.",
+      "I'm temporarily unable to fetch live weather data right now.",
+      "Please try again in a few seconds — include your city name for the most accurate forecast.",
     ].join("\n");
   }
 
@@ -4650,8 +4657,8 @@ function buildEmergencyProfessionalFallback(message: string) {
     return [
       "📰 *News Update*",
       "",
-      "Send topic + location for accurate latest headlines.",
-      "Example: _India business news today_.",
+      "I'm currently experiencing a temporary connection issue with my live news sources.",
+      "Please try your question again in a few seconds — I'll have the latest headlines ready for you.",
     ].join("\n");
   }
 
@@ -4687,22 +4694,66 @@ function buildEmergencyProfessionalFallback(message: string) {
 
   if (/\bmariana trench\b/.test(text)) {
     return [
-      "Mariana Trench:",
+      "🌊 *Mariana Trench*",
       "",
-      "The Mariana Trench is the deepest known part of Earth's oceans in the western Pacific Ocean.",
-      "Its deepest point is Challenger Deep at about 10,935 meters (35,876 feet).",
+      "The Mariana Trench is the deepest known part of Earth's oceans, located in the western Pacific Ocean.",
+      "Its deepest point — *Challenger Deep* — reaches approximately *10,935 meters (35,876 feet)* below sea level.",
+      "",
+      "It was first explored by Jacques Piccard and Don Walsh in 1960 using the bathyscaphe *Trieste*.",
     ].join("\n");
   }
 
-  // For any unmatched question, provide a helpful acknowledgment
-  // that doesn't ask the user to repeat themselves
-  const shortQuestion = text.length > 80 ? text.slice(0, 80) + "..." : text;
+  // Greetings — warm, friendly response
+  if (/^(hi+|hello+|hey+|howdy|namaste|hola|bonjour|sup|yo|what'?s up|greetings|konichiwa|konnichiwa|assalam|salam|merhaba|annyeong|ni hao|sawadee|selamat|aloha|jambo|ciao)\b/i.test(text) && text.length < 50) {
+    return [
+      "Hey there! 👋 Great to hear from you!",
+      "",
+      "I'm ClawCloud, your personal AI assistant. How can I help you today? 😊",
+    ].join("\n");
+  }
+
+  // "What is X" knowledge questions — give a real answer attempt
+  const whatIsMatch = text.match(/^(?:what(?:'s| is| are)\s+)(.+?)(?:\?|$)/i);
+  if (whatIsMatch?.[1]?.trim()) {
+    const subject = whatIsMatch[1].trim();
+    return [
+      `📖 *${subject.charAt(0).toUpperCase() + subject.slice(1)}*`,
+      "",
+      `I'm temporarily unable to connect to my AI backend to give you a detailed answer about "${subject}".`,
+      "",
+      "Please try asking again in a few seconds — my systems refresh quickly and I'll have a complete answer ready.",
+    ].join("\n");
+  }
+
+  // "Who is X" questions
+  if (/^who\s+(is|was|are)\b/i.test(text)) {
+    return [
+      "👤 I'm temporarily unable to connect to my AI backend for a detailed answer.",
+      "",
+      "Please try asking again in a few seconds — I'll have the complete information ready.",
+    ].join("\n");
+  }
+
+  // Send message / contact commands
+  if (/\b(send|message|msg|text)\s+(to|message)\b/i.test(text) || /\bsend\s+/i.test(text)) {
+    return [
+      "📱 *Message Sending*",
+      "",
+      "I can send WhatsApp messages for you! Use this format:",
+      "• _Send \"Hello\" to Raj Sharma_",
+      "• _Send message to Maa: Good morning_",
+      "",
+      "Make sure the contact name matches exactly as saved in your phone.",
+    ].join("\n");
+  }
+
+  // For any truly unmatched question — honest, professional response
   return [
-    `Processing your question about: _${shortQuestion}_`,
+    "⚡ I'm experiencing a temporary connection issue with my AI backend right now.",
     "",
-    "I'm working on getting you an accurate answer. If this takes a moment, the AI model may be under high load.",
+    "Please try your question again in a few seconds — my systems refresh quickly and I'll have your answer ready.",
     "",
-    "Please try again in a few seconds if you don't receive a full answer.",
+    "💡 _Tip: If this keeps happening, try reconnecting at swift-deploy.in/settings_",
   ].join("\n");
 }
 
@@ -5124,7 +5175,7 @@ async function handleInbound(
 
   // Absolute last resort — never send internal signals or empty replies
   if (!finalReply || isEmptyOrFallback(finalReply, text) || finalReply.includes("__LOW_CONFIDENCE")) {
-    finalReply = "I'm processing your request. Please try again in a moment.";
+    finalReply = buildEmergencyProfessionalFallback(text);
   }
 
   const sensitivity = detectWhatsAppSensitivity(`${text}\n${finalReply}`);
