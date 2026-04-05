@@ -32,6 +32,18 @@ const WORD_MATCH_SCORE = 0.88;
 const FUZZY_THRESHOLD = 0.65;
 const AMBIGUOUS_THRESHOLD = 0.1;
 const WHATSAPP_HISTORY_LIMIT = 600;
+const PARTIAL_MATCH_QUERY_MIN_LENGTH = 3;
+const HISTORY_RELATIONSHIP_ALIAS_MIN_OCCURRENCES = 2;
+const HISTORY_RELATIONSHIP_ALIAS_MESSAGE_MAX_LENGTH = 80;
+const HISTORY_RELATIONSHIP_ALIAS_CANONICALS = new Set([
+  "maa",
+  "papa",
+  "didi",
+  "bhai",
+  "bhaiya",
+]);
+const SYSTEM_LIKE_HISTORY_ALIAS_PATTERN =
+  /\b(?:clawcloud|daily limit reached|message delivered to|active contact mode|upgrade to|whatsapp conversation summary)\b/i;
 
 const HINDI_HONORIFICS = [
   "bhai",
@@ -116,6 +128,10 @@ type WhatsAppMessageRow = {
   remote_jid: string | null;
   remote_phone: string | null;
   contact_name: string | null;
+  content?: string | null;
+  direction?: string | null;
+  message_type?: string | null;
+  chat_type?: string | null;
 };
 
 type ContactScoreDetail = {
@@ -267,7 +283,12 @@ function scoreContact(queryVariants: string[], storedName: string, primaryQuery:
       continue;
     }
 
-    if (normalizedStored.startsWith(query) || query.startsWith(normalizedStored)) {
+    const allowLoosePartialMatch = query.length >= PARTIAL_MATCH_QUERY_MIN_LENGTH;
+
+    if (
+      allowLoosePartialMatch
+      && (normalizedStored.startsWith(query) || query.startsWith(normalizedStored))
+    ) {
       best = pickBetterContactScore(best, {
         score: STARTS_WITH_SCORE,
         exact: false,
@@ -277,14 +298,16 @@ function scoreContact(queryVariants: string[], storedName: string, primaryQuery:
       continue;
     }
 
-    for (const word of storedWords) {
-      if (word === query || word.startsWith(query) || query.startsWith(word)) {
-        best = pickBetterContactScore(best, {
-          score: WORD_MATCH_SCORE,
-          exact: false,
-          matchedAlias: storedName,
-          matchBasis: "word",
-        });
+    if (allowLoosePartialMatch) {
+      for (const word of storedWords) {
+        if (word === query || word.startsWith(query) || query.startsWith(word)) {
+          best = pickBetterContactScore(best, {
+            score: WORD_MATCH_SCORE,
+            exact: false,
+            matchedAlias: storedName,
+            matchBasis: "word",
+          });
+        }
       }
     }
 
@@ -348,6 +371,128 @@ function uniqueStrings(values: Array<string | null | undefined>) {
   return [...new Set(values.map((value) => String(value ?? "").trim()).filter(Boolean))];
 }
 
+function buildContactIdentityKey(input: {
+  identityKey?: string | null;
+  phone?: string | null;
+  jid?: string | null;
+}) {
+  const identityKey = String(input.identityKey ?? "").trim();
+  if (identityKey) {
+    return identityKey;
+  }
+
+  const phone = normalizePhone(String(input.phone ?? ""));
+  if (phone) {
+    return `phone:${phone}`;
+  }
+
+  const jid = String(input.jid ?? "").trim().toLowerCase();
+  return jid ? `jid:${jid}` : null;
+}
+
+function normalizeHistoryAliasInferenceText(value: string) {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .replace(/[\u200d\uFE0F]/g, " ")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}\s\u0900-\u097F]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function inferRelationshipAliasesFromShortDirectChatText(value: string | null | undefined) {
+  const raw = String(value ?? "").trim();
+  if (
+    !raw
+    || raw.length > HISTORY_RELATIONSHIP_ALIAS_MESSAGE_MAX_LENGTH
+    || /[\r\n]/.test(raw)
+    || SYSTEM_LIKE_HISTORY_ALIAS_PATTERN.test(raw)
+  ) {
+    return [] as string[];
+  }
+
+  const normalized = normalizeHistoryAliasInferenceText(raw);
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (!words.length) {
+    return [] as string[];
+  }
+
+  const phraseCandidates = uniqueStrings([
+    words[0],
+    words[words.length - 1],
+    words.slice(0, 2).join(" "),
+    words.slice(-2).join(" "),
+  ]);
+
+  return phraseCandidates
+    .map((phrase) => normalizeContactName(phrase))
+    .filter((alias) => HISTORY_RELATIONSHIP_ALIAS_CANONICALS.has(alias));
+}
+
+function buildHistoryDerivedWhatsAppAliases(messages: WhatsAppMessageRow[]) {
+  const aliasCounts = new Map<string, Map<string, number>>();
+
+  for (const message of messages) {
+    if (String(message.direction ?? "").trim().toLowerCase() !== "outbound") {
+      continue;
+    }
+
+    const chatType = String(message.chat_type ?? "").trim().toLowerCase();
+    if (chatType && chatType !== "direct") {
+      continue;
+    }
+
+    const messageType = String(message.message_type ?? "").trim().toLowerCase();
+    if (messageType && messageType !== "text") {
+      continue;
+    }
+
+    const inferredAliases = inferRelationshipAliasesFromShortDirectChatText(message.content);
+    if (!inferredAliases.length) {
+      continue;
+    }
+
+    const phone = normalizeWhatsAppCandidatePhone(message.remote_jid, message.remote_phone);
+    const keys = uniqueStrings([
+      buildContactIdentityKey({ phone }),
+      buildContactIdentityKey({ jid: message.remote_jid }),
+    ]);
+
+    for (const key of keys) {
+      const counts = aliasCounts.get(key) ?? new Map<string, number>();
+      for (const alias of inferredAliases) {
+        counts.set(alias, (counts.get(alias) ?? 0) + 1);
+      }
+      aliasCounts.set(key, counts);
+    }
+  }
+
+  const inferredByIdentity = new Map<string, string[]>();
+  for (const [key, counts] of aliasCounts.entries()) {
+    const aliases = [...counts.entries()]
+      .filter(([, count]) => count >= HISTORY_RELATIONSHIP_ALIAS_MIN_OCCURRENCES)
+      .sort((left, right) => {
+        if (right[1] !== left[1]) {
+          return right[1] - left[1];
+        }
+        return left[0].localeCompare(right[0]);
+      })
+      .map(([alias]) => alias);
+
+    if (aliases.length) {
+      inferredByIdentity.set(key, aliases);
+    }
+  }
+
+  return inferredByIdentity;
+}
+
+export function buildHistoryDerivedWhatsAppAliasesForTest(messages: WhatsAppMessageRow[]) {
+  return Object.fromEntries(
+    [...buildHistoryDerivedWhatsAppAliases(messages).entries()].map(([key, aliases]) => [key, [...aliases]]),
+  ) as Record<string, string[]>;
+}
+
 function isStructuredContactMatch(match: Pick<ContactMatch, "exact" | "matchBasis">) {
   return Boolean(match.exact || match.matchBasis === "exact" || match.matchBasis === "prefix" || match.matchBasis === "word");
 }
@@ -394,7 +539,7 @@ async function loadWhatsAppContactCandidates(userId: string): Promise<ContactSea
       .limit(300),
     supabaseAdmin
       .from("whatsapp_messages")
-      .select("remote_jid, remote_phone, contact_name")
+      .select("remote_jid, remote_phone, contact_name, content, direction, message_type, chat_type")
       .eq("user_id", userId)
       .order("sent_at", { ascending: false })
       .limit(WHATSAPP_HISTORY_LIMIT),
@@ -403,6 +548,7 @@ async function loadWhatsAppContactCandidates(userId: string): Promise<ContactSea
 
   const contacts = ((contactsResult.data ?? []) as WhatsAppContactRow[]).filter(Boolean);
   const messages = ((messagesResult.data ?? []) as WhatsAppMessageRow[]).filter(Boolean);
+  const inferredHistoryAliases = buildHistoryDerivedWhatsAppAliases(messages);
   const identities = buildClawCloudWhatsAppContactIdentityGraph([
     ...contacts.map((contact) => ({
       jid: contact.jid,
@@ -437,15 +583,32 @@ async function loadWhatsAppContactCandidates(userId: string): Promise<ContactSea
     })),
   ]);
 
-  return identities.map((identity) => ({
-    name: identity.displayName,
-    phone: identity.phone,
-    jid: identity.primaryJid,
-    aliases: [...new Set(
-      identity.aliases.flatMap((alias) => expandStoredAliasVariants(alias)),
-    )],
-    identityKey: identity.identityKey,
-  }));
+  return identities.map((identity) => {
+    const identityKey = buildContactIdentityKey({
+      identityKey: identity.identityKey,
+      phone: identity.phone,
+      jid: identity.primaryJid,
+    });
+    const inferredAliases = uniqueStrings([
+      ...(identityKey ? inferredHistoryAliases.get(identityKey) ?? [] : []),
+      ...(identity.primaryJid ? inferredHistoryAliases.get(buildContactIdentityKey({ jid: identity.primaryJid }) ?? "") ?? [] : []),
+    ]);
+    const displayNameLooksNumeric = !/[^\d\s+()\-]/.test(identity.displayName);
+
+    return {
+      name:
+        displayNameLooksNumeric && inferredAliases.length
+          ? formatContactDisplayName(inferredAliases[0] ?? identity.displayName)
+          : identity.displayName,
+      phone: identity.phone,
+      jid: identity.primaryJid,
+      aliases: [...new Set([
+        ...identity.aliases.flatMap((alias) => expandStoredAliasVariants(alias)),
+        ...inferredAliases.flatMap((alias) => expandStoredAliasVariants(alias)),
+      ])],
+      identityKey: identity.identityKey,
+    };
+  });
 }
 
 export function rankContactCandidates(

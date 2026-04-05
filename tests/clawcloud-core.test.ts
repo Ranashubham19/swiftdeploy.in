@@ -33,7 +33,11 @@ import {
   normalizeContactName,
   parseSendMessageCommand,
 } from "@/lib/clawcloud-contacts";
-import { formatAmbiguousReply } from "@/lib/clawcloud-contacts-v2";
+import {
+  buildHistoryDerivedWhatsAppAliasesForTest,
+  formatAmbiguousReply,
+  rankContactCandidates,
+} from "@/lib/clawcloud-contacts-v2";
 import { detectDriveIntent } from "@/lib/clawcloud-drive";
 import { answerHolidayQuery, detectHolidayQuery } from "@/lib/clawcloud-holidays";
 import {
@@ -382,7 +386,6 @@ import {
   whatsAppChunkDelayMs,
   whatsAppInitialTypingDelayMs,
 } from "@/lib/clawcloud-whatsapp-streaming";
-import { rankContactCandidates } from "@/lib/clawcloud-contacts-v2";
 import {
   extractWhatsAppPhoneShareFromChat,
   extractWhatsAppPhoneShareFromMessage,
@@ -5583,6 +5586,104 @@ test("contact ranking understands softer family nicknames and inactive-contact a
   if (maaResolved.type === "found") {
     assert.equal(maaResolved.contact.phone, "919700000002");
   }
+});
+
+test("history-derived didi aliases beat weak di-prefix WhatsApp names", () => {
+  const inferredAliases = buildHistoryDerivedWhatsAppAliasesForTest([
+    {
+      remote_jid: "917876831969@s.whatsapp.net",
+      remote_phone: "917876831969",
+      contact_name: "917876831969",
+      direction: "outbound",
+      message_type: "text",
+      chat_type: "direct",
+      content: "Ok dii",
+    },
+    {
+      remote_jid: "917876831969@s.whatsapp.net",
+      remote_phone: "917876831969",
+      contact_name: "917876831969",
+      direction: "outbound",
+      message_type: "text",
+      chat_type: "direct",
+      content: "Koi na didi",
+    },
+    {
+      remote_jid: "917876831969@s.whatsapp.net",
+      remote_phone: "917876831969",
+      contact_name: "917876831969",
+      direction: "outbound",
+      message_type: "text",
+      chat_type: "direct",
+      content: "Why didi",
+    },
+  ]);
+
+  assert.deepEqual(inferredAliases["phone:917876831969"], ["didi"]);
+
+  const resolved = rankContactCandidates("dii", [
+    {
+      name: "Didi",
+      phone: "917876831969",
+      jid: "917876831969@s.whatsapp.net",
+      aliases: ["917876831969", ...(inferredAliases["phone:917876831969"] ?? [])],
+    },
+    {
+      name: "Divya Prakash Classmate",
+      phone: "917979819955",
+      jid: "917979819955@s.whatsapp.net",
+      aliases: ["Divya Prakash Classmate", "Divya"],
+    },
+    {
+      name: "Mansi Dixit Class Mate",
+      phone: "917988685681",
+      jid: "917988685681@s.whatsapp.net",
+      aliases: ["Mansi Dixit Class Mate", "Dixit"],
+    },
+    {
+      name: "Divyansh Dhiman",
+      phone: "918219162088",
+      jid: "918219162088@s.whatsapp.net",
+      aliases: ["Divyansh Dhiman"],
+    },
+  ]);
+
+  assert.equal(resolved.type, "found");
+  if (resolved.type === "found") {
+    assert.equal(resolved.contact.name, "Didi");
+    assert.equal(resolved.contact.phone, "917876831969");
+  }
+});
+
+test("dii does not treat unrelated di-prefix WhatsApp names as strong matches", () => {
+  const result = rankContactCandidates("dii", [
+    {
+      name: "Divya Prakash Classmate",
+      phone: "917979819955",
+      jid: "917979819955@s.whatsapp.net",
+      aliases: ["Divya Prakash Classmate", "Divya"],
+    },
+    {
+      name: "Mansi Dixit Class Mate",
+      phone: "917988685681",
+      jid: "917988685681@s.whatsapp.net",
+      aliases: ["Mansi Dixit Class Mate", "Dixit"],
+    },
+    {
+      name: "Divyansh Dhiman",
+      phone: "918219162088",
+      jid: "918219162088@s.whatsapp.net",
+      aliases: ["Divyansh Dhiman"],
+    },
+    {
+      name: "Anmol Dixit Bh 6",
+      phone: "918755061396",
+      jid: "918755061396@s.whatsapp.net",
+      aliases: ["Anmol Dixit Bh 6", "Dixit"],
+    },
+  ]);
+
+  assert.equal(result.type, "not_found");
 });
 
 test("contact ranking keeps near-miss WhatsApp names on the send path", () => {
