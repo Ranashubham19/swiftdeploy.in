@@ -2829,6 +2829,8 @@ function isDeprecatedInternalFallbackLeak(value: string) {
     || /\bwithout better grounding\b/i.test(normalized)
     || /\b(?:the )?(?:answer|response) path took too long to complete reliably\b/i.test(normalized)
     || /\bReason:\s*(?:the )?(?:answer|response) path took too long to complete reliably\b/i.test(normalized)
+    || /\bno translation was provided\b/i.test(normalized)
+    || /\btranslation was not provided\b/i.test(normalized)
   );
 }
 
@@ -3505,7 +3507,7 @@ const MULTILINGUAL_CAPABILITY_PATTERNS = [
 ];
 
 const MULTILINGUAL_GREETING_PATTERNS = [
-  /^(?:hi+|hello+|hey+|good\s*(?:morning|afternoon|evening|night)|namaste|hola|bonjour|ciao|sup|yo|what'?s up|howdy|greetings|kon+ichiwa|konbanwa|ohayo|sayonara|annyeong|annyeonghaseyo|ni\s*hao|salam|assalamu?\s*alaikum|merhaba|shalom|sawadee|sawatdee|selamat|aloha|jambo|habari|salut|hej|hei|ola|bom\s*dia|guten\s*tag|guten\s*morgen|buongiorno|buenos?\s*dias?|bonsoir|dobry\s*den|privyet|zdra[sv]+ui?te|xin\s*chao|kamusta|kumusta)\b/i,
+  /^(?:hi+|hello+|hey+|good\s*(?:morning|afternoon|evening|night)|namaste|hola|bonjour|ciao|sup|yo|what'?s up|howdy|greetings|kon+ichiwa|konbanwa|ohayo|sayonara|annyeong|annyeonghaseyo|ni\s*hao|salam|assalamu?\s*alaikum|merhaba|shalom|sawadee|sawatdee|selamat|aloha|jambo|habari|salut|hej|hei|ola|bom\s*dia|guten\s*tag|guten\s*morgen|buongiorno|buenos?\s*dias?|bonsoir|dobry\s*den|privyet|zdra[sv]+ui?te|xin\s*chao|kamusta|kumusta|sat\s*sri\s*akal|waheguru\s*ji)\b/i,
   /^(?:\u043f\u0440\u0438\u0432\u0435\u0442|\u0437\u0434\u0440\u0430\u0432\u0441\u0442\u0432\u0443\u0439\u0442\u0435|\u0434\u043e\u0431\u0440\u044b\u0439\s+(?:\u0434\u0435\u043d\u044c|\u0432\u0435\u0447\u0435\u0440|\u0443\u0442\u0440\u043e))/iu,
   /^(?:\u3053\u3093\u306b\u3061\u306f|\u3053\u3093\u3070\u3093\u306f|\u3084\u3042|\u3069\u3046\u3082)/u,
   /^(?:\uc548\ub155(?:\ud558\uc138\uc694)?)/u,
@@ -3779,8 +3781,8 @@ const LOCALIZED_CAPABILITY_REPLY_COPY: Partial<Record<SupportedLocale, Localized
   },
   te: {
     wellbeing: "నేను బాగున్నాను.",
-    capabilities: "కోడింగ్, రాయడం, గణితం, పరిశోధన, అనువాదం, డాక్యుమెంట్లు, రిమైండర్లు, మరియు కనెక్ట్ చేసిన Gmail, Calendar, Drive, WhatsApp వంటి టూల్స్‌లో నేను సహాయం చేయగలను.",
-    close: "మీకు కావాల్సిన ఖచ్చితమైన పనిని చెప్పండి, నేను నేరుగా సహాయం చేస్తాను.",
+    capabilities: "కోడింగ్, రాయడం, గణితం, పరిశోధన, అనువాదం, డాక్యుమెంట్లు, రిమైండర్లు, మరియు కనెక్ట్ చేసిన Gmail, Calendar, Drive, WhatsApp వంటి టూల్��్‌లో నేను సహాయం చేయగలను.",
+    close: "మీకు కావాల్సిన ఖచ్చితమైన పనిన��� చెప్పండి, నేను నేరుగా సహాయం చేస్తాను.",
   },
   kn: {
     wellbeing: "ನಾನು ಚೆನ್ನಾಗಿದ್ದೇನೆ.",
@@ -7377,6 +7379,10 @@ function buildTimeboxedProfessionalReply(message: string, intent: IntentType): s
 
 export function buildTimeboxedProfessionalReplyForTest(message: string, intent: IntentType) {
   return buildTimeboxedProfessionalReply(message, intent);
+}
+
+export function isVisibleFallbackReplyForTest(reply: string) {
+  return isVisibleFallbackReply(reply);
 }
 
 async function ensureProfessionalReply(input: {
@@ -11190,7 +11196,7 @@ function detectIntent(text: string): DetectedIntent {
 
   if (
     (
-      /^(hi+|hello+|hey+|howdy|good\s*(morning|evening|afternoon|night)|namaste|hola|bonjour|sup|yo|what'?s up|greetings)\b/.test(t)
+      /^(hi+|hello+|hey+|howdy|good\s*(morning|evening|afternoon|night)|namaste|hola|bonjour|sup|yo|what'?s up|greetings|konichiwa|konnichiwa|annyeong|ni\s*hao|merhaba|salam|assalamu?\s*alaikum|sat\s*sri\s*akal|ciao|aloha|jambo|sawadee|selamat)\b/.test(t)
       || /^(आप\s*कैसे\s*ह(ैं|ो|ै)|नमस्ते|नमस्कार|कैसे\s*हो|क्या\s*हाल|सलाम|ಹಲೋ|ನಮಸ್ಕಾರ|வணக்கம்|నమస్కారం|হ্যালো|নমস্কার|ନମସ୍କାର|સલામ|ਸਤ\s*ਸ੍ਰੀ\s*ਅਕਾਲ|안녕|こんにちは|你好|مرحبا|سلام)/u.test(text.trim())
     )
     && text.trim().length < 40
