@@ -4415,7 +4415,14 @@ function isEmptyOrFallback(reply: string | null | undefined, sourceMessage?: str
     lower.includes("i don't have the ability to send") ||
     lower.includes("not capable of sending messages to phone") ||
     lower.includes("i will answer this directly") ||
-    lower.includes("i understand your question. let me help")
+    lower.includes("i understand your question. let me help") ||
+    // Vision/translation prompt leak
+    lower.startsWith("you need me to translate") ||
+    lower.startsWith("you want me to translate") ||
+    lower.includes("preserving the original tone, warmth") ||
+    lower.includes("preserving the original tone and level") ||
+    lower.includes("keeping specific details like names, numbers") ||
+    (lower.includes("translate a given text") && lower.includes("preserving"))
   );
 }
 

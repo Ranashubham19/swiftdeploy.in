@@ -704,6 +704,37 @@ function parseSendMessageCommandCandidate(t: string): ParsedSendMessageCommand |
     return buildParsedSendCommand(directToPattern[1] ?? "", directToPattern[2] ?? "");
   }
 
+  // Hindi/Hinglish send patterns:
+  // "X likh do maa ko" / "X likh ke bhej do maa ko" / "X bhej do maa ko"
+  // "maa ko X likh do" / "maa ko X bhej do"
+  const hindiSendVerbs = "(?:likh(?:\\s*(?:ke|kar))?\\s*(?:bhej|send)?\\s*(?:do|de|dena|dijiye|kar(?:o|na)?)|bhej(?:\\s*(?:do|de|dena|dijiye|na))|send\\s*(?:kar(?:o|do|na)?))";
+
+  // Pattern: "ek badiya sa good afternoon message likh do maa ko"
+  // Matches: <message description> <hindi send verb> <recipient> ko
+  const hindiMessageFirst = t.match(
+    new RegExp(`^(?:(?:aaj|abhi|zara|ek|please|pls)\\s+)*(.+?)\\s+${hindiSendVerbs}\\s+(.+?)\\s+(?:ko|k)$`, "i"),
+  );
+  if (hindiMessageFirst) {
+    return buildParsedSendCommand(hindiMessageFirst[2] ?? "", hindiMessageFirst[1] ?? "");
+  }
+
+  // Pattern: "maa ko ek good afternoon message likh do"
+  // Matches: <recipient> ko <message description> <hindi send verb>
+  const hindiRecipientFirst = t.match(
+    new RegExp(`^(.+?)\\s+(?:ko|k)\\s+(.+?)\\s+${hindiSendVerbs}$`, "i"),
+  );
+  if (hindiRecipientFirst) {
+    return buildParsedSendCommand(hindiRecipientFirst[1] ?? "", hindiRecipientFirst[2] ?? "");
+  }
+
+  // Pattern: "maa ko bhej do good morning" / "maa ko send karo hi"
+  const hindiRecipientVerb = t.match(
+    new RegExp(`^(.+?)\\s+(?:ko|k)\\s+${hindiSendVerbs}\\s+(.+)$`, "i"),
+  );
+  if (hindiRecipientVerb) {
+    return buildParsedSendCommand(hindiRecipientVerb[1] ?? "", hindiRecipientVerb[2] ?? "");
+  }
+
   return null;
 }
 

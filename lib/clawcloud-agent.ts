@@ -2359,6 +2359,15 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || normalized.includes("unable to send whatsapp")
     || normalized.includes("i don't have the ability to send")
     || normalized.includes("i do not have the ability to send")
+    // Vision/translation prompt leak patterns
+    || normalized.startsWith("you need me to translate")
+    || normalized.startsWith("you want me to translate")
+    || normalized.includes("preserving the original tone, warmth")
+    || normalized.includes("preserving the original tone and level")
+    || normalized.includes("keeping specific details like names, numbers")
+    || (normalized.includes("translate a given text") && normalized.includes("preserving"))
+    || (normalized.startsWith("you need me to") && normalized.includes("translate"))
+    || (normalized.startsWith("you want me to") && normalized.includes("preserving"))
     // Live source diagnostic leaks
     || normalized.includes("i could not get a clean live source")
     || normalized.includes("name the exact topic plus")
@@ -19801,6 +19810,42 @@ async function handleSendMessageToContactProfessional(
   );
 
   if (canAutoSendSingleRecipient && singleRecipient) {
+    // Check if the user's command is a "draft/write for" request (likh do, write for, etc.)
+    // vs a direct "send X to Y" command. Draft requests show preview first.
+    const isDraftRequest = /\b(?:likh|likho|likhna|likhdo|write|draft|compose|banao|bana)\b/i.test(text)
+      && !/\b(?:bhej|send|snd|sned|forward)\b/i.test(text);
+
+    if (isDraftRequest) {
+      // Show draft and ask for confirmation before sending
+      await rememberWhatsAppPendingContactResolution({
+        userId,
+        kind: "send_message",
+        requestedName: singleRecipient.name,
+        resumePrompt: `send "${professionalDraft}" to ${singleRecipient.name}`,
+        matches: [{
+          name: singleRecipient.name,
+          phone: singleRecipient.phone ?? "",
+          jid: singleRecipient.jid ?? "",
+        }],
+      });
+
+      const recipientLabel = `${singleRecipient.name}${singleRecipient.phone ? ` (+${singleRecipient.phone})` : ""}`;
+      return translateMessage(
+        [
+          `✍️ *Draft message for ${recipientLabel}:*`,
+          "",
+          `"${professionalDraft}"`,
+          "",
+          "━━━",
+          "Reply with:",
+          "• *Send* — to send this message now",
+          "• *Improve* — to make it better",
+          "• Or type your own version",
+        ].join("\n"),
+        locale,
+      );
+    }
+
     try {
       const sendResult = await sendClawCloudWhatsAppToPhone(singleRecipient.phone, professionalDraft, {
         userId,
@@ -19819,14 +19864,14 @@ async function handleSendMessageToContactProfessional(
       void upsertAnalyticsDaily(userId, { wa_messages_sent: 1, tasks_run: 1 }).catch(() => null);
       const recipientLabel = `${singleRecipient.name}${singleRecipient.phone ? ` (+${singleRecipient.phone})` : ""}`;
       const statusLine = sendResult.deliveryConfirmed
-        ? `Message delivered to ${recipientLabel}.`
-        : `Message submitted to WhatsApp for ${recipientLabel}. Delivery confirmation is pending.`;
+        ? `✅ Message delivered to ${recipientLabel}.`
+        : `✅ Message sent to ${recipientLabel}. Delivery confirmation is pending.`;
       return translateMessage(
         [
           statusLine,
           "",
-          `Sent text: "${professionalDraft}"`,
-          ...(sendResult.warning ? ["", `Note: ${sendResult.warning}`] : []),
+          `*Sent:* "${professionalDraft}"`,
+          ...(sendResult.warning ? ["", `_Note: ${sendResult.warning}_`] : []),
         ].join("\n"),
         locale,
       );
