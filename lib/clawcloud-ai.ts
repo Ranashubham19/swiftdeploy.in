@@ -64,31 +64,38 @@ type ModelHealthState = {
   lastSuccessAt: number;
 };
 
-// Live-benchmarked 2026-04-07 against integrate.api.nvidia.com.
-// NVIDIA-first engine. Dead/timeout models removed. Ranked by speed + quality.
+// Live-benchmarked 2026-04-07. GPT-5 flagships first, then NVIDIA by speed.
 const GLOBAL_TOP_MODELS = [
+  // ── Tier 0: GPT-5 flagships — most advanced AI models available ──
+  "gpt-5.4-pro",                                   //  flagship pro — best accuracy
+  "gpt-5.4",                                       //  latest flagship
+  "gpt-5.4-mini",                                  //  latest mini — fast + strong
+  "gpt-5.2-pro",                                   //  strong pro
+  "gpt-5.2",                                       //  strong flagship
+  "gpt-5-pro",                                     //  proven pro
+  "gpt-5",                                         //  proven flagship
   // ── Tier 1: NVIDIA ultra-fast frontier (sub-1.5s) ──
-  "google/gemma-2-27b-it",                        //  1.0s  fast general
-  "meta/llama-4-maverick-17b-128e-instruct",      //  1.1s  latest Meta, strong all-domain
-  "meta/llama3-8b-instruct",                      //  1.1s  ultra-fast lightweight
-  "mistralai/mistral-small-3.1-24b-instruct-2503", // 1.1s  fast + accurate
-  "moonshotai/kimi-k2-instruct-0905",             //  1.2s  top-tier chat
-  "qwen/qwen2.5-coder-32b-instruct",             //  1.3s  code specialist
-  "qwen/qwen3-next-80b-a3b-instruct",            //  1.3s  latest Qwen MoE
-  "mistralai/mixtral-8x22b-instruct-v0.1",       //  1.4s  strong reasoning
-  "qwen/qwen3-coder-480b-a35b-instruct",         //  1.5s  frontier code MoE
+  "google/gemma-2-27b-it",                         //  1.0s  fast general
+  "meta/llama-4-maverick-17b-128e-instruct",       //  1.1s  latest Meta, strong all-domain
+  "meta/llama3-8b-instruct",                       //  1.1s  ultra-fast lightweight
+  "mistralai/mistral-small-3.1-24b-instruct-2503", //  1.1s  fast + accurate
+  "moonshotai/kimi-k2-instruct-0905",              //  1.2s  top-tier chat
+  "qwen/qwen2.5-coder-32b-instruct",              //  1.3s  code specialist
+  "qwen/qwen3-next-80b-a3b-instruct",             //  1.3s  latest Qwen MoE
+  "mistralai/mixtral-8x22b-instruct-v0.1",        //  1.4s  strong reasoning
+  "qwen/qwen3-coder-480b-a35b-instruct",          //  1.5s  frontier code MoE
   // ── Tier 2: NVIDIA fast + strong (sub-2.5s) ──
-  "moonshotai/kimi-k2-instruct",                  //  1.8s  top-tier chat
-  "deepseek-ai/deepseek-v3.1",                    //  1.8s  strong general
-  "qwen/qwen3.5-397b-a17b",                       //  1.9s  frontier MoE all-domain
-  "meta/llama-3.1-8b-instruct",                   //  2.0s  fast lightweight
-  "deepseek-ai/deepseek-v3.1-terminus",            //  2.0s  strong general
-  "meta/llama-3.3-70b-instruct",                   //  2.1s  proven reliable
-  "moonshotai/kimi-k2-thinking",                   //  2.2s  deep reasoning
-  "meta/llama-3.1-70b-instruct",                   //  2.3s  solid all-rounder
-  "moonshotai/kimi-k2.5",                          //  2.5s  advanced reasoning
-  // ── Last resort: OpenAI cheap fallback ──
-  "gpt-4o-mini",                                   //  ~0.5s  cheap OpenAI fallback
+  "moonshotai/kimi-k2-instruct",                   //  1.8s  top-tier chat
+  "deepseek-ai/deepseek-v3.1",                     //  1.8s  strong general
+  "qwen/qwen3.5-397b-a17b",                        //  1.9s  frontier MoE all-domain
+  "meta/llama-3.1-8b-instruct",                    //  2.0s  fast lightweight
+  "deepseek-ai/deepseek-v3.1-terminus",             //  2.0s  strong general
+  "meta/llama-3.3-70b-instruct",                    //  2.1s  proven reliable
+  "moonshotai/kimi-k2-thinking",                    //  2.2s  deep reasoning
+  "meta/llama-3.1-70b-instruct",                    //  2.3s  solid all-rounder
+  "moonshotai/kimi-k2.5",                           //  2.5s  advanced reasoning
+  // ── Last resort: GPT cheap fallback ──
+  "gpt-5.4-nano",                                  //  cheapest GPT, ultra-fast
 ] as const;
 
 const MODEL_HEALTH = new Map<string, ModelHealthState>();

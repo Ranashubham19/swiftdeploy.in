@@ -216,7 +216,7 @@ const DEDICATED_JUDGE_MODELS = [
   "moonshotai/kimi-k2.5",
   "moonshotai/kimi-k2-thinking",
   "meta/llama-3.3-70b-instruct",
-  "gpt-4o",
+  "gpt-5.4-pro",
 ];
 
 export function selectIndependentJudge(

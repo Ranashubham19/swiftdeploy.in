@@ -1382,7 +1382,7 @@ async function emergencyDirectAnswer(
       "moonshotai/kimi-k2-instruct-0905",
       "mistralai/mistral-large-3-675b-instruct-2512",
       "moonshotai/kimi-k2.5",
-      "gpt-4o",
+      "gpt-5.4-pro",
     ],
     maxTokens: 1000,
     fallback: "",

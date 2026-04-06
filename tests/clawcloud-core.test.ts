@@ -762,7 +762,7 @@ test("emergency direct answers prefer stable NVIDIA models before legacy moonsho
   assert.match(source, /export async function recoverUserFacingReplyForServer/);
   assert.match(
     source,
-    /preferredModels:\s*\[\s*"meta\/llama-3\.3-70b-instruct",\s*"qwen\/qwen3\.5-397b-a17b",\s*"moonshotai\/kimi-k2-instruct-0905",\s*"mistralai\/mistral-large-3-675b-instruct-2512",\s*"moonshotai\/kimi-k2\.5",\s*"gpt-4o"/,
+    /preferredModels:\s*\[\s*"meta\/llama-3\.3-70b-instruct",\s*"qwen\/qwen3\.5-397b-a17b",\s*"moonshotai\/kimi-k2-instruct-0905",\s*"mistralai\/mistral-large-3-675b-instruct-2512",\s*"moonshotai\/kimi-k2\.5",\s*"gpt-5\.4-pro"/,
   );
 });
 
@@ -782,7 +782,7 @@ test("ai engine routing keeps Railway legacy envs on stable NVIDIA defaults and 
 
   assert.match(
     aiSource,
-    /const GLOBAL_TOP_MODELS = \[[\s\S]*?"google\/gemma-2-27b-it"[\s\S]*?"gpt-4o-mini"/,
+    /const GLOBAL_TOP_MODELS = \[[\s\S]*?"gpt-5\.4-pro"[\s\S]*?"gpt-5\.4-nano"/,
   );
   assert.match(aiSource, /function hasExplicitModernNvidiaRoutingConfig\(\)/);
   assert.match(aiSource, /function applyResilientDefaultModelOrdering\(models: string\[\]\)/);
