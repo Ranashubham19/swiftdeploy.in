@@ -25,26 +25,82 @@ export type ConversationMemory = {
   continuityHint: string | null;
 };
 
-const RAW_RECENT_TURNS = 30;
-const SUMMARY_LOOK_BACK = 60;
+type ConversationContinuityAnalysis = {
+  isFollowUp: boolean;
+  resolvedQuestion: string;
+  anchorUserTurn: MemoryTurn | null;
+  anchorAssistantTurn: MemoryTurn | null;
+  score: number;
+};
+
+const RAW_RECENT_TURNS = 36;
+const SUMMARY_LOOK_BACK = 90;
 const MAX_CONTENT_CHARS = 1_200;
 const MAX_DOCUMENT_CONTENT_CHARS = 4_800;
+const CONTINUITY_TOKEN_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "by",
+  "do",
+  "for",
+  "from",
+  "get",
+  "give",
+  "hai",
+  "ho",
+  "i",
+  "in",
+  "is",
+  "it",
+  "ki",
+  "ko",
+  "me",
+  "mein",
+  "my",
+  "of",
+  "on",
+  "or",
+  "please",
+  "se",
+  "tell",
+  "the",
+  "to",
+  "tum",
+  "what",
+  "with",
+]);
 
 const FOLLOW_UP_SIGNALS = [
-  /\b(it|this|that|those|these|they|he|she|him|her|its|their)\b/i,
+  /\b(it|this|that|those|these|they|he|she|him|her|its|their|unka|unki|unke|uska|uski|uske|inko|inki|inke|isko|iske|iss|ye|yeh|woh|voh)\b/i,
   /\b(above|previous|last|earlier|before|prior|mentioned|said|told)\b/i,
-  /\b(more|again|also|another|next|then|after|and|so|but|still)\b/i,
+  /\b(more|again|also|another|next|then|after|and|so|but|still|aur|phir|ab|ab se|same)\b/i,
   /^(yes|no|ok|okay|sure|right|correct|wrong|really|why|how|when|what|who|where)\b/i,
   /\?$/,
 ];
 
-const PRONOUN_START = /^(it|this|that|those|they|he|she)\s/i;
+const PRONOUN_START = /^(it|this|that|those|they|he|she|unka|unki|unke|uska|uski|uske|inko|inki|inke|ye|yeh|woh|voh)\s/i;
+const CONTEXTUAL_REFERENCE = /\b(it|this|that|those|these|they|he|she|him|her|its|their|unka|unki|unke|uska|uski|uske|inko|inki|inke|isko|iske|iss|ye|yeh|woh|voh)\b/i;
 const DIRECT_STANDALONE_QUESTION_START =
   /^(?:what(?:'s| is| are| was| were)|who(?:'s| is| are| was| were)|when(?:'s| is| are| was| were| did)|where(?:'s| is| are| was| were)|why(?:'s| is| are| does| do| did)|how(?:'s| is| are| does| do| did)|explain|describe|define|summari[sz]e|story of|plot of|summary of|tell me about|compare|difference between)\b/i;
+const FRESH_ACTION_REQUEST_START =
+  /^(?:send|reply|read|show|draft|write|translate|open|search|find|check|from now(?: on(?:ward)?)?|start|stop)\b/i;
+const CONTINUATION_OPENER =
+  /^(?:and|also|so|then|but|or|aur|ab|ab se|phir|same|continue|go on|tell me more|what about|how about|which one|that one|this one|those|them|it)\b/i;
+const LANGUAGE_OR_STYLE_ONLY_FOLLOW_UP =
+  /^(?:(?:in|into)\s+(?:english|hindi|hinglish|urdu|punjabi|thai|chinese|japanese|korean|tamil|telugu|bengali|marathi|french|spanish|arabic|german|italian|russian)|(?:make|keep|write|say|reply|send|translate|explain)\s+(?:it\s+)?(?:in|into)\s+(?:english|hindi|hinglish|urdu|punjabi|thai|chinese|japanese|korean|tamil|telugu|bengali|marathi|french|spanish|arabic|german|italian|russian)|(?:short(?:er)?|brief(?:ly)?|simple(?:r)?|professional(?:ly)?|formal(?:ly)?|polite(?:ly)?|more detailed|detailed))\b/i;
 const DOCUMENT_FOLLOW_UP_SIGNAL =
   /\b(document|file|pdf|sheet|page|row|table|section|clause|invoice|statement|receipt|contract|resume|cv)\b/i;
 const DOCUMENT_DECISION_SIGNAL =
   /\b(which|compare|better|best|cheapest|lowest|highest|difference|summary|summarize|explain|mention|show)\b/i;
+const LOW_SIGNAL_ACK_RE =
+  /^(?:ok(?:ay)?|kk|k|hmm+|hm+|yes|no|sure|fine|thanks?|thank you|thx|done|haan|han|hmm|ji|acha|achha|theek(?: hai)?|thik(?: hai)?|right|correct|got it|understood)\b[!.? ]*$/i;
+const LOW_SIGNAL_ASSISTANT_OPERATION_RE =
+  /\b(?:message (?:delivered|submitted|sent|re-?sent) to|reply (?:delivered|submitted|sent|re-?sent) to|delivery confirmation|active contact mode|reply with the exact contact name|whatsapp conversation summary|messages reviewed for this summary|latest visible message|couldn't find synced whatsapp messages|train status update|official fallbacks)\b/i;
 
 const TOPIC_EXTRACTORS: Array<{ re: RegExp; topic: string }> = [
   { re: /\b(bitcoin|btc|ethereum|eth|crypto|blockchain|nft|defi|web3)\b/i, topic: "cryptocurrency" },
@@ -69,6 +125,10 @@ function extractTopics(text: string): string[] {
     .slice(0, 5);
 }
 
+function normalizeWhitespace(value: string) {
+  return value.replace(/\s+/g, " ").trim();
+}
+
 function looksLikeStandaloneQuestion(msg: string, wordCount: number) {
   if (!msg) {
     return false;
@@ -81,30 +141,206 @@ function looksLikeStandaloneQuestion(msg: string, wordCount: number) {
   return /[\uac00-\ud7af\u3040-\u30ff\u4e00-\u9fff]/u.test(msg) && wordCount >= 4 && !PRONOUN_START.test(msg);
 }
 
+function looksLikeFreshActionRequest(msg: string) {
+  if (!msg) {
+    return false;
+  }
+
+  if (!FRESH_ACTION_REQUEST_START.test(msg)) {
+    return false;
+  }
+
+  if (CONTEXTUAL_REFERENCE.test(msg) || LANGUAGE_OR_STYLE_ONLY_FOLLOW_UP.test(msg)) {
+    return false;
+  }
+
+  return true;
+}
+
+function toContinuityTokens(value: string) {
+  return normalizeWhitespace(value)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s-]/gu, " ")
+    .split(/\s+/)
+    .filter((token) => token.length >= 3)
+    .filter((token) => !CONTINUITY_TOKEN_STOP_WORDS.has(token));
+}
+
+function tokenOverlapScore(left: string, right: string) {
+  const leftTokens = new Set(toContinuityTokens(left));
+  const rightTokens = new Set(toContinuityTokens(right));
+  if (!leftTokens.size || !rightTokens.size) {
+    return 0;
+  }
+
+  let overlap = 0;
+  for (const token of leftTokens) {
+    if (rightTokens.has(token)) {
+      overlap += 1;
+    }
+  }
+
+  return overlap / Math.max(1, Math.min(leftTokens.size, rightTokens.size));
+}
+
+function isLowSignalTurn(turn: MemoryTurn) {
+  const trimmed = normalizeWhitespace(turn.content);
+  if (!trimmed) {
+    return true;
+  }
+
+  if (LOW_SIGNAL_ACK_RE.test(trimmed) && trimmed.split(/\s+/).filter(Boolean).length <= 4) {
+    return true;
+  }
+
+  return turn.role === "assistant" && LOW_SIGNAL_ASSISTANT_OPERATION_RE.test(trimmed);
+}
+
+function findLatestSubstantiveTurn(
+  recentTurns: MemoryTurn[],
+  role: MemoryTurn["role"],
+) {
+  for (let index = recentTurns.length - 1; index >= 0; index -= 1) {
+    const turn = recentTurns[index];
+    if (!turn || turn.role !== role || isLowSignalTurn(turn)) {
+      continue;
+    }
+    return turn;
+  }
+
+  return null;
+}
+
 function isFollowUpQuestion(currentMessage: string, recentTurns: MemoryTurn[]): boolean {
   if (!recentTurns.length) return false;
 
   const msg = currentMessage.trim();
   const words = msg.split(/\s+/).filter(Boolean);
   const wordCount = words.length;
+  const anchorUserTurn = findLatestSubstantiveTurn(recentTurns, "user");
+  const anchorAssistantTurn = findLatestSubstantiveTurn(recentTurns, "assistant");
 
   if (!msg) return false;
   if (PRONOUN_START.test(msg)) return true;
+  if (LANGUAGE_OR_STYLE_ONLY_FOLLOW_UP.test(msg)) return Boolean(anchorUserTurn || anchorAssistantTurn);
+  if (CONTINUATION_OPENER.test(msg) && !looksLikeStandaloneQuestion(msg, wordCount)) return true;
+  if (looksLikeFreshActionRequest(msg) && !CONTEXTUAL_REFERENCE.test(msg)) return false;
   if (looksLikeStandaloneQuestion(msg, wordCount)) return false;
   if (wordCount <= 3) return true;
+
+  const anchorText = `${anchorUserTurn?.content ?? ""} ${anchorAssistantTurn?.content ?? ""}`.trim();
+  const overlap = anchorText ? tokenOverlapScore(msg, anchorText) : 0;
+  if (overlap >= 0.34) {
+    return true;
+  }
 
   const hits = FOLLOW_UP_SIGNALS.reduce((count, re) => count + (re.test(msg) ? 1 : 0), 0);
   return hits >= 2;
 }
 
-function resolveFollowUp(currentMessage: string, recentTurns: MemoryTurn[], activeTopics: string[]): string {
+function analyzeConversationContinuity(
+  currentMessage: string,
+  recentTurns: MemoryTurn[],
+  activeTopics: string[],
+): ConversationContinuityAnalysis {
+  const msg = currentMessage.trim();
+  const anchorUserTurn = findLatestSubstantiveTurn(recentTurns, "user");
+  const anchorAssistantTurn = findLatestSubstantiveTurn(recentTurns, "assistant");
+
+  if (!recentTurns.length || !msg) {
+    return {
+      isFollowUp: false,
+      resolvedQuestion: msg,
+      anchorUserTurn,
+      anchorAssistantTurn,
+      score: 0,
+    };
+  }
+
+  const words = msg.split(/\s+/).filter(Boolean).length;
+  const lastUserContext = anchorUserTurn?.content?.slice(0, 300) ?? "";
+  const lastAssistantContext = anchorAssistantTurn?.content?.slice(0, 300) ?? "";
+  const overlap = Math.max(
+    tokenOverlapScore(msg, lastUserContext),
+    tokenOverlapScore(msg, lastAssistantContext),
+  );
+  const hasContextCue = PRONOUN_START.test(msg) || CONTEXTUAL_REFERENCE.test(msg);
+  const hasContinuationCue = CONTINUATION_OPENER.test(msg);
+  const styleOnly = LANGUAGE_OR_STYLE_ONLY_FOLLOW_UP.test(msg);
+  const standaloneQuestion = looksLikeStandaloneQuestion(msg, words);
+  const freshAction = looksLikeFreshActionRequest(msg);
+
+  let score = 0;
+  if (PRONOUN_START.test(msg)) score += 4;
+  if (hasContextCue) score += 2;
+  if (hasContinuationCue) score += 2;
+  if (styleOnly) score += 3;
+  if (looksLikeDocumentFollowUp(msg)) score += 2;
+  if (words <= 3) score += 2;
+  else if (words <= 6 && !standaloneQuestion && !freshAction) score += 1;
+  if (overlap >= 0.45) score += 2;
+  else if (overlap >= 0.25) score += 1;
+  if (standaloneQuestion) score -= 4;
+  if (freshAction && !hasContextCue && !hasContinuationCue) score -= 3;
+  if (words >= 8 && overlap === 0 && !hasContextCue && !styleOnly) score -= 1;
+
+  const isFollowUp =
+    score >= 2
+    && Boolean(anchorUserTurn || anchorAssistantTurn)
+    && !(standaloneQuestion && !hasContextCue && !styleOnly);
+
+  return {
+    isFollowUp,
+    resolvedQuestion: isFollowUp
+      ? resolveFollowUp(currentMessage, recentTurns, activeTopics, anchorUserTurn, anchorAssistantTurn)
+      : msg,
+    anchorUserTurn,
+    anchorAssistantTurn,
+    score,
+  };
+}
+
+function resolveFollowUp(
+  currentMessage: string,
+  recentTurns: MemoryTurn[],
+  activeTopics: string[],
+  anchorUserTurn?: MemoryTurn | null,
+  anchorAssistantTurn?: MemoryTurn | null,
+): string {
   const msg = currentMessage.trim();
   if (!recentTurns.length || !msg) return msg;
 
-  const lastUserTurn = [...recentTurns].reverse().find((turn) => turn.role === "user");
-  const lastAssistantTurn = [...recentTurns].reverse().find((turn) => turn.role === "assistant");
-  const lastUserContext = lastUserTurn?.content?.slice(0, 300) ?? "";
-  const lastAssistantContext = lastAssistantTurn?.content?.slice(0, 300) ?? "";
+  const lastUserContext = anchorUserTurn?.content?.slice(0, 300)
+    ?? findLatestSubstantiveTurn(recentTurns, "user")?.content?.slice(0, 300)
+    ?? "";
+  const lastAssistantContext = anchorAssistantTurn?.content?.slice(0, 300)
+    ?? findLatestSubstantiveTurn(recentTurns, "assistant")?.content?.slice(0, 300)
+    ?? "";
+
+  if (LANGUAGE_OR_STYLE_ONLY_FOLLOW_UP.test(msg) && lastUserContext) {
+    return normalizeWhitespace(`${lastUserContext} ${msg}`);
+  }
+
+  if (/^(?:what about|how about|same for)\b/i.test(msg) && lastUserContext) {
+    const directSubject = msg
+      .replace(/^(?:what about|how about|same for)\s+/i, "")
+      .replace(/[?!.]+$/g, "")
+      .trim();
+    if (directSubject) {
+      return normalizeWhitespace(`${lastUserContext} ${directSubject}`);
+    }
+  }
+
+  if (/^(?:and|also|or|aur|so|then|but|ab|ab se|phir)\b/i.test(msg) && lastUserContext) {
+    const suffix = msg.replace(/^(?:and|also|or|aur|so|then|but|ab|ab se|phir)\s+/i, "").trim();
+    if (suffix) {
+      return normalizeWhitespace(`${lastUserContext} ${suffix}`);
+    }
+  }
+
+  if (/^(?:why|when|where|who|how much|how many|which one)\b/i.test(msg) && lastUserContext) {
+    return normalizeWhitespace(`${msg} regarding ${lastUserContext}`);
+  }
 
   // For pronoun references, inject both user and assistant context
   if (PRONOUN_START.test(msg)) {
@@ -117,7 +353,19 @@ function resolveFollowUp(currentMessage: string, recentTurns: MemoryTurn[], acti
 
   const words = msg.split(/\s+/).filter(Boolean).length;
 
+  if (CONTEXTUAL_REFERENCE.test(msg)) {
+    const contextParts: string[] = [];
+    if (lastUserContext) contextParts.push(`user asked: ${lastUserContext}`);
+    if (lastAssistantContext) contextParts.push(`you answered: ${lastAssistantContext}`);
+    const context = contextParts.join("; ");
+    return context ? `${msg} (context: ${context})` : msg;
+  }
+
   // For short messages, inject topic and recent context
+  if (words <= 8 && lastUserContext) {
+    return normalizeWhitespace(`${lastUserContext}. Follow-up: ${msg}`);
+  }
+
   if (words <= 8 && activeTopics.length > 0) {
     const topicHint = `topic: ${activeTopics.join(", ")}`;
     const contextHint = lastAssistantContext ? `; recent answer: ${lastAssistantContext.slice(0, 160)}` : "";
@@ -237,13 +485,12 @@ export async function buildConversationMemory(
   const olderTurns = allTurns.slice(0, Math.max(0, allTurns.length - RAW_RECENT_TURNS));
   const activeTopics = extractTopics(`${recentTurns.map((turn) => turn.content).join(" ")} ${currentMessage}`);
   const topicSummary = buildOlderSummary(olderTurns);
-  const isFollowUp = isFollowUpQuestion(currentMessage, recentTurns);
+  const continuity = analyzeConversationContinuity(currentMessage, recentTurns, activeTopics);
+  const isFollowUp = continuity.isFollowUp;
   const recentDocumentContext = findRecentDocumentContext(recentTurns);
   const casualTalkProfile = inferClawCloudCasualTalkProfile(currentMessage, recentTurns);
   const emotionalContext = inferClawCloudEmotionalContext(currentMessage, recentTurns);
-  const resolvedQuestionBase = isFollowUp
-    ? resolveFollowUp(currentMessage, recentTurns, activeTopics)
-    : currentMessage.trim();
+  const resolvedQuestionBase = continuity.resolvedQuestion || currentMessage.trim();
   const resolvedQuestion = recentDocumentContext
     && !looksLikeDocumentPrompt(currentMessage)
     && looksLikeDocumentFollowUp(currentMessage)
@@ -311,4 +558,26 @@ export async function getSmartHistory(
 ): Promise<MemoryTurn[]> {
   const limit = mode === "deep" ? 50 : 30;
   return loadRawHistory(userId, limit);
+}
+
+export function analyzeConversationContinuityForTest(input: {
+  currentMessage: string;
+  recentTurns: MemoryTurn[];
+  activeTopics?: string[];
+}) {
+  const analysis = analyzeConversationContinuity(
+    input.currentMessage,
+    input.recentTurns,
+    input.activeTopics ?? extractTopics(
+      `${input.recentTurns.map((turn) => turn.content).join(" ")} ${input.currentMessage}`,
+    ),
+  );
+
+  return {
+    isFollowUp: analysis.isFollowUp,
+    resolvedQuestion: analysis.resolvedQuestion,
+    anchorUserTurn: analysis.anchorUserTurn?.content ?? null,
+    anchorAssistantTurn: analysis.anchorAssistantTurn?.content ?? null,
+    score: analysis.score,
+  };
 }

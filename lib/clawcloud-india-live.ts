@@ -329,11 +329,15 @@ export async function answerIndianStockQuery(message: string): Promise<string | 
 export function detectTrainIntent(message: string): { type: "pnr" | "running" | "schedule" | null; value: string } {
   const normalized = message.toLowerCase().trim();
   const pnrMatch = message.match(/\b(\d{10})\b/);
-  if (pnrMatch && /\b(pnr|ticket|booking|status)\b/.test(normalized)) {
-    return { type: "pnr", value: pnrMatch[1] };
+  const hasPnrContext = /\b(pnr|ticket|booking|reservation|irctc|rail(?:way)?|train|status|journey)\b/.test(normalized);
+  const hasPhoneOrChatContext =
+    /\b(phone|number|contact|whatsapp|whatsap|whatsaap|wa|message|messages|reply|replier|auto[\s-]?reply|auto[\s-]?replier|language)\b/.test(normalized);
+
+  if (pnrMatch && hasPhoneOrChatContext && !hasPnrContext) {
+    return { type: null, value: "" };
   }
 
-  if (pnrMatch && !message.match(/\b\d{11,}\b/)) {
+  if (pnrMatch && hasPnrContext) {
     return { type: "pnr", value: pnrMatch[1] };
   }
 

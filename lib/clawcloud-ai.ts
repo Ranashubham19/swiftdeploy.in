@@ -121,7 +121,7 @@ const INTENT_PARALLELISM: Record<IntentType, number> = {
   send_message: 1,
   save_contact: 1,
   calendar: 1,
-  general: 2,
+  general: 1,
   email: 1,
   spending: 1,
   finance: 2,
@@ -140,7 +140,7 @@ const INTENT_PARALLELISM: Record<IntentType, number> = {
   sports: 1,
   technology: 2,
   language: 1,
-  explain: 2,
+  explain: 1,
 };
 
 const INTENT_MAX_TOTAL_MS: Record<IntentType, number> = {
@@ -181,7 +181,7 @@ const INTENT_CANDIDATE_LIMIT: Record<IntentType, number> = {
   send_message: 1,
   save_contact: 1,
   calendar: 1,
-  general: 2,
+  general: 4,
   email: 2,
   spending: 2,
   finance: 2,
@@ -190,17 +190,17 @@ const INTENT_CANDIDATE_LIMIT: Record<IntentType, number> = {
   coding: 2,
   math: 2,
   research: 2,
-  science: 2,
-  history: 2,
-  geography: 2,
-  health: 2,
-  law: 2,
-  economics: 2,
+  science: 4,
+  history: 4,
+  geography: 3,
+  health: 4,
+  law: 4,
+  economics: 4,
   culture: 2,
   sports: 2,
-  technology: 2,
-  language: 2,
-  explain: 2,
+  technology: 4,
+  language: 4,
+  explain: 4,
 };
 
 const INTENT_HISTORY_LIMIT: Record<IntentType, number> = {
@@ -307,11 +307,12 @@ const INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
     "moonshotai/kimi-k2-instruct",
   ],
   general: [
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct-0905",
+    "moonshotai/kimi-k2.5",
     "z-ai/glm5",
     "qwen/qwen3.5-397b-a17b",
+    "mistralai/mistral-large-3-675b-instruct-2512",
+    "moonshotai/kimi-k2-instruct-0905",
+    "meta/llama-3.3-70b-instruct",
   ],
   coding: [
     "moonshotai/kimi-k2-instruct-0905",
@@ -368,34 +369,52 @@ const INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
     "qwen/qwen3.5-397b-a17b",
   ],
   science: [
-    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2.5",
     "mistralai/mistral-large-3-675b-instruct-2512",
+    "qwen/qwen3.5-397b-a17b",
+    "z-ai/glm5",
     "moonshotai/kimi-k2-instruct-0905",
+    "meta/llama-3.3-70b-instruct",
   ],
   history: [
-    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2.5",
     "mistralai/mistral-large-3-675b-instruct-2512",
+    "qwen/qwen3.5-397b-a17b",
+    "z-ai/glm5",
     "moonshotai/kimi-k2-instruct-0905",
+    "meta/llama-3.3-70b-instruct",
   ],
   geography: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
+    "moonshotai/kimi-k2.5",
+    "qwen/qwen3.5-397b-a17b",
     "mistralai/mistral-large-3-675b-instruct-2512",
+    "z-ai/glm5",
+    "moonshotai/kimi-k2-instruct-0905",
+    "meta/llama-3.3-70b-instruct",
   ],
   health: [
-    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2.5",
     "mistralai/mistral-large-3-675b-instruct-2512",
+    "qwen/qwen3.5-397b-a17b",
+    "z-ai/glm5",
     "moonshotai/kimi-k2-instruct-0905",
+    "meta/llama-3.3-70b-instruct",
   ],
   law: [
-    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2.5",
     "mistralai/mistral-large-3-675b-instruct-2512",
+    "qwen/qwen3.5-397b-a17b",
+    "z-ai/glm5",
     "moonshotai/kimi-k2-instruct-0905",
+    "meta/llama-3.3-70b-instruct",
   ],
   economics: [
-    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2.5",
     "mistralai/mistral-large-3-675b-instruct-2512",
+    "qwen/qwen3.5-397b-a17b",
+    "z-ai/glm5",
     "moonshotai/kimi-k2-instruct-0905",
+    "meta/llama-3.3-70b-instruct",
   ],
   culture: [
     "moonshotai/kimi-k2-instruct-0905",
@@ -408,19 +427,28 @@ const INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
     "mistralai/mistral-large-3-675b-instruct-2512",
   ],
   technology: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-  ],
-  language: [
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-  ],
-  explain: [
-    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2.5",
+    "qwen/qwen3.5-397b-a17b",
     "mistralai/mistral-large-3-675b-instruct-2512",
     "z-ai/glm5",
+    "moonshotai/kimi-k2-instruct-0905",
+    "meta/llama-3.3-70b-instruct",
+  ],
+  language: [
+    "moonshotai/kimi-k2.5",
+    "qwen/qwen3.5-397b-a17b",
+    "moonshotai/kimi-k2-instruct-0905",
+    "mistralai/mistral-large-3-675b-instruct-2512",
+    "z-ai/glm5",
+    "meta/llama-3.3-70b-instruct",
+  ],
+  explain: [
+    "moonshotai/kimi-k2.5",
+    "qwen/qwen3.5-397b-a17b",
+    "z-ai/glm5",
+    "mistralai/mistral-large-3-675b-instruct-2512",
+    "moonshotai/kimi-k2-instruct-0905",
+    "meta/llama-3.3-70b-instruct",
   ],
 };
 
@@ -462,7 +490,7 @@ const DEEP_INTENT_PARALLELISM: Record<IntentType, number> = {
   send_message: 1,
   save_contact: 1,
   calendar: 1,
-  general: 2,
+  general: 1,
   email: 2,
   spending: 2,
   finance: 3,
@@ -480,8 +508,8 @@ const DEEP_INTENT_PARALLELISM: Record<IntentType, number> = {
   culture: 2,
   sports: 2,
   technology: 2,
-  language: 2,
-  explain: 2,
+  language: 1,
+  explain: 1,
 };
 
 const DEEP_INTENT_MAX_TOTAL_MS: Record<IntentType, number> = {
@@ -522,7 +550,7 @@ const DEEP_INTENT_CANDIDATE_LIMIT: Record<IntentType, number> = {
   send_message: 1,
   save_contact: 1,
   calendar: 1,
-  general: 2,
+  general: 4,
   email: 2,
   spending: 2,
   finance: 3,
@@ -532,16 +560,16 @@ const DEEP_INTENT_CANDIDATE_LIMIT: Record<IntentType, number> = {
   math: 3,
   research: 3,
   science: 3,
-  history: 2,
-  geography: 2,
+  history: 4,
+  geography: 3,
   health: 3,
   law: 3,
   economics: 3,
   culture: 2,
   sports: 2,
-  technology: 2,
-  language: 2,
-  explain: 3,
+  technology: 4,
+  language: 4,
+  explain: 4,
 };
 
 const DEEP_INTENT_HISTORY_LIMIT: Record<IntentType, number> = {
@@ -634,7 +662,11 @@ const DEEP_INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
     "moonshotai/kimi-k2-instruct-0905",
   ],
   general: [
+    "moonshotai/kimi-k2.5",
+    "z-ai/glm5",
     "mistralai/mistral-large-3-675b-instruct-2512",
+    "qwen/qwen3.5-397b-a17b",
+    "moonshotai/kimi-k2-instruct-0905",
     "meta/llama-3.3-70b-instruct",
   ],
   coding: [
@@ -675,14 +707,20 @@ const DEEP_INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
     "moonshotai/kimi-k2-instruct-0905",
   ],
   history: [
-    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2.5",
     "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct",
+    "z-ai/glm5",
+    "qwen/qwen3.5-397b-a17b",
+    "moonshotai/kimi-k2-instruct-0905",
+    "meta/llama-3.3-70b-instruct",
   ],
   geography: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
+    "moonshotai/kimi-k2.5",
+    "qwen/qwen3.5-397b-a17b",
     "mistralai/mistral-large-3-675b-instruct-2512",
+    "z-ai/glm5",
+    "moonshotai/kimi-k2-instruct-0905",
+    "meta/llama-3.3-70b-instruct",
   ],
   health: [
     "meta/llama-3.3-70b-instruct",
@@ -710,19 +748,28 @@ const DEEP_INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
     "mistralai/mistral-large-3-675b-instruct-2512",
   ],
   technology: [
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  language: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-  ],
-  explain: [
-    "meta/llama-3.3-70b-instruct",
+    "moonshotai/kimi-k2.5",
+    "qwen/qwen3.5-397b-a17b",
     "mistralai/mistral-large-3-675b-instruct-2512",
     "z-ai/glm5",
+    "moonshotai/kimi-k2-instruct-0905",
+    "meta/llama-3.3-70b-instruct",
+  ],
+  language: [
+    "moonshotai/kimi-k2.5",
+    "qwen/qwen3.5-397b-a17b",
+    "moonshotai/kimi-k2-instruct-0905",
+    "mistralai/mistral-large-3-675b-instruct-2512",
+    "z-ai/glm5",
+    "meta/llama-3.3-70b-instruct",
+  ],
+  explain: [
+    "moonshotai/kimi-k2.5",
+    "qwen/qwen3.5-397b-a17b",
+    "z-ai/glm5",
+    "mistralai/mistral-large-3-675b-instruct-2512",
+    "moonshotai/kimi-k2-instruct-0905",
+    "meta/llama-3.3-70b-instruct",
   ],
 };
 
@@ -903,7 +950,10 @@ function prioritizeHealthyModels(models: string[], healthScope: string) {
     }
   }
 
-  return [...available, ...cooling];
+  // If we still have healthy models available, do not keep retrying cooling
+  // models in the same answer cascade. That is what was causing repeated 429s
+  // and timeout loops on live WhatsApp traffic.
+  return available.length ? available : cooling;
 }
 
 function baseModelsForIntent(intent: IntentType) {

@@ -119,6 +119,11 @@ export function recordModelPerformance(input: {
   perf.latencySamples.push(input.latencyMs);
 }
 
+export function recordModelJudgeWin(model: string, intent: string, responseMode: string) {
+  const perf = getOrCreatePerf(model, intent, responseMode);
+  perf.judgeWins += 1;
+}
+
 // ---------------------------------------------------------------------------
 // COMPOSITE SCORE — rank models by combined quality signals
 // ---------------------------------------------------------------------------
@@ -177,9 +182,10 @@ export function getAdaptiveTimeout(model: string, intent: string, responseMode: 
   const sorted = [...perf.latencySamples].sort((a, b) => a - b);
   const p95 = sorted[Math.ceil(sorted.length * 0.95) - 1] ?? baseTimeout;
 
-  // Set timeout to p95 + 30% buffer, clamped between 50% and 150% of base
+  // Set timeout to p95 + 30% buffer, but NEVER go below the base timeout
+  // (prevents stale failure data from shrinking timeouts too aggressively)
   const adaptive = p95 * 1.3;
-  return Math.max(baseTimeout * 0.5, Math.min(adaptive, baseTimeout * 1.5));
+  return Math.max(baseTimeout, Math.min(adaptive, baseTimeout * 1.5));
 }
 
 // ---------------------------------------------------------------------------

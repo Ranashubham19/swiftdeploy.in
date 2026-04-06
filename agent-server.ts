@@ -4598,6 +4598,11 @@ function isEmptyOrFallback(reply: string | null | undefined, sourceMessage?: str
     lower.includes("couldn't give a reliable definition for") ||
     lower.includes("ask the same question once more") ||
     lower.includes("send the same question once more") ||
+    // "I do not have" fallback patterns — must NEVER reach users
+    lower.includes("i do not have a reliable") ||
+    lower.includes("i do not have a trustworthy") ||
+    lower.includes("i do not have a verified") ||
+    (lower.startsWith("i do not have") && lower.length < 120) ||
     // Legacy connection-failure copy that should never reach the user again
     lower.includes("temporary connection issue with my ai backend") ||
     lower.includes("temporary connection issue with my live news sources")
@@ -4740,10 +4745,9 @@ function buildEmergencyProfessionalFallback(message: string) {
     ].join("\n");
   }
 
-  // For any truly unmatched question — honest, professional response
-  return [
-    "⚡ My AI engine is warming up — please resend your question in a few seconds and I'll answer it fully.",
-  ].join("\n");
+  // For any truly unmatched question — return the LOW_CONFIDENCE signal
+  // so the caller retries via emergencyDirectAnswer instead of leaking text.
+  return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
 }
 
 async function sendReply(

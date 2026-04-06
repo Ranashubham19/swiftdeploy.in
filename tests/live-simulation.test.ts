@@ -61,7 +61,7 @@ function assertNotFallback(reply: string | null | undefined, label: string) {
 test("Greetings: English hello", () => {
   const reply = buildDeterministicConversationReplyForTest("Hello");
   assertNotFallback(reply, "English hello");
-  assert.ok(reply.length > 5, "Greeting too short");
+  assert.ok((reply ?? "").length > 5, "Greeting too short");
 });
 
 test("Greetings: Hi", () => {

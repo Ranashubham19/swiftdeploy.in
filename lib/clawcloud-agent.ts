@@ -191,6 +191,7 @@ import {
   extractExplicitReplyLocaleRequests,
   enforceClawCloudReplyLanguage,
   getUserLocale,
+  getUserLocalePreferenceState,
   inferClawCloudMessageLocale,
   resolveClawCloudReplyLanguage,
   resolveClawCloudSpecialReplyLanguage,
@@ -1334,6 +1335,7 @@ async function emergencyDirectAnswer(
 ): Promise<string> {
   // No more early-exit for news — fall through to the knowledge-based answer below
   const isNewsQ = detectNewsQuestion(question);
+  const emergencyIntent = detectIntent(question).type;
   const deadlineMs = Date.now() + Math.max(1_500, timeoutMs);
   const runBoundedEmergencyPrompt = async (
     task: Promise<string>,
@@ -1372,12 +1374,15 @@ async function emergencyDirectAnswer(
     ].filter(Boolean).join("\n"),
     user: question,
     history,
-    intent: "research",
-    responseMode: "deep",
+    intent: emergencyIntent,
+    responseMode: "fast",
     preferredModels: [
-      "meta/llama-3.3-70b-instruct",
+      "moonshotai/kimi-k2.5",
+      "z-ai/glm5",
+      "qwen/qwen3.5-397b-a17b",
       "mistralai/mistral-large-3-675b-instruct-2512",
       "moonshotai/kimi-k2-instruct-0905",
+      "meta/llama-3.3-70b-instruct",
     ],
     maxTokens: 1000,
     fallback: "",
@@ -1467,7 +1472,7 @@ async function emergencyDirectAnswer(
   // If even this fails, return the deterministic reply or a minimal but real answer
   return deterministicExplain
     || deterministicChatFallback
-    || "I do not have a trustworthy final answer ready for that exact prompt right now.";
+    || "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
 }
 
 function buildSmartSystem(
@@ -2431,6 +2436,12 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || normalized.includes("i do not have internet access")
     || normalized.includes("i can't browse the web")
     || normalized.includes("i cannot browse the web")
+    // "I do not have" fallback text patterns — must NEVER reach users
+    || normalized.includes("i do not have a reliable")
+    || normalized.includes("i do not have a trustworthy")
+    || normalized.includes("i do not have a verified")
+    || normalized.includes("i do not have verified live")
+    || (normalized.startsWith("i do not have") && normalized.length < 120)
     // Translation pipeline leaks
     || normalized.includes("no translation was provided")
     || normalized.includes("no translation was provided in the prompt")
@@ -3468,6 +3479,7 @@ function looksLikeUserWellbeingCheck(message: string) {
     /\b(how are you|how are u|how r you|how'?s it going|what'?s up)\b/i.test(text)
     || /\b(aap|tum|tu)\b.{0,12}\b(kaise|theek|haal)\b.{0,10}\b(ho|hai|hain)\b/i.test(text)
     || /\b(kya haal|haal chaal)\b/i.test(text)
+    || /\b(?:ki|kii|hor|or)\s+(?:haal|hall)\s+(?:chaal|chal|chall)\b/i.test(text)
   );
 }
 
@@ -12904,9 +12916,14 @@ async function buildInboundAgentTimeoutResult(
     return { response: null, liveAnswerBundle: null };
   }
 
+  const timeoutLocaleState = await getUserLocalePreferenceState(userId).catch(() => ({
+    locale: "en" as SupportedLocale,
+    explicit: false,
+  }));
   const timeoutReplyLanguageResolution = resolveClawCloudReplyLanguage({
     message: normalizedMessage,
-    preferredLocale: "en",
+    preferredLocale: timeoutLocaleState.locale,
+    storedLocaleIsExplicit: timeoutLocaleState.explicit,
   });
   const activeContactStatusRecovery = await resolveWhatsAppActiveContactStatusRecoveryResult({
     userId,
@@ -13123,9 +13140,11 @@ async function applyEndToEndReplyLanguageLock(input: {
     return input.result;
   }
 
-  const preferredLocale = resolveSupportedLocale(
-    await getUserLocale(input.userId).catch(() => "en"),
-  ) ?? "en";
+  const storedLocaleState = await getUserLocalePreferenceState(input.userId).catch(() => ({
+    locale: "en" as SupportedLocale,
+    explicit: false,
+  }));
+  const preferredLocale = resolveSupportedLocale(storedLocaleState.locale) ?? "en";
   if (
     activeContactSessionCommand.type !== "none"
     && looksLikeRomanHinglishActiveContactCommand(normalizedMessage)
@@ -13139,6 +13158,7 @@ async function applyEndToEndReplyLanguageLock(input: {
       : resolveClawCloudReplyLanguage({
         message: normalizedMessage,
         preferredLocale,
+        storedLocaleIsExplicit: storedLocaleState.explicit,
       });
   let responseForLanguageLock = rawResponse;
 
@@ -13257,8 +13277,33 @@ async function applyEndToEndReplyLanguageLockWithinBudget(input: {
     input.deadlineMs,
     INBOUND_AGENT_LANGUAGE_LOCK_TIMEOUT_MS,
   );
+  const rawResponse = input.result.response?.trim() ?? "";
+  const invalidResponse =
+    !rawResponse
+    || isInternalRecoverySignalReply(rawResponse)
+    || isVisibleFallbackReply(rawResponse);
+  const safeFallbackResponse = invalidResponse
+    ? normalizeReplyForClawCloudDisplay(
+      buildDeterministicExplainReply(input.message)
+      || buildDeterministicChatFallback(input.message, detectIntent(input.message).type)
+      || "__LOW_CONFIDENCE_RECOVERY_SIGNAL__",
+    )
+    : rawResponse;
+  const safeFallbackResult = invalidResponse
+    ? {
+      ...input.result,
+      response: safeFallbackResponse,
+      liveAnswerBundle: input.result.liveAnswerBundle
+        ? {
+          ...input.result.liveAnswerBundle,
+          answer: safeFallbackResponse,
+        }
+        : null,
+    }
+    : input.result;
+
   if (budgetMs > 0 && budgetMs < 450) {
-    return input.result;
+    return safeFallbackResult;
   }
 
   if (!input.deadlineMs || budgetMs >= INBOUND_AGENT_LANGUAGE_LOCK_TIMEOUT_MS) {
@@ -13275,7 +13320,7 @@ async function applyEndToEndReplyLanguageLockWithinBudget(input: {
       message: input.message,
       result: input.result,
     }),
-    input.result,
+    safeFallbackResult,
     budgetMs,
   );
 }
@@ -13475,6 +13520,31 @@ async function routeInboundAgentMessageCore(
   const fullContextMessage = trimmed;
   trimmed = stripWhatsAppRoutingContextPrefix(trimmed);
   const rawUserMessage = trimmed;
+  const localePreferenceStatePromise = getUserLocalePreferenceState(userId).catch(() => ({
+    locale: "en" as SupportedLocale,
+    explicit: false,
+  }));
+  const resolveStoredLocalePreferenceQuickly = () =>
+    withSoftTimeout(
+      localePreferenceStatePromise,
+      { locale: "en" as SupportedLocale, explicit: false },
+      NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS,
+    );
+  const resolveReplyLocale = async (
+    messageForLocale: string,
+    recentTurns?: Array<{ role: "user" | "assistant"; content: string }>,
+  ) => {
+    const storedLocaleState = await resolveStoredLocalePreferenceQuickly();
+    return resolveClawCloudReplyLanguage({
+      message: messageForLocale,
+      preferredLocale: storedLocaleState.locale,
+      storedLocaleIsExplicit: storedLocaleState.explicit,
+      recentUserMessages: recentTurns
+        ?.filter((turn) => turn.role === "user")
+        .map((turn) => turn.content)
+        .slice(-4),
+    });
+  };
 
   const preflightActiveContactSessionCommand = parseWhatsAppActiveContactSessionCommand(trimmed);
   const preflightSendMessageCommand = parseSendMessageCommand(trimmed);
@@ -13569,15 +13639,7 @@ async function routeInboundAgentMessageCore(
       ? null
       : buildDeterministicExplainReply(trimmed);
   if (earlyDeterministicExplainReply) {
-    const storedLocale = await withSoftTimeout(
-      getUserLocale(userId).catch(() => "en" as SupportedLocale),
-      "en" as SupportedLocale,
-      NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS,
-    );
-    const replyLanguage = resolveClawCloudReplyLanguage({
-      message: trimmed,
-      preferredLocale: storedLocale,
-    });
+    const replyLanguage = await resolveReplyLocale(trimmed);
 
     return finalizeAgentReply({
       userId,
@@ -13593,15 +13655,7 @@ async function routeInboundAgentMessageCore(
 
   const earlyAssistantMetaReply = buildDeterministicAssistantMetaReply(trimmed);
   if (looksLikeClawCloudCapabilityQuestion(rawUserMessage) || earlyAssistantMetaReply) {
-    const storedLocale = await withSoftTimeout(
-      getUserLocale(userId).catch(() => "en" as SupportedLocale),
-      "en" as SupportedLocale,
-      NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS,
-    );
-    const replyLanguage = resolveClawCloudReplyLanguage({
-      message: trimmed,
-      preferredLocale: storedLocale,
-    });
+    const replyLanguage = await resolveReplyLocale(trimmed);
 
     if (looksLikeClawCloudCapabilityQuestion(rawUserMessage)) {
       return finalizeAgentReply({
@@ -13659,9 +13713,6 @@ async function routeInboundAgentMessageCore(
     });
   }
 
-  const localePromise = getUserLocale(userId).catch(() => "en" as SupportedLocale);
-  const resolveStoredLocaleQuickly = () =>
-    withSoftTimeout(localePromise, "en" as SupportedLocale, NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS);
   const emptyMemory = {
     recentTurns: [],
     topicSummary: "",
@@ -13673,17 +13724,6 @@ async function routeInboundAgentMessageCore(
     userEmotionalContext: "",
     continuityHint: null,
   };
-  const resolveReplyLocale = async (
-    messageForLocale: string,
-    recentTurns?: Array<{ role: "user" | "assistant"; content: string }>,
-  ) => resolveClawCloudReplyLanguage({
-    message: messageForLocale,
-    preferredLocale: await resolveStoredLocaleQuickly(),
-    recentUserMessages: recentTurns
-      ?.filter((turn) => turn.role === "user")
-      .map((turn) => turn.content)
-      .slice(-4),
-  });
   const finalizeEarlyRaw = async (
     reply: string,
     intent: string,
@@ -14163,7 +14203,7 @@ async function routeInboundAgentMessageCore(
 
   const localeCommand = detectLocalePreferenceCommand(trimmed);
   if (localeCommand.type === "show") {
-    const currentLocale = await localePromise;
+    const currentLocale = (await resolveStoredLocalePreferenceQuickly()).locale;
     const baseReply = buildLocalePreferenceStatusReply(currentLocale);
     const reply = currentLocale === "en" ? baseReply : await translateMessage(baseReply, currentLocale);
     return finalizeEarlyWithLocale(reply, currentLocale, "language", "language");
@@ -14182,9 +14222,14 @@ async function routeInboundAgentMessageCore(
     await saveMemoryFact(userId, "reply_language", localeCommand.label, "explicit", 1.0);
 
     const baseReply = buildLocalePreferenceSavedReply(localeCommand.locale);
-    const reply = localeCommand.locale === "en"
+    const translatedReply = localeCommand.locale === "en"
       ? baseReply
-      : await translateMessage(baseReply, localeCommand.locale);
+      : await enforceClawCloudReplyLanguage({
+        message: baseReply,
+        locale: localeCommand.locale,
+        targetLanguageName: localeCommand.label,
+      }).catch(() => "");
+    const reply = translatedReply.trim() || baseReply;
 
     return finalizeEarlyWithLocale(reply, localeCommand.locale, "language", "language");
   }
@@ -14613,7 +14658,7 @@ async function routeInboundAgentMessageCore(
   void autoExtractAndSaveFacts(userId, trimmed).catch(() => null);
   void autoDetectAndSaveTimezone(userId, trimmed).catch(() => null);
 
-  const [memory, userProfileSnippet, locale] = await Promise.all([
+  const [memory, userProfileSnippet, localeState] = await Promise.all([
     withSoftTimeout(
       buildConversationMemory(userId, trimmed),
       emptyMemory,
@@ -14624,8 +14669,10 @@ async function routeInboundAgentMessageCore(
       "",
       NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS,
     ),
-    resolveStoredLocaleQuickly(),
+    resolveStoredLocalePreferenceQuickly(),
   ]);
+  const locale = localeState.locale;
+  const localeIsExplicit = localeState.explicit;
   if (looksLikeAssistantReplyRepairRequest(trimmed)) {
     const repairContext = extractLatestAssistantRepairContext(memory.recentTurns);
     const previousQuestion = repairContext
@@ -14662,6 +14709,7 @@ async function routeInboundAgentMessageCore(
         const repairReplyLanguage = resolveClawCloudReplyLanguage({
           message: trimmed,
           preferredLocale: locale,
+          storedLocaleIsExplicit: localeIsExplicit,
           recentUserMessages: memory.recentTurns
             .filter((turn) => turn.role === "user")
             .map((turn) => turn.content)
@@ -14688,6 +14736,7 @@ async function routeInboundAgentMessageCore(
     const repairReplyLanguage = resolveClawCloudReplyLanguage({
       message: trimmed,
       preferredLocale: locale,
+      storedLocaleIsExplicit: localeIsExplicit,
       recentUserMessages: memory.recentTurns
         .filter((turn) => turn.role === "user")
         .map((turn) => turn.content)
@@ -14714,6 +14763,7 @@ async function routeInboundAgentMessageCore(
   const replyLanguageResolution = resolveClawCloudReplyLanguage({
     message: trimmed,
     preferredLocale: locale,
+    storedLocaleIsExplicit: localeIsExplicit,
     recentUserMessages: memory.recentTurns
       .filter((turn) => turn.role === "user")
       .map((turn) => turn.content)

@@ -345,13 +345,15 @@ const LATIN_LANGUAGE_PATTERNS: Array<{ locale: SupportedLocale; pattern: RegExp 
   { locale: "az", pattern: /\b(?:salam|təşəkkür|zəhmət|kömək|izah et|niyə|bu gün|xəbərlər|hava|nə qədər|harada|nə vaxt|kim|var|edir|bilir|etmək|demək|şəhər|ölkə|dünya)\b/i },
   { locale: "uz", pattern: /\b(?:salom|rahmat|iltimos|yordam|tushuntir|nima uchun|bugun|yangiliklar|ob-havo|qancha|qayerda|qachon|kim|bor|qilmoq|aytmoq|shahar|mamlakat|dunyo)\b/i },
   { locale: "sw", pattern: /\b(?:habari|asante|tafadhali|msaada|eleza|niambie|vipi|kwa nini|leo|bei|habari|hali ya hewa|nchi|jiji|dunia|watu|serikali|elimu)\b/i },
-  { locale: "ha", pattern: /\b(?:sannu|nagode|don allah|taimako|bayyana|me yasa|yau|labarai|yanayi|nawa|ina|yaushe|wane|ne|iya|yi|ce|gari|kasa|duniya)\b/i },
+  { locale: "ha", pattern: /\b(?:sannu|nagode|don allah|taimako|bayyana|me yasa|ina kwana|ya kake|ya kuke|labarai|yanayi|gari|kasa|duniya)\b/i },
   { locale: "yo", pattern: /\b(?:bawo|ẹ ku|jọwọ|iranlọwọ|ṣalaye|kilode|loni|iroyin|oju ojo|melo|nibo|nigbawo|tani|ni|le|ṣe|sọ|ilu|orile-ede|aye)\b/i },
   { locale: "ig", pattern: /\b(?:kedu|daalụ|biko|enyemaka|kọwaa|gịnị mere|taa|akụkọ|ihu igwe|ole|ebee|mgbe|onye|bụ|nwere|ike|mee|kwuo|obodo|ala|ụwa)\b/i },
 ];
 
-const ROMAN_PUNJABI_SIGNAL_RE =
-  /\b(?:sat\s*sri\s*akal|sri\s*akaal|tusi|tuhada|tuhanu|mainu|menu|sanu|kive|kiven|kidda|kida|ki\s+haal|changa|vadhiya|vadiya|gall|punjabi|paaji|paji|veer|kudi|munda|naal|vich|krdo|kardo)\b/i;
+const ROMAN_PUNJABI_STRONG_PHRASE_RE =
+  /\b(?:sat\s*sri\s*akal|sri\s*akaal|ki+\s+(?:haal|hall)|(?:haal|hall)\s+(?:chaal|chall)|(?:hor|or)\s+ki+\s+(?:haal|hall)\s+(?:chaal|chall))\b/i;
+const ROMAN_PUNJABI_TOKEN_RE =
+  /\b(?:tusi|tuhada|tuhanu|mainu|menu|sanu|kive|kiven|kidda|kida|changa|vadhiya|vadiya|gall|punjabi|paaji|paji|veer|kudi|munda|naal|vich|krdo|kardo|hor|haal|hall|chaal|chall)\b/gi;
 const ENGLISH_COMMAND_SIGNAL_RE =
   /(?:\b(?:talk|speak|chat|message|reply)\s+(?:to|with)\b|\b(?:start|begin)\s+(?:talking|replying|messaging|chatting)\s+(?:to|with)\b|\bstop\s+(?:talking|replying|messaging|chatting)\s+(?:to|with)\b|\bon\s+my\s+behalf\b|\bfor\s+me\b|\bwho\s+are\s+you\s+(?:talking|replying)\s+to\b|\bwhich\s+contact\s+is\s+active\b|\bactive\s+contact\b)/i;
 const ENGLISH_SIGNAL_RE =
@@ -450,7 +452,13 @@ function looksLikeRomanPunjabiMessage(normalized: string) {
     return false;
   }
 
-  return ROMAN_PUNJABI_SIGNAL_RE.test(normalized);
+  if (ROMAN_PUNJABI_STRONG_PHRASE_RE.test(normalized)) {
+    return true;
+  }
+
+  const matches = normalized.match(ROMAN_PUNJABI_TOKEN_RE) ?? [];
+  const uniqueMatches = new Set(matches.map((token) => token.toLowerCase()));
+  return uniqueMatches.size >= 2;
 }
 
 function isShortAmbiguousMessage(normalized: string) {
@@ -760,6 +768,7 @@ export function resolveClawCloudReplyLanguage(input: {
   message: string;
   preferredLocale: SupportedLocale;
   recentUserMessages?: string[];
+  storedLocaleIsExplicit?: boolean;
 }): ClawCloudReplyLanguageResolution {
   const normalized = normalizeMessageForLanguageDetection(input.message);
   const specialReplyLanguage = resolveClawCloudSpecialReplyLanguage(normalized);
@@ -812,15 +821,43 @@ export function resolveClawCloudReplyLanguage(input: {
 
   const currentMessageLocale = inferClawCloudMessageLocale(normalized);
   const isLatinOnlyMessage = LATIN_SCRIPT_MESSAGE_RE.test(normalized);
+  const looksOperationalEnglish =
+    /^(?:ok(?:ay)?\s+)?(?:send|message|msg|text|reply|read|save|sync|connect|disconnect|search|open|create|draft|email|gmail|calendar|drive|whatsapp|start|stop|turn\s+on|turn\s+off)\b/i.test(normalized);
 
-  // Protect against history-driven language drift on Latin-script inputs.
-  // If the current Latin message does not strongly map to another locale,
-  // default to English instead of inheriting stale past-language context.
-  if (!currentMessageLocale && isLatinOnlyMessage) {
+  if (!currentMessageLocale && isLatinOnlyMessage && looksOperationalEnglish) {
     return {
       locale: "en",
       source: "mirrored_message",
       detectedLocale: "en",
+      preserveRomanScript: false,
+    };
+  }
+
+  if (
+    !currentMessageLocale
+    && isLatinOnlyMessage
+    && isShortAmbiguousMessage(normalized)
+    && input.preferredLocale === "en"
+  ) {
+    return {
+      locale: "en",
+      source: "mirrored_message",
+      detectedLocale: "en",
+      preserveRomanScript: false,
+    };
+  }
+
+  if (
+    input.storedLocaleIsExplicit
+    && isLatinOnlyMessage
+    && input.preferredLocale !== "en"
+    && !looksOperationalEnglish
+    && (!currentMessageLocale || currentMessageLocale === "en")
+  ) {
+    return {
+      locale: input.preferredLocale,
+      source: "stored_preference",
+      detectedLocale: currentMessageLocale,
       preserveRomanScript: false,
     };
   }
@@ -977,7 +1014,10 @@ export function detectLocaleFromEmail(email: string): SupportedLocale {
   return DEFAULT_CLAW_CLOUD_LOCALE;
 }
 
-export async function getUserLocale(userId: string): Promise<SupportedLocale> {
+export async function getUserLocalePreferenceState(userId: string): Promise<{
+  locale: SupportedLocale;
+  explicit: boolean;
+}> {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
 
   const { data: prefs } = await supabaseAdmin
@@ -1021,18 +1061,35 @@ export async function getUserLocale(userId: string): Promise<SupportedLocale> {
       || !(preferredLanguage in localeNames)
       || (Number.isFinite(memoryUpdatedAt) && (!Number.isFinite(prefUpdatedAt) || memoryUpdatedAt >= prefUpdatedAt)))
   ) {
-    return explicitLocale;
+    return {
+      locale: explicitLocale,
+      explicit: true,
+    };
   }
 
   if (preferredLanguage && preferredLanguage in localeNames) {
-    return preferredLanguage as SupportedLocale;
+    return {
+      locale: preferredLanguage as SupportedLocale,
+      explicit: false,
+    };
   }
 
   if (explicitLocale) {
-    return explicitLocale;
+    return {
+      locale: explicitLocale,
+      explicit: true,
+    };
   }
 
-  return DEFAULT_CLAW_CLOUD_LOCALE;
+  return {
+    locale: DEFAULT_CLAW_CLOUD_LOCALE,
+    explicit: false,
+  };
+}
+
+export async function getUserLocale(userId: string): Promise<SupportedLocale> {
+  const state = await getUserLocalePreferenceState(userId);
+  return state.locale;
 }
 
 export async function setUserLocale(userId: string, locale: SupportedLocale) {
@@ -1075,8 +1132,8 @@ function normalizeLocaleRequest(value: string) {
 
 function extractLocalePreferenceCandidate(message: string): string | null {
   const patterns = [
-    /^(?:from\s+now\s+on\s+)?(?:always\s+)?(?:reply|respond|answer|speak|talk|write)(?:\s+to\s+me)?\s+in\s+(.+)$/i,
-    /^(?:from\s+now\s+on\s+)?(?:always\s+)?(?:reply|respond|answer|speak|talk|write)(?:\s+to\s+me)?\s+only\s+in\s+(.+)$/i,
+    /^(?:ok(?:ay)?[, ]+)?(?:from\s+now(?:\s+on(?:war(?:d|ds?)?)?)?\s+)?(?:always\s+)?(?:reply|respond|answer|speak|talk|write)(?:\s+to\s+me)?\s+in\s+(.+)$/i,
+    /^(?:ok(?:ay)?[, ]+)?(?:from\s+now(?:\s+on(?:war(?:d|ds?)?)?)?\s+)?(?:always\s+)?(?:reply|respond|answer|speak|talk|write)(?:\s+to\s+me)?\s+only\s+in\s+(.+)$/i,
     /^(?:set|change|switch|update)\s+(?:my\s+)?(?:reply\s+)?language(?:\s+to)?\s+(.+)$/i,
     /^(?:switch|change|move|go)\s+back\s+to\s+(.+)$/i,
     /^(?:switch|change)\s+to\s+(.+)$/i,

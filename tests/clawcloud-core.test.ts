@@ -743,6 +743,16 @@ test("agent server keeps a wider answer window and no longer emits resend-the-qu
   assert.doesNotMatch(source, /return\s+[`"'][^`"']*Ask the same question once more/i);
   assert.doesNotMatch(source, /return\s+[`"'][^`"']*Send the same question once more/i);
   assert.doesNotMatch(source, /return\s+[`"'][^`"']*temporary connection issue with my ai backend/i);
+  assert.doesNotMatch(source, /warming up — please resend your question/i);
+});
+
+test("ai engine routing prioritizes stable chat models and skips cooling models", () => {
+  const source = readFileSync(path.resolve(process.cwd(), "lib/clawcloud-ai.ts"), "utf8");
+
+  assert.match(source, /general:\s*\[\s*"moonshotai\/kimi-k2\.5"/);
+  assert.match(source, /language:\s*\[\s*"moonshotai\/kimi-k2\.5"/);
+  assert.match(source, /explain:\s*\[\s*"moonshotai\/kimi-k2\.5"/);
+  assert.match(source, /return available\.length \? available : cooling;/);
 });
 
 test("whatsapp runtime progress and health stay bounded and honest", () => {
@@ -3560,6 +3570,18 @@ test("locale preference commands are explicit and do not depend on email domains
   assert.equal(detectLocaleFromEmail("founder@startup.invest"), "en");
 });
 
+test("plain Latin follow-ups honor an explicitly stored non-English locale preference", () => {
+  const resolution = resolveClawCloudReplyLanguage({
+    message: "what is gorkha",
+    preferredLocale: "th",
+    storedLocaleIsExplicit: true,
+  });
+
+  assert.equal(resolution.locale, "th");
+  assert.equal(resolution.source, "stored_preference");
+  assert.equal(resolution.preserveRomanScript, false);
+});
+
 test("reply language resolver mirrors the user's current message language when it is clear", () => {
   assert.equal(inferClawCloudMessageLocale("Necesito ayuda con esto hoy, por favor."), "es");
   assert.equal(inferClawCloudMessageLocale("¿Qué es Cuba?"), "es");
@@ -3894,17 +3916,18 @@ test("latin-script operational commands do not inherit stale non-English locale 
   assert.equal(resolution.preserveRomanScript, false);
 });
 
-test("plain English follow-up queries stay English even when stored preference is non-English", () => {
+test("plain English follow-up queries honor an explicitly stored non-English reply preference", () => {
   const resolution = resolveClawCloudReplyLanguage({
     message: "is it has its branch in lpu",
     preferredLocale: "af",
+    storedLocaleIsExplicit: true,
     recentUserMessages: [
       "vertel my die storie in afrikaans",
     ],
   });
 
-  assert.equal(resolution.locale, "en");
-  assert.equal(resolution.source, "mirrored_message");
+  assert.equal(resolution.locale, "af");
+  assert.equal(resolution.source, "stored_preference");
   assert.equal(resolution.preserveRomanScript, false);
 });
 
@@ -3917,6 +3940,14 @@ test("localized capability replies stay conversational and mirror the current la
   const spanishReply = buildLocalizedCapabilityReplyForTest("que puedes hacer", "es");
   assert.match(spanishReply, /Puedo ayudarte/i);
   assert.match(spanishReply, /Dime la tarea exacta/i);
+});
+
+test("Roman Punjabi wellbeing prompts are treated as direct conversation instead of drifting into status replies", () => {
+  const signal = detectDirectConversationSignalForTest("or kii hall chall ne");
+  assert.equal(signal?.asksWellbeing, true);
+
+  const reply = buildDeterministicConversationReplyForTest("or kii hall chall ne");
+  assert.match(reply ?? "", /Main theek hoon/i);
 });
 
 test("deterministic multilingual conversation detection catches Russian name-exchange prompts", () => {
