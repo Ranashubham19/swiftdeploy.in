@@ -1571,13 +1571,12 @@ async function sendStreamingMessage(sock: WASocket, jid: string, fullText: strin
     return [];
   }
   const plan = buildWhatsAppStreamPlan(trimmed);
-  const outboundText = plan.chunks[0] ?? trimmed;
 
-  // Show "typing..." indicator before sending — natural thinking pause
+  // Show "typing..." indicator proportional to reply length — feels natural
   await waitWithWhatsAppTypingPresence(sock, jid, plan.initialDelayMs);
 
-  // Always send as a SINGLE message box — no splitting into multiple bubbles
-  const sent = await sock.sendMessage(jid, { text: outboundText });
+  // Always send as a SINGLE message bubble
+  const sent = await sock.sendMessage(jid, { text: trimmed });
   await sock.sendPresenceUpdate("paused", jid).catch(() => null);
   if (sent?.key?.id) {
     outboundIds.add(sent.key.id);

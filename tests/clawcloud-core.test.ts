@@ -10286,8 +10286,8 @@ test("whatsapp reply delivery keeps a single bubble with a fast typing lead", ()
   const plan = buildWhatsAppStreamPlan(message);
   assert.equal(plan.chunks.length, 1);
   assert.equal(plan.chunks[0], chunks[0]);
-  assert.ok(plan.initialDelayMs >= 180);
-  assert.ok(plan.initialDelayMs <= 1_450);
+  assert.ok(plan.initialDelayMs >= 350);
+  assert.ok(plan.initialDelayMs <= 3_500);
   assert.equal(plan.totalDelayMs, plan.initialDelayMs);
   assert.equal(plan.chunkDelayMs.length, 0);
 });
