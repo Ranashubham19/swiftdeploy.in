@@ -38,6 +38,7 @@ import {
   formatAmbiguousReply,
   rankContactCandidates,
 } from "@/lib/clawcloud-contacts-v2";
+import { analyzeConversationContinuityForTest } from "@/lib/clawcloud-memory";
 import { detectDriveIntent } from "@/lib/clawcloud-drive";
 import { answerHolidayQuery, detectHolidayQuery } from "@/lib/clawcloud-holidays";
 import {
@@ -388,6 +389,7 @@ import {
   parseWeatherCity,
 } from "@/lib/clawcloud-weather";
 import {
+  buildWhatsAppStreamPlan,
   shouldStageWhatsAppReply,
   splitWhatsAppStreamChunks,
   whatsAppChunkDelayMs,
@@ -730,6 +732,17 @@ test("agent server assistant replies refuse non-self chat targets", () => {
     /const jid = resolveAssistantSelfReplyTarget\(session, targetJid\);/,
   );
   assert.match(source, /Blocked non-self assistant reply/);
+});
+
+test("agent server keeps a wider answer window and no longer emits resend-the-question fallbacks", () => {
+  const source = readFileSync(path.resolve(process.cwd(), "agent-server.ts"), "utf8");
+
+  assert.match(source, /const DIRECT_REPLY_TIMEOUT_MS = 25_000;/);
+  assert.match(source, /const HTTP_REPLY_TIMEOUT_MS = 25_000;/);
+  assert.match(source, /allowWithoutNvidia:\s*true/);
+  assert.doesNotMatch(source, /return\s+[`"'][^`"']*Ask the same question once more/i);
+  assert.doesNotMatch(source, /return\s+[`"'][^`"']*Send the same question once more/i);
+  assert.doesNotMatch(source, /return\s+[`"'][^`"']*temporary connection issue with my ai backend/i);
 });
 
 test("whatsapp runtime progress and health stay bounded and honest", () => {
@@ -2535,6 +2548,12 @@ assert.equal(detectDriveIntent("find my sales sheet in google drive"), "search")
   assert.equal(detectIndianStockQuery("What is the price of Bitcoin right now in USD?"), null);
   assert.equal(detectIndianStockQuery("ITC share price today"), "ITC.NS");
   assert.deepEqual(detectTrainIntent("PNR status for 1234567890"), { type: "pnr", value: "1234567890" });
+  assert.deepEqual(detectTrainIntent("7876831969"), { type: null, value: "" });
+  assert.deepEqual(detectTrainIntent("unka number hai 7876831969"), { type: null, value: "" });
+  assert.deepEqual(
+    detectTrainIntent("send appko as an auto replier unke har message ka reply dena hai unki language mai unka number hai 7876831969"),
+    { type: null, value: "" },
+  );
   assert.deepEqual(detectTrainIntent("running status of train 12951"), { type: "running", value: "12951" });
   assert.deepEqual(detectTrainIntent("schedule for 12002"), { type: "schedule", value: "12002" });
 
@@ -2860,6 +2879,50 @@ test("casual talk instruction tells the model to sound human and use prior threa
   assert.match(instruction, /thoughtful human teammate/i);
   assert.match(instruction, /Observed emotional context:/i);
   assert.match(instruction, /Resolved follow-up context:/i);
+});
+
+test("conversation continuity skips low-signal turns and keeps the real previous question as anchor", () => {
+  const continuity = analyzeConversationContinuityForTest({
+    currentMessage: "what about security?",
+    recentTurns: [
+      { role: "user", content: "Compare Gmail and Outlook for startup ops" },
+      { role: "assistant", content: "Gmail is simpler while Outlook is stronger in Microsoft-heavy teams." },
+      { role: "user", content: "ok" },
+      { role: "assistant", content: "Sure." },
+    ],
+  });
+
+  assert.equal(continuity.isFollowUp, true);
+  assert.equal(continuity.anchorUserTurn, "Compare Gmail and Outlook for startup ops");
+  assert.equal(continuity.resolvedQuestion, "Compare Gmail and Outlook for startup ops security");
+});
+
+test("conversation continuity carries pure language/style follow-ups into the previous request", () => {
+  const continuity = analyzeConversationContinuityForTest({
+    currentMessage: "in thai",
+    recentTurns: [
+      { role: "user", content: "tell me the story of bad boys" },
+      { role: "assistant", content: "Bad Boys is a buddy-cop action film about two Miami detectives." },
+    ],
+  });
+
+  assert.equal(continuity.isFollowUp, true);
+  assert.equal(continuity.anchorUserTurn, "tell me the story of bad boys");
+  assert.equal(continuity.resolvedQuestion, "tell me the story of bad boys in thai");
+});
+
+test("conversation continuity understands roman-hindi pronoun follow-ups as part of the existing thread", () => {
+  const continuity = analyzeConversationContinuityForTest({
+    currentMessage: "unke har message ka reply dena hai unki language mai",
+    recentTurns: [
+      { role: "user", content: "ab tum dii se baat karoge mere behalf pe" },
+      { role: "assistant", content: "Pehle mujhe bataiye aap Dii ko kya message bhejna chahte ho." },
+    ],
+  });
+
+  assert.equal(continuity.isFollowUp, true);
+  assert.equal(continuity.anchorUserTurn, "ab tum dii se baat karoge mere behalf pe");
+  assert.match(continuity.resolvedQuestion, /ab tum dii se baat karoge mere behalf pe/i);
 });
 
 test("phase 4 profile formatting separates confirmed profile facts from pending suggestions", () => {
@@ -3419,39 +3482,39 @@ test("primary conversation lane keeps normal follow-ups on direct chat instead o
 test("inbound route timeout policy is category-aware", () => {
   const direct = getInboundRouteTimeoutPolicyForTest("why is the sky blue");
   assert.equal(direct.kind, "direct_knowledge");
-  assert.equal(direct.timeoutMs, 20000);
+  assert.equal(direct.timeoutMs, 16000);
 
   const standaloneDirect = getInboundRouteTimeoutPolicyForTest("overview of photosynthesis");
   assert.equal(standaloneDirect.kind, "direct_knowledge");
-  assert.equal(standaloneDirect.timeoutMs, 20000);
+  assert.equal(standaloneDirect.timeoutMs, 16000);
 
   const spanishDirect = getInboundRouteTimeoutPolicyForTest("¿Puedes explicar la fotosíntesis de forma simple?");
   assert.equal(spanishDirect.kind, "direct_knowledge");
-  assert.equal(spanishDirect.timeoutMs, 20000);
+  assert.equal(spanishDirect.timeoutMs, 16000);
 
   const kannadaDirect = getInboundRouteTimeoutPolicyForTest("10 ನಾಡು ಕನ್ನಡ ಸಾಹಿತ್ಯದ ಕವಿಗಳ ಬಗ್ಗೆ ಗೊಬ್ಬಿ ಬರೆಯಿರಿ");
   assert.equal(kannadaDirect.kind, "direct_knowledge");
-  assert.equal(kannadaDirect.timeoutMs, 20000);
+  assert.equal(kannadaDirect.timeoutMs, 16000);
 
   const live = getInboundRouteTimeoutPolicyForTest("latest news about ai");
   assert.equal(live.kind, "live_research");
-  assert.equal(live.timeoutMs, 20000);
+  assert.equal(live.timeoutMs, 18000);
 
   const operational = getInboundRouteTimeoutPolicyForTest("show my gmail inbox");
   assert.equal(operational.kind, "operational");
-  assert.equal(operational.timeoutMs, 15000);
+  assert.equal(operational.timeoutMs, 12000);
 
   const activeContact = getInboundRouteTimeoutPolicyForTest("ab se app meri tarf se dii se baat karoge");
   assert.equal(activeContact.kind, "operational");
-  assert.equal(activeContact.timeoutMs, 25000);
+  assert.equal(activeContact.timeoutMs, 18000);
 
   const deep = getInboundRouteTimeoutPolicyForTest("deep: explain transformers");
   assert.equal(deep.kind, "deep_reasoning");
-  assert.equal(deep.timeoutMs, 30000);
+  assert.equal(deep.timeoutMs, 20000);
 
   const groupedDeep = getInboundRouteTimeoutPolicyForTest("[Group message from product team] deep: what is artificial intelligence");
   assert.equal(groupedDeep.kind, "deep_reasoning");
-  assert.equal(groupedDeep.timeoutMs, 30000);
+  assert.equal(groupedDeep.timeoutMs, 20000);
 });
 
 test("locale preference commands are explicit and do not depend on email domains", () => {
@@ -3468,6 +3531,12 @@ test("locale preference commands are explicit and do not depend on email domains
   });
 
   assert.deepEqual(detectLocalePreferenceCommand("reply in thai"), {
+    type: "set",
+    locale: "th",
+    label: "Thai",
+  });
+
+  assert.deepEqual(detectLocalePreferenceCommand("from now onwar talk to me in thai"), {
     type: "set",
     locale: "th",
     label: "Thai",
@@ -3788,6 +3857,7 @@ test("reply language resolution mirrors Sanskrit prompts instead of drifting to 
 test("reply language resolver mirrors Roman Punjabi and keeps Roman script", () => {
   const message = "tusi lassi pasand krdo";
   assert.equal(inferClawCloudMessageLocale(message), "pa");
+  assert.equal(inferClawCloudMessageLocale("or kii hall chall ne"), "pa");
 
   const mirrored = resolveClawCloudReplyLanguage({
     message,
@@ -10192,11 +10262,11 @@ test("historical power rankings route to history and use a cautious 400 AD fallb
   assert.doesNotMatch(reply ?? "", /\bLiu Song\b/i);
 });
 
-test("whatsapp staged delivery prefers typing-style sends for normal answers and preserves code blocks", () => {
+test("whatsapp reply delivery keeps a single bubble with a fast typing lead", () => {
   assert.equal(shouldStageWhatsAppReply("Short ok", 140), false);
   assert.equal(shouldStageWhatsAppReply("A".repeat(160), 140), true);
 
-  const chunks = splitWhatsAppStreamChunks([
+  const message = [
     "Recommendation",
     "",
     "Use a short staged delivery so the user sees a typing-like reply instead of one instant wall of text. This should split into multiple messages cleanly.",
@@ -10204,11 +10274,20 @@ test("whatsapp staged delivery prefers typing-style sends for normal answers and
     "```javascript",
     "console.log('hello');",
     "```",
-  ].join("\n"));
+  ].join("\n");
+  const chunks = splitWhatsAppStreamChunks(message);
 
-  assert.ok(chunks.length >= 3);
-  assert.ok(chunks.some((chunk) => chunk.includes("Recommendation")));
-  assert.ok(chunks.some((chunk) => chunk.startsWith("```javascript")));
+  assert.equal(chunks.length, 1);
+  assert.match(chunks[0] ?? "", /Recommendation/);
+  assert.match(chunks[0] ?? "", /```javascript/);
   assert.ok(whatsAppInitialTypingDelayMs("hello") < whatsAppInitialTypingDelayMs("A".repeat(500)));
-  assert.ok(whatsAppChunkDelayMs("```javascript\nconsole.log('hello');\n```") > whatsAppChunkDelayMs("short sentence"));
+  assert.ok(whatsAppChunkDelayMs("```javascript\nconsole.log('hello');\n```") >= whatsAppChunkDelayMs("short sentence"));
+
+  const plan = buildWhatsAppStreamPlan(message);
+  assert.equal(plan.chunks.length, 1);
+  assert.equal(plan.chunks[0], chunks[0]);
+  assert.ok(plan.initialDelayMs >= 180);
+  assert.ok(plan.initialDelayMs <= 1_450);
+  assert.equal(plan.totalDelayMs, plan.initialDelayMs);
+  assert.equal(plan.chunkDelayMs.length, 0);
 });

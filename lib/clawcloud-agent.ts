@@ -1330,11 +1330,24 @@ async function emergencyDirectAnswer(
   question: string,
   history: Array<{ role: "user" | "assistant"; content: string }>,
   languageHint: string,
+  timeoutMs = 20_000,
 ): Promise<string> {
   // No more early-exit for news — fall through to the knowledge-based answer below
   const isNewsQ = detectNewsQuestion(question);
+  const deadlineMs = Date.now() + Math.max(1_500, timeoutMs);
+  const runBoundedEmergencyPrompt = async (
+    task: Promise<string>,
+    capMs: number,
+  ) => {
+    const budgetMs = Math.min(capMs, Math.max(0, remainingDeadlineMs(deadlineMs) - 100));
+    if (budgetMs < 400) {
+      return "";
+    }
 
-  const reply = await completeClawCloudPrompt({
+    return withSoftTimeout(task.catch(() => ""), "", budgetMs);
+  };
+
+  const reply = await runBoundedEmergencyPrompt(completeClawCloudPrompt({
     system: [
       PROFESSIONAL_RESPONSE_BRAIN,
       PROFESSIONAL_DEEP_BRAIN,
@@ -1370,7 +1383,7 @@ async function emergencyDirectAnswer(
     fallback: "",
     skipCache: true,
     temperature: 0.2,
-  }).catch(() => "");
+  }), 15_000);
 
   const trimmed = reply.trim();
   if (trimmed && !isVisibleFallbackReply(trimmed)) {
@@ -1392,7 +1405,7 @@ async function emergencyDirectAnswer(
 
   if (hasWeatherIntent(question)) {
     // Instead of a generic English request, generate a real weather answer from knowledge
-    const weatherKnowledgeReply = await completeClawCloudPrompt({
+    const weatherKnowledgeReply = await runBoundedEmergencyPrompt(completeClawCloudPrompt({
       system: [
         PROFESSIONAL_RESPONSE_BRAIN,
         "",
@@ -1412,7 +1425,7 @@ async function emergencyDirectAnswer(
       fallback: "",
       skipCache: true,
       temperature: 0.3,
-    }).catch(() => "");
+    }), 8_000);
     if (weatherKnowledgeReply?.trim() && !isVisibleFallbackReply(weatherKnowledgeReply)) {
       return normalizeResearchMarkdownForWhatsApp(weatherKnowledgeReply.trim());
     }
@@ -1429,7 +1442,7 @@ async function emergencyDirectAnswer(
   }
 
   // Absolute last resort — make one more attempt with a simpler prompt
-  const lastResortReply = await completeClawCloudPrompt({
+  const lastResortReply = await runBoundedEmergencyPrompt(completeClawCloudPrompt({
     system: [
       "You are a professional AI assistant. Answer the user's question directly and accurately.",
       "Use your training knowledge. NEVER refuse. NEVER say you cannot answer.",
@@ -1445,7 +1458,7 @@ async function emergencyDirectAnswer(
     fallback: "",
     skipCache: true,
     temperature: 0.4,
-  }).catch(() => "");
+  }), 8_000);
 
   if (lastResortReply?.trim() && !isVisibleFallbackReply(lastResortReply)) {
     return normalizeResearchMarkdownForWhatsApp(lastResortReply.trim());
@@ -1454,7 +1467,7 @@ async function emergencyDirectAnswer(
   // If even this fails, return the deterministic reply or a minimal but real answer
   return deterministicExplain
     || deterministicChatFallback
-    || "This topic requires more context. Share the specific detail and I will give a precise answer right away.";
+    || "I do not have a trustworthy final answer ready for that exact prompt right now.";
 }
 
 function buildSmartSystem(
@@ -2127,7 +2140,9 @@ function shouldUseSmartHistory(message: string, intent?: string | null) {
 
   if (
     /^(?:it|this|that|those|these|they|he|she|and|also|then|so|but|what about|which one|that one|this one)\b/i.test(trimmed)
-    || /\b(it|this|that|those|these|they|he|she|him|her|its|their)\b/i.test(trimmed)
+    || /\b(it|this|that|those|these|they|he|she|him|her|its|their|unka|unki|unke|uska|uski|uske|inko|inki|inke|isko|iske|iss|ye|yeh|woh|voh)\b/i.test(trimmed)
+    || /^(?:aur|ab|ab se|phir|same|continue|go on)\b/i.test(trimmed)
+    || /^(?:(?:in|into)\s+(?:english|hindi|hinglish|urdu|punjabi|thai|chinese|japanese|korean|tamil|telugu|bengali|marathi|french|spanish|arabic|german|italian|russian)|(?:make|keep|write|say|reply|send|translate|explain)\s+(?:it\s+)?(?:in|into)\s+(?:english|hindi|hinglish|urdu|punjabi|thai|chinese|japanese|korean|tamil|telugu|bengali|marathi|french|spanish|arabic|german|italian|russian)|(?:short(?:er)?|brief(?:ly)?|simple(?:r)?|professional(?:ly)?|formal(?:ly)?|polite(?:ly)?|more detailed|detailed))\b/i.test(trimmed)
   ) {
     return true;
   }
@@ -7120,14 +7135,17 @@ async function buildProfessionalRecoveryReply(input: {
   return answer.trim();
 }
 
-const FAST_REPLY_TOTAL_BUDGET_MS = 12_000;
-const DEEP_REPLY_TOTAL_BUDGET_MS = 20_000;
-const INBOUND_AGENT_ROUTE_TIMEOUT_MS = 25_000;
-const INBOUND_AGENT_ROUTE_DIRECT_TIMEOUT_MS = 20_000;
-const INBOUND_AGENT_ROUTE_ACTIVE_CONTACT_TIMEOUT_MS = 25_000;
-const INBOUND_AGENT_ROUTE_OPERATIONAL_TIMEOUT_MS = 15_000;
-const INBOUND_AGENT_ROUTE_DEEP_TIMEOUT_MS = 30_000;
-const INBOUND_AGENT_ROUTE_LIVE_TIMEOUT_MS = 20_000;
+const FAST_REPLY_TOTAL_BUDGET_MS = 10_000;
+const DEEP_REPLY_TOTAL_BUDGET_MS = 16_000;
+const INBOUND_AGENT_ROUTE_TIMEOUT_MS = 18_000;
+const INBOUND_AGENT_ROUTE_DIRECT_TIMEOUT_MS = 16_000;
+const INBOUND_AGENT_ROUTE_ACTIVE_CONTACT_TIMEOUT_MS = 18_000;
+const INBOUND_AGENT_ROUTE_OPERATIONAL_TIMEOUT_MS = 12_000;
+const INBOUND_AGENT_ROUTE_DEEP_TIMEOUT_MS = 20_000;
+const INBOUND_AGENT_ROUTE_LIVE_TIMEOUT_MS = 18_000;
+const INBOUND_AGENT_TIMEOUT_RECOVERY_MS = 3_500;
+const INBOUND_AGENT_POST_RACE_RECOVERY_MS = 3_500;
+const INBOUND_AGENT_LANGUAGE_LOCK_TIMEOUT_MS = 3_000;
 const NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS = 400;
 
 type InboundRouteTimeoutPolicy = {
@@ -7267,6 +7285,18 @@ function remainingDeadlineMs(deadlineMs?: number) {
 
 function hasReplyRecoveryBudget(deadlineMs: number | undefined, minMs: number) {
   return remainingDeadlineMs(deadlineMs) >= minMs;
+}
+
+function availableReplyBudgetMs(
+  deadlineMs: number | undefined,
+  capMs: number,
+  reserveMs = 150,
+) {
+  if (!deadlineMs) {
+    return capMs;
+  }
+
+  return Math.max(0, Math.min(capMs, remainingDeadlineMs(deadlineMs) - reserveMs));
 }
 
 function replyPipelineBudgetMs(mode: ResponseMode) {
@@ -12956,7 +12986,7 @@ async function buildInboundAgentTimeoutResult(
   }
 
   // If the template response is a fallback/low-quality, attempt a quick AI call
-  // with a 12s budget as last resort before returning template garbage
+  // with a small bounded budget as last resort before returning template garbage
   if (!response || isVisibleFallbackReply(response) || isLowQualityTemplateReply(response)) {
     try {
       // Detect non-Latin script and translate for the timeout emergency call too
@@ -12965,20 +12995,24 @@ async function buildInboundAgentTimeoutResult(
       let timeoutUserPrompt = normalizedMessage;
       let timeoutLanguageHint = "";
       if (hasNonLatinTimeout && timeoutLocale && timeoutLocale !== "en") {
-        const timeoutGloss = await translateMessage(normalizedMessage, "en", { force: true }).catch(() => "");
+        const timeoutGloss = await withSoftTimeout(
+          translateMessage(normalizedMessage, "en", { force: true }).catch(() => ""),
+          "",
+          1_500,
+        );
         if (timeoutGloss?.trim() && timeoutGloss.trim().toLowerCase() !== normalizedMessage.trim().toLowerCase()) {
           timeoutUserPrompt = timeoutGloss.trim();
           timeoutLanguageHint = `\nIMPORTANT: The user wrote in ${localeNames[timeoutLocale] ?? timeoutLocale}. Original message: ${normalizedMessage}\nAnswer in ${localeNames[timeoutLocale] ?? timeoutLocale}, NOT in English. Use the English translation only to understand the question.`;
         }
       }
-      const emergencyReply = await completeClawCloudPrompt({
+      const emergencyReply = await withSoftTimeout(completeClawCloudPrompt({
         system: `You are ClawCloud AI, the world's most capable AI assistant. Answer the user's question completely, accurately, and directly. Do NOT say you cannot help. Do NOT ask for more details — answer with what you know. Silently repair obvious misspellings, shorthand, and incomplete phrasing before answering. Use WhatsApp markdown (*bold*, _italic_, bullet points).${timeoutLanguageHint}`,
         user: timeoutUserPrompt,
         intent: detected.type,
         temperature: 0.15,
         maxTokens: 2000,
         fallback: "",
-      });
+      }), "", INBOUND_AGENT_TIMEOUT_RECOVERY_MS);
       if (emergencyReply?.trim() && !isVisibleFallbackReply(emergencyReply) && !isLowQualityTemplateReply(emergencyReply)) {
         return {
           response: emergencyReply.trim(),
@@ -13213,6 +13247,39 @@ async function applyEndToEndReplyLanguageLock(input: {
   };
 }
 
+async function applyEndToEndReplyLanguageLockWithinBudget(input: {
+  userId: string;
+  message: string;
+  result: RouteInboundAgentMessageResult;
+  deadlineMs?: number;
+}) {
+  const budgetMs = availableReplyBudgetMs(
+    input.deadlineMs,
+    INBOUND_AGENT_LANGUAGE_LOCK_TIMEOUT_MS,
+  );
+  if (budgetMs > 0 && budgetMs < 450) {
+    return input.result;
+  }
+
+  if (!input.deadlineMs || budgetMs >= INBOUND_AGENT_LANGUAGE_LOCK_TIMEOUT_MS) {
+    return applyEndToEndReplyLanguageLock({
+      userId: input.userId,
+      message: input.message,
+      result: input.result,
+    });
+  }
+
+  return withSoftTimeout(
+    applyEndToEndReplyLanguageLock({
+      userId: input.userId,
+      message: input.message,
+      result: input.result,
+    }),
+    input.result,
+    budgetMs,
+  );
+}
+
 export async function routeInboundAgentMessageResult(
   userId: string,
   message: string,
@@ -13223,6 +13290,7 @@ export async function routeInboundAgentMessageResult(
   },
 ): Promise<RouteInboundAgentMessageResult> {
   const timeoutPolicy = resolveInboundRouteTimeoutPolicy(message);
+  const routeDeadlineMs = Date.now() + timeoutPolicy.timeoutMs + INBOUND_AGENT_TIMEOUT_RECOVERY_MS + INBOUND_AGENT_LANGUAGE_LOCK_TIMEOUT_MS;
   const result = await Promise.race([
     routeInboundAgentMessageResultCore(userId, message, options).catch(
       (): RouteInboundAgentMessageResult => ({ response: null as unknown as string, liveAnswerBundle: null, modelAuditTrail: null }),
@@ -13248,7 +13316,7 @@ export async function routeInboundAgentMessageResult(
 
     const activeContactFallback = buildWhatsAppActiveContactOperationalFallback(message);
     if (activeContactFallback) {
-      return applyEndToEndReplyLanguageLock({
+      return applyEndToEndReplyLanguageLockWithinBudget({
         userId,
         message,
         result: {
@@ -13256,12 +13324,13 @@ export async function routeInboundAgentMessageResult(
           liveAnswerBundle: result.liveAnswerBundle ?? null,
           modelAuditTrail: result.modelAuditTrail ?? null,
         },
+        deadlineMs: routeDeadlineMs,
       });
     }
 
     const protectedWhatsAppClarification = buildUnhandledWhatsAppOperationalClarification(message);
     if (protectedWhatsAppClarification) {
-      return applyEndToEndReplyLanguageLock({
+      return applyEndToEndReplyLanguageLockWithinBudget({
         userId,
         message,
         result: {
@@ -13269,6 +13338,7 @@ export async function routeInboundAgentMessageResult(
           liveAnswerBundle: result.liveAnswerBundle ?? null,
           modelAuditTrail: result.modelAuditTrail ?? null,
         },
+        deadlineMs: routeDeadlineMs,
       });
     }
 
@@ -13290,7 +13360,7 @@ export async function routeInboundAgentMessageResult(
           6_000,
         ).catch(() => "")
         : "";
-      return applyEndToEndReplyLanguageLock({
+      return applyEndToEndReplyLanguageLockWithinBudget({
         userId,
         message,
         result: {
@@ -13298,10 +13368,24 @@ export async function routeInboundAgentMessageResult(
           liveAnswerBundle: result.liveAnswerBundle ?? null,
           modelAuditTrail: result.modelAuditTrail ?? null,
         },
+        deadlineMs: routeDeadlineMs,
       });
     }
 
     try {
+      const emergencyBudgetMs = availableReplyBudgetMs(
+        routeDeadlineMs,
+        INBOUND_AGENT_POST_RACE_RECOVERY_MS,
+      );
+      if (emergencyBudgetMs < 500) {
+        return applyEndToEndReplyLanguageLockWithinBudget({
+          userId,
+          message,
+          result,
+          deadlineMs: routeDeadlineMs,
+        });
+      }
+
       // Detect non-Latin script and use romanization + translation for comprehension
       const hasNonLatinEmergency = /[^\u0000-\u024F\u1E00-\u1EFF\u2C60-\u2C7F\uA720-\uA7FF]/u.test(message);
       const emergencyLocale = hasNonLatinEmergency ? inferClawCloudMessageLocale(message) : null;
@@ -13314,25 +13398,29 @@ export async function routeInboundAgentMessageResult(
           emergencyUserPrompt = `[${langName}] ${message}\n[Romanized] ${emergencyRomanized}`;
           emergencyLanguageHint = `\nIMPORTANT: The user wrote in ${langName}. Use the romanized reading to understand the question. Answer in ${langName}, NOT in English.`;
         } else {
-          const emergencyGloss = await translateMessage(message, "en", { force: true }).catch(() => "");
+          const emergencyGloss = await withSoftTimeout(
+            translateMessage(message, "en", { force: true }).catch(() => ""),
+            "",
+            Math.min(1_500, emergencyBudgetMs),
+          );
           if (emergencyGloss?.trim() && emergencyGloss.trim().toLowerCase() !== message.trim().toLowerCase()) {
             emergencyUserPrompt = emergencyGloss.trim();
             emergencyLanguageHint = `\nIMPORTANT: The user wrote in ${langName}. Original message: ${message}\nAnswer in ${langName}, NOT in English. Use the English translation only to understand the question.`;
           }
         }
       }
-      const emergencyReply = await completeClawCloudPrompt({
+      const emergencyReply = await withSoftTimeout(completeClawCloudPrompt({
         system: `You are ClawCloud AI, the world's most capable AI assistant. Answer the user's question completely, accurately, and directly. Do NOT say you cannot help. Do NOT ask for more details — answer with what you know. Silently repair obvious misspellings, shorthand, and incomplete phrasing before answering. Use WhatsApp markdown (*bold*, _italic_, bullet points). Provide a comprehensive, professional answer.${emergencyLanguageHint}`,
         user: emergencyUserPrompt,
         intent: detectIntent(emergencyUserPrompt).type,
         temperature: 0.15,
         maxTokens: 2500,
         fallback: "",
-      });
+      }), "", emergencyBudgetMs);
       if (emergencyReply?.trim() && emergencyReply.trim().length > 30
           && !isVisibleFallbackReply(emergencyReply)
           && !isLowQualityTemplateReply(emergencyReply)) {
-        return applyEndToEndReplyLanguageLock({
+        return applyEndToEndReplyLanguageLockWithinBudget({
           userId,
           message,
           result: {
@@ -13340,6 +13428,7 @@ export async function routeInboundAgentMessageResult(
             liveAnswerBundle: result.liveAnswerBundle ?? null,
             modelAuditTrail: result.modelAuditTrail ?? null,
           },
+          deadlineMs: routeDeadlineMs,
         });
       }
     } catch {
@@ -13347,10 +13436,11 @@ export async function routeInboundAgentMessageResult(
     }
   }
 
-  return applyEndToEndReplyLanguageLock({
+  return applyEndToEndReplyLanguageLockWithinBudget({
     userId,
     message,
     result,
+    deadlineMs: routeDeadlineMs,
   });
 }
 

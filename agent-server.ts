@@ -117,10 +117,7 @@ import {
   type ClawCloudWhatsAppSessionStorageHealth,
 } from "./lib/clawcloud-whatsapp-storage";
 import {
-  shouldStageWhatsAppReply,
-  splitWhatsAppStreamChunks,
-  whatsAppChunkDelayMs,
-  whatsAppInitialTypingDelayMs,
+  buildWhatsAppStreamPlan,
 } from "./lib/clawcloud-whatsapp-streaming";
 import { deleteWhatsAppWorkspaceData } from "./lib/clawcloud-whatsapp-governance";
 import { listRetiredWhatsAppOwnerUserIds } from "./lib/clawcloud-whatsapp-owner-handoff";
@@ -149,11 +146,12 @@ const WHATSAPP_QR_STALE_AFTER_MS = 75_000;
 const WHATSAPP_QR_RENDER_WIDTH = 640;
 const WHATSAPP_QR_RENDER_MARGIN = 4;
 const WA_VERSION_CACHE_MS = 30 * 60_000;
-const DIRECT_REPLY_TIMEOUT_MS = 18_000;
-const HTTP_REPLY_TIMEOUT_MS = 22_000;
-const STREAM_REPLY_MIN_LENGTH = Math.max(
-  20,
-  Number.parseInt(process.env.WA_STREAM_REPLY_MIN_LENGTH ?? "24", 10) || 24,
+const DIRECT_REPLY_TIMEOUT_MS = 25_000;
+const HTTP_REPLY_TIMEOUT_MS = 25_000;
+const HTTP_REPLY_HEADSTART_MS = 100;
+const WHATSAPP_TYPING_HEARTBEAT_MS = Math.max(
+  900,
+  Number.parseInt(process.env.WA_TYPING_HEARTBEAT_MS ?? "1100", 10) || 1_100,
 );
 const SESSION_WATCHDOG_STALE_MS = 3 * 60_000;
 const SESSION_WATCHDOG_INTERVAL_MS = 5 * 60_000;
@@ -1522,23 +1520,70 @@ function sanitizeOutboundWhatsAppMessage(raw: string): string {
   return cleaned;
 }
 
-async function sendStreamingMessage(sock: WASocket, jid: string, fullText: string) {
-  const trimmed = sanitizeOutboundWhatsAppMessage(fullText);
-  const messageIds: string[] = [];
+function startWhatsAppTypingHeartbeat(sock: WASocket, jid: string) {
+  let stopped = false;
+  let timer: NodeJS.Timeout | null = null;
 
-  // Show "typing..." indicator before sending — natural thinking pause
-  await sock.sendPresenceUpdate("composing", jid).catch(() => null);
-  await new Promise((resolve) => setTimeout(resolve, whatsAppInitialTypingDelayMs(trimmed)));
+  const pulse = async () => {
+    if (stopped) {
+      return;
+    }
 
-  // Always send as a SINGLE message box — no splitting into multiple bubbles
-  const sent = await sock.sendMessage(jid, { text: trimmed });
-  if (sent?.key?.id) {
-    outboundIds.add(sent.key.id);
-    messageIds.push(sent.key.id);
+    await sock.sendPresenceUpdate("composing", jid).catch(() => null);
+    timer = setTimeout(() => {
+      void pulse();
+    }, WHATSAPP_TYPING_HEARTBEAT_MS);
+  };
+
+  void pulse();
+
+  return () => {
+    stopped = true;
+    if (timer) {
+      clearTimeout(timer);
+    }
+    void sock.sendPresenceUpdate("paused", jid).catch(() => null);
+  };
+}
+
+async function waitWithWhatsAppTypingPresence(sock: WASocket, jid: string, durationMs: number) {
+  if (durationMs <= 0) {
+    return;
   }
 
+  const pulseEveryMs = Math.max(850, Math.min(1_250, WHATSAPP_TYPING_HEARTBEAT_MS));
+  let remainingMs = durationMs;
+
+  await sock.sendPresenceUpdate("composing", jid).catch(() => null);
+  while (remainingMs > 0) {
+    const sleepMs = Math.min(pulseEveryMs, remainingMs);
+    await new Promise((resolve) => setTimeout(resolve, sleepMs));
+    remainingMs -= sleepMs;
+    if (remainingMs > 0) {
+      await sock.sendPresenceUpdate("composing", jid).catch(() => null);
+    }
+  }
+}
+
+async function sendStreamingMessage(sock: WASocket, jid: string, fullText: string) {
+  const trimmed = sanitizeOutboundWhatsAppMessage(fullText);
+  if (!trimmed) {
+    return [];
+  }
+  const plan = buildWhatsAppStreamPlan(trimmed);
+  const outboundText = plan.chunks[0] ?? trimmed;
+
+  // Show "typing..." indicator before sending — natural thinking pause
+  await waitWithWhatsAppTypingPresence(sock, jid, plan.initialDelayMs);
+
+  // Always send as a SINGLE message box — no splitting into multiple bubbles
+  const sent = await sock.sendMessage(jid, { text: outboundText });
   await sock.sendPresenceUpdate("paused", jid).catch(() => null);
-  return messageIds;
+  if (sent?.key?.id) {
+    outboundIds.add(sent.key.id);
+    return [sent.key.id];
+  }
+  return [];
 }
 
 type TrackedWhatsAppSendInput = {
@@ -4549,7 +4594,14 @@ function isEmptyOrFallback(reply: string | null | undefined, sourceMessage?: str
     lower.includes("translation was not provided") ||
     // Processing fallback
     lower.includes("i'm processing your request") ||
-    lower.includes("processing your question about:")
+    lower.includes("processing your question about:") ||
+    lower.includes("couldn't answer that accurately enough in that attempt") ||
+    lower.includes("couldn't give a reliable definition for") ||
+    lower.includes("ask the same question once more") ||
+    lower.includes("send the same question once more") ||
+    // Legacy connection-failure copy that should never reach the user again
+    lower.includes("temporary connection issue with my ai backend") ||
+    lower.includes("temporary connection issue with my live news sources")
   );
 }
 
@@ -4557,27 +4609,26 @@ function buildEmergencyProfessionalFallback(message: string) {
   const text = message.toLowerCase().trim();
 
   if (looksLikeAssistantPreferenceRequest(text)) {
-    return [
-      "Understood. I'll keep replies more direct and better grounded from here.",
-      "",
-      "Routine questions will get a faster answer. If something is uncertain, I'll say that briefly instead of guessing.",
-      "Short prompts will stay concise, and deeper questions will get fuller answers when needed.",
-    ].join("\n");
+    return "Understood. I'll keep replies faster, more direct, and better grounded from here.";
   }
 
   if (looksLikeAssistantParametersQuestion(text)) {
+    return "I can answer questions, explain, write, summarize, translate, code, and help with connected tools when they are linked. Ask me anything!";
+  }
+
+  // Greetings — warm, friendly response
+  if (/^(hi+|hello+|hey+|howdy|namaste|hola|bonjour|sup|yo|what'?s up|greetings|konichiwa|konnichiwa|assalam|salam|merhaba|annyeong|ni hao|sawadee|selamat|aloha|jambo|ciao|sat\s*sri\s*akal|good\s*(morning|afternoon|evening|night))\b/i.test(text) && text.length < 50) {
     return [
-      "If you mean how I operate: I do not expose raw internal model parameters in chat.",
+      "Hey there! 👋 Great to hear from you!",
       "",
-      "Practically, I can answer questions, explain concepts, write, code, summarize, translate, and help with connected tools when they are linked.",
-      "",
-      "If you want a specific behavior, tell me directly, for example: be faster, be more detailed, or be more professional.",
+      "I'm ClawCloud, your personal AI assistant. How can I help you today? 😊",
     ].join("\n");
   }
 
+  // Hardcoded algorithm answers — these are genuinely useful
   if (/\bn[-\s]?queen\b/.test(text)) {
     return [
-      "Coding answer:",
+      "💻 *Solution:*",
       "",
       "```python",
       "def solve_n_queens(n: int):",
@@ -4606,7 +4657,7 @@ function buildEmergencyProfessionalFallback(message: string) {
 
   if (/\brat\b/.test(text) && /\bmaze\b/.test(text)) {
     return [
-      "Coding answer:",
+      "💻 *Solution:*",
       "",
       "```python",
       "def find_paths(maze):",
@@ -4635,33 +4686,7 @@ function buildEmergencyProfessionalFallback(message: string) {
     ].join("\n");
   }
 
-  if (/\b(code|program|algorithm|n[-\s]?queen|debug|python|javascript|java|c\+\+)\b/.test(text)) {
-    return [
-      "💻 *Coding Mode*",
-      "",
-      "I'm temporarily unable to connect to my AI backend to generate code right now.",
-      "Please try your request again in a few seconds — I'll have the complete solution ready.",
-    ].join("\n");
-  }
-
-  if (/\b(weather|whether|temperature|forecast|rain|humidity|wind|aqi)\b/.test(text)) {
-    return [
-      "🌦️ *Weather*",
-      "",
-      "I'm temporarily unable to fetch live weather data right now.",
-      "Please try again in a few seconds — include your city name for the most accurate forecast.",
-    ].join("\n");
-  }
-
-  if (/\b(news|latest|today|headline)\b/.test(text)) {
-    return [
-      "📰 *News Update*",
-      "",
-      "I'm currently experiencing a temporary connection issue with my live news sources.",
-      "Please try your question again in a few seconds — I'll have the latest headlines ready for you.",
-    ].join("\n");
-  }
-
+  // Hardcoded knowledge answers
   const diffMatch = text.match(/\b(?:difference between|compare)\s+(.+?)\s+(?:and|vs\.?|versus)\s+(.+?)(?:\?|$)/);
   if (diffMatch) {
     const left = diffMatch[1].trim();
@@ -4703,37 +4728,6 @@ function buildEmergencyProfessionalFallback(message: string) {
     ].join("\n");
   }
 
-  // Greetings — warm, friendly response
-  if (/^(hi+|hello+|hey+|howdy|namaste|hola|bonjour|sup|yo|what'?s up|greetings|konichiwa|konnichiwa|assalam|salam|merhaba|annyeong|ni hao|sawadee|selamat|aloha|jambo|ciao)\b/i.test(text) && text.length < 50) {
-    return [
-      "Hey there! 👋 Great to hear from you!",
-      "",
-      "I'm ClawCloud, your personal AI assistant. How can I help you today? 😊",
-    ].join("\n");
-  }
-
-  // "What is X" knowledge questions — give a real answer attempt
-  const whatIsMatch = text.match(/^(?:what(?:'s| is| are)\s+)(.+?)(?:\?|$)/i);
-  if (whatIsMatch?.[1]?.trim()) {
-    const subject = whatIsMatch[1].trim();
-    return [
-      `📖 *${subject.charAt(0).toUpperCase() + subject.slice(1)}*`,
-      "",
-      `I'm temporarily unable to connect to my AI backend to give you a detailed answer about "${subject}".`,
-      "",
-      "Please try asking again in a few seconds — my systems refresh quickly and I'll have a complete answer ready.",
-    ].join("\n");
-  }
-
-  // "Who is X" questions
-  if (/^who\s+(is|was|are)\b/i.test(text)) {
-    return [
-      "👤 I'm temporarily unable to connect to my AI backend for a detailed answer.",
-      "",
-      "Please try asking again in a few seconds — I'll have the complete information ready.",
-    ].join("\n");
-  }
-
   // Send message / contact commands
   if (/\b(send|message|msg|text)\s+(to|message)\b/i.test(text) || /\bsend\s+/i.test(text)) {
     return [
@@ -4749,11 +4743,7 @@ function buildEmergencyProfessionalFallback(message: string) {
 
   // For any truly unmatched question — honest, professional response
   return [
-    "⚡ I'm experiencing a temporary connection issue with my AI backend right now.",
-    "",
-    "Please try your question again in a few seconds — my systems refresh quickly and I'll have your answer ready.",
-    "",
-    "💡 _Tip: If this keeps happening, try reconnecting at swift-deploy.in/settings_",
+    "⚡ My AI engine is warming up — please resend your question in a few seconds and I'll answer it fully.",
   ].join("\n");
 }
 
@@ -4786,7 +4776,8 @@ async function sendReply(
     message: cleaned,
     idempotencyKey: buildAssistantReplyIdempotencyKey(userId, jid),
     metadata: {
-      staged_delivery: shouldStageWhatsAppReply(cleaned, STREAM_REPLY_MIN_LENGTH),
+      staged_delivery: false,
+      delivery_shape: "single_bubble",
       chat_type: getChatType(jid, session),
     },
   };
@@ -4804,16 +4795,7 @@ async function sendReply(
 
   for (let attempt = 0; attempt < MAX_SEND_RETRIES; attempt += 1) {
     try {
-      let waMessageIds: string[] = [];
-      if (shouldStageWhatsAppReply(cleaned, STREAM_REPLY_MIN_LENGTH)) {
-        waMessageIds = await sendStreamingMessage(session.sock, jid, cleaned);
-      } else {
-        const sent = await session.sock.sendMessage(jid, { text: cleaned });
-        if (sent?.key?.id) {
-          outboundIds.add(sent.key.id);
-          waMessageIds = [sent.key.id];
-        }
-      }
+      const waMessageIds = await sendStreamingMessage(session.sock, jid, cleaned);
 
       await recordTrackedWhatsAppSendSuccess({
         ...assistantTracking,
@@ -4896,17 +4878,7 @@ async function sendReplyLegacy(
 
   const cleaned = sanitizeOutboundWhatsAppMessage(message);
   if (!cleaned) return false;
-  let waMessageIds: string[] = [];
-
-  if (shouldStageWhatsAppReply(cleaned, STREAM_REPLY_MIN_LENGTH)) {
-    waMessageIds = await sendStreamingMessage(session.sock, jid, cleaned);
-  } else {
-    const sent = await session.sock.sendMessage(jid, { text: cleaned });
-    if (sent?.key?.id) {
-      outboundIds.add(sent.key.id);
-      waMessageIds = [sent.key.id];
-    }
-  }
+  const waMessageIds = await sendStreamingMessage(session.sock, jid, cleaned);
 
   void logOutbound(userId, cleaned, jid, null, waMessageIds);
   if (isGroupChatJid(jid)) {
@@ -4978,11 +4950,16 @@ async function getDirectRouteInboundAgentMessage() {
   return cachedRouteInboundAgentMessage;
 }
 
-async function runDirectAgentReply(userId: string, message: string): Promise<string | null> {
+async function runDirectAgentReply(
+  userId: string,
+  message: string,
+  options?: { allowWithoutNvidia?: boolean },
+): Promise<string | null> {
   // If local NVIDIA key is missing, PATH A often degrades to generic templates.
-  // Prefer PATH B (/api/agent/message on app_url) for stronger answers.
+  // Prefer PATH B (/api/agent/message on app_url) for stronger answers, but
+  // keep an optional degraded local retry available if PATH B is unavailable.
   const nvidia = ensureCanonicalNvidiaEnv();
-  if (!nvidia.value && appUrl()) {
+  if (!options?.allowWithoutNvidia && !nvidia.value && appUrl()) {
     return null;
   }
 
@@ -5000,6 +4977,120 @@ async function runDirectAgentReply(userId: string, message: string): Promise<str
     );
     return null;
   }
+}
+
+function isUsableAgentReply(reply: string | null | undefined, sourceMessage: string) {
+  return Boolean(reply?.trim() && !isEmptyOrFallback(reply, sourceMessage));
+}
+
+async function runHttpAgentReply(userId: string, message: string): Promise<string | null> {
+  if (!appUrl()) {
+    return null;
+  }
+
+  const response = await callNext("/api/agent/message", {
+    userId,
+    message,
+    _internal: true,
+  });
+
+  if (!response?.ok) {
+    if (response) {
+      const body = await response.text().catch(() => "");
+      console.error(
+        `[agent] PATH B failed for ${userId}: HTTP ${response.status}${body ? ` - ${body.slice(0, 200)}` : ""}`,
+      );
+    } else {
+      console.error(`[agent] PATH B failed for ${userId}: no response`);
+    }
+    return null;
+  }
+
+  const json = (await response.json().catch(() => ({}))) as { response?: string | null };
+  return json.response?.trim() || null;
+}
+
+async function runBestAvailableAgentReply(
+  userId: string,
+  routedText: string,
+  sourceText: string,
+): Promise<{ reply: string | null; path: "A" | "B" | null }> {
+  const directPromise = runDirectAgentReply(userId, routedText);
+  const preferHttpFirst = !ensureCanonicalNvidiaEnv().value && Boolean(appUrl());
+  const headstartMs = preferHttpFirst ? 0 : HTTP_REPLY_HEADSTART_MS;
+  const pendingMarker = Symbol("pending");
+  const earlyDirect: string | null | symbol = await Promise.race([
+    directPromise,
+    new Promise<symbol>((resolve) => {
+      setTimeout(() => resolve(pendingMarker), headstartMs);
+    }),
+  ]);
+
+  if (typeof earlyDirect === "string" && isUsableAgentReply(earlyDirect, sourceText)) {
+    return { reply: earlyDirect, path: "A" };
+  }
+
+  const candidates: Array<{ path: "A" | "B"; promise: Promise<string | null> }> = [];
+  if (earlyDirect === pendingMarker) {
+    candidates.push({ path: "A", promise: directPromise });
+  }
+  if (appUrl()) {
+    candidates.push({ path: "B", promise: runHttpAgentReply(userId, routedText) });
+  }
+
+  if (!candidates.length) {
+    return {
+      reply: typeof earlyDirect === "string" ? earlyDirect : null,
+      path: null,
+    };
+  }
+
+  const pending = new Map(
+    candidates.map((candidate, index) => [
+      index,
+      candidate.promise
+        .then((reply) => ({ index, path: candidate.path, reply }))
+        .catch((error) => {
+          console.error(
+            `[agent] PATH ${candidate.path} failed for ${userId}:`,
+            error instanceof Error ? error.message : error,
+          );
+          return { index, path: candidate.path, reply: null };
+        }),
+    ]),
+  );
+  let lastReply: string | null =
+    earlyDirect !== pendingMarker && typeof earlyDirect === "string"
+      ? earlyDirect
+      : null;
+
+  while (pending.size > 0) {
+    const settled = await Promise.race(pending.values());
+    pending.delete(settled.index);
+    if (isUsableAgentReply(settled.reply, sourceText)) {
+      return { reply: settled.reply, path: settled.path };
+    }
+    if (settled.reply?.trim()) {
+      lastReply = settled.reply;
+    }
+  }
+
+  if (preferHttpFirst) {
+    console.warn(
+      `[agent] PATH B did not produce a usable answer for ${userId}; trying degraded PATH A fallback`,
+    );
+    const degradedDirect = await runDirectAgentReply(userId, routedText, {
+      allowWithoutNvidia: true,
+    });
+    if (isUsableAgentReply(degradedDirect, sourceText)) {
+      return { reply: degradedDirect, path: "A" };
+    }
+    if (degradedDirect?.trim()) {
+      lastReply = degradedDirect;
+    }
+  }
+
+  return { reply: lastReply, path: null };
 }
 
 async function markPassiveExternalWhatsAppChatOnly(
@@ -5093,9 +5184,9 @@ async function handleInbound(
 
   const settings = settingsOverride ?? await getWhatsAppSettings(userId).catch(() => defaultWhatsAppSettings);
 
-  if (jid && session) {
-    void session.sock.sendPresenceUpdate("composing", jid).catch(() => null);
-  }
+  const stopTypingHeartbeat = jid && session
+    ? startWhatsAppTypingHeartbeat(session.sock, jid)
+    : null;
 
   let finalReply: string | null = null;
   const workspaceContact = await loadWhatsAppWorkspaceContact(
@@ -5118,41 +5209,20 @@ async function handleInbound(
     tags: workspaceContact.tags,
   });
 
-  console.log(`[agent] PATH A direct reply for ${userId}`);
-  const directReply = await runDirectAgentReply(userId, routedText);
-  if (directReply?.trim() && !isEmptyOrFallback(directReply, text)) {
-    finalReply = directReply.trim();
-    console.log(`[agent] PATH A success for ${userId} (${finalReply.length} chars)`);
+  console.log(`[agent] Starting best-effort reply race for ${userId}`);
+  const bestReply = await runBestAvailableAgentReply(userId, routedText, text);
+  if (isUsableAgentReply(bestReply.reply, text)) {
+    finalReply = bestReply.reply!.trim();
+    console.log(
+      `[agent] PATH ${bestReply.path ?? "fallback"} success for ${userId} (${finalReply.length} chars)`,
+    );
+  } else if (bestReply.reply?.trim()) {
+    finalReply = bestReply.reply.trim();
+    console.warn(
+      `[agent] Best-effort reply race produced a low-confidence reply for ${userId}; emergency fallback guard remains armed`,
+    );
   } else {
-    console.warn(`[agent] PATH A empty or fallback for ${userId} - trying PATH B`);
-
-    if (appUrl()) {
-      console.log(`[agent] PATH B HTTP call to ${appUrl()}/api/agent/message`);
-      const response = await callNext("/api/agent/message", {
-        userId,
-        message: routedText,
-        _internal: true,
-      });
-
-      if (response?.ok) {
-        const json = (await response.json().catch(() => ({}))) as { response?: string | null };
-        if (json.response?.trim() && !isEmptyOrFallback(json.response, text)) {
-          finalReply = json.response.trim();
-          console.log(`[agent] PATH B success for ${userId} (${finalReply.length} chars)`);
-        } else {
-          console.warn(`[agent] PATH B returned empty or fallback for ${userId}`);
-        }
-      } else if (response) {
-        const body = await response.text().catch(() => "");
-        console.error(
-          `[agent] PATH B failed for ${userId}: HTTP ${response.status}${body ? ` - ${body.slice(0, 200)}` : ""}`,
-        );
-      } else {
-        console.error(`[agent] PATH B failed for ${userId}: no response`);
-      }
-    } else {
-      console.error("[agent] PATH B skipped: NEXT_PUBLIC_APP_URL is not set");
-    }
+    console.warn(`[agent] Reply race returned no acceptable answer for ${userId}`);
   }
 
   if (!finalReply || isEmptyOrFallback(finalReply, text)) {
@@ -5162,7 +5232,7 @@ async function handleInbound(
       const { emergencyDirectAnswerForServer } = await import("./lib/clawcloud-agent");
       const emergencyReply = await Promise.race([
         emergencyDirectAnswerForServer?.(text) ?? Promise.resolve(null),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 8_000)),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000)),
       ]);
       if (emergencyReply?.trim() && !isEmptyOrFallback(emergencyReply, text)) {
         finalReply = emergencyReply.trim();
@@ -5225,10 +5295,6 @@ async function handleInbound(
       ),
     );
 
-  if (jid && session) {
-    void session.sock.sendPresenceUpdate("paused", jid).catch(() => null);
-  }
-
   if (decision.action === "block") {
     await markLatestWhatsAppThreadState({
       userId,
@@ -5262,6 +5328,7 @@ async function handleInbound(
     }).catch(() => null);
     void scheduleWorkflows(false);
     void processDueWorkflows();
+    stopTypingHeartbeat?.();
     return;
   }
 
@@ -5298,6 +5365,7 @@ async function handleInbound(
     }).catch(() => null);
     void scheduleWorkflows(false);
     void processDueWorkflows();
+    stopTypingHeartbeat?.();
     return;
   }
 
@@ -5309,6 +5377,7 @@ async function handleInbound(
       );
       return false;
     });
+    stopTypingHeartbeat?.();
 
     await markLatestWhatsAppThreadState({
       userId,
@@ -5350,6 +5419,7 @@ async function handleInbound(
     }
   }
 
+  stopTypingHeartbeat?.();
   void processDueWorkflows();
   console.error(`[agent] Could not send reply for ${userId}: jid=${jid}, session=${Boolean(session)}`);
 }
