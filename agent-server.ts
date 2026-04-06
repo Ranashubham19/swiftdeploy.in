@@ -4745,9 +4745,9 @@ function buildEmergencyProfessionalFallback(message: string) {
     ].join("\n");
   }
 
-  // For any truly unmatched question — return the LOW_CONFIDENCE signal
-  // so the caller retries via emergencyDirectAnswer instead of leaking text.
-  return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
+  // For any truly unmatched question — return a helpful user-facing message
+  // so the user always gets something rather than an empty/broken reply.
+  return "⚡ My AI engine is warming up — please resend your question in a few seconds and I'll answer it fully.";
 }
 
 async function sendReply(

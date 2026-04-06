@@ -1472,7 +1472,7 @@ async function emergencyDirectAnswer(
   // If even this fails, return the deterministic reply or a minimal but real answer
   return deterministicExplain
     || deterministicChatFallback
-    || "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
+    || "⚡ My AI engine is warming up — please resend your question in a few seconds and I'll answer it fully.";
 }
 
 function buildSmartSystem(

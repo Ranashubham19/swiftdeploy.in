@@ -2206,6 +2206,8 @@ async function _call(
     signal.addEventListener("abort", onAbort, { once: true });
   }
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const callStartMs = Date.now();
+  console.log(`[ai] calling ${model} timeout=${timeoutMs}ms url=${url}`);
 
   try {
     const res = await fetch(url, {
@@ -2224,19 +2226,23 @@ async function _call(
       }),
     });
 
+    const callLatencyMs = Date.now() - callStartMs;
     if (!res.ok) {
       const txt = await res.text().catch(() => "");
-      console.error(`[ai] ${res.status} ${model}: ${txt.slice(0, 200)}`);
+      console.error(`[ai] ${res.status} ${model} (${callLatencyMs}ms): ${txt.slice(0, 300)}`);
       return null;
     }
 
     const data = (await res.json()) as NvResp;
-    return data.choices?.[0]?.message?.content?.trim() ?? null;
+    const content = data.choices?.[0]?.message?.content?.trim() ?? null;
+    console.log(`[ai] ${model} OK (${callLatencyMs}ms) len=${content?.length ?? 0}`);
+    return content;
   } catch (error) {
+    const callLatencyMs = Date.now() - callStartMs;
     if ((error as Error)?.name === "AbortError") {
-      console.warn(`[ai] timeout on ${model}`);
+      console.warn(`[ai] timeout on ${model} after ${callLatencyMs}ms (limit=${timeoutMs}ms)`);
     } else {
-      console.error(`[ai] error on ${model}:`, error);
+      console.error(`[ai] error on ${model} after ${callLatencyMs}ms:`, error);
     }
     return null;
   } finally {
