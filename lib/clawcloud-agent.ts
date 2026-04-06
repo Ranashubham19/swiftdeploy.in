@@ -1331,7 +1331,7 @@ async function emergencyDirectAnswer(
   question: string,
   history: Array<{ role: "user" | "assistant"; content: string }>,
   languageHint: string,
-  timeoutMs = 20_000,
+  timeoutMs = 30_000,
 ): Promise<string> {
   // No more early-exit for news — fall through to the knowledge-based answer below
   const isNewsQ = detectNewsQuestion(question);
@@ -1377,12 +1377,12 @@ async function emergencyDirectAnswer(
     intent: emergencyIntent,
     responseMode: "fast",
     preferredModels: [
-      "moonshotai/kimi-k2.5",
-      "z-ai/glm5",
-      "qwen/qwen3.5-397b-a17b",
-      "mistralai/mistral-large-3-675b-instruct-2512",
-      "moonshotai/kimi-k2-instruct-0905",
       "meta/llama-3.3-70b-instruct",
+      "qwen/qwen3.5-397b-a17b",
+      "z-ai/glm5",
+      "mistralai/mistral-large-3-675b-instruct-2512",
+      "moonshotai/kimi-k2.5",
+      "moonshotai/kimi-k2-instruct-0905",
     ],
     maxTokens: 1000,
     fallback: "",
@@ -1472,7 +1472,7 @@ async function emergencyDirectAnswer(
   // If even this fails, return the deterministic reply or a minimal but real answer
   return deterministicExplain
     || deterministicChatFallback
-    || "⚡ My AI engine is warming up — please resend your question in a few seconds and I'll answer it fully.";
+    || buildGuaranteedServerRecoveryReply(question);
 }
 
 function buildSmartSystem(
@@ -2451,6 +2451,39 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || normalized.includes("processing your question about:")
     || normalized.includes("please try again in a moment")
     || normalized.includes("please try again in a few seconds if you don't receive")
+    // Clarification-request refusals — bot must answer, not ask back
+    || normalized.includes("tell me the context for")
+    || normalized.includes("send the exact topic in one line")
+    || normalized.includes("i can give the precise meaning")
+    || normalized.includes("so i can give the precise meaning")
+    || normalized.includes("send one topic")
+    || normalized.includes("provide me with the exact topic")
+    || normalized.includes("could you clarify what you mean")
+    || normalized.includes("please specify which")
+    || normalized.includes("can you be more specific")
+    || normalized.includes("what exactly do you mean")
+    || normalized.includes("which one do you mean")
+    || normalized.includes("please provide more context")
+    || normalized.includes("give me more details so i can")
+    || normalized.includes("tell me which")
+    // "Couldn't complete" fallback patterns
+    || normalized.includes("couldn't complete a strong answer")
+    || normalized.includes("could not complete a strong answer")
+    || normalized.includes("i couldn't complete a strong answer")
+    || normalized.includes("i can still help with a direct")
+    || normalized.includes("but i can still help with")
+    // Generic handoff / meta-statements
+    || normalized.includes("i will answer it directly")
+    || normalized.includes("i'll answer it directly")
+    || normalized.includes("send the exact topic")
+    || normalized.includes("general, food, tech, business, law, medicine, or finance")
+    // Legacy connection-failure copy
+    || normalized.includes("temporary connection issue with my ai backend")
+    || normalized.includes("temporary connection issue with my live news sources")
+    || normalized.includes("couldn't answer that accurately enough in that attempt")
+    || normalized.includes("couldn't give a reliable definition for")
+    || normalized.includes("ask the same question once more")
+    || normalized.includes("send the same question once more")
   );
 }
 
@@ -7147,17 +7180,17 @@ async function buildProfessionalRecoveryReply(input: {
   return answer.trim();
 }
 
-const FAST_REPLY_TOTAL_BUDGET_MS = 10_000;
-const DEEP_REPLY_TOTAL_BUDGET_MS = 16_000;
-const INBOUND_AGENT_ROUTE_TIMEOUT_MS = 18_000;
-const INBOUND_AGENT_ROUTE_DIRECT_TIMEOUT_MS = 16_000;
-const INBOUND_AGENT_ROUTE_ACTIVE_CONTACT_TIMEOUT_MS = 18_000;
-const INBOUND_AGENT_ROUTE_OPERATIONAL_TIMEOUT_MS = 12_000;
-const INBOUND_AGENT_ROUTE_DEEP_TIMEOUT_MS = 20_000;
-const INBOUND_AGENT_ROUTE_LIVE_TIMEOUT_MS = 18_000;
-const INBOUND_AGENT_TIMEOUT_RECOVERY_MS = 3_500;
-const INBOUND_AGENT_POST_RACE_RECOVERY_MS = 3_500;
-const INBOUND_AGENT_LANGUAGE_LOCK_TIMEOUT_MS = 3_000;
+const FAST_REPLY_TOTAL_BUDGET_MS = 18_000;
+const DEEP_REPLY_TOTAL_BUDGET_MS = 25_000;
+const INBOUND_AGENT_ROUTE_TIMEOUT_MS = 40_000;
+const INBOUND_AGENT_ROUTE_DIRECT_TIMEOUT_MS = 35_000;
+const INBOUND_AGENT_ROUTE_ACTIVE_CONTACT_TIMEOUT_MS = 35_000;
+const INBOUND_AGENT_ROUTE_OPERATIONAL_TIMEOUT_MS = 25_000;
+const INBOUND_AGENT_ROUTE_DEEP_TIMEOUT_MS = 45_000;
+const INBOUND_AGENT_ROUTE_LIVE_TIMEOUT_MS = 35_000;
+const INBOUND_AGENT_TIMEOUT_RECOVERY_MS = 5_000;
+const INBOUND_AGENT_POST_RACE_RECOVERY_MS = 5_000;
+const INBOUND_AGENT_LANGUAGE_LOCK_TIMEOUT_MS = 5_000;
 const NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS = 400;
 
 type InboundRouteTimeoutPolicy = {
@@ -7257,6 +7290,15 @@ function resolveInboundRouteTimeoutPolicy(message: string): InboundRouteTimeoutP
 
 export function getInboundRouteTimeoutPolicyForTest(message: string) {
   return resolveInboundRouteTimeoutPolicy(message);
+}
+
+export function getInboundRouteTimeoutPolicy(message: string) {
+  return resolveInboundRouteTimeoutPolicy(message);
+}
+
+export function getInboundRouteTotalDeadlineMs(message: string) {
+  const policy = resolveInboundRouteTimeoutPolicy(message);
+  return policy.timeoutMs + INBOUND_AGENT_TIMEOUT_RECOVERY_MS + INBOUND_AGENT_LANGUAGE_LOCK_TIMEOUT_MS;
 }
 
 function withSoftTimeout<T>(promise: Promise<T>, fallback: T, timeoutMs: number): Promise<T> {
@@ -9747,6 +9789,21 @@ function buildDeterministicExplainReply(question: string) {
       ].join("\n");
     }
 
+    if (
+      directTopic === "jeera"
+      || directTopic === "jira"
+      || directTopic === "zeera"
+      || directTopic === "cumin"
+    ) {
+      return [
+        "Jeera is cumin, a common spice made from the dried seeds of the cumin plant.",
+        "",
+        "It has a warm, earthy flavor and is widely used in Indian, Middle Eastern, and Mexican cooking.",
+        "",
+        "People use it whole or ground in dishes like dal, curry, rice, and spice blends.",
+      ].join("\n");
+    }
+
     return null;
   }
 
@@ -11977,6 +12034,7 @@ async function enforceAnswerQuality(input: {
   });
 
   let answer = (input.reply ?? "").trim();
+  console.log(`[quality] enforceAnswerQuality start for "${input.question.slice(0, 60)}" intent=${input.intent} domain=${profile.domain} answer_len=${answer.length} requiresLive=${profile.requiresLiveGrounding} requiresEvidence=${profile.requiresEvidence}`);
   let directRecoveryUsed = false;
   const tryDirectRecovery = async (failureReason: string) => {
     if (directRecoveryUsed || !shouldAttemptDirectAnswerRecovery(input.question, profile)) {
@@ -12018,6 +12076,7 @@ async function enforceAnswerQuality(input: {
     if (isAcceptableLiveAnswer(normalizedGrounded, input.question)) {
       answer = normalizedGrounded;
     } else {
+      console.warn(`[quality] REJECTED: liveGrounding check failed for "${input.question.slice(0, 60)}"`);
       return buildClawCloudLowConfidenceReply(input.question, profile);
     }
   }
@@ -15043,10 +15102,12 @@ async function routeInboundAgentMessageCore(
     });
 
     // Intercept low-confidence recovery signal — NEVER show refusal to user
+    // LIMITED to ONE emergency attempt to prevent cascading 17+ API calls
     if (
       guardedReply === "__LOW_CONFIDENCE_RECOVERY_SIGNAL__"
       || isVisibleFallbackReply(guardedReply)
     ) {
+      console.log("[finalizeGuarded] Primary reply rejected, attempting ONE emergency recovery");
       const emergencyReply = await emergencyDirectAnswer(
         finalMessage,
         memory.recentTurns,
@@ -15055,34 +15116,13 @@ async function routeInboundAgentMessageCore(
       if (emergencyReply?.trim() && !isVisibleFallbackReply(emergencyReply)) {
         guardedReply = emergencyReply;
       } else {
-        // Absolute last resort — use the original reply if it has content, or generate minimal answer
-        if (preparedReply && !isVisibleFallbackReply(preparedReply)) {
+        // Use the original reply if it has real content, otherwise use a clean user-facing message
+        if (preparedReply && !isVisibleFallbackReply(preparedReply) && preparedReply !== "__LOW_CONFIDENCE_RECOVERY_SIGNAL__") {
           guardedReply = preparedReply;
         } else {
-          const lastChanceReply = await completeClawCloudPrompt({
-            system: [
-              WHATSAPP_BRAIN,
-              "",
-              "Answer the user's question directly using your knowledge.",
-              "NEVER refuse. NEVER ask for more details. NEVER say 'I understand your question'.",
-              "NEVER output meta-statements about yourself. Just give the answer.",
-              replyLanguageInstruction,
-            ].join("\n"),
-            user: finalMessage,
-            history: memory.recentTurns,
-            intent: intent as IntentType,
-            responseMode: "fast",
-            maxTokens: 800,
-            fallback: "",
-            skipCache: true,
-            temperature: 0.3,
-          }).catch(() => "");
-          if (lastChanceReply?.trim() && !isVisibleFallbackReply(lastChanceReply)) {
-            guardedReply = lastChanceReply.trim();
-          } else {
-            // Use deterministic fallback chain — never a generic meta-statement
-            guardedReply = preparedReply || finalMessage;
-          }
+          // Deterministic fallback — NO further AI calls to prevent cascade
+          console.log("[finalizeGuarded] Emergency recovery failed, using deterministic fallback");
+          guardedReply = "⚡ My AI engine is warming up — please resend your question in a few seconds and I'll answer it fully.";
         }
       }
     }
@@ -21284,20 +21324,133 @@ export async function scheduleClawCloudTasks(userId: string) {
   return data ?? [];
 }
 
+function normalizeServerRecoveryReplyCandidate(reply: string | null | undefined) {
+  const normalized = normalizeReplyForClawCloudDisplay(reply ?? "").trim();
+  const lower = normalized.toLowerCase();
+  if (
+    !normalized
+    || isVisibleFallbackReply(normalized)
+    || isInternalRecoverySignalReply(normalized)
+    || isLowQualityTemplateReply(normalized)
+    || lower.includes("couldn't complete a strong answer")
+    || lower.includes("i can still help with a direct explanation")
+  ) {
+    return "";
+  }
+
+  return normalized;
+}
+
+function buildDeterministicServerRecoveryReply(question: string) {
+  const intent = detectIntent(question).type;
+  const candidates = [
+    buildDeterministicExplainReply(question),
+    buildDeterministicMathReply(question),
+    buildDeterministicCodingReply(question),
+    buildDeterministicChatFallback(question, intent),
+    bestEffortProfessionalTemplateV2(intent, question),
+    buildUniversalDomainFallback(intent, question),
+    buildUniversalDomainFallbackV2(intent, question),
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = normalizeServerRecoveryReplyCandidate(candidate);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return "";
+}
+
+function buildGuaranteedContextualRecoveryReply(question: string) {
+  const cleaned = normalizeClawCloudUnderstandingMessage(question).replace(/\s+/g, " ").trim();
+  const toTitle = (value: string) => value.replace(/\b\w/g, (ch) => ch.toUpperCase());
+  const clip = (value: string) => value.replace(/[?.!]+$/g, "").trim();
+
+  if (!cleaned) {
+    return "Send the exact topic or task in one line and I will answer it directly.";
+  }
+
+  const definitionMatch = cleaned.match(/^(?:what is|what are|define|meaning of|explain)\s+(.+?)(?:\?|$)/i);
+  if (definitionMatch) {
+    const topic = clip(definitionMatch[1]);
+    if (topic) {
+      return [
+        `*${toTitle(topic)}*`,
+        "",
+        `Tell me the context for ${topic} in one word so I can give the precise meaning: general, food, tech, business, law, medicine, or finance.`,
+      ].join("\n");
+    }
+  }
+
+  const compareMatch = cleaned.match(/\b(?:difference between|compare)\s+(.+?)\s+(?:and|vs\.?|versus)\s+(.+?)(?:\?|$)/i);
+  if (compareMatch) {
+    return [
+      `I can compare *${clip(compareMatch[1])}* and *${clip(compareMatch[2])}* directly.`,
+      "",
+      "Tell me whether you want the comparison in simple terms, a table, or a technical breakdown.",
+    ].join("\n");
+  }
+
+  if (/^(?:how to|how do i|how can i)\b/i.test(cleaned)) {
+    return "Tell me the exact tool, app, language, or platform involved and I will give you the steps directly.";
+  }
+
+  if (/^(?:who is|who was|where is|when is|when was)\b/i.test(cleaned)) {
+    return "Tell me the exact person, place, or event name once and I will answer it directly.";
+  }
+
+  return "Send the exact topic in one line and I will answer it directly.";
+}
+
+export function buildGuaranteedServerRecoveryReply(question: string) {
+  return buildDeterministicServerRecoveryReply(question) || buildGuaranteedContextualRecoveryReply(question);
+}
+
+export async function recoverUserFacingReplyForServer(input: {
+  question: string;
+  candidateReply?: string | null;
+}): Promise<string | null> {
+  const intent = detectIntent(input.question).type;
+  const candidate = normalizeServerRecoveryReplyCandidate(input.candidateReply);
+  if (candidate) {
+    return candidate;
+  }
+
+  try {
+    const emergencyReply = await emergencyDirectAnswer(input.question, [], "");
+    const normalizedEmergencyReply = normalizeServerRecoveryReplyCandidate(emergencyReply);
+    if (normalizedEmergencyReply) {
+      return normalizedEmergencyReply;
+    }
+  } catch {
+    // Fall through to deterministic recovery.
+  }
+
+  try {
+    const professionalRecovery = await buildProfessionalRecoveryReply({
+      userId: "server-recovery",
+      message: input.question,
+      intent,
+    });
+    const normalizedProfessionalRecovery = normalizeServerRecoveryReplyCandidate(professionalRecovery);
+    if (normalizedProfessionalRecovery) {
+      return normalizedProfessionalRecovery;
+    }
+  } catch {
+    // Fall through to deterministic recovery.
+  }
+
+  return buildGuaranteedServerRecoveryReply(input.question);
+}
+
 /**
  * Server-level emergency fallback — generates a direct answer when all paths fail.
  * Called from agent-server.ts as an absolute last resort before sending to WhatsApp.
  */
 export async function emergencyDirectAnswerForServer(question: string): Promise<string | null> {
-  try {
-    const reply = await emergencyDirectAnswer(question, [], "");
-    if (reply?.trim() && !isVisibleFallbackReply(reply) && !isInternalRecoverySignalReply(reply)) {
-      return reply.trim();
-    }
-    return null;
-  } catch {
-    return null;
-  }
+  return recoverUserFacingReplyForServer({ question });
 }
 
 export async function routeInboundAgentMessage(

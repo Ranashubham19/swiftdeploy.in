@@ -99,8 +99,8 @@ export const env = {
     "https://integrate.api.nvidia.com/v1",
   ),
   NVIDIA_CHAT_MODEL: readFirstString(
-    ["NVIDIA_CHAT_MODEL", "NVIDIA_MODEL"],
-    "moonshotai/kimi-k2.5",
+    ["NVIDIA_CHAT_MODEL"],
+    "meta/llama-3.3-70b-instruct",
   ),
   NVIDIA_GLOBAL_MODELS: readString("NVIDIA_GLOBAL_MODELS"),
   NVIDIA_FAST_MODELS: readString("NVIDIA_FAST_MODELS"),

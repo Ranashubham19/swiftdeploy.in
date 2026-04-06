@@ -8,9 +8,9 @@
 // strongest model first, falls forward instantly on failure, and promotes
 // higher-ranked models back to the front after a cooldown.
 //
-// Set these in Vercel env vars:
-//   NVIDIA_CHAT_MODEL      = moonshotai/kimi-k2.5
-//   NVIDIA_GLOBAL_MODELS   = moonshotai/kimi-k2.5,z-ai/glm5,...
+// Set these in env vars when you want explicit routing:
+//   NVIDIA_CHAT_MODEL      = meta/llama-3.3-70b-instruct
+//   NVIDIA_GLOBAL_MODELS   = meta/llama-3.3-70b-instruct,qwen/qwen3.5-397b-a17b,...
 // -----------------------------------------------------------------------------
 
 import { env } from "@/lib/env";
@@ -65,13 +65,14 @@ type ModelHealthState = {
 };
 
 const GLOBAL_TOP_MODELS = [
-  "moonshotai/kimi-k2.5",
-  "z-ai/glm5",
-  "mistralai/mistral-large-3-675b-instruct-2512",
+  "meta/llama-3.3-70b-instruct",
   "qwen/qwen3.5-397b-a17b",
+  "mistralai/mistral-large-3-675b-instruct-2512",
+  "z-ai/glm5",
   "moonshotai/kimi-k2-instruct-0905",
   "meta/llama-3.1-405b-instruct",
   "deepseek-ai/deepseek-v3.1-terminus",
+  "moonshotai/kimi-k2.5",
   "moonshotai/kimi-k2-instruct",
   "qwen/qwen3-coder-480b-a35b-instruct",
   "moonshotai/kimi-k2-thinking",
@@ -828,6 +829,32 @@ function uniqueModels(models: string[]) {
   return result;
 }
 
+function hasExplicitModernNvidiaRoutingConfig() {
+  return [
+    process.env.NVIDIA_CHAT_MODEL,
+    process.env.NVIDIA_FAST_MODEL,
+    process.env.NVIDIA_REASONING_MODEL,
+    process.env.NVIDIA_CODE_MODEL,
+    process.env.NVIDIA_GLOBAL_MODELS,
+    process.env.NVIDIA_FAST_MODELS,
+    process.env.NVIDIA_CHAT_MODELS,
+    process.env.NVIDIA_REASONING_MODELS,
+    process.env.NVIDIA_CODE_MODELS,
+  ].some((value) => Boolean(value?.trim()));
+}
+
+function applyResilientDefaultModelOrdering(models: string[]) {
+  const unique = uniqueModels(models);
+  if (hasExplicitModernNvidiaRoutingConfig()) {
+    return unique;
+  }
+
+  const stableFirst = [...GLOBAL_TOP_MODELS].filter((model) => unique.includes(model));
+  const stableSet = new Set<string>(stableFirst);
+  const remaining = unique.filter((model) => !stableSet.has(model));
+  return [...stableFirst, ...remaining];
+}
+
 function configuredModelList(
   listValue: string,
   primaryValue: string,
@@ -898,9 +925,15 @@ function appendCandidates(
 
 function reorderModels(models: string[], preferredOrder: string[]) {
   const unique = uniqueModels(models);
+  if (hasExplicitModernNvidiaRoutingConfig() && unique.length > 0) {
+    const [explicitPrimary, ...rest] = unique;
+    const preferred = preferredOrder.filter((model) => rest.includes(model));
+    const remaining = rest.filter((model) => !preferred.includes(model));
+    return [explicitPrimary, ...preferred, ...remaining];
+  }
   const preferred = preferredOrder.filter((model) => unique.includes(model));
   const remaining = unique.filter((model) => !preferred.includes(model));
-  return [...preferred, ...remaining];
+  return applyResilientDefaultModelOrdering([...preferred, ...remaining]);
 }
 
 function modelHealthState(healthKey: string): ModelHealthState {
@@ -1449,8 +1482,6 @@ const HIGH_STAKES_INTENTS = new Set<IntentType>([
   "health",
   "law",
   "economics",
-  "technology",
-  "explain",
 ]);
 
 const STRUCTURED_RESPONSE_INTENTS = new Set<IntentType>([
@@ -1683,12 +1714,17 @@ function buildClawCloudModelPlannerDecision(input: {
 }): ClawCloudModelPlannerDecision {
   const highStakes = isHighStakesIntent(input.intent);
   const isDeep = input.responseMode === "deep";
+  const isFast = input.responseMode === "fast";
   const canJudge = input.availableCandidates > 1;
 
   let targetResponses = 1;
   let judgeEnabled = false;
 
-  if (highStakes && canJudge) {
+  // Fast mode: ALWAYS single-pass — speed is paramount
+  if (isFast) {
+    targetResponses = 1;
+    judgeEnabled = false;
+  } else if (highStakes && canJudge) {
     targetResponses = Math.min(input.availableCandidates, isDeep ? 3 : 2);
     judgeEnabled = true;
   } else if (isDeep && canJudge) {

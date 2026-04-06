@@ -1049,7 +1049,10 @@ const NEWS_PATTERNS: RegExp[] = [
 function looksLikeVagueWorldNewsRequest(question: string) {
   const normalizedQuestion = normalizeRegionalQuestion(question);
   const lower = normalizedQuestion.toLowerCase();
+  const regionMention = detectClawCloudRegionMention(normalizedQuestion);
   return (
+    !regionMention
+    &&
     /\b(update|updates?|latest|news|headlines?|top stories)\b/.test(lower)
     && /\b(today|todays|today's|current|right now|as of now)\b/.test(lower)
     && !/\b(?:about|on|for)\b\s+[a-z]/.test(lower)
@@ -1311,6 +1314,7 @@ export function buildNewsQueries(question: string): string[] {
   const normalizedQuestion = normalizeRegionalQuestion(question);
   const lower = normalizedQuestion.toLowerCase();
   const isVagueUpdateRequest = looksLikeVagueWorldNewsRequest(normalizedQuestion);
+  const regionMention = detectClawCloudRegionMention(normalizedQuestion);
   const topic = isVagueUpdateRequest ? "top world news" : (cleanedTopic(normalizedQuestion) || normalizedQuestion.trim());
   const queries = new Set<string>();
 
@@ -1325,6 +1329,19 @@ export function buildNewsQueries(question: string): string[] {
     queries.add("top world headlines today Reuters AP BBC");
     queries.add("breaking global news today");
     queries.add(`today's biggest world headlines ${currentYear()}`);
+    return [...queries];
+  }
+
+  if (
+    regionMention?.kind === "country"
+    && /\b(news|headlines?|updates?)\b/i.test(normalizedQuestion)
+    && /\b(today|latest|current|right now|as of now)\b/i.test(lower)
+    && !/\b(case|incident|war|attack|meeting|summit|ultimatum|conditions?|status|why|explained?)\b/i.test(lower)
+  ) {
+    const country = regionMention.region.countryName;
+    queries.add(`${country} top headlines today Reuters AP BBC`);
+    queries.add(`${country} breaking news today`);
+    queries.add(`${country} latest headlines ${currentYear()}`);
     return [...queries];
   }
 

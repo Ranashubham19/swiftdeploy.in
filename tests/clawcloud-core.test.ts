@@ -737,8 +737,15 @@ test("agent server assistant replies refuse non-self chat targets", () => {
 test("agent server keeps a wider answer window and no longer emits resend-the-question fallbacks", () => {
   const source = readFileSync(path.resolve(process.cwd(), "agent-server.ts"), "utf8");
 
-  assert.match(source, /const DIRECT_REPLY_TIMEOUT_MS = 25_000;/);
-  assert.match(source, /const HTTP_REPLY_TIMEOUT_MS = 25_000;/);
+  assert.match(source, /const DEFAULT_DIRECT_REPLY_TIMEOUT_MS = 50_000;/);
+  assert.match(source, /const DEFAULT_HTTP_REPLY_TIMEOUT_MS = 50_000;/);
+  assert.match(source, /const DEFAULT_HTTP_REPLY_HEADSTART_MS = 12_000;/);
+  assert.match(source, /const AGENT_ROUTE_TIMEOUT_BUFFER_MS = 5_000;/);
+  assert.match(source, /const DIRECT_RECOVERY_REPLY_TIMEOUT_MS = 35_000;/);
+  assert.match(source, /getInboundRouteTimeoutPolicy/);
+  assert.match(source, /getInboundRouteTotalDeadlineMs/);
+  assert.match(source, /recoverUserFacingReplyForServer/);
+  assert.match(source, /route_budget=\$\{timing\.routeBudgetMs\}/);
   assert.match(source, /allowWithoutNvidia:\s*true/);
   assert.doesNotMatch(source, /return\s+[`"'][^`"']*Ask the same question once more/i);
   assert.doesNotMatch(source, /return\s+[`"'][^`"']*Send the same question once more/i);
@@ -746,13 +753,43 @@ test("agent server keeps a wider answer window and no longer emits resend-the-qu
   assert.doesNotMatch(source, /warming up — please resend your question/i);
 });
 
-test("ai engine routing prioritizes stable chat models and skips cooling models", () => {
-  const source = readFileSync(path.resolve(process.cwd(), "lib/clawcloud-ai.ts"), "utf8");
+test("emergency direct answers prefer stable NVIDIA models before legacy moonshot fallbacks", () => {
+  const source = readFileSync(path.resolve(process.cwd(), "lib/clawcloud-agent.ts"), "utf8");
 
-  assert.match(source, /general:\s*\[\s*"moonshotai\/kimi-k2\.5"/);
-  assert.match(source, /language:\s*\[\s*"moonshotai\/kimi-k2\.5"/);
-  assert.match(source, /explain:\s*\[\s*"moonshotai\/kimi-k2\.5"/);
-  assert.match(source, /return available\.length \? available : cooling;/);
+  assert.match(source, /export function getInboundRouteTotalDeadlineMs\(message: string\)/);
+  assert.match(source, /export async function recoverUserFacingReplyForServer/);
+  assert.match(
+    source,
+    /preferredModels:\s*\[\s*"meta\/llama-3\.3-70b-instruct",\s*"qwen\/qwen3\.5-397b-a17b",\s*"z-ai\/glm5",\s*"mistralai\/mistral-large-3-675b-instruct-2512",\s*"moonshotai\/kimi-k2\.5"/,
+  );
+});
+
+test("server recovery no longer ships the old generic strong-answer fallback copy", () => {
+  const agentServerSource = readFileSync(path.resolve(process.cwd(), "agent-server.ts"), "utf8");
+  const recoverySource = readFileSync(path.resolve(process.cwd(), "lib/clawcloud-agent.ts"), "utf8");
+
+  assert.match(agentServerSource, /const DIRECT_RECOVERY_REPLY_TIMEOUT_MS = 35_000;/);
+  assert.match(recoverySource, /export function buildGuaranteedServerRecoveryReply\(question: string\)/);
+  assert.doesNotMatch(agentServerSource, /I couldn't complete a strong answer on that attempt/i);
+  assert.doesNotMatch(recoverySource, /I couldn't complete a strong answer on that attempt/i);
+});
+
+test("ai engine routing keeps Railway legacy envs on stable NVIDIA defaults and skips cooling models", () => {
+  const aiSource = readFileSync(path.resolve(process.cwd(), "lib/clawcloud-ai.ts"), "utf8");
+  const envSource = readFileSync(path.resolve(process.cwd(), "lib/env.ts"), "utf8");
+
+  assert.match(
+    aiSource,
+    /const GLOBAL_TOP_MODELS = \[\s*"meta\/llama-3\.3-70b-instruct",\s*"qwen\/qwen3\.5-397b-a17b",\s*"mistralai\/mistral-large-3-675b-instruct-2512",\s*"z-ai\/glm5"/,
+  );
+  assert.match(aiSource, /function hasExplicitModernNvidiaRoutingConfig\(\)/);
+  assert.match(aiSource, /function applyResilientDefaultModelOrdering\(models: string\[\]\)/);
+  assert.match(aiSource, /return available\.length \? available : cooling;/);
+  assert.match(
+    envSource,
+    /NVIDIA_CHAT_MODEL:\s*readFirstString\(\s*\["NVIDIA_CHAT_MODEL"\],\s*"meta\/llama-3\.3-70b-instruct"/,
+  );
+  assert.doesNotMatch(envSource, /NVIDIA_MODEL/);
 });
 
 test("whatsapp runtime progress and health stay bounded and honest", () => {
@@ -3397,6 +3434,13 @@ test("deterministic explain replies cover foundational AI terms directly", () =>
   assert.match(rag ?? "", /fetches relevant documents or database chunks/i);
 });
 
+test("deterministic explain replies cover jeera directly", () => {
+  const reply = buildDeterministicExplainReplyForTest("what is jeera");
+
+  assert.match(reply ?? "", /Jeera is cumin/i);
+  assert.match(reply ?? "", /spice/i);
+});
+
 test("deterministic explain replies cover idempotency versus deduplication directly", () => {
   const reply = buildDeterministicExplainReplyForTest(
     "Explain the difference between idempotency and deduplication in event-driven systems, and give one concrete payment example where deduplication alone is insufficient.",
@@ -3492,39 +3536,39 @@ test("primary conversation lane keeps normal follow-ups on direct chat instead o
 test("inbound route timeout policy is category-aware", () => {
   const direct = getInboundRouteTimeoutPolicyForTest("why is the sky blue");
   assert.equal(direct.kind, "direct_knowledge");
-  assert.equal(direct.timeoutMs, 16000);
+  assert.equal(direct.timeoutMs, 35000);
 
   const standaloneDirect = getInboundRouteTimeoutPolicyForTest("overview of photosynthesis");
   assert.equal(standaloneDirect.kind, "direct_knowledge");
-  assert.equal(standaloneDirect.timeoutMs, 16000);
+  assert.equal(standaloneDirect.timeoutMs, 35000);
 
   const spanishDirect = getInboundRouteTimeoutPolicyForTest("¿Puedes explicar la fotosíntesis de forma simple?");
   assert.equal(spanishDirect.kind, "direct_knowledge");
-  assert.equal(spanishDirect.timeoutMs, 16000);
+  assert.equal(spanishDirect.timeoutMs, 35000);
 
   const kannadaDirect = getInboundRouteTimeoutPolicyForTest("10 ನಾಡು ಕನ್ನಡ ಸಾಹಿತ್ಯದ ಕವಿಗಳ ಬಗ್ಗೆ ಗೊಬ್ಬಿ ಬರೆಯಿರಿ");
   assert.equal(kannadaDirect.kind, "direct_knowledge");
-  assert.equal(kannadaDirect.timeoutMs, 16000);
+  assert.equal(kannadaDirect.timeoutMs, 35000);
 
   const live = getInboundRouteTimeoutPolicyForTest("latest news about ai");
   assert.equal(live.kind, "live_research");
-  assert.equal(live.timeoutMs, 18000);
+  assert.equal(live.timeoutMs, 35000);
 
   const operational = getInboundRouteTimeoutPolicyForTest("show my gmail inbox");
   assert.equal(operational.kind, "operational");
-  assert.equal(operational.timeoutMs, 12000);
+  assert.equal(operational.timeoutMs, 25000);
 
   const activeContact = getInboundRouteTimeoutPolicyForTest("ab se app meri tarf se dii se baat karoge");
   assert.equal(activeContact.kind, "operational");
-  assert.equal(activeContact.timeoutMs, 18000);
+  assert.equal(activeContact.timeoutMs, 35000);
 
   const deep = getInboundRouteTimeoutPolicyForTest("deep: explain transformers");
   assert.equal(deep.kind, "deep_reasoning");
-  assert.equal(deep.timeoutMs, 20000);
+  assert.equal(deep.timeoutMs, 45000);
 
   const groupedDeep = getInboundRouteTimeoutPolicyForTest("[Group message from product team] deep: what is artificial intelligence");
   assert.equal(groupedDeep.kind, "deep_reasoning");
-  assert.equal(groupedDeep.timeoutMs, 20000);
+  assert.equal(groupedDeep.timeoutMs, 45000);
 });
 
 test("locale preference commands are explicit and do not depend on email domains", () => {

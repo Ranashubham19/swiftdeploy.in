@@ -146,9 +146,11 @@ const WHATSAPP_QR_STALE_AFTER_MS = 75_000;
 const WHATSAPP_QR_RENDER_WIDTH = 640;
 const WHATSAPP_QR_RENDER_MARGIN = 4;
 const WA_VERSION_CACHE_MS = 30 * 60_000;
-const DIRECT_REPLY_TIMEOUT_MS = 25_000;
-const HTTP_REPLY_TIMEOUT_MS = 25_000;
-const HTTP_REPLY_HEADSTART_MS = 100;
+const DEFAULT_DIRECT_REPLY_TIMEOUT_MS = 50_000;
+const DEFAULT_HTTP_REPLY_TIMEOUT_MS = 50_000;
+const DEFAULT_HTTP_REPLY_HEADSTART_MS = 12_000;
+const AGENT_ROUTE_TIMEOUT_BUFFER_MS = 5_000;
+const DIRECT_RECOVERY_REPLY_TIMEOUT_MS = 35_000;
 const WHATSAPP_TYPING_HEARTBEAT_MS = Math.max(
   900,
   Number.parseInt(process.env.WA_TYPING_HEARTBEAT_MS ?? "1100", 10) || 1_100,
@@ -4605,7 +4607,33 @@ function isEmptyOrFallback(reply: string | null | undefined, sourceMessage?: str
     (lower.startsWith("i do not have") && lower.length < 120) ||
     // Legacy connection-failure copy that should never reach the user again
     lower.includes("temporary connection issue with my ai backend") ||
-    lower.includes("temporary connection issue with my live news sources")
+    lower.includes("temporary connection issue with my live news sources") ||
+    // Clarification-request refusals — bot must answer, not ask back
+    lower.includes("tell me the context for") ||
+    lower.includes("send the exact topic in one line") ||
+    lower.includes("i can give the precise meaning") ||
+    lower.includes("so i can give the precise meaning") ||
+    lower.includes("send one topic") ||
+    lower.includes("provide me with the exact topic") ||
+    lower.includes("could you clarify what you mean") ||
+    lower.includes("please specify which") ||
+    lower.includes("can you be more specific") ||
+    lower.includes("what exactly do you mean") ||
+    lower.includes("which one do you mean") ||
+    lower.includes("please provide more context") ||
+    lower.includes("give me more details so i can") ||
+    lower.includes("tell me which") ||
+    // "Couldn't complete" fallback patterns
+    lower.includes("couldn't complete a strong answer") ||
+    lower.includes("could not complete a strong answer") ||
+    lower.includes("i couldn't complete a strong answer") ||
+    lower.includes("i can still help with a direct") ||
+    lower.includes("but i can still help with") ||
+    // Generic handoff / meta-statements
+    lower.includes("i will answer it directly") ||
+    lower.includes("i'll answer it directly") ||
+    lower.includes("send the exact topic") ||
+    lower.includes("general, food, tech, business, law, medicine, or finance")
   );
 }
 
@@ -4732,6 +4760,15 @@ function buildEmergencyProfessionalFallback(message: string) {
     ].join("\n");
   }
 
+  if (/\bwhat is jeera\b|\bdefine jeera\b|\bmeaning of jeera\b|\bwhat is cumin\b/.test(text)) {
+    return [
+      "*Jeera means cumin.*",
+      "",
+      "It is a spice made from the dried seeds of the cumin plant.",
+      "Its flavor is warm, earthy, and slightly nutty, and it is used in dishes like dal, curry, rice, and spice mixes.",
+    ].join("\n");
+  }
+
   // Send message / contact commands
   if (/\b(send|message|msg|text)\s+(to|message)\b/i.test(text) || /\bsend\s+/i.test(text)) {
     return [
@@ -4747,7 +4784,40 @@ function buildEmergencyProfessionalFallback(message: string) {
 
   // For any truly unmatched question — return a helpful user-facing message
   // so the user always gets something rather than an empty/broken reply.
-  return "⚡ My AI engine is warming up — please resend your question in a few seconds and I'll answer it fully.";
+  const normalized = message.trim().replace(/\s+/g, " ");
+  const toTitle = (value: string) => value.replace(/\b\w/g, (ch) => ch.toUpperCase());
+  const clip = (value: string) => value.replace(/[?.!]+$/g, "").trim();
+
+  const definitionMatch = normalized.match(/^(?:what is|what are|define|meaning of|explain)\s+(.+?)(?:\?|$)/i);
+  if (definitionMatch) {
+    const topic = clip(definitionMatch[1]);
+    if (topic) {
+      return [
+        `*${toTitle(topic)}*`,
+        "",
+        `Tell me the context for ${topic} in one word so I can give the precise meaning: general, food, tech, business, law, medicine, or finance.`,
+      ].join("\n");
+    }
+  }
+
+  const compareMatch = normalized.match(/\b(?:difference between|compare)\s+(.+?)\s+(?:and|vs\.?|versus)\s+(.+?)(?:\?|$)/i);
+  if (compareMatch) {
+    return [
+      `I can compare *${clip(compareMatch[1])}* and *${clip(compareMatch[2])}* directly.`,
+      "",
+      "Tell me whether you want the comparison in simple terms, a table, or a technical breakdown.",
+    ].join("\n");
+  }
+
+  if (/^(?:how to|how do i|how can i)\b/i.test(normalized)) {
+    return "Tell me the exact tool, app, language, or platform involved and I will give you the steps directly.";
+  }
+
+  if (/^(?:who is|who was|where is|when is|when was)\b/i.test(normalized)) {
+    return "Tell me the exact person, place, or event name once and I will answer it directly.";
+  }
+
+  return "Send the exact topic in one line and I will answer it directly.";
 }
 
 async function sendReply(
@@ -4890,7 +4960,11 @@ async function sendReplyLegacy(
   return true;
 }
 
-async function callNext(pathname: string, body: Record<string, unknown>): Promise<Response | null> {
+async function callNext(
+  pathname: string,
+  body: Record<string, unknown>,
+  controller?: AbortController,
+): Promise<Response | null> {
   if (!appUrl()) {
     console.error("[agent] callNext skipped: app URL is missing");
     return null;
@@ -4906,14 +4980,16 @@ async function callNext(pathname: string, body: Record<string, unknown>): Promis
     return null;
   }
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), HTTP_REPLY_TIMEOUT_MS);
+  const activeController = controller ?? new AbortController();
+  const timer = controller
+    ? null
+    : setTimeout(() => activeController.abort(), DEFAULT_HTTP_REPLY_TIMEOUT_MS);
 
   try {
     for (const secret of sharedSecrets) {
       const response = await fetch(`${appUrl()}${pathname}`, {
         method: "POST",
-        signal: controller.signal,
+        signal: activeController.signal,
         headers: {
           Authorization: `Bearer ${secret}`,
           "Content-Type": "application/json",
@@ -4938,7 +5014,58 @@ async function callNext(pathname: string, body: Record<string, unknown>): Promis
     );
     return null;
   } finally {
-    clearTimeout(timer);
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+type AgentReplyTiming = {
+  policyKind: "default" | "direct_knowledge" | "operational" | "live_research" | "deep_reasoning";
+  routeBudgetMs: number;
+  directTimeoutMs: number;
+  httpTimeoutMs: number;
+  httpHeadstartMs: number;
+};
+
+async function resolveAgentReplyTiming(message: string): Promise<AgentReplyTiming> {
+  try {
+    const {
+      getInboundRouteTimeoutPolicy,
+      getInboundRouteTotalDeadlineMs,
+    } = await import("./lib/clawcloud-agent");
+    const policy = getInboundRouteTimeoutPolicy(message);
+    const routeBudgetMs = getInboundRouteTotalDeadlineMs(message);
+    const alignedTimeoutMs = Math.max(
+      DEFAULT_DIRECT_REPLY_TIMEOUT_MS,
+      routeBudgetMs + AGENT_ROUTE_TIMEOUT_BUFFER_MS,
+    );
+    const httpHeadstartMs = policy.kind === "operational"
+      ? 1_000
+      : Math.min(
+        20_000,
+        Math.max(DEFAULT_HTTP_REPLY_HEADSTART_MS, Math.floor(routeBudgetMs * 0.4)),
+      );
+
+    return {
+      policyKind: policy.kind,
+      routeBudgetMs,
+      directTimeoutMs: alignedTimeoutMs,
+      httpTimeoutMs: alignedTimeoutMs,
+      httpHeadstartMs,
+    };
+  } catch (error) {
+    console.warn(
+      "[agent] Failed to resolve dynamic reply timing; using defaults:",
+      error instanceof Error ? error.message : error,
+    );
+    return {
+      policyKind: "default",
+      routeBudgetMs: DEFAULT_DIRECT_REPLY_TIMEOUT_MS,
+      directTimeoutMs: DEFAULT_DIRECT_REPLY_TIMEOUT_MS,
+      httpTimeoutMs: DEFAULT_HTTP_REPLY_TIMEOUT_MS,
+      httpHeadstartMs: DEFAULT_HTTP_REPLY_HEADSTART_MS,
+    };
   }
 }
 
@@ -4957,6 +5084,7 @@ async function runDirectAgentReply(
   userId: string,
   message: string,
   options?: { allowWithoutNvidia?: boolean },
+  timeoutMs = DEFAULT_DIRECT_REPLY_TIMEOUT_MS,
 ): Promise<string | null> {
   // If local NVIDIA key is missing, PATH A often degrades to generic templates.
   // Prefer PATH B (/api/agent/message on app_url) for stronger answers, but
@@ -4969,7 +5097,7 @@ async function runDirectAgentReply(
   try {
     const routeInboundAgentMessage = await getDirectRouteInboundAgentMessage();
     const timeout = new Promise<string | null>((resolve) => {
-      setTimeout(() => resolve(null), DIRECT_REPLY_TIMEOUT_MS);
+      setTimeout(() => resolve(null), timeoutMs);
     });
 
     return await Promise.race([routeInboundAgentMessage(userId, message), timeout]);
@@ -4986,16 +5114,46 @@ function isUsableAgentReply(reply: string | null | undefined, sourceMessage: str
   return Boolean(reply?.trim() && !isEmptyOrFallback(reply, sourceMessage));
 }
 
-async function runHttpAgentReply(userId: string, message: string): Promise<string | null> {
+async function recoverUserFacingAgentReply(
+  sourceMessage: string,
+  candidateReply?: string | null,
+): Promise<string | null> {
+  try {
+    const { recoverUserFacingReplyForServer } = await import("./lib/clawcloud-agent");
+    return await recoverUserFacingReplyForServer({
+      question: sourceMessage,
+      candidateReply,
+    });
+  } catch (error) {
+    console.error(
+      "[agent] Server-side direct-answer recovery failed:",
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  }
+}
+
+async function runHttpAgentReply(
+  userId: string,
+  message: string,
+  timeoutMs = DEFAULT_HTTP_REPLY_TIMEOUT_MS,
+): Promise<string | null> {
   if (!appUrl()) {
     return null;
   }
 
-  const response = await callNext("/api/agent/message", {
-    userId,
-    message,
-    _internal: true,
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response: Response | null = null;
+  try {
+    response = await callNext("/api/agent/message", {
+      userId,
+      message,
+      _internal: true,
+    }, controller);
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (!response?.ok) {
     if (response) {
@@ -5018,9 +5176,13 @@ async function runBestAvailableAgentReply(
   routedText: string,
   sourceText: string,
 ): Promise<{ reply: string | null; path: "A" | "B" | null }> {
-  const directPromise = runDirectAgentReply(userId, routedText);
+  const timing = await resolveAgentReplyTiming(sourceText);
+  const directPromise = runDirectAgentReply(userId, routedText, undefined, timing.directTimeoutMs);
   const preferHttpFirst = !ensureCanonicalNvidiaEnv().value && Boolean(appUrl());
-  const headstartMs = preferHttpFirst ? 0 : HTTP_REPLY_HEADSTART_MS;
+  const headstartMs = preferHttpFirst ? 0 : timing.httpHeadstartMs;
+  console.log(
+    `[agent] Reply race timing for ${userId}: policy=${timing.policyKind} route_budget=${timing.routeBudgetMs} direct=${timing.directTimeoutMs} http=${timing.httpTimeoutMs} headstart=${headstartMs}`,
+  );
   const pendingMarker = Symbol("pending");
   const earlyDirect: string | null | symbol = await Promise.race([
     directPromise,
@@ -5038,7 +5200,7 @@ async function runBestAvailableAgentReply(
     candidates.push({ path: "A", promise: directPromise });
   }
   if (appUrl()) {
-    candidates.push({ path: "B", promise: runHttpAgentReply(userId, routedText) });
+    candidates.push({ path: "B", promise: runHttpAgentReply(userId, routedText, timing.httpTimeoutMs) });
   }
 
   if (!candidates.length) {
@@ -5084,7 +5246,7 @@ async function runBestAvailableAgentReply(
     );
     const degradedDirect = await runDirectAgentReply(userId, routedText, {
       allowWithoutNvidia: true,
-    });
+    }, timing.directTimeoutMs);
     if (isUsableAgentReply(degradedDirect, sourceText)) {
       return { reply: degradedDirect, path: "A" };
     }
@@ -5219,30 +5381,28 @@ async function handleInbound(
     console.log(
       `[agent] PATH ${bestReply.path ?? "fallback"} success for ${userId} (${finalReply.length} chars)`,
     );
-  } else if (bestReply.reply?.trim()) {
-    finalReply = bestReply.reply.trim();
-    console.warn(
-      `[agent] Best-effort reply race produced a low-confidence reply for ${userId}; emergency fallback guard remains armed`,
-    );
   } else {
-    console.warn(`[agent] Reply race returned no acceptable answer for ${userId}`);
+    console.warn(
+      `[agent] Reply race did not yield a sendable primary answer for ${userId}; promoting direct recovery`,
+    );
   }
 
   if (!finalReply || isEmptyOrFallback(finalReply, text)) {
-    console.warn(`[agent] All paths failed for ${userId} — using direct emergency answer`);
-    // Try one more time with a direct AI call instead of returning an internal signal
-    try {
-      const { emergencyDirectAnswerForServer } = await import("./lib/clawcloud-agent");
-      const emergencyReply = await Promise.race([
-        emergencyDirectAnswerForServer?.(text) ?? Promise.resolve(null),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000)),
-      ]);
-      if (emergencyReply?.trim() && !isEmptyOrFallback(emergencyReply, text)) {
-        finalReply = emergencyReply.trim();
-        console.log(`[agent] Emergency direct answer succeeded for ${userId} (${finalReply.length} chars)`);
-      }
-    } catch {
-      // ignore emergency answer failure
+    console.warn(
+      `[agent] Primary answer and recovery models did not return a sendable reply for ${userId}; using deterministic last-resort recovery`,
+    );
+    const recoveredReply = await Promise.race([
+      recoverUserFacingAgentReply(text, bestReply.reply),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), DIRECT_RECOVERY_REPLY_TIMEOUT_MS)),
+    ]);
+    if (recoveredReply?.trim() && !isEmptyOrFallback(recoveredReply, text)) {
+      finalReply = recoveredReply.trim();
+      console.log(`[agent] Direct recovery answer succeeded for ${userId} (${finalReply.length} chars)`);
+    } else if (bestReply.reply?.trim() && !bestReply.reply.includes("__LOW_CONFIDENCE")) {
+      finalReply = bestReply.reply.trim();
+      console.warn(
+        `[agent] Sending best available reply for ${userId} after recovery exhausted; no generic fallback was used`,
+      );
     }
   }
 
