@@ -66,18 +66,18 @@ export async function semanticDomainClassify(question: string): Promise<ExpertDo
 
 const CODING_REVIEW_MODELS = [
   "moonshotai/kimi-k2.5",
-  "z-ai/glm5",
+  "moonshotai/kimi-k2-instruct-0905",
   "qwen/qwen3-coder-480b-a35b-instruct",
   "mistralai/mistral-large-3-675b-instruct-2512",
   "meta/llama-3.3-70b-instruct",
-  "meta/llama-3.1-405b-instruct",
+  "meta/llama-3.3-70b-instruct",
 ];
 
 const RESEARCH_MEMO_MODELS = [
   "moonshotai/kimi-k2.5",
-  "z-ai/glm5",
+  "moonshotai/kimi-k2-instruct-0905",
   "mistralai/mistral-large-3-675b-instruct-2512",
-  "meta/llama-3.1-405b-instruct",
+  "meta/llama-3.3-70b-instruct",
   "meta/llama-3.3-70b-instruct",
 ];
 

@@ -131,11 +131,17 @@ function cleanupStaleEntries() {
 // ---------------------------------------------------------------------------
 
 const MODEL_COST_PER_1K_TOKENS: Record<string, number> = {
+  // OpenAI models (cheapest first)
+  "gpt-4.1-nano": 0.0001,
+  "gpt-4o-mini": 0.00015,
+  "gpt-4.1-mini": 0.0004,
+  "gpt-4o": 0.0025,
+  // NVIDIA models
   "moonshotai/kimi-k2.5": 0.0012,
-  "z-ai/glm5": 0.0010,
+  "google/gemma-2-27b-it": 0.0004,
   "mistralai/mistral-large-3-675b-instruct-2512": 0.0020,
   "qwen/qwen3.5-397b-a17b": 0.0015,
-  "meta/llama-3.1-405b-instruct": 0.0016,
+  "nvidia/llama-3.3-nemotron-super-49b-v1": 0.0008,
   "meta/llama-3.3-70b-instruct": 0.0006,
   "deepseek-ai/deepseek-v3.1-terminus": 0.0014,
   "moonshotai/kimi-k2-instruct-0905": 0.0010,

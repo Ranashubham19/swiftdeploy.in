@@ -174,8 +174,10 @@ import {
   buildUnhandledWhatsAppOperationalClarificationForTest,
   buildDeterministicAssistantMetaReplyForTest,
   buildDeterministicConversationReplyForTest,
+  buildUnsupportedWhatsAppCallReplyForTest,
   buildLocalizedCapabilityReplyForTest,
   buildLocalizedCapabilityReplyFromMessageForTest,
+  buildWhatsAppDeliveryFollowUpReplyForTest,
   buildWhatsAppHistoryProfessionalSummaryForTest,
   detectDirectConversationSignalForTest,
   detectNativeLanguageDirectAnswerLaneIntentForTest,
@@ -760,7 +762,7 @@ test("emergency direct answers prefer stable NVIDIA models before legacy moonsho
   assert.match(source, /export async function recoverUserFacingReplyForServer/);
   assert.match(
     source,
-    /preferredModels:\s*\[\s*"meta\/llama-3\.3-70b-instruct",\s*"qwen\/qwen3\.5-397b-a17b",\s*"z-ai\/glm5",\s*"mistralai\/mistral-large-3-675b-instruct-2512",\s*"moonshotai\/kimi-k2\.5"/,
+    /preferredModels:\s*\[\s*"meta\/llama-3\.3-70b-instruct",\s*"qwen\/qwen3\.5-397b-a17b",\s*"moonshotai\/kimi-k2-instruct-0905",\s*"mistralai\/mistral-large-3-675b-instruct-2512",\s*"moonshotai\/kimi-k2\.5",\s*"gpt-4o"/,
   );
 });
 
@@ -780,7 +782,7 @@ test("ai engine routing keeps Railway legacy envs on stable NVIDIA defaults and 
 
   assert.match(
     aiSource,
-    /const GLOBAL_TOP_MODELS = \[\s*"meta\/llama-3\.3-70b-instruct",\s*"qwen\/qwen3\.5-397b-a17b",\s*"mistralai\/mistral-large-3-675b-instruct-2512",\s*"z-ai\/glm5"/,
+    /const GLOBAL_TOP_MODELS = \[[\s\S]*?"google\/gemma-2-27b-it"[\s\S]*?"gpt-4o-mini"/,
   );
   assert.match(aiSource, /function hasExplicitModernNvidiaRoutingConfig\(\)/);
   assert.match(aiSource, /function applyResilientDefaultModelOrdering\(models: string\[\]\)/);
@@ -1321,7 +1323,7 @@ test("dashboard journal messages preserve sanitized model audit trails", () => {
       ],
       judge: {
         used: true,
-        model: "z-ai/glm5",
+        model: "moonshotai/kimi-k2-instruct-0905",
         winnerModel: "mistralai/mistral-large-3-675b-instruct-2512",
         confidence: "high",
         materialDisagreement: true,
@@ -4045,6 +4047,24 @@ test("assistant meta prompts get deterministic professional acknowledgements", (
   assert.match(parametersReply ?? "", /specific behavior/i);
 });
 
+test("assistant meta preferences do not hijack concrete technical tasks", () => {
+  const reply = buildDeterministicAssistantMetaReplyForTest(
+    "ok now explain me the n queen problem in detail and also give its code in russian language",
+  );
+  assert.equal(reply, null);
+});
+
+test("full inbound route answers detailed n-queens requests instead of drifting into meta acknowledgements", async () => {
+  const result = await routeInboundAgentMessageResult(
+    "test-user",
+    "ok now explain me the n queen problem in detail and also give its code in russian language",
+  );
+
+  assert.match(result.response ?? "", /N-Queens/i);
+  assert.match(result.response ?? "", /```/i);
+  assert.doesNotMatch(result.response ?? "", /keep replies more disciplined from here/i);
+});
+
 test("full inbound route keeps assistant-parameters prompts out of the short-definition lane", async () => {
   const result = await routeInboundAgentMessageResult("test-user", "what is your parameters");
   assert.match(result.response ?? "", /raw internal model parameters/i);
@@ -4945,6 +4965,22 @@ test("send-message parsing survives soft prefixes and understanding-layer typo c
   assert.equal(corrected?.message, "call me when free");
 });
 
+test("send-message parsing strips trailing behalf noise and blocks placeholder carry-over text", () => {
+  const stripped = parseSendMessageCommand("send hii to mohan on my behalf");
+  assert.ok(stripped);
+  assert.equal(stripped?.kind, "contacts");
+  assert.equal(normalizeContactName(stripped?.contactName ?? ""), "mohan");
+  assert.equal(stripped?.message, "hii");
+
+  const placeholder = analyzeSendMessageCommandSafety("send it to mohan room mate");
+  assert.ok(placeholder && !placeholder.allowed);
+  if (placeholder && !placeholder.allowed) {
+    assert.equal(placeholder.issue, "ambiguous_message");
+    assert.equal(normalizeContactName(placeholder.parsed.contactName), "mohan room mate");
+    assert.equal(placeholder.parsed.message, "it");
+  }
+});
+
 test("send-message parsing understands abstract drafting requests for both send and reply commands", () => {
   const sendParsed = parseSendMessageCommand(
     "send a professional thanku note to Priyanka for helping me in my todays exam and that to in hindi",
@@ -5661,6 +5697,19 @@ test("near-miss WhatsApp operational prompts fail closed with a WhatsApp clarifi
   assert.match(contactClarification?.reply ?? "", /Talk to Maa on my behalf/i);
 });
 
+test("unsupported direct call commands fail closed into a safe WhatsApp send suggestion", () => {
+  const reply = buildUnsupportedWhatsAppCallReplyForTest("call Jaideep right now");
+  assert.match(reply ?? "", /can't place a voice call to Jaideep/i);
+  assert.match(reply ?? "", /Send "Call me when free" to Jaideep/i);
+});
+
+test("full inbound route keeps unsupported call commands out of generic reliability fallbacks", async () => {
+  const result = await routeInboundAgentMessageResult("test-user", "call Jaideep right now");
+  assert.match(result.response ?? "", /can't place a voice call to Jaideep/i);
+  assert.match(result.response ?? "", /Send "Call me when free" to Jaideep/i);
+  assert.doesNotMatch(result.response ?? "", /reliable final answer/i);
+});
+
 test("final reply pipeline preserves operational WhatsApp history clarifications instead of collapsing them", async () => {
   const result = await finalizeAgentReplyForTest({
     locale: "en",
@@ -5737,6 +5786,22 @@ test("active-contact Hinglish status and stop replies stay in Roman Hinglish thr
   });
   assert.match(afterStop.response ?? "", /Koi active contact mode abhi chal nahi raha hai\./i);
   assert.doesNotMatch(afterStop.response ?? "", /No active contact mode is running right now/i);
+});
+
+test("delivery complaints stay in the WhatsApp lane instead of leaking into general routing", () => {
+  const reply = buildWhatsAppDeliveryFollowUpReplyForTest(
+    "But message send nhi hua uske contact mai",
+    [
+      {
+        role: "assistant",
+        content: "Message submitted to WhatsApp for Mohan roommate (+919546942365). Delivery confirmation is pending.",
+      },
+    ],
+  );
+
+  assert.match(reply ?? "", /accepted by WhatsApp, but delivery is still unconfirmed/i);
+  assert.match(reply ?? "", /Mohan roommate \(\+919546942365\)/i);
+  assert.match(reply ?? "", /resend it/i);
 });
 
 test("active-contact status recovery plan rebuilds real status replies instead of generic fallback copy", () => {
@@ -6993,6 +7058,14 @@ test("current-affairs verification requests build stronger event queries", () =>
   assert.ok(tankerArrivalQueries.some((query) => /russia/i.test(query) && /cuba/i.test(query)));
   assert.ok(tankerArrivalQueries.some((query) => /barrels|cargo/i.test(query)));
   assert.ok(tankerArrivalQueries.some((query) => /arrived|anchored|reached/i.test(query)));
+});
+
+test("current-affairs query builder normalizes common israel misspellings inside live-news prompts", () => {
+  const queries = buildCurrentAffairsQueries("what is the the news of iran and iseral of today tell me in chinese");
+  assert.ok(queries.length > 0);
+  assert.ok(queries.some((query) => /iran/i.test(query)));
+  assert.ok(queries.some((query) => /israel/i.test(query)));
+  assert.ok(queries.every((query) => !/iseral/i.test(query)));
 });
 
 test("current-affairs demand answers stay evidence-first when only low-trust wrapped headlines are available", () => {

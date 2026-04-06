@@ -1241,7 +1241,7 @@ export async function translateMessage(
   const sourceLanguageName = detectedSourceLocale ? (localeNames[detectedSourceLocale] ?? null) : null;
   const indicModels = (isIndicSource || isSanskritTarget) ? [
     "qwen/qwen3.5-397b-a17b",
-    "meta/llama-3.1-405b-instruct",
+    "meta/llama-3.3-70b-instruct",
     "deepseek-ai/deepseek-v3.1-terminus",
     "moonshotai/kimi-k2.5",
     "mistralai/mistral-large-3-675b-instruct-2512",
@@ -1467,7 +1467,7 @@ export async function enforceClawCloudReplyLanguage(input: {
         temperature: 0.05,
         preferredModels: [
           "qwen/qwen3.5-397b-a17b",
-          "meta/llama-3.1-405b-instruct",
+          "meta/llama-3.3-70b-instruct",
           "deepseek-ai/deepseek-v3.1-terminus",
           "moonshotai/kimi-k2.5",
           "mistralai/mistral-large-3-675b-instruct-2512",

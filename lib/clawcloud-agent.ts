@@ -611,7 +611,7 @@ const LEGACY_RECOVERY_MODELS: Partial<Record<IntentType, string[]>> = {
     "moonshotai/kimi-k2-instruct-0905",
   ],
   math: [
-    "z-ai/glm5",
+    "moonshotai/kimi-k2-instruct-0905",
     "meta/llama-3.3-70b-instruct",
     "moonshotai/kimi-k2-instruct-0905",
   ],
@@ -1217,7 +1217,7 @@ const RECOVERY_MODELS: Partial<Record<IntentType, string[]>> = {
     "qwen/qwen3-coder-480b-a35b-instruct",
   ],
   math: [
-    "z-ai/glm5",
+    "moonshotai/kimi-k2-instruct-0905",
     "meta/llama-3.3-70b-instruct",
     "moonshotai/kimi-k2-instruct-0905",
     "deepseek-ai/deepseek-v3.1",
@@ -1250,7 +1250,7 @@ const RECOVERY_MODELS: Partial<Record<IntentType, string[]>> = {
   explain: [
     "meta/llama-3.3-70b-instruct",
     "mistralai/mistral-large-3-675b-instruct-2512",
-    "z-ai/glm5",
+    "moonshotai/kimi-k2-instruct-0905",
   ],
   economics: [
     "meta/llama-3.3-70b-instruct",
@@ -1379,10 +1379,10 @@ async function emergencyDirectAnswer(
     preferredModels: [
       "meta/llama-3.3-70b-instruct",
       "qwen/qwen3.5-397b-a17b",
-      "z-ai/glm5",
+      "moonshotai/kimi-k2-instruct-0905",
       "mistralai/mistral-large-3-675b-instruct-2512",
       "moonshotai/kimi-k2.5",
-      "moonshotai/kimi-k2-instruct-0905",
+      "gpt-4o",
     ],
     maxTokens: 1000,
     fallback: "",
@@ -1679,7 +1679,7 @@ const MULTILINGUAL_NATIVE_ANSWER_ALLOWED_INTENTS = new Set<IntentType>([
 
 const MULTILINGUAL_DIRECT_ANSWER_PREFERRED_MODELS = [
   "moonshotai/kimi-k2-instruct-0905",
-  "z-ai/glm5",
+  "moonshotai/kimi-k2-instruct-0905",
   "qwen/qwen3.5-397b-a17b",
   "mistralai/mistral-large-3-675b-instruct-2512",
 ];
@@ -4294,9 +4294,38 @@ type AssistantMetaPreferenceSignal = {
   wantsAccuracy: boolean;
 };
 
+function looksLikeCurrentTaskRequestDisguisedAsMeta(message: string) {
+  const normalized = normalizeClawCloudUnderstandingMessage(message).toLowerCase().trim();
+  if (!normalized) {
+    return false;
+  }
+
+  if (
+    /^(?:explain|solve|write|give|provide|show|tell me|what is|what are|who is|who was|where is|when is|when was|how to|how do i|how can i|compare|difference between|translate|summarize)\b/.test(normalized)
+  ) {
+    return true;
+  }
+
+  return (
+    /\b(?:problem|algorithm|code|program|function|class|query|sql|story|plot|movie|series|drama|news|history|war|weather|price|capital|essay|email|message|bug|error|issue|topic)\b/.test(normalized)
+    && /\b(?:explain|solve|write|give|provide|show)\b/.test(normalized)
+  );
+}
+
 function detectAssistantMetaPreferenceSignal(message: string): AssistantMetaPreferenceSignal | null {
   const normalized = normalizeClawCloudUnderstandingMessage(message).toLowerCase().trim();
   if (!normalized) {
+    return null;
+  }
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  const hasPersistentPreferenceCue =
+    /\b(?:from now(?:\s+onward)?|from here|going forward|keep|stay|be|sound|stop|don't|do not)\b/.test(normalized);
+  const isShortPureMetaRequest =
+    words.length <= 8
+    && /\b(?:reply|respond|response|answer|answers|replies|be|keep|make|stay|sound|detail|detailed|brief|short|concise|professional|formal|polished|accurate|accuracy|correct|precise|hallucinat(?:e|ing|ion)|guess(?:ing)?|fast|faster|slow)\b/.test(normalized);
+
+  if ((!hasPersistentPreferenceCue && !isShortPureMetaRequest) || looksLikeCurrentTaskRequestDisguisedAsMeta(normalized)) {
     return null;
   }
 
@@ -4310,7 +4339,8 @@ function detectAssistantMetaPreferenceSignal(message: string): AssistantMetaPref
       && /\b(?:reply|response|respond|answer)\b/.test(normalized)
     );
   const wantsMoreDetail =
-    /\b(?:answer|reply|respond|explain|write|make)\b.{0,24}\b(?:in\s+detail|detailed|detailled|step\s+by\s+step|fully|more\s+detail|full\s+answer|complete\s+answer|long\s+answer|longer\s+answer)\b/.test(normalized)
+    /\b(?:answer|reply|respond|be|keep|make)\b.{0,24}\b(?:in\s+detail|detailed|detailled|step\s+by\s+step|fully|more\s+detail|full\s+answer|complete\s+answer|long\s+answer|longer\s+answer)\b/.test(normalized)
+    || /\b(?:from now(?:\s+onward)?|from here|going forward)\b.{0,24}\b(?:detail|detailed|full|complete|longer)\b/.test(normalized)
     || /\b(?:give|need|want)\b.{0,16}\b(?:a\s+)?(?:detailed|full|complete|long)\s+answer\b/.test(normalized);
   const wantsBriefer =
     /\b(?:keep|make|be|answer|reply|respond|write)\b.{0,20}\b(?:brief|short|shorter|concise|direct)\b/.test(normalized)
@@ -4442,6 +4472,61 @@ function buildDeterministicAssistantMetaReply(message: string) {
   return null;
 }
 
+function extractUnsupportedWhatsAppCallTarget(message: string) {
+  const normalized = stripClawCloudConversationalLeadIn(
+    normalizeClawCloudUnderstandingMessage(String(message ?? "")).trim(),
+  );
+  if (!normalized) {
+    return null;
+  }
+
+  if (
+    parseSendMessageCommand(normalized) !== null
+    || parseWhatsAppActiveContactSessionCommand(normalized).type !== "none"
+    || looksLikeWhatsAppHistoryQuestion(normalized)
+    || parseSaveContactCommand(normalized) !== null
+    || detectReminderIntent(normalized.toLowerCase()).intent !== "unknown"
+  ) {
+    return null;
+  }
+
+  const englishMatch = normalized.match(
+    /^(?:please\s+)?(?:call|dial|ring|phone)\s+(.+?)(?:\s+(?:right\s+now|now|immediately|on\s+whatsapp|via\s+whatsapp))?[.?!]*$/i,
+  );
+  const hindiMatch = normalized.match(
+    /^(.+?)\s+ko\s+call\s+kar(?:o|do|de|dena|dijiye)?[.?!]*$/i,
+  );
+  const rawTarget = englishMatch?.[1] ?? hindiMatch?.[1] ?? "";
+  const cleanedTarget = normalizeWhatsAppActiveContactSessionLabel(rawTarget)
+    .replace(/\b(?:right\s+now|now|immediately)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (
+    !cleanedTarget
+    || cleanedTarget.split(/\s+/).length > 5
+    || /\b(?:when|if|because|that|free|later)\b/i.test(cleanedTarget)
+  ) {
+    return null;
+  }
+
+  return cleanedTarget;
+}
+
+function buildUnsupportedWhatsAppCallReply(message: string) {
+  const target = extractUnsupportedWhatsAppCallTarget(message);
+  if (!target) {
+    return null;
+  }
+
+  return [
+    `I can't place a voice call to ${target} from here.`,
+    "",
+    "I can still help with the WhatsApp part.",
+    `Say: _Send "Call me when free" to ${target}_ and I will queue the message safely.`,
+  ].join("\n");
+}
+
 function looksLikeAssistantReplyRepairRequest(message: string) {
   const normalized = normalizeClawCloudUnderstandingMessage(message).toLowerCase().trim();
   if (!normalized) {
@@ -4484,6 +4569,10 @@ function extractLatestAssistantRepairContext(
 
 export function buildDeterministicAssistantMetaReplyForTest(message: string) {
   return buildDeterministicAssistantMetaReply(message)?.reply ?? null;
+}
+
+export function buildUnsupportedWhatsAppCallReplyForTest(message: string) {
+  return buildUnsupportedWhatsAppCallReply(message);
 }
 
 export function looksLikeAssistantReplyRepairRequestForTest(message: string) {
@@ -13009,6 +13098,24 @@ async function buildInboundAgentTimeoutResult(
     };
   }
 
+  const unsupportedWhatsAppCallReply = buildUnsupportedWhatsAppCallReply(normalizedMessage);
+  if (unsupportedWhatsAppCallReply) {
+    return {
+      response: unsupportedWhatsAppCallReply,
+      liveAnswerBundle: null,
+      modelAuditTrail: null,
+    };
+  }
+
+  const deterministicCodingReply = buildDeterministicCodingReply(normalizedMessage);
+  if (deterministicCodingReply) {
+    return {
+      response: deterministicCodingReply,
+      liveAnswerBundle: null,
+      modelAuditTrail: null,
+    };
+  }
+
   if (looksLikeClawCloudCapabilityQuestion(normalizedMessage)) {
     return {
       response: normalizeReplyForClawCloudDisplay(buildLocalizedCapabilityReplyFromMessage(normalizedMessage)),
@@ -13690,6 +13797,22 @@ async function routeInboundAgentMessageCore(
         : "send_message",
       startedAt: routeStartedAt,
       reply: protectedWhatsAppClarification.reply,
+    });
+  }
+
+  const unsupportedWhatsAppCallReply = buildUnsupportedWhatsAppCallReply(trimmed);
+  if (unsupportedWhatsAppCallReply) {
+    const replyLanguage = await resolveReplyLocale(trimmed);
+
+    return finalizeAgentReply({
+      userId,
+      locale: replyLanguage.locale,
+      preserveRomanScript: replyLanguage.preserveRomanScript,
+      question: trimmed,
+      intent: "send_message",
+      category: "send_message",
+      startedAt: routeStartedAt,
+      reply: unsupportedWhatsAppCallReply,
     });
   }
 
@@ -14482,7 +14605,7 @@ async function routeInboundAgentMessageCore(
           temperature: 0.05,
           preferredModels: [
             "qwen/qwen3.5-397b-a17b",
-            "meta/llama-3.1-405b-instruct",
+            "meta/llama-3.3-70b-instruct",
             "deepseek-ai/deepseek-v3.1-terminus",
           ],
         }),
@@ -14585,7 +14708,7 @@ async function routeInboundAgentMessageCore(
           temperature: 0.05,
           preferredModels: [
             "qwen/qwen3.5-397b-a17b",
-            "meta/llama-3.1-405b-instruct",
+            "meta/llama-3.3-70b-instruct",
             "deepseek-ai/deepseek-v3.1-terminus",
           ],
         }),
@@ -14732,6 +14855,21 @@ async function routeInboundAgentMessageCore(
   ]);
   const locale = localeState.locale;
   const localeIsExplicit = localeState.explicit;
+
+  const deliveryFollowUpReply = buildWhatsAppDeliveryFollowUpReply(trimmed, memory.recentTurns);
+  if (deliveryFollowUpReply) {
+    return finalizeAgentReply({
+      userId,
+      locale,
+      preserveRomanScript: false,
+      question: trimmed,
+      intent: "send_message",
+      category: "send_message",
+      startedAt: routeStartedAt,
+      reply: deliveryFollowUpReply,
+    });
+  }
+
   if (looksLikeAssistantReplyRepairRequest(trimmed)) {
     const repairContext = extractLatestAssistantRepairContext(memory.recentTurns);
     const previousQuestion = repairContext
@@ -14813,7 +14951,7 @@ async function routeInboundAgentMessageCore(
       reply: [
         "That previous reply was off-topic.",
         "",
-        "Send the same question again in one line and I will answer it directly.",
+        "Repeat the exact question or task once and I will answer that directly.",
       ].join("\n"),
     });
   }
@@ -19563,6 +19701,110 @@ async function buildWhatsAppHistoryNoRowsReply(input: {
   return "I couldn't find matching WhatsApp messages. Tell me the contact name or a keyword from the chat and I'll check it.";
 }
 
+function extractRecentWhatsAppDeliveryFollowUpContext(
+  recentTurns: Array<{ role: "user" | "assistant"; content: string }>,
+) {
+  const lastAssistantTurn = [...recentTurns]
+    .reverse()
+    .find((turn) => turn.role === "assistant")
+    ?.content
+    ?.trim();
+  if (!lastAssistantTurn) {
+    return null;
+  }
+
+  const patterns: Array<{
+    status: "pending" | "delivered" | "failed";
+    regex: RegExp;
+  }> = [
+    {
+      status: "pending",
+      regex: /(?:message|reply)\s+(?:resubmitted to whatsapp|submitted to whatsapp)\s+for\s+(.+?)\.\s+delivery confirmation is pending\./i,
+    },
+    {
+      status: "pending",
+      regex: /an identical (?:message|reply) for\s+(.+?)\s+is already pending delivery\./i,
+    },
+    {
+      status: "pending",
+      regex: /(.+?)\s+ko\s+(?:reply|message)\s+whatsapp\s+par\s+bhej\s+diya\.\s+delivery confirm hone ka wait hai\./i,
+    },
+    {
+      status: "delivered",
+      regex: /(?:message|reply)\s+delivered to\s+(.+?)\./i,
+    },
+    {
+      status: "failed",
+      regex: /i couldn't send the whatsapp message to\s+(.+?)\./i,
+    },
+  ];
+
+  for (const pattern of patterns) {
+    const match = lastAssistantTurn.match(pattern.regex);
+    if (match?.[1]) {
+      return {
+        status: pattern.status,
+        targetLabel: match[1].trim(),
+      };
+    }
+  }
+
+  return null;
+}
+
+function looksLikeWhatsAppDeliveryComplaint(message: string) {
+  const normalized = normalizeClawCloudUnderstandingMessage(String(message ?? "")).toLowerCase().trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    /\b(?:message|msg|reply)\b.{0,20}\b(?:send|sent|delivery|deliver(?:ed|y))\b.{0,20}\b(?:nhi|nahi|not|didn't|didnt|wasn't|wasnt|failed|pending|hua)\b/.test(normalized)
+    || /\b(?:nhi hua|nahi hua|not delivered|wasn't delivered|wasnt delivered|didn't send|didnt send|pending delivery)\b/.test(normalized)
+    || /\b(?:uske\s+contact|their\s+contact)\b/.test(normalized)
+  );
+}
+
+function buildWhatsAppDeliveryFollowUpReply(
+  message: string,
+  recentTurns: Array<{ role: "user" | "assistant"; content: string }>,
+) {
+  if (!looksLikeWhatsAppDeliveryComplaint(message)) {
+    return null;
+  }
+
+  const context = extractRecentWhatsAppDeliveryFollowUpContext(recentTurns);
+  if (!context) {
+    return null;
+  }
+
+  const targetSuffix = context.targetLabel ? ` to ${context.targetLabel}` : "";
+  switch (context.status) {
+    case "failed":
+      return [
+        `The earlier WhatsApp send${targetSuffix} did not complete.`,
+        "",
+        "Tell me the exact contact name or full number and I will retry it safely.",
+      ].join("\n");
+
+    case "delivered":
+      return [
+        `The earlier WhatsApp send${targetSuffix} was already marked delivered on my side.`,
+        "",
+        "If the person still says they did not receive it, tell me to resend the same text or send a corrected version to the exact contact.",
+      ].join("\n");
+
+    case "pending":
+    default:
+      return [
+        `The earlier WhatsApp send${targetSuffix} was accepted by WhatsApp, but delivery is still unconfirmed.`,
+        "",
+        "That usually means the number is offline, unreachable, not on WhatsApp, or the delivery receipt has not arrived yet.",
+        "If you want, tell me to resend it to the exact contact or send the full number and I will try again.",
+      ].join("\n");
+  }
+}
+
 function inferRecentWhatsAppContactFollowUpIntent(
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>,
 ): WhatsAppPendingContactResolution["kind"] | null {
@@ -19626,6 +19868,13 @@ export function inferRecentWhatsAppContactFollowUpIntentForTest(
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>,
 ) {
   return inferRecentWhatsAppContactFollowUpIntent(recentTurns);
+}
+
+export function buildWhatsAppDeliveryFollowUpReplyForTest(
+  message: string,
+  recentTurns: Array<{ role: "user" | "assistant"; content: string }>,
+) {
+  return buildWhatsAppDeliveryFollowUpReply(message, recentTurns);
 }
 
 export function extractWhatsAppLooseContactFollowUpTargetForTest(message: string) {
@@ -20667,6 +20916,14 @@ function formatWhatsAppSendSafetyReply(
       ].join("\n");
     }
 
+    case "ambiguous_message":
+      return [
+        "I couldn't safely send a placeholder WhatsApp message like \"it\" or \"same message\".",
+        "",
+        "Tell me the exact message text you want me to send now.",
+        'Example: _Send "Hi Mohan, how are you?" to Mohan roommate_',
+      ].join("\n");
+
     case "conditional_send":
       return [
         "I don't auto-send conditional or chained WhatsApp instructions.",
@@ -21367,9 +21624,10 @@ function buildGuaranteedContextualRecoveryReply(question: string) {
   const cleaned = normalizeClawCloudUnderstandingMessage(question).replace(/\s+/g, " ").trim();
   const toTitle = (value: string) => value.replace(/\b\w/g, (ch) => ch.toUpperCase());
   const clip = (value: string) => value.replace(/[?.!]+$/g, "").trim();
+  const excerpt = clip(cleaned).slice(0, 80);
 
   if (!cleaned) {
-    return "Send the exact topic or task in one line and I will answer it directly.";
+    return "Reply with the exact question or task and I will answer that directly.";
   }
 
   const definitionMatch = cleaned.match(/^(?:what is|what are|define|meaning of|explain)\s+(.+?)(?:\?|$)/i);
@@ -21401,7 +21659,9 @@ function buildGuaranteedContextualRecoveryReply(question: string) {
     return "Tell me the exact person, place, or event name once and I will answer it directly.";
   }
 
-  return "Send the exact topic in one line and I will answer it directly.";
+  return excerpt
+    ? `I couldn't safely recover a complete reply for *${excerpt}*. Reply with the exact question or task and I will continue directly.`
+    : "Reply with the exact question or task and I will answer that directly.";
 }
 
 export function buildGuaranteedServerRecoveryReply(question: string) {

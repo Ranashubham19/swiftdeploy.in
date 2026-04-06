@@ -4787,6 +4787,7 @@ function buildEmergencyProfessionalFallback(message: string) {
   const normalized = message.trim().replace(/\s+/g, " ");
   const toTitle = (value: string) => value.replace(/\b\w/g, (ch) => ch.toUpperCase());
   const clip = (value: string) => value.replace(/[?.!]+$/g, "").trim();
+  const excerpt = clip(normalized).slice(0, 80);
 
   const definitionMatch = normalized.match(/^(?:what is|what are|define|meaning of|explain)\s+(.+?)(?:\?|$)/i);
   if (definitionMatch) {
@@ -4817,7 +4818,9 @@ function buildEmergencyProfessionalFallback(message: string) {
     return "Tell me the exact person, place, or event name once and I will answer it directly.";
   }
 
-  return "Send the exact topic in one line and I will answer it directly.";
+  return excerpt
+    ? `I couldn't safely recover a complete reply for *${excerpt}*. Reply with the exact question or task and I will continue directly.`
+    : "Reply with the exact question or task and I will answer that directly.";
 }
 
 async function sendReply(

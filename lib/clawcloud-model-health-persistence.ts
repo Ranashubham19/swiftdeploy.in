@@ -212,11 +212,11 @@ export function reorderModelsByPerformance(
 // ---------------------------------------------------------------------------
 
 const DEDICATED_JUDGE_MODELS = [
-  "nvidia/nemotron-4-340b-instruct",
-  "meta/llama-3.1-405b-instruct",
-  "mistralai/mistral-large-3-675b-instruct-2512",
-  "z-ai/glm5",
+  "qwen/qwen3.5-397b-a17b",
   "moonshotai/kimi-k2.5",
+  "moonshotai/kimi-k2-thinking",
+  "meta/llama-3.3-70b-instruct",
+  "gpt-4o",
 ];
 
 export function selectIndependentJudge(

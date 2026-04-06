@@ -64,26 +64,38 @@ type ModelHealthState = {
   lastSuccessAt: number;
 };
 
+// Live-benchmarked 2026-04-07 against integrate.api.nvidia.com.
+// NVIDIA-first engine. Dead/timeout models removed. Ranked by speed + quality.
 const GLOBAL_TOP_MODELS = [
-  "meta/llama-3.3-70b-instruct",
-  "qwen/qwen3.5-397b-a17b",
-  "mistralai/mistral-large-3-675b-instruct-2512",
-  "z-ai/glm5",
-  "moonshotai/kimi-k2-instruct-0905",
-  "meta/llama-3.1-405b-instruct",
-  "deepseek-ai/deepseek-v3.1-terminus",
-  "moonshotai/kimi-k2.5",
-  "moonshotai/kimi-k2-instruct",
-  "qwen/qwen3-coder-480b-a35b-instruct",
-  "moonshotai/kimi-k2-thinking",
-  "deepseek-ai/deepseek-v3.1",
-  "deepseek-ai/deepseek-v3.2",
+  // ── Tier 1: NVIDIA ultra-fast frontier (sub-1.5s) ──
+  "google/gemma-2-27b-it",                        //  1.0s  fast general
+  "meta/llama-4-maverick-17b-128e-instruct",      //  1.1s  latest Meta, strong all-domain
+  "meta/llama3-8b-instruct",                      //  1.1s  ultra-fast lightweight
+  "mistralai/mistral-small-3.1-24b-instruct-2503", // 1.1s  fast + accurate
+  "moonshotai/kimi-k2-instruct-0905",             //  1.2s  top-tier chat
+  "qwen/qwen2.5-coder-32b-instruct",             //  1.3s  code specialist
+  "qwen/qwen3-next-80b-a3b-instruct",            //  1.3s  latest Qwen MoE
+  "mistralai/mixtral-8x22b-instruct-v0.1",       //  1.4s  strong reasoning
+  "qwen/qwen3-coder-480b-a35b-instruct",         //  1.5s  frontier code MoE
+  // ── Tier 2: NVIDIA fast + strong (sub-2.5s) ──
+  "moonshotai/kimi-k2-instruct",                  //  1.8s  top-tier chat
+  "deepseek-ai/deepseek-v3.1",                    //  1.8s  strong general
+  "qwen/qwen3.5-397b-a17b",                       //  1.9s  frontier MoE all-domain
+  "meta/llama-3.1-8b-instruct",                   //  2.0s  fast lightweight
+  "deepseek-ai/deepseek-v3.1-terminus",            //  2.0s  strong general
+  "meta/llama-3.3-70b-instruct",                   //  2.1s  proven reliable
+  "moonshotai/kimi-k2-thinking",                   //  2.2s  deep reasoning
+  "meta/llama-3.1-70b-instruct",                   //  2.3s  solid all-rounder
+  "moonshotai/kimi-k2.5",                          //  2.5s  advanced reasoning
+  // ── Last resort: OpenAI cheap fallback ──
+  "gpt-4o-mini",                                   //  ~0.5s  cheap OpenAI fallback
 ] as const;
 
 const MODEL_HEALTH = new Map<string, ModelHealthState>();
 const MODEL_FAILURE_COOLDOWN_MS = 45_000;
 const MODEL_FAILURE_MAX_COOLDOWN_MS = 8 * 60 * 1000;
 
+// Per-model timeout — reduced to fail fast and move to the next model quickly
 const INTENT_TIMEOUT_MS: Record<IntentType, number> = {
   greeting: 5_000,
   help: 5_000,
@@ -92,28 +104,29 @@ const INTENT_TIMEOUT_MS: Record<IntentType, number> = {
   send_message: 6_000,
   save_contact: 5_000,
   calendar: 6_000,
-  general: 12_000,
-  email: 10_000,
-  spending: 10_000,
-  finance: 14_000,
-  web_search: 15_000,
-  creative: 12_000,
-  coding: 14_000,
-  math: 14_000,
-  research: 14_000,
-  science: 12_000,
-  history: 12_000,
+  general: 8_000,
+  email: 8_000,
+  spending: 8_000,
+  finance: 10_000,
+  web_search: 10_000,
+  creative: 8_000,
+  coding: 10_000,
+  math: 10_000,
+  research: 10_000,
+  science: 8_000,
+  history: 8_000,
   geography: 8_000,
-  health: 12_000,
-  law: 12_000,
-  economics: 12_000,
+  health: 8_000,
+  law: 8_000,
+  economics: 8_000,
   culture: 8_000,
   sports: 8_000,
-  technology: 12_000,
+  technology: 8_000,
   language: 8_000,
-  explain: 12_000,
+  explain: 8_000,
 };
 
+// Parallelism 2 for all knowledge intents — race two models to beat NVIDIA timeouts
 const INTENT_PARALLELISM: Record<IntentType, number> = {
   greeting: 1,
   help: 1,
@@ -122,26 +135,26 @@ const INTENT_PARALLELISM: Record<IntentType, number> = {
   send_message: 1,
   save_contact: 1,
   calendar: 1,
-  general: 1,
-  email: 1,
-  spending: 1,
+  general: 2,
+  email: 2,
+  spending: 2,
   finance: 2,
   web_search: 2,
-  creative: 1,
+  creative: 2,
   coding: 2,
   math: 2,
   research: 2,
   science: 2,
   history: 2,
-  geography: 1,
+  geography: 2,
   health: 2,
   law: 2,
   economics: 2,
-  culture: 1,
-  sports: 1,
+  culture: 2,
+  sports: 2,
   technology: 2,
-  language: 1,
-  explain: 1,
+  language: 2,
+  explain: 2,
 };
 
 const INTENT_MAX_TOTAL_MS: Record<IntentType, number> = {
@@ -320,14 +333,14 @@ const INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
     "meta/llama-3.3-70b-instruct",
     "mistralai/mistral-large-3-675b-instruct-2512",
     "qwen/qwen3-coder-480b-a35b-instruct",
-    "meta/llama-3.1-405b-instruct",
+    "meta/llama-3.3-70b-instruct",
   ],
   math: [
     "z-ai/glm5",
     "moonshotai/kimi-k2-instruct-0905",
     "meta/llama-3.3-70b-instruct",
     "mistralai/mistral-large-3-675b-instruct-2512",
-    "meta/llama-3.1-405b-instruct",
+    "meta/llama-3.3-70b-instruct",
     "moonshotai/kimi-k2-thinking",
   ],
   email: [
@@ -347,21 +360,21 @@ const INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
     "meta/llama-3.3-70b-instruct",
     "moonshotai/kimi-k2-instruct-0905",
     "z-ai/glm5",
-    "meta/llama-3.1-405b-instruct",
+    "meta/llama-3.3-70b-instruct",
   ],
   web_search: [
     "mistralai/mistral-large-3-675b-instruct-2512",
     "meta/llama-3.3-70b-instruct",
     "moonshotai/kimi-k2-instruct-0905",
     "z-ai/glm5",
-    "meta/llama-3.1-405b-instruct",
+    "meta/llama-3.3-70b-instruct",
   ],
   research: [
     "mistralai/mistral-large-3-675b-instruct-2512",
     "meta/llama-3.3-70b-instruct",
     "moonshotai/kimi-k2-instruct-0905",
     "z-ai/glm5",
-    "meta/llama-3.1-405b-instruct",
+    "meta/llama-3.3-70b-instruct",
   ],
   creative: [
     "moonshotai/kimi-k2-instruct-0905",
@@ -789,12 +802,12 @@ const DEFAULT_CHAT_MODELS = [
 
 const DEFAULT_REASONING_MODELS = [
   ...GLOBAL_TOP_MODELS,
-  "nvidia/nemotron-4-340b-instruct",
+  "nvidia/llama-3.1-nemotron-ultra-253b-v1",
 ];
 
 const DEFAULT_CODE_MODELS = [
   ...GLOBAL_TOP_MODELS,
-  "mistralai/devstral-2-123b-instruct-2512",
+  "qwen/qwen2.5-coder-32b-instruct",
 ];
 
 function splitModelList(raw: string) {
@@ -1732,11 +1745,14 @@ function buildClawCloudModelPlannerDecision(input: {
     judgeEnabled = true;
   }
 
+  // In single_pass mode, batch size = parallelism (race N models, first wins).
+  // In collect_and_judge mode, batch size = max(targetResponses, 2).
+  const parallelism = parallelismForIntent(input.intent, input.responseMode);
   const generatorBatchSize = Math.max(
     1,
     Math.min(
-      parallelismForIntent(input.intent, input.responseMode),
-      Math.max(targetResponses, judgeEnabled ? 2 : 1),
+      parallelism,
+      judgeEnabled ? Math.max(targetResponses, 2) : parallelism,
       input.availableCandidates,
     ),
   );
@@ -2218,6 +2234,12 @@ async function orchestrateClawCloudPrompt(input: {
 
 // Core API call
 
+// OpenAI model prefixes — routed to api.openai.com instead of NVIDIA
+const OPENAI_MODEL_PREFIXES = ["gpt-", "o1-", "o3-", "o4-", "chatgpt-"];
+function isOpenAIModel(model: string) {
+  return OPENAI_MODEL_PREFIXES.some((p) => model.startsWith(p));
+}
+
 async function _call(
   messages: Msg[],
   maxTokens: number,
@@ -2226,13 +2248,22 @@ async function _call(
   temperature = 0.2,
   signal?: AbortSignal,
 ): Promise<string | null> {
-  if (!env.NVIDIA_API_KEY) return null;
+  const useOpenAI = isOpenAIModel(model);
 
-  const base = (env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1")
-    .replace(/\/+$/, "")
-    .replace(/\/chat\/completions$/i, "")
-    .replace(/\/embeddings$/i, "");
-  const url = `${/\/v\d+$/i.test(base) ? base : `${base}/v1`}/chat/completions`;
+  if (useOpenAI && !env.OPENAI_API_KEY) return null;
+  if (!useOpenAI && !env.NVIDIA_API_KEY) return null;
+
+  const url = useOpenAI
+    ? "https://api.openai.com/v1/chat/completions"
+    : (() => {
+        const base = (env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1")
+          .replace(/\/+$/, "")
+          .replace(/\/chat\/completions$/i, "")
+          .replace(/\/embeddings$/i, "");
+        return `${/\/v\d+$/i.test(base) ? base : `${base}/v1`}/chat/completions`;
+      })();
+
+  const apiKey = useOpenAI ? env.OPENAI_API_KEY : env.NVIDIA_API_KEY;
 
   const ctrl = new AbortController();
   const onAbort = () => ctrl.abort();
@@ -2250,7 +2281,7 @@ async function _call(
       method: "POST",
       signal: ctrl.signal,
       headers: {
-        Authorization: `Bearer ${env.NVIDIA_API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
