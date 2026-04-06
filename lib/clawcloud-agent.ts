@@ -16305,6 +16305,9 @@ async function buildInboundRunLimitReply(userId: string) {
 }
 
 async function buildProfessionalInboundRunLimitReply(userId: string) {
+  // TEMPORARILY DISABLED — daily limit bypass for testing
+  return null;
+
   const plan = await getUserPlan(userId);
   if (plan === "pro") {
     return null;
