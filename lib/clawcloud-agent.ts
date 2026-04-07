@@ -12947,7 +12947,8 @@ async function routeInboundAgentMessageResultCore(
     activeContactSessionCommand.type !== "none"
     || parseSendMessageCommand(normalizedMessage) !== null
     || parseSaveContactCommand(normalizedMessage) !== null
-    || detectWhatsAppSettingsCommandIntent(normalizedMessage) !== null;
+    || detectWhatsAppSettingsCommandIntent(normalizedMessage) !== null
+    || looksLikeInChatClawCloudRequestDuringActiveContact(normalizedMessage);
   const preflightWhatsAppSettings = shouldBypassPendingContactSelection
     ? null
     : await getWhatsAppSettings(userId).catch(() => null);
@@ -19383,6 +19384,8 @@ const ACTIVE_CONTACT_STATUS_PATTERNS = [
 
 const ACTIVE_CONTACT_STOP_PATTERNS = [
   /^(?:please\s+)?stop\s+(?:talking|replying|messaging|chatting)\s+(?:to|with)\s+(.+)$/i,
+  /^(?:please\s+)?stop\s+(?:sending\s+messages?|messaging|replying)\s+(?:this\s+number|this\s+contact|him|her|them|it)(?:\s+from\s+now\s+(?:on|onward|onwards))?(?:\s+\+?\d[\d\s-]{6,})?$/i,
+  /^(?:please\s+)?stop\s+(?:sending\s+messages?|messaging|replying)(?:\s+(?:this\s+number|this\s+contact|him|her|them|it|to\s+.+?|with\s+.+?))?(?:\s+from\s+now\s+(?:on|onward|onwards))?(?:\s+\+?\d[\d\s-]{6,})?$/i,
   /^(?:please\s+)?stop\s+(?:replying|talking)\s+(?:on\s+my\s+behalf|for\s+me)$/i,
   /^(?:please\s+)?stop\s+(?:this\s+)?(?:contact|proxy|conversation|chat)\s+mode$/i,
   /^(?:please\s+)?(.+?)\s+se\s+(?:baat|chat|reply)\s+karna\s+band\s+kar(?:o|do)?$/i,
@@ -19486,6 +19489,18 @@ function parseWhatsAppActiveContactSessionCommand(text: string): WhatsAppActiveC
   for (const candidate of candidates) {
     if (ACTIVE_CONTACT_STATUS_PATTERNS.some((pattern) => pattern.test(candidate))) {
       return { type: "status" };
+    }
+  }
+
+  for (const candidate of candidates) {
+    if (
+      /^(?:please\s+)?stop\s+(?:sending\s+messages?|messaging|replying)\s+(?:this\s+number|this\s+contact|him|her|them|it)\b/i.test(candidate)
+      && /(?:\bfrom\s+now\s+(?:on|onward|onwards)\b|\+\d[\d\s-]{6,})/i.test(candidate)
+    ) {
+      return {
+        type: "stop",
+        contactName: null,
+      };
     }
   }
 
@@ -20411,8 +20426,13 @@ function looksLikeInChatClawCloudRequestDuringActiveContact(message: string) {
 
   if (
     /^(?:tell me about|explain|compare|difference between|search(?: the web)? for|look up|lookup|find|research|analy[sz]e|summari[sz]e)\b/i.test(normalized)
+    || /^(?:tell me|give me|show me)\s+(?:top\b|the\s+story\b|a\s+story\b|about\b|what\b|who\b|where\b|when\b|why\b|how\b|which\b|all\b|the\s+latest\b|the\s+current\b)/i.test(normalized)
+    || /^(?:story|history)\s+of\b/i.test(lower)
+    || /^(?:top|best|hardest|most\s+difficult)\s+\d+\b/i.test(lower)
+    || /^(?:how\s+many\s+contacts?|how\s+many\s+messages?)\b/i.test(lower)
+    || /\b(?:contacts?|messages?)\b.{0,28}\b(?:in|on)\s+my\s+whatsapp\b/i.test(lower)
     || (
-      /^(?:what\s+(?:is|are|was|were|does|do)|who\s+is|where\s+is|which\s+|how\s+(?:does|do|did|is|are)|why\s+(?:is|are|did|does))\b/i.test(lower)
+      /^(?:what\s+(?:is|are|was|were|does|do)|who\s+is|where\s+is|which\s+|how\s+(?:does|do|did|is|are|many|much|long|old)|why\s+(?:is|are|did|does))\b/i.test(lower)
       && !/^(?:how are you|where are you|what are you(?:\s+doing)?|what(?:'s|\s+is)\s+up|when are you coming|what time(?: are you| will you)|are you free|can you call|could you call|will you call|did you|have you|why(?:\s+did(?:n't)?|\s+didnt|\s+don't|\s+dont)\s+you|what happened|kab aa(?:oge|rahe)|kya kar rahe|kahaan ho|tum kahan|aap kahan|free ho)\b/i.test(lower)
     )
     || looksLikeClawCloudCapabilityQuestion(lower)
@@ -20452,6 +20472,57 @@ function looksLikeInChatClawCloudRequestDuringActiveContact(message: string) {
     )
     || /\b(?:python|javascript|typescript|java|c\+\+|cpp|golang|go\b|rust|php|swift|kotlin|ruby|scala|sql|react|node|django|flask|spring|express|api|endpoint|query|bug|debug|stacktrace|exception|algorithm|code|script|program)\b/i.test(normalized)
     || /\d+\s*[\+\-\*\/\^%]\s*\d+/.test(normalized)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function looksLikePlainChatFollowUpForActiveContact(message: string) {
+  const normalized = normalizeClawCloudUnderstandingMessage(String(message ?? "")).trim();
+  if (!normalized) {
+    return false;
+  }
+
+  if (looksLikeInChatClawCloudRequestDuringActiveContact(normalized)) {
+    return false;
+  }
+
+  const lower = normalized.toLowerCase();
+  const words = lower.split(/\s+/).filter(Boolean);
+  const directConversationSignal = detectDirectConversationSignal(normalized);
+  if (
+    directConversationSignal
+    && !directConversationSignal.asksCapability
+    && !directConversationSignal.asksAssistantName
+  ) {
+    return true;
+  }
+
+  if (
+    /^(?:please\s+)?(?:tell|say|inform|let)\b.{0,80}\b(?:him|her|them)\b/i.test(normalized)
+    || /^(?:please\s+)?(?:bolo|bata(?:\s*do|\s*dena)?|keh(?:\s*do|\s*dena)?)\b/i.test(lower)
+  ) {
+    return true;
+  }
+
+  if (
+    /^(?:hi+|hello+|hey+|hlo+|helo+|good morning|good afternoon|good evening|good night|namaste|thanks?|thank you|sorry|ok(?:ay)?|haan|han|hmm|hm|theek hai|thik hai)\b/i.test(lower)
+  ) {
+    return true;
+  }
+
+  if (
+    words.length <= 24
+    && /\b(?:where are you|are you free|call me|text me|let me know|on my way|i(?:'m| am)?|i will|i'll|ill|main|mai|mein|mujhe|meri|mera|tum|tu|aap|free ho|kahan ho|kahaan ho|kab aa(?:oge|rahe)|late|busy|reached|reach gaya|reach gya|milte|take care|tc)\b/i.test(lower)
+  ) {
+    return true;
+  }
+
+  if (
+    words.length <= 14
+    && /^(?:please\s+)?(?:call|come|wait|listen|take care|tc|gn|gm|good night|good morning|miss you|love you)\b/i.test(lower)
   ) {
     return true;
   }
@@ -20500,7 +20571,11 @@ function shouldRouteMessageToActiveWhatsAppContactSession(
   message: string,
   session: WhatsAppActiveContactSession | null | undefined,
 ) {
-  return Boolean(session && !shouldBypassWhatsAppActiveContactSessionRouting(message));
+  return Boolean(
+    session
+    && !shouldBypassWhatsAppActiveContactSessionRouting(message)
+    && looksLikePlainChatFollowUpForActiveContact(message),
+  );
 }
 
 export function shouldRouteMessageToActiveWhatsAppContactSessionForTest(
@@ -20643,19 +20718,76 @@ async function generateWhatsAppActiveContactConversationalReply(input: {
     ].join("\n\n"),
     intent: "send_message",
     maxTokens: 90,
-    fallback: input.currentMessage,
+    fallback: "",
   }).catch((error) => {
     console.error("[agent] generateWhatsAppActiveContactConversationalReply failed:", error);
-    return input.currentMessage;
+    return "";
   });
 
-  const candidateReply = sanitizeStyledWhatsAppDraftForHumanDelivery(drafted.trim() || input.currentMessage);
-  return enforceClawCloudReplyLanguage({
+  const candidateReply = sanitizeStyledWhatsAppDraftForHumanDelivery(drafted.trim());
+  if (isUnsafeWhatsAppActiveContactReplyCandidate({
+    candidate: candidateReply,
+    currentMessage: input.currentMessage,
+    matchedInboundMessage: input.matchedInboundMessage,
+  })) {
+    return null;
+  }
+
+  const localizedReply = await enforceClawCloudReplyLanguage({
     message: candidateReply,
     locale: input.languageResolution.locale,
     preserveRomanScript: input.languageResolution.preserveRomanScript,
     targetLanguageName: input.languageResolution.targetLanguageName,
   }).catch(() => candidateReply);
+
+  return isUnsafeWhatsAppActiveContactReplyCandidate({
+    candidate: localizedReply,
+    currentMessage: input.currentMessage,
+    matchedInboundMessage: input.matchedInboundMessage,
+  })
+    ? null
+    : localizedReply;
+}
+
+function isUnsafeWhatsAppActiveContactReplyCandidate(input: {
+  candidate: string;
+  currentMessage: string;
+  matchedInboundMessage: string;
+}) {
+  const cleanedCandidate = sanitizeStyledWhatsAppDraftForHumanDelivery(input.candidate).trim();
+  if (!cleanedCandidate) {
+    return true;
+  }
+
+  if (
+    /other person's latest message|write the best next reply|return only the next reply|user typed in self chat|recipient:/i.test(cleanedCandidate)
+  ) {
+    return true;
+  }
+
+  const normalizedCandidate = normalizeWhatsAppActiveContactQuotedIncomingMessage(cleanedCandidate);
+  if (!normalizedCandidate) {
+    return true;
+  }
+
+  const normalizedCurrent = normalizeWhatsAppActiveContactQuotedIncomingMessage(input.currentMessage);
+  const normalizedMatchedInbound = normalizeWhatsAppActiveContactQuotedIncomingMessage(input.matchedInboundMessage);
+
+  return Boolean(
+    normalizedCandidate
+    && (
+      normalizedCandidate === normalizedCurrent
+      || normalizedCandidate === normalizedMatchedInbound
+    )
+  );
+}
+
+export function isUnsafeWhatsAppActiveContactReplyCandidateForTest(input: {
+  candidate: string;
+  currentMessage: string;
+  matchedInboundMessage: string;
+}) {
+  return isUnsafeWhatsAppActiveContactReplyCandidate(input);
 }
 
 export async function generateAutomaticWhatsAppActiveContactReplyForServer(input: {
@@ -20687,7 +20819,7 @@ export async function generateAutomaticWhatsAppActiveContactReplyForServer(input
     conversationStyle: input.conversationStyle ?? "professional",
     locale: draftLanguageChoice.resolution.locale,
     languageResolution: draftLanguageChoice.resolution,
-  });
+  }).then((reply) => reply ?? "");
 }
 
 function buildWhatsAppSendActionLabel(action: "message" | "reply") {
@@ -21197,6 +21329,14 @@ async function sendWhatsAppMessageThroughActiveContactSession(input: {
       locale: draftLanguageResolution.locale,
       languageResolution: draftLanguageResolution,
     });
+
+  if (!draftedMessage?.trim()) {
+    return [
+      `I couldn't draft a clean WhatsApp reply for ${input.session.contactName} from that message, so I did not send anything.`,
+      "",
+      "Tell me the exact reply you want, or ask me to draft one explicitly and I will keep it in this chat first.",
+    ].join("\n");
+  }
 
   try {
     const sendResult = await sendClawCloudWhatsAppToPhone(input.session.phone, draftedMessage, {

@@ -233,6 +233,7 @@ import {
   resolveResponseModeForTest,
   resolveDeterministicKnownStoryReplyForTest,
   resolveRoutingMessageForTest,
+  isUnsafeWhatsAppActiveContactReplyCandidateForTest,
   shouldUsePrimaryConversationLaneForTest,
   shouldUsePrimaryDirectAnswerLaneForTest,
   shouldUseSimpleKnowledgeFastLaneForTest,
@@ -5506,6 +5507,10 @@ test("active contact mode parses professional handoff commands and only proxies 
     { type: "stop", contactName: "Maa" },
   );
   assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("Stop messaging this number from now onward +919116592165"),
+    { type: "stop", contactName: null },
+  );
+  assert.deepEqual(
     parseWhatsAppActiveContactSessionCommandForTest("Maa se baat karna band karo"),
     { type: "stop", contactName: "Maa" },
   );
@@ -5589,6 +5594,27 @@ test("active contact mode parses professional handoff commands and only proxies 
   assert.equal(
     shouldRouteMessageToActiveWhatsAppContactSessionForTest(
       "What is GDP of China right now?",
+      activeSession,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRouteMessageToActiveWhatsAppContactSessionForTest(
+      "How many contacts do i have in my whatsapp",
+      activeSession,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRouteMessageToActiveWhatsAppContactSessionForTest(
+      "story of Harry potter in japanese",
+      activeSession,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRouteMessageToActiveWhatsAppContactSessionForTest(
+      "Tell me top 10 difficult phrases of thai language",
       activeSession,
     ),
     false,
@@ -6105,6 +6131,35 @@ test("active contact mode detects copied inbound chat lines so it can reply inst
   });
 
   assert.equal(reply, "Main theek hoon, tu bata?");
+});
+
+test("active contact reply safety blocks copy-paste fallbacks and prompt leakage", () => {
+  assert.equal(
+    isUnsafeWhatsAppActiveContactReplyCandidateForTest({
+      candidate: "Kesa hai tu.",
+      currentMessage: "Kesa hai tu.",
+      matchedInboundMessage: "Kesa hai tu.",
+    }),
+    true,
+  );
+
+  assert.equal(
+    isUnsafeWhatsAppActiveContactReplyCandidateForTest({
+      candidate: "Recipient: didi\nOther person's latest message: Kesa hai tu.",
+      currentMessage: "Kesa hai tu.",
+      matchedInboundMessage: "Kesa hai tu.",
+    }),
+    true,
+  );
+
+  assert.equal(
+    isUnsafeWhatsAppActiveContactReplyCandidateForTest({
+      candidate: "Main theek hoon, tu bata?",
+      currentMessage: "Kesa hai tu.",
+      matchedInboundMessage: "Kesa hai tu.",
+    }),
+    false,
+  );
 });
 
 test("active contact send receipts stay short and mirror the user's message language", async () => {
