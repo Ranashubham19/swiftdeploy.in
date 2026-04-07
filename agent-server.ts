@@ -43,6 +43,11 @@ import {
 import { handleUrlMessage, hasUrlIntent } from "./lib/clawcloud-url-reader";
 import { detectCodeRunIntent, runUserCode } from "./lib/clawcloud-code-runner";
 import {
+  classifyResolvedContactMatchConfidence,
+  lookupContactFuzzy,
+  normalizeResolvedContactMatchScore,
+} from "./lib/clawcloud-contacts-v2";
+import {
   getActiveOnboardingState,
   handleOnboardingReply,
   isNewUserNeedingOnboarding,
@@ -151,6 +156,7 @@ const DEFAULT_HTTP_REPLY_TIMEOUT_MS = 50_000;
 const DEFAULT_HTTP_REPLY_HEADSTART_MS = 12_000;
 const AGENT_ROUTE_TIMEOUT_BUFFER_MS = 5_000;
 const DIRECT_RECOVERY_REPLY_TIMEOUT_MS = 35_000;
+const ACTIVE_CONTACT_AUTOREPLY_TIMEOUT_MS = 18_000;
 const WHATSAPP_TYPING_HEARTBEAT_MS = Math.max(
   900,
   Number.parseInt(process.env.WA_TYPING_HEARTBEAT_MS ?? "1100", 10) || 1_100,
@@ -281,16 +287,37 @@ type SessionContactEntry = {
   updatedAt: number;
 };
 
+type SessionContactMatchBasis = "exact" | "prefix" | "word" | "fuzzy";
+
 type SessionContactMatch = {
   name: string;
   phone: string | null;
   jid: string | null;
   score: number;
+  exact: boolean;
+  matchBasis: SessionContactMatchBasis;
 };
 
 type SessionContactResolveResult =
   | { type: "found"; contact: SessionContactMatch }
   | { type: "ambiguous"; matches: SessionContactMatch[] };
+
+type RuntimeResolvedContact = {
+  name: string;
+  phone: string | null;
+  jid: string | null;
+  exact: boolean;
+  score: number;
+  matchBasis: SessionContactMatchBasis;
+  source: "live" | "fuzzy";
+};
+
+type RuntimeAmbiguousContact = RuntimeResolvedContact;
+
+type RuntimeResolveContactResult =
+  | { type: "found"; contact: RuntimeResolvedContact }
+  | { type: "confirmation_required"; contact: RuntimeResolvedContact }
+  | { type: "ambiguous"; matches: RuntimeAmbiguousContact[] };
 
 type SessionHistoryEntry = {
   wa_message_id: string;
@@ -311,6 +338,8 @@ type DurableWhatsAppContactRow = {
   contact_name?: string | null;
   notify_name?: string | null;
   verified_name?: string | null;
+  aliases?: string[] | null;
+  last_seen_at?: string | null;
 };
 
 type SessionHistoryCursor = {
@@ -356,7 +385,194 @@ const sessionHistoryExpansionState = new Map<string, Map<string, {
   attempts: number;
 }>>();
 const sessionReconnectTimers = new Map<string, NodeJS.Timeout>();
+const WHATSAPP_LIBRARY_NOISE_PATTERNS = [
+  /bad mac/i,
+  /failed to decrypt message/i,
+  /decrypt message with any known session/i,
+  /closing stale open session/i,
+  /closing open session in favor of incoming prekey bundle/i,
+  /closing session:\s*sessionentry/i,
+  /removing old closed session:\s*sessionentry/i,
+  /\bsent retry receipt\b/i,
+  /\bresyncing\s+(?:regular|regular_high|regular_low|critical_block|critical_unblock_low)\b/i,
+  /\bsynced\s+(?:regular|regular_high|regular_low|critical_block|critical_unblock_low)\b/i,
+];
+const WHATSAPP_LIBRARY_SENSITIVE_PATTERNS = [
+  /\b(?:_chains|chainkey|messagekeys)\b/i,
+  /\b(?:indexinfo|currentratchet|ephemeralkeypair)\b/i,
+  /\b(?:basekey|basekeytype|remoteidentitykey|lastremoteephemeralkey)\b/i,
+  /\b(?:privkey|pubkey|rootkey|registrationid|previouscounter)\b/i,
+  /\b(?:pendingprekey|unacknowledgedprekey|prekeyid|signedprekeyid)\b/i,
+  /<Buffer\b/i,
+];
+const WHATSAPP_LIBRARY_STACK_NOISE_PATTERNS = [
+  /node_modules[\\/].*libsignal/i,
+  /session_cipher\.js/i,
+  /queue_job\.js/i,
+  /crypto\.js/i,
+  /\b(?:rootkey|chainkey|indexinfo|basekey|basekeytype|remoteidentitykey|registrationid|currentratchet|ephemeralkeypair|pendingprekey|unacknowledgedprekey|prekeyid|signedprekeyid)\b/i,
+  /^\s*at\s+/i,
+];
+const WHATSAPP_LIBRARY_STRUCTURED_BLOCK_PATTERNS = [
+  /^[{}\[\],]+$/,
+  /^(?:'[^']+'|"[^"]+"|[A-Za-z_][A-Za-z0-9_]*)\s*:/,
+  /\b(?:chainKey|messageKeys)\b/,
+];
+
+function formatWhatsAppLibraryLog(args: unknown[]) {
+  return args
+    .map((value) => {
+      if (typeof value === "string") {
+        return value;
+      }
+      if (value instanceof Error) {
+        return value.message;
+      }
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return String(value);
+      }
+    })
+    .join(" ")
+    .trim();
+}
+
+function isSensitiveWhatsAppLibraryLine(value: string) {
+  return WHATSAPP_LIBRARY_SENSITIVE_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+function shouldSuppressWhatsAppLibraryLog(args: unknown[]) {
+  const message = formatWhatsAppLibraryLog(args);
+  return (
+    WHATSAPP_LIBRARY_NOISE_PATTERNS.some((pattern) => pattern.test(message))
+    || isSensitiveWhatsAppLibraryLine(message)
+  );
+}
+
+const QUIET_WHATSAPP_LOGGER: any = {
+  level: "info",
+  child: () => QUIET_WHATSAPP_LOGGER,
+  trace: () => {},
+  debug: () => {},
+  info: (...args: unknown[]) => {
+    if (!shouldSuppressWhatsAppLibraryLog(args)) {
+      console.log("[wa-lib]", formatWhatsAppLibraryLog(args));
+    }
+  },
+  warn: (...args: unknown[]) => {
+    if (!shouldSuppressWhatsAppLibraryLog(args)) {
+      console.warn("[wa-lib]", formatWhatsAppLibraryLog(args));
+    }
+  },
+  error: (...args: unknown[]) => {
+    if (!shouldSuppressWhatsAppLibraryLog(args)) {
+      console.error("[wa-lib]", formatWhatsAppLibraryLog(args));
+    }
+  },
+  fatal: (...args: unknown[]) => {
+    if (!shouldSuppressWhatsAppLibraryLog(args)) {
+      console.error("[wa-lib]", formatWhatsAppLibraryLog(args));
+    }
+  },
+};
+let whatsappStdStreamFilterInstalled = false;
+
+function buildWhatsAppNoiseFilteringWrite(
+  stream: NodeJS.WriteStream,
+) {
+  const originalWrite = stream.write.bind(stream);
+  let suppressedTraceLines = 0;
+  let pendingFragment = "";
+
+  return function filteredWrite(
+    chunk: unknown,
+    encoding?: BufferEncoding | ((error?: Error | null) => void),
+    callback?: (error?: Error | null) => void,
+  ) {
+    const resolvedEncoding = typeof encoding === "string" ? encoding : "utf8";
+    const resolvedCallback = typeof encoding === "function" ? encoding : callback;
+    const text =
+      typeof chunk === "string"
+        ? chunk
+        : Buffer.isBuffer(chunk)
+          ? chunk.toString(resolvedEncoding)
+          : String(chunk ?? "");
+    const combinedText = `${pendingFragment}${text}`;
+    const lastNewlineIndex = combinedText.lastIndexOf("\n");
+    const flushableText = lastNewlineIndex >= 0
+      ? combinedText.slice(0, lastNewlineIndex + 1)
+      : "";
+    pendingFragment = lastNewlineIndex >= 0 ? combinedText.slice(lastNewlineIndex + 1) : combinedText;
+    const renderedLines = flushableText
+      ? (flushableText.match(/[^\n]*\n|[^\n]+$/g) ?? [flushableText])
+      : [];
+    const visibleLines: string[] = [];
+
+    for (const line of renderedLines) {
+      const normalized = line.replace(/\r/g, "").trim();
+      const suppressHeader = normalized
+        ? shouldSuppressWhatsAppLibraryLog([normalized])
+        : false;
+      const suppressSensitive = normalized
+        ? isSensitiveWhatsAppLibraryLine(normalized)
+        : false;
+      const suppressContinuation = Boolean(normalized)
+        && suppressedTraceLines > 0
+        && (
+          WHATSAPP_LIBRARY_STACK_NOISE_PATTERNS.some((pattern) => pattern.test(normalized))
+          || WHATSAPP_LIBRARY_STRUCTURED_BLOCK_PATTERNS.some((pattern) => pattern.test(normalized))
+        );
+
+      if (suppressHeader || suppressSensitive) {
+        suppressedTraceLines = 64;
+        continue;
+      }
+
+      if (suppressContinuation) {
+        suppressedTraceLines = Math.max(0, suppressedTraceLines - 1);
+        continue;
+      }
+
+      if (normalized) {
+        suppressedTraceLines = 0;
+      }
+      visibleLines.push(line);
+    }
+
+    if (!visibleLines.length) {
+      if (resolvedCallback) {
+        resolvedCallback();
+      }
+      return true;
+    }
+
+    return originalWrite(visibleLines.join("") as never, encoding as never, callback as never);
+  };
+}
+
+function installWhatsAppStdStreamFilter() {
+  if (whatsappStdStreamFilterInstalled) {
+    return;
+  }
+
+  whatsappStdStreamFilterInstalled = true;
+  process.stdout.write = buildWhatsAppNoiseFilteringWrite(process.stdout) as typeof process.stdout.write;
+  process.stderr.write = buildWhatsAppNoiseFilteringWrite(process.stderr) as typeof process.stderr.write;
+}
+
+installWhatsAppStdStreamFilter();
+
 let cachedRouteInboundAgentMessage: RouteInboundAgentMessageFn | null = null;
+type GenerateAutomaticWhatsAppActiveContactReplyFn = (input: {
+  userId: string;
+  inboundMessage: string;
+  session: NonNullable<WhatsAppSettings["activeContactSession"]>;
+  conversationStyle?: "professional" | "casual";
+}) => Promise<string>;
+let cachedGenerateAutomaticWhatsAppActiveContactReply:
+  | GenerateAutomaticWhatsAppActiveContactReplyFn
+  | null = null;
 let cachedWAVersion:
   | {
     version: [number, number, number];
@@ -813,6 +1029,16 @@ function logStartupDiagnostics() {
       value: nvidia.value
         ? `SET (${nvidia.value.slice(0, 8)}...)`
         : "MISSING - AI answers may fall back",
+    },
+    {
+      key: "OPENAI_API_KEY",
+      value: process.env.OPENAI_API_KEY?.trim()
+        ? `SET (${process.env.OPENAI_API_KEY.trim().slice(0, 8)}...)`
+        : "MISSING - GPT model routing will be skipped",
+    },
+    {
+      key: "OPENAI_MODEL",
+      value: process.env.OPENAI_MODEL?.trim() || "not set",
     },
     {
       key: "NEXT_PUBLIC_APP_URL",
@@ -1515,7 +1741,7 @@ function sanitizeOutboundWhatsAppMessage(raw: string): string {
 
   // ABSOLUTE SAFETY: internal signals must NEVER reach a WhatsApp chat
   const cleaned = text.replace(/\n{3,}/g, "\n\n").trim();
-  if (/^__[A-Z_]+__$/.test(cleaned) || cleaned.includes("__LOW_CONFIDENCE_RECOVERY_SIGNAL__")) {
+  if (/^__[A-Z_]+__$/.test(cleaned)) {
     return "";
   }
 
@@ -1578,13 +1804,20 @@ async function sendStreamingMessage(sock: WASocket, jid: string, fullText: strin
   await waitWithWhatsAppTypingPresence(sock, jid, plan.initialDelayMs);
 
   // Always send as a SINGLE message bubble
-  const sent = await sock.sendMessage(jid, { text: trimmed });
+  const sent = await sock.sendMessage(jid, buildPlainTextWhatsAppMessage(trimmed));
   await sock.sendPresenceUpdate("paused", jid).catch(() => null);
   if (sent?.key?.id) {
     outboundIds.add(sent.key.id);
     return [sent.key.id];
   }
   return [];
+}
+
+function buildPlainTextWhatsAppMessage(text: string) {
+  return {
+    text,
+    linkPreview: null,
+  };
 }
 
 type TrackedWhatsAppSendInput = {
@@ -1997,6 +2230,35 @@ async function shouldSendWelcome(userId: string, phone: string | null) {
 function normalizePhone(value: string | null | undefined) {
   const digits = String(value ?? "").replace(/\D/g, "");
   return digits || null;
+}
+
+function formatActiveContactSessionTarget(
+  session: NonNullable<WhatsAppSettings["activeContactSession"]>,
+) {
+  const phone = normalizePhone(session.phone);
+  return phone ? `${session.contactName} (+${phone})` : session.contactName;
+}
+
+function doesActiveContactSessionMatchInbound(input: {
+  settings: WhatsAppSettings | null | undefined;
+  remoteJid?: string | null;
+  remotePhone?: string | null;
+  chatType?: "direct" | "group" | "self" | "broadcast" | "unknown";
+}) {
+  const session = input.settings?.activeContactSession;
+  if (!session || input.chatType !== "direct") {
+    return false;
+  }
+
+  const sessionPhone = normalizePhone(session.phone) ?? phoneFromJid(session.jid);
+  const inboundPhone = normalizePhone(input.remotePhone) ?? phoneFromJid(input.remoteJid);
+  if (sessionPhone && inboundPhone && sessionPhone === inboundPhone) {
+    return true;
+  }
+
+  const sessionJid = toReplyableJid(session.jid)?.toLowerCase() ?? "";
+  const inboundJid = toReplyableJid(input.remoteJid)?.toLowerCase() ?? "";
+  return Boolean(sessionJid && inboundJid && sessionJid === inboundJid);
 }
 
 function deriveSessionCountryCode(record: SessionRecord | null | undefined) {
@@ -2735,6 +2997,49 @@ async function hydrateSessionSelfLidMappingsFromStore(
   return changed;
 }
 
+async function hydrateSessionContactsFromDurableStore(
+  userId: string,
+  record: SessionRecord,
+  reason: string,
+  options: { limit?: number } = {},
+) {
+  if (!isActiveSessionRecord(userId, record)) {
+    return 0;
+  }
+
+  const rawLimit = typeof options.limit === "number" && Number.isFinite(options.limit)
+    ? Math.trunc(options.limit)
+    : 240;
+  const limit = Math.max(1, Math.min(1_000, rawLimit));
+  const beforeCount = record.contacts.size;
+  const { data } = await db()
+    .from("whatsapp_contacts")
+    .select("jid,phone_number,contact_name,notify_name,verified_name,aliases,last_seen_at")
+    .eq("user_id", userId)
+    .order("last_seen_at", { ascending: false })
+    .limit(limit)
+    .catch(() => ({ data: [] as DurableWhatsAppContactRow[] }));
+
+  const seeds = (Array.isArray(data) ? data : [])
+    .map((row) => buildSyncSeedFromDurableContactRow(row as DurableWhatsAppContactRow))
+    .filter(Boolean) as WhatsAppContactSyncInput[];
+  if (!seeds.length) {
+    return 0;
+  }
+
+  syncSessionContactSeeds(userId, record, seeds, `${reason}.durable-store`, { persist: false });
+  const hydratedCount = Math.max(0, record.contacts.size - beforeCount);
+  if (hydratedCount > 0) {
+    touchSessionActivity(record);
+    persistSessionSyncCheckpoint(userId, record);
+    console.log(
+      `[agent] Hydrated ${hydratedCount} durable WhatsApp contacts into live session for ${userId} after ${reason}`,
+    );
+  }
+
+  return hydratedCount;
+}
+
 function syncSessionContactSeeds(
   userId: string,
   record: SessionRecord,
@@ -2991,6 +3296,36 @@ function buildSyncSeedFromHistoryRow(row: SessionHistoryEntry): WhatsAppContactS
     sourceKinds: ["history_message_snapshot"],
     messageCount: 1,
     lastMessageAt: row.sent_at,
+  };
+}
+
+function buildSyncSeedFromDurableContactRow(row: DurableWhatsAppContactRow): WhatsAppContactSyncInput | null {
+  const jid = toReplyableJid(row.jid ?? null);
+  const phoneNumber =
+    phoneFromJid(jid)
+    ?? normalizePhone(row.phone_number ?? null);
+  const aliases = uniqueSanitizedStrings([
+    sanitizeContactName(row.contact_name),
+    sanitizeContactName(row.notify_name),
+    sanitizeContactName(row.verified_name),
+    ...(Array.isArray(row.aliases) ? row.aliases.map((value) => sanitizeContactName(value)) : []),
+    phoneNumber,
+  ]);
+
+  if (!jid || (!phoneNumber && !isLidChatJid(jid)) || !aliases.length) {
+    return null;
+  }
+
+  return {
+    jid,
+    phoneNumber,
+    contactName: sanitizeContactName(row.contact_name),
+    notifyName: sanitizeContactName(row.notify_name),
+    verifiedName: sanitizeContactName(row.verified_name),
+    aliases,
+    source: "history",
+    sourceKinds: ["durable_contact_store"],
+    lastSeenAt: row.last_seen_at ?? null,
   };
 }
 
@@ -3547,6 +3882,7 @@ async function bootstrapSessionWorkspace(
   const task = (async () => {
     const syncFrame = beginSessionSync(userId, record, "workspace_bootstrap", reason);
     let backfillCount = 0;
+    let durableHydratedCount = 0;
     try {
       if (!isActiveSessionRecord(userId, record)) {
         return;
@@ -3556,6 +3892,12 @@ async function bootstrapSessionWorkspace(
       if (!isActiveSessionRecord(userId, record)) {
         return;
       }
+
+      durableHydratedCount = await hydrateSessionContactsFromDurableStore(
+        userId,
+        record,
+        `${reason}.pre-backfill`,
+      );
 
       const backfill = await backfillWhatsAppContactsFromHistory(userId).catch((error) => {
         console.error(
@@ -3569,6 +3911,11 @@ async function bootstrapSessionWorkspace(
       if (isActiveSessionRecord(userId, record) && backfillCount > 0) {
         console.log(
           `[agent] Backfilled ${backfillCount} durable WhatsApp contacts from history for ${userId} after ${reason}`,
+        );
+        durableHydratedCount += await hydrateSessionContactsFromDurableStore(
+          userId,
+          record,
+          `${reason}.post-backfill`,
         );
       }
 
@@ -3596,6 +3943,9 @@ async function bootstrapSessionWorkspace(
         completeSessionSync(userId, record, syncFrame, {
           historyBackfillCount: backfillCount,
         });
+      }
+      if (durableHydratedCount > 0) {
+        scheduleSessionContactSnapshotPersist(userId, record, `${reason}.durable-store`);
       }
       const activeTask = workspaceBootstrapTasks.get(userId);
       if (activeTask?.record === record) {
@@ -3649,13 +3999,17 @@ function scheduleSessionWorkspaceResync(
   sessionWorkspaceResyncTimers.set(userId, timer);
 }
 
-function scoreSessionContactAlias(alias: string, normalizedQuery: string) {
+function scoreSessionContactAlias(alias: string, normalizedQuery: string): {
+  score: number;
+  exact: boolean;
+  matchBasis: SessionContactMatchBasis;
+} {
   if (alias === normalizedQuery) {
-    return 100;
+    return { score: 100, exact: true, matchBasis: "exact" };
   }
 
   if (alias.startsWith(normalizedQuery) || normalizedQuery.startsWith(alias)) {
-    return 92;
+    return { score: 92, exact: false, matchBasis: "prefix" };
   }
 
   const aliasWords = alias.split(/\s+/).filter(Boolean);
@@ -3664,14 +4018,18 @@ function scoreSessionContactAlias(alias: string, normalizedQuery: string) {
     aliasWords.some((word) => queryWords.includes(word))
     || queryWords.some((word) => aliasWords.includes(word))
   ) {
-    return 88;
+    return { score: 88, exact: false, matchBasis: "word" };
   }
 
   if (alias.includes(normalizedQuery) || normalizedQuery.includes(alias)) {
-    return 84;
+    return { score: 84, exact: false, matchBasis: "fuzzy" };
   }
 
-  return Math.round(liveContactSimilarity(alias, normalizedQuery) * 100);
+  return {
+    score: Math.round(liveContactSimilarity(alias, normalizedQuery) * 100),
+    exact: false,
+    matchBasis: "fuzzy",
+  };
 }
 
 const SELF_CONTACT_QUERY_PATTERN = /\b(me|myself|self|my chat|my own|my number|my whatsapp|to me|to myself)\b/i;
@@ -3711,12 +4069,87 @@ function isSessionSelfRecipient(
   return getChatType(input.jid, record) === "self";
 }
 
+function findSessionContactMatchesByPhone(
+  record: SessionRecord,
+  rawPhone: string,
+) {
+  const digits = normalizePhone(rawPhone);
+  if (!digits) {
+    return [] as SessionContactMatch[];
+  }
+
+  const matches = new Map<string, SessionContactMatch>();
+  for (const contact of record.contacts.values()) {
+    const contactPhone = normalizePhone(contact.phone);
+    if (!contactPhone) {
+      continue;
+    }
+
+    const exact = contactPhone === digits;
+    const suffix =
+      !exact
+      && digits.length >= 7
+      && (
+        contactPhone.endsWith(digits)
+        || digits.endsWith(contactPhone)
+      );
+    if (!exact && !suffix) {
+      continue;
+    }
+
+    const key = contactPhone || contact.jid;
+    if (!key) {
+      continue;
+    }
+
+    const score = exact ? 100 : 92;
+    const existing = matches.get(key);
+    if (existing && existing.score >= score) {
+      continue;
+    }
+
+    matches.set(key, {
+      name: contact.displayName,
+      phone: contactPhone,
+      jid: contact.jid,
+      score,
+      exact,
+      matchBasis: exact ? "exact" : "prefix",
+    });
+  }
+
+  return [...matches.values()].sort((left, right) =>
+    right.score - left.score
+    || Number(Boolean(right.exact)) - Number(Boolean(left.exact))
+    || right.name.length - left.name.length,
+  );
+}
+
 function resolveSessionContact(record: SessionRecord, rawName: string): SessionContactResolveResult | null {
   const queryVariants = getLiveContactQueryVariants(rawName);
+  const allowSelfMatch = isExplicitSelfContactQuery(rawName);
+  const phoneMatches = allowSelfMatch
+    ? findSessionContactMatchesByPhone(record, rawName)
+    : findSessionContactMatchesByPhone(record, rawName).filter((candidate) =>
+      !isSessionSelfRecipient(record, {
+        phone: candidate.phone,
+        jid: candidate.jid ?? null,
+        name: candidate.name,
+      })
+    );
+  if (phoneMatches.length === 1) {
+    return { type: "found", contact: phoneMatches[0]! };
+  }
+  if (phoneMatches.length > 1) {
+    return {
+      type: "ambiguous",
+      matches: phoneMatches.slice(0, 4),
+    };
+  }
+
   if (!queryVariants.length) {
     return null;
   }
-  const allowSelfMatch = isExplicitSelfContactQuery(rawName);
   const receiptDerivedAliases = buildWhatsAppReceiptDerivedAliasMap(
     [...record.historyRows.values()].map((row) => ({
       content: row.content,
@@ -3750,14 +4183,25 @@ function resolveSessionContact(record: SessionRecord, rawName: string): SessionC
   );
 
   for (const identity of identities) {
-    let score = 0;
+    let bestMatch: {
+      score: number;
+      exact: boolean;
+      matchBasis: SessionContactMatchBasis;
+    } | null = null;
     for (const alias of identity.normalizedAliases) {
       for (const queryVariant of queryVariants) {
-        score = Math.max(score, scoreSessionContactAlias(alias, queryVariant));
+        const detail = scoreSessionContactAlias(alias, queryVariant);
+        if (
+          !bestMatch
+          || detail.score > bestMatch.score
+          || (detail.score === bestMatch.score && detail.exact && !bestMatch.exact)
+        ) {
+          bestMatch = detail;
+        }
       }
     }
 
-    if (score < 72) {
+    if ((bestMatch?.score ?? 0) < 72) {
       continue;
     }
 
@@ -3765,7 +4209,9 @@ function resolveSessionContact(record: SessionRecord, rawName: string): SessionC
       name: identity.displayName,
       phone: identity.phone,
       jid: identity.primaryJid,
-      score,
+      score: bestMatch?.score ?? 0,
+      exact: bestMatch?.exact ?? false,
+      matchBasis: bestMatch?.matchBasis ?? "fuzzy",
       qualityRank:
         identity.phone
           ? 3
@@ -3813,6 +4259,157 @@ function resolveSessionContact(record: SessionRecord, rawName: string): SessionC
     type: "ambiguous",
     matches: filteredMatches.slice(0, 4),
   };
+}
+
+function normalizeRuntimeResolvedContact(
+  requestedName: string,
+  contact: {
+    name: string;
+    phone: string | null;
+    jid?: string | null;
+    exact?: boolean;
+    score?: number;
+    matchBasis?: SessionContactMatchBasis | "exact" | "prefix" | "word" | "fuzzy" | null;
+  },
+  source: "live" | "fuzzy",
+): RuntimeResolvedContact {
+  return {
+    name: contact.name,
+    phone: contact.phone,
+    jid: contact.jid ?? null,
+    exact: Boolean(contact.exact),
+    score: normalizeResolvedContactMatchScore(contact.score) ?? (source === "live" ? 0.82 : 0.8),
+    matchBasis:
+      contact.matchBasis === "exact"
+      || contact.matchBasis === "prefix"
+      || contact.matchBasis === "word"
+      || contact.matchBasis === "fuzzy"
+        ? contact.matchBasis
+        : (requestedName.trim() ? "fuzzy" : "exact"),
+    source,
+  };
+}
+
+function chooseBetterRuntimeConfirmationCandidate(
+  current: RuntimeResolvedContact | null,
+  next: RuntimeResolvedContact,
+) {
+  if (!current) {
+    return next;
+  }
+
+  if (next.exact !== current.exact) {
+    return next.exact ? next : current;
+  }
+
+  if (next.score !== current.score) {
+    return next.score > current.score ? next : current;
+  }
+
+  const basisPriority = { exact: 4, prefix: 3, word: 2, fuzzy: 1 } as const;
+  if (basisPriority[next.matchBasis] !== basisPriority[current.matchBasis]) {
+    return basisPriority[next.matchBasis] > basisPriority[current.matchBasis] ? next : current;
+  }
+
+  if (next.source !== current.source) {
+    return next.source === "fuzzy" ? next : current;
+  }
+
+  return next.name.length > current.name.length ? next : current;
+}
+
+async function resolveRuntimeContactResult(
+  userId: string,
+  session: SessionRecord,
+  contactName: string,
+  reason: string,
+): Promise<RuntimeResolveContactResult | null> {
+  let resolved = resolveSessionContact(session, contactName);
+  if (
+    (!resolved || resolved.type === "ambiguous" || session.contacts.size < CONTACT_REFRESH_TARGET_COUNT)
+    && session.status === "connected"
+  ) {
+    await bootstrapSessionWorkspace(userId, session, reason);
+    await hydrateSessionContactsFromDurableStore(userId, session, reason);
+    resolved = resolveSessionContact(session, contactName);
+  }
+
+  let confirmationRequired: RuntimeResolvedContact | null = null;
+
+  if (resolved?.type === "found") {
+    const liveContact = normalizeRuntimeResolvedContact(contactName, resolved.contact, "live");
+    const liveConfidence = classifyResolvedContactMatchConfidence({
+      requestedName: contactName,
+      resolvedName: liveContact.name,
+      exact: liveContact.exact,
+      score: liveContact.score,
+      matchBasis: liveContact.matchBasis,
+      source: liveContact.source,
+    });
+    if (liveConfidence === "verified") {
+      return {
+        type: "found",
+        contact: liveContact,
+      };
+    }
+    if (liveConfidence === "confirmation_required") {
+      confirmationRequired = chooseBetterRuntimeConfirmationCandidate(confirmationRequired, liveContact);
+    }
+  }
+
+  if (resolved?.type === "ambiguous") {
+    return {
+      type: "ambiguous",
+      matches: resolved.matches.map((match) => normalizeRuntimeResolvedContact(contactName, match, "live")),
+    };
+  }
+
+  const fuzzyResult = await lookupContactFuzzy(userId, contactName).catch(() => null);
+  if (fuzzyResult?.type === "found") {
+    const fuzzyContact = normalizeRuntimeResolvedContact(contactName, fuzzyResult.contact, "fuzzy");
+    const fuzzyConfidence = classifyResolvedContactMatchConfidence({
+      requestedName: contactName,
+      resolvedName: fuzzyContact.name,
+      exact: fuzzyContact.exact,
+      score: fuzzyContact.score,
+      matchBasis: fuzzyContact.matchBasis,
+      source: fuzzyContact.source,
+    });
+    if (fuzzyConfidence === "verified") {
+      if (session.status === "connected") {
+        syncSessionContactSeeds(userId, session, [{
+          jid: fuzzyContact.jid ?? (fuzzyContact.phone ? jidFromPhone(fuzzyContact.phone) : null),
+          phoneNumber: fuzzyContact.phone,
+          contactName: fuzzyContact.name,
+          aliases: fuzzyResult.contact.aliases,
+          source: "history",
+        }], `${reason}.fuzzy-promote`, { persist: false });
+      }
+      return {
+        type: "found",
+        contact: fuzzyContact,
+      };
+    }
+    if (fuzzyConfidence === "confirmation_required") {
+      confirmationRequired = chooseBetterRuntimeConfirmationCandidate(confirmationRequired, fuzzyContact);
+    }
+  }
+
+  if (fuzzyResult?.type === "ambiguous") {
+    return {
+      type: "ambiguous",
+      matches: fuzzyResult.matches.map((match) => normalizeRuntimeResolvedContact(contactName, match, "fuzzy")),
+    };
+  }
+
+  if (confirmationRequired) {
+    return {
+      type: "confirmation_required",
+      contact: confirmationRequired,
+    };
+  }
+
+  return null;
 }
 
 function buildSyncSeedFromBaileysContact(contact: Partial<WAContact>): WhatsAppContactSyncInput | null {
@@ -4024,6 +4621,22 @@ function buildWhatsAppRoutingContext(input: {
   return `[WhatsApp workspace context]\n${notes.map((note) => `- ${note}`).join("\n")}\n\n${input.baseText}`;
 }
 
+function buildWhatsAppActiveContactRoutingContext(input: {
+  baseText: string;
+  session: NonNullable<WhatsAppSettings["activeContactSession"]>;
+}) {
+  return [
+    "[WhatsApp active contact mode]",
+    `- Active contact mode is ON for this exact direct contact: ${formatActiveContactSessionTarget(input.session)}.`,
+    "- This is a real inbound WhatsApp message from that contact.",
+    "- Reply only as the user in this one-to-one conversation.",
+    "- Keep the message natural, concise, and human.",
+    "- Do not mention ClawCloud, tools, policies, or analysis.",
+    "",
+    input.baseText,
+  ].join("\n");
+}
+
 function resolveReplyJid(
   session: SessionRecord,
   targetJid?: string | null,
@@ -4215,7 +4828,7 @@ async function sendWelcome(sock: WASocket, phone: string, userId?: string) {
     }
   }
 
-  const sent = await sock.sendMessage(jid, { text });
+  const sent = await sock.sendMessage(jid, buildPlainTextWhatsAppMessage(text));
   if (sent?.key?.id) {
     outboundIds.add(sent.key.id);
   }
@@ -4319,7 +4932,7 @@ async function sendWelcomeLegacy(sock: WASocket, phone: string) {
     "Finish setup at swift-deploy.in to unlock all features.",
   ].join("\n");
 
-  const sent = await sock.sendMessage(jid, { text });
+  const sent = await sock.sendMessage(jid, buildPlainTextWhatsAppMessage(text));
   if (sent?.key?.id) {
     outboundIds.add(sent.key.id);
   }
@@ -4548,6 +5161,12 @@ function isEmptyOrFallback(reply: string | null | undefined, sourceMessage?: str
     lower.includes("send your exact goal in one line") ||
     lower.includes("preferred output format") ||
     lower.includes("direct answer mode is active") ||
+    lower.includes("i need the exact problem statement, language, or constraints to give a precise coding answer.") ||
+    lower.includes("i need the exact word, phrase, or sentence you want translated or explained to answer it accurately.") ||
+    lower.includes("i need the exact topic, item, or detail you want answered to give a precise reply.") ||
+    lower.includes("i need the exact topic, name, item, or number you want answered to give a precise reply.") ||
+    lower.includes("i need the full equation or the exact values to calculate that accurately.") ||
+    lower.includes("i need the exact place, date, person, item, or market you want checked to answer that accurately.") ||
     lower.includes("reminder set for [task] at [time]") ||
     (lower.includes("[task]") && lower.includes("[time]")) ||
     lower.includes("message understood: _") ||
@@ -5083,6 +5702,18 @@ async function getDirectRouteInboundAgentMessage() {
   return cachedRouteInboundAgentMessage;
 }
 
+async function getGenerateAutomaticWhatsAppActiveContactReply() {
+  if (cachedGenerateAutomaticWhatsAppActiveContactReply) {
+    return cachedGenerateAutomaticWhatsAppActiveContactReply;
+  }
+
+  ensureCanonicalNvidiaEnv();
+  const module = await import("./lib/clawcloud-agent");
+  cachedGenerateAutomaticWhatsAppActiveContactReply =
+    module.generateAutomaticWhatsAppActiveContactReplyForServer;
+  return cachedGenerateAutomaticWhatsAppActiveContactReply;
+}
+
 async function runDirectAgentReply(
   userId: string,
   message: string,
@@ -5351,6 +5982,15 @@ async function handleInbound(
     (session ? resolveReplyJid(session) : null);
 
   const settings = settingsOverride ?? await getWhatsAppSettings(userId).catch(() => defaultWhatsAppSettings);
+  const activeContactSession = settings.activeContactSession;
+  const activeContactSessionMatched =
+    settings.allowDirectSendCommands
+    && doesActiveContactSessionMatchInbound({
+      settings,
+      remoteJid: logFields.remote_jid,
+      remotePhone: logFields.remote_phone,
+      chatType: logFields.chat_type,
+    });
 
   const stopTypingHeartbeat = jid && session
     ? startWhatsAppTypingHeartbeat(session.sock, jid)
@@ -5368,7 +6008,7 @@ async function handleInbound(
     tags: [] as string[],
   }));
   const priority = getWhatsAppPriorityForMessage(text, workspaceContact.priority);
-  const routedText = buildWhatsAppRoutingContext({
+  const standardRoutedText = buildWhatsAppRoutingContext({
     baseText: routedTextOverride?.trim() || text,
     chatType: logFields.chat_type,
     messageType,
@@ -5376,18 +6016,62 @@ async function handleInbound(
     priority,
     tags: workspaceContact.tags,
   });
+  const routedText = activeContactSessionMatched && activeContactSession
+    ? buildWhatsAppActiveContactRoutingContext({
+      baseText: standardRoutedText,
+      session: activeContactSession,
+    })
+    : standardRoutedText;
 
-  console.log(`[agent] Starting best-effort reply race for ${userId}`);
-  const bestReply = await runBestAvailableAgentReply(userId, routedText, text);
-  if (isUsableAgentReply(bestReply.reply, text)) {
-    finalReply = bestReply.reply!.trim();
-    console.log(
-      `[agent] PATH ${bestReply.path ?? "fallback"} success for ${userId} (${finalReply.length} chars)`,
-    );
-  } else {
-    console.warn(
-      `[agent] Reply race did not yield a sendable primary answer for ${userId}; promoting direct recovery`,
-    );
+  let bestReply: { reply: string | null; path: "A" | "B" | null } = { reply: null, path: null };
+  if (activeContactSessionMatched && activeContactSession) {
+    try {
+      const generateAutomaticWhatsAppActiveContactReply =
+        await getGenerateAutomaticWhatsAppActiveContactReply();
+      const activeContactReply = await Promise.race([
+        generateAutomaticWhatsAppActiveContactReply({
+          userId,
+          inboundMessage: text,
+          session: activeContactSession,
+          conversationStyle: "professional",
+        }),
+        new Promise<string | null>((resolve) => {
+          setTimeout(() => resolve(null), ACTIVE_CONTACT_AUTOREPLY_TIMEOUT_MS);
+        }),
+      ]);
+
+      if (isUsableAgentReply(activeContactReply, text)) {
+        finalReply = activeContactReply!.trim();
+        bestReply = { reply: finalReply, path: "A" };
+        console.log(
+          `[agent] Active contact reply generated for ${userId}: target=${formatActiveContactSessionTarget(activeContactSession)} (${finalReply.length} chars)`,
+        );
+      } else {
+        console.warn(
+          `[agent] Active contact reply generation did not return a sendable answer for ${userId}; falling back to best-effort reply race`,
+        );
+      }
+    } catch (error) {
+      console.error(
+        `[agent] Active contact reply generation failed for ${userId}:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
+  if (!finalReply) {
+    console.log(`[agent] Starting best-effort reply race for ${userId}`);
+    bestReply = await runBestAvailableAgentReply(userId, routedText, text);
+    if (isUsableAgentReply(bestReply.reply, text)) {
+      finalReply = bestReply.reply!.trim();
+      console.log(
+        `[agent] PATH ${bestReply.path ?? "fallback"} success for ${userId} (${finalReply.length} chars)`,
+      );
+    } else {
+      console.warn(
+        `[agent] Reply race did not yield a sendable primary answer for ${userId}; promoting direct recovery`,
+      );
+    }
   }
 
   if (!finalReply || isEmptyOrFallback(finalReply, text)) {
@@ -5422,14 +6106,19 @@ async function handleInbound(
     isGroupMessage: logFields.chat_type === "group",
   });
   const userTimeZone = await getUserWhatsAppTimeZone(userId).catch(() => null);
-  const decision = decideWhatsAppReplyAction({
-    settings,
-    sensitivity,
-    chatType: logFields.chat_type,
-    isGroupMessage: logFields.chat_type === "group",
-    isKnownContact: workspaceContact.isKnown,
-    timeZone: userTimeZone,
-  });
+  const decision = activeContactSessionMatched && activeContactSession
+    ? {
+      action: "send" as const,
+      reason: `Active contact mode is on for ${formatActiveContactSessionTarget(activeContactSession)} until the user stops it.`,
+    }
+    : decideWhatsAppReplyAction({
+      settings,
+      sensitivity,
+      chatType: logFields.chat_type,
+      isGroupMessage: logFields.chat_type === "group",
+      isKnownContact: workspaceContact.isKnown,
+      timeZone: userTimeZone,
+    });
   console.log(
     `[agent] Reply decision for ${userId}: action=${decision.action} chatType=${logFields.chat_type} jid=${jid ?? "none"} reason=${decision.reason}`,
   );
@@ -5816,6 +6505,8 @@ async function connectSession(userId: string): Promise<SessionRecord> {
     printQRInTerminal: false,
     version,
     browser: Browsers.ubuntu("Chrome"),
+    logger: QUIET_WHATSAPP_LOGGER,
+    generateHighQualityLinkPreview: false,
     markOnlineOnConnect: false,
     syncFullHistory: true,
   });
@@ -7007,11 +7698,12 @@ registerClawCloudWhatsAppRuntime({
       return null;
     }
 
-    let resolved = resolveSessionContact(session, contactName);
-    if ((!resolved || session.contacts.size === 0) && session.status === "connected") {
-      await bootstrapSessionWorkspace(userId, session, "local-runtime-resolve-contact");
-      resolved = resolveSessionContact(session, contactName);
-    }
+    const resolved = await resolveRuntimeContactResult(
+      userId,
+      session,
+      contactName,
+      "local-runtime-resolve-contact",
+    );
     if (!resolved) {
       return null;
     }
@@ -7023,16 +7715,24 @@ registerClawCloudWhatsAppRuntime({
           name: match.name,
           phone: match.phone,
           jid: match.jid,
+          exact: match.exact,
+          score: match.score,
+          matchBasis: match.matchBasis,
+          source: match.source,
         })),
       };
     }
 
     return {
-      type: "found",
+      type: resolved.type,
       contact: {
         name: resolved.contact.name,
         phone: resolved.contact.phone,
         jid: resolved.contact.jid,
+        exact: resolved.contact.exact,
+        score: resolved.contact.score,
+        matchBasis: resolved.contact.matchBasis,
+        source: resolved.contact.source,
       },
     };
   },
@@ -7397,37 +8097,33 @@ app.post("/wa/resolve-contact", auth, async (req, res) => {
     return;
   }
 
-  let resolved = resolveSessionContact(session, contactName);
-  if ((!resolved || session.contacts.size === 0) && session.status === "connected") {
-    await bootstrapSessionWorkspace(userId, session, "resolve-contact");
-    resolved = resolveSessionContact(session, contactName);
-  }
+  const resolved = await resolveRuntimeContactResult(userId, session, contactName, "resolve-contact");
 
-  if (!resolved) {
-    res.status(404).json({ error: "No matching contact in active WhatsApp session" });
-    return;
-  }
-
-  if (resolved.type === "ambiguous") {
+  if (resolved?.type === "ambiguous") {
     res.json({
       success: true,
       type: "ambiguous",
-      matches: resolved.matches.map((match) => ({
-        name: match.name,
-        phone: match.phone,
-        jid: match.jid,
-      })),
+      matches: resolved.matches,
     });
     return;
   }
 
-  res.json({
-    success: true,
-    type: "found",
-    name: resolved.contact.name,
-    phone: resolved.contact.phone,
-    jid: resolved.contact.jid,
-  });
+  if (resolved?.type === "found" || resolved?.type === "confirmation_required") {
+    res.json({
+      success: true,
+      type: resolved.type,
+      name: resolved.contact.name,
+      phone: resolved.contact.phone,
+      jid: resolved.contact.jid,
+      exact: resolved.contact.exact,
+      score: resolved.contact.score,
+      matchBasis: resolved.contact.matchBasis,
+      source: resolved.contact.source,
+    });
+    return;
+  }
+
+  res.status(404).json({ error: "No matching contact in active WhatsApp session" });
 });
 
 app.get("/wa/runtime/:userId", auth, async (req, res) => {
@@ -7525,6 +8221,8 @@ app.get("/health", (_req, res) => {
     connections: connected.length,
     total_sessions: sessions.size,
     nvidia_configured: Boolean(nvidia.value),
+    openai_configured: Boolean(process.env.OPENAI_API_KEY?.trim()),
+    openai_model: process.env.OPENAI_MODEL?.trim() || null,
     nvidia_env_source: nvidia.key,
     nvidia_env_hints: nvidiaHints,
     app_url: appUrl() || "NOT SET",

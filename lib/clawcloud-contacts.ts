@@ -142,6 +142,7 @@ export type ParsedSendMessageCommand =
 
 export type SendMessageCommandSafetyIssue =
   | "ambiguous_recipient"
+  | "ambiguous_message"
   | "scheduled_send"
   | "conditional_send";
 

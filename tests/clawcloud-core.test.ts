@@ -21,6 +21,8 @@ import {
 } from "@/lib/clawcloud-answer-observability";
 import { setLogLevel } from "@/lib/clawcloud-observability";
 import {
+  buildPreferredModelOrderForIntent,
+  buildClawCloudModelCandidatesForTest,
   buildClawCloudModelPlannerDecisionForTest,
   chooseClawCloudCandidateForTest,
   detectMaterialCandidateDisagreementForTest,
@@ -34,8 +36,10 @@ import {
   parseSendMessageCommand,
 } from "@/lib/clawcloud-contacts";
 import {
+  classifyResolvedContactMatchConfidence,
   buildHistoryDerivedWhatsAppAliasesForTest,
   formatAmbiguousReply,
+  normalizeResolvedContactMatchScore,
   rankContactCandidates,
 } from "@/lib/clawcloud-contacts-v2";
 import { analyzeConversationContinuityForTest } from "@/lib/clawcloud-memory";
@@ -191,6 +195,7 @@ import {
   formatWhatsAppHistoryResolvedNoRowsReplyForTest,
   formatWhatsAppHistoryUnverifiedContactReplyForTest,
   isConfidentRecipientNameMatchForTest,
+  isProfessionallyCommittedRecipientMatchForTest,
   buildWhatsAppPendingContactResumePromptForTest,
   buildWhatsAppSendAmbiguousContactReplyForTest,
   maybePromoteVisibleResponseWithLiveBundleForTest,
@@ -755,15 +760,13 @@ test("agent server keeps a wider answer window and no longer emits resend-the-qu
   assert.doesNotMatch(source, /warming up — please resend your question/i);
 });
 
-test("emergency direct answers prefer stable NVIDIA models before legacy moonshot fallbacks", () => {
+test("emergency direct answers use the shared preferred-model helper instead of stale hardcoded recovery lists", () => {
   const source = readFileSync(path.resolve(process.cwd(), "lib/clawcloud-agent.ts"), "utf8");
 
   assert.match(source, /export function getInboundRouteTotalDeadlineMs\(message: string\)/);
   assert.match(source, /export async function recoverUserFacingReplyForServer/);
-  assert.match(
-    source,
-    /preferredModels:\s*\[\s*"meta\/llama-3\.3-70b-instruct",\s*"qwen\/qwen3\.5-397b-a17b",\s*"moonshotai\/kimi-k2-instruct-0905",\s*"mistralai\/mistral-large-3-675b-instruct-2512",\s*"moonshotai\/kimi-k2\.5",\s*"gpt-5\.4-pro"/,
-  );
+  assert.match(source, /preferredModels:\s*buildPreferredModelOrderForIntent\(emergencyIntent,\s*"fast",\s*6\)/);
+  assert.match(source, /const MULTILINGUAL_DIRECT_ANSWER_PREFERRED_MODELS = buildPreferredModelOrderForIntent\("language",\s*"fast",\s*4\)/);
 });
 
 test("server recovery no longer ships the old generic strong-answer fallback copy", () => {
@@ -776,7 +779,7 @@ test("server recovery no longer ships the old generic strong-answer fallback cop
   assert.doesNotMatch(recoverySource, /I couldn't complete a strong answer on that attempt/i);
 });
 
-test("ai engine routing keeps Railway legacy envs on stable NVIDIA defaults and skips cooling models", () => {
+test("ai engine routing filters failed GPT/gemma/llama3 families out of active production routing", () => {
   const aiSource = readFileSync(path.resolve(process.cwd(), "lib/clawcloud-ai.ts"), "utf8");
   const envSource = readFileSync(path.resolve(process.cwd(), "lib/env.ts"), "utf8");
 
@@ -784,14 +787,69 @@ test("ai engine routing keeps Railway legacy envs on stable NVIDIA defaults and 
     aiSource,
     /const GLOBAL_TOP_MODELS = \[[\s\S]*?"gpt-5\.4-pro"[\s\S]*?"gpt-5\.4-nano"/,
   );
-  assert.match(aiSource, /function hasExplicitModernNvidiaRoutingConfig\(\)/);
+  assert.match(aiSource, /\^gpt-5\/i/);
+  assert.match(aiSource, /\^google\\\/gemma-2-27b-it\$\/i/);
+  assert.match(aiSource, /\^meta\\\/llama3-8b-instruct\$\/i/);
+  assert.match(aiSource, /const ACTIVE_STABLE_ROUTE_MODELS = \[/);
   assert.match(aiSource, /function applyResilientDefaultModelOrdering\(models: string\[\]\)/);
+  assert.match(aiSource, /function filterModelsByConfiguredProviders\(/);
+  assert.match(aiSource, /function hasAnyAiProviderConfigured\(/);
+  assert.doesNotMatch(aiSource, /function hasExplicitModernNvidiaRoutingConfig\(\)/);
   assert.match(aiSource, /return available\.length \? available : cooling;/);
   assert.match(
     envSource,
-    /NVIDIA_CHAT_MODEL:\s*readFirstString\(\s*\["NVIDIA_CHAT_MODEL"\],\s*"meta\/llama-3\.3-70b-instruct"/,
+    /NVIDIA_CHAT_MODEL:\s*readFirstString\(\s*\["NVIDIA_CHAT_MODEL"\],\s*"meta\/llama-4-maverick-17b-128e-instruct"/,
   );
+  assert.match(aiSource, /const DEPRECATED_ROUTE_MODEL_PATTERNS = \[/);
+  assert.match(aiSource, /export function buildPreferredModelOrderForIntent\(/);
   assert.doesNotMatch(envSource, /NVIDIA_MODEL/);
+});
+
+test("math fast routing keeps stable NVIDIA fallback models in the first production batch window", () => {
+  const ordered = buildPreferredModelOrderForIntent("math", "fast", 4);
+
+  assert.deepEqual(ordered, [
+    "meta/llama-4-maverick-17b-128e-instruct",
+    "qwen/qwen3.5-397b-a17b",
+    "mistralai/mistral-small-3.1-24b-instruct-2503",
+    "deepseek-ai/deepseek-v3.1-terminus",
+  ]);
+});
+
+test("ai adapter uses the modern OpenAI responses contract and normalizes NVIDIA models that reject system role", () => {
+  const aiSource = readFileSync(path.resolve(process.cwd(), "lib/clawcloud-ai.ts"), "utf8");
+  const serverSource = readFileSync(path.resolve(process.cwd(), "agent-server.ts"), "utf8");
+
+  assert.match(aiSource, /https:\/\/api\.openai\.com\/v1\/responses/);
+  assert.match(aiSource, /max_output_tokens/);
+  assert.match(aiSource, /max_completion_tokens/);
+  assert.match(aiSource, /output_text/);
+  assert.match(aiSource, /collapseSystemMessagesIntoUserTurn/);
+  assert.match(aiSource, /coalesceAdjacentMessages/);
+  assert.match(aiSource, /NVIDIA_NO_SYSTEM_ROLE_PATTERNS/);
+  assert.match(aiSource, /openAIReasoningEffortForModel/);
+  assert.match(aiSource, /reasoning_effort/);
+  assert.match(serverSource, /QUIET_WHATSAPP_LOGGER/);
+  assert.match(serverSource, /logger:\s*QUIET_WHATSAPP_LOGGER/);
+  assert.match(serverSource, /installWhatsAppStdStreamFilter\(\)/);
+  assert.match(serverSource, /WHATSAPP_LIBRARY_STACK_NOISE_PATTERNS/);
+});
+
+test("agent server buffers partial WhatsApp noise lines and only promotes verified fuzzy contact resolutions back into the live session", () => {
+  const serverSource = readFileSync(path.resolve(process.cwd(), "agent-server.ts"), "utf8");
+  const agentSource = readFileSync(path.resolve(process.cwd(), "lib/clawcloud-agent.ts"), "utf8");
+
+  assert.match(serverSource, /let pendingFragment = "";/);
+  assert.match(serverSource, /const combinedText = `\$\{pendingFragment\}\$\{text\}`;/);
+  assert.match(serverSource, /const lastNewlineIndex = combinedText\.lastIndexOf\("\\n"\);/);
+  assert.match(serverSource, /<Buffer\\b/);
+  assert.match(serverSource, /pendingprekey\|unacknowledgedprekey\|prekeyid\|signedprekeyid/i);
+  assert.match(serverSource, /fuzzy-promote/);
+  assert.match(serverSource, /type:\s*"confirmation_required"/);
+  assert.match(serverSource, /classifyResolvedContactMatchConfidence/);
+  assert.match(serverSource, /findSessionContactMatchesByPhone/);
+  assert.match(agentSource, /type:\s*"confirmation_required"/);
+  assert.match(agentSource, /buildWhatsAppExactContactRequiredReply/);
 });
 
 test("whatsapp runtime progress and health stay bounded and honest", () => {
@@ -1302,10 +1360,10 @@ test("dashboard journal messages preserve sanitized model audit trails", () => {
         disagreementThreshold: 0.48,
       },
       selectedBy: "judge",
-      selectedModel: "mistralai/mistral-large-3-675b-instruct-2512",
+      selectedModel: "qwen/qwen3-coder-480b-a35b-instruct",
       candidates: [
         {
-          model: "meta/llama-3.3-70b-instruct",
+          model: "meta/llama-4-maverick-17b-128e-instruct",
           tier: "chat",
           status: "generated",
           latencyMs: 1900,
@@ -1313,7 +1371,7 @@ test("dashboard journal messages preserve sanitized model audit trails", () => {
           preview: "Use Redis with a processing key before enqueueing work.",
         },
         {
-          model: "mistralai/mistral-large-3-675b-instruct-2512",
+          model: "qwen/qwen3-coder-480b-a35b-instruct",
           tier: "reasoning",
           status: "selected",
           latencyMs: 2400,
@@ -1323,8 +1381,8 @@ test("dashboard journal messages preserve sanitized model audit trails", () => {
       ],
       judge: {
         used: true,
-        model: "moonshotai/kimi-k2-instruct-0905",
-        winnerModel: "mistralai/mistral-large-3-675b-instruct-2512",
+        model: "gpt-5.4-pro",
+        winnerModel: "qwen/qwen3-coder-480b-a35b-instruct",
         confidence: "high",
         materialDisagreement: true,
         needsClarification: false,
@@ -1374,7 +1432,7 @@ test("dashboard journal messages preserve sanitized model audit trails", () => {
     ],
   );
 
-  assert.equal(merged[0]?.messages[0]?.modelAuditTrail?.selectedModel, "mistralai/mistral-large-3-675b-instruct-2512");
+  assert.equal(merged[0]?.messages[0]?.modelAuditTrail?.selectedModel, "qwen/qwen3-coder-480b-a35b-instruct");
   assert.equal(merged[0]?.messages[0]?.modelAuditTrail?.judge?.confidence, "high");
 });
 
@@ -1390,6 +1448,69 @@ test("phase 2 planner escalates deep finance prompts into collect-and-judge orch
   assert.equal(plan.generatorBatchSize >= 2, true);
   assert.equal(plan.judgeEnabled, true);
   assert.equal(plan.allowLowConfidenceWinner, false);
+});
+
+test("model router keeps general fast candidates on the stable NVIDIA-first production sequence", () => {
+  const candidates = buildClawCloudModelCandidatesForTest({
+    intent: "general",
+    responseMode: "fast",
+    providerAvailability: { openai: true, nvidia: true },
+  });
+
+  assert.deepEqual(candidates, [
+    "meta/llama-4-maverick-17b-128e-instruct",
+    "qwen/qwen3.5-397b-a17b",
+    "deepseek-ai/deepseek-v3.1",
+    "deepseek-ai/deepseek-v3.1-terminus",
+  ]);
+});
+
+test("model router keeps fast coding on low-latency NVIDIA fallbacks while deep coding still prefers code specialists", () => {
+  const fastCoding = buildClawCloudModelCandidatesForTest({
+    intent: "coding",
+    responseMode: "fast",
+    providerAvailability: { openai: true, nvidia: true },
+  });
+  const deepCoding = buildClawCloudModelCandidatesForTest({
+    intent: "coding",
+    responseMode: "deep",
+    providerAvailability: { openai: true, nvidia: true },
+  });
+
+  assert.equal(fastCoding.length, 3);
+  assert.deepEqual(fastCoding, [
+    "meta/llama-4-maverick-17b-128e-instruct",
+    "mistralai/mistral-small-3.1-24b-instruct-2503",
+    "deepseek-ai/deepseek-v3.1-terminus",
+  ]);
+
+  assert.equal(deepCoding.length, 3);
+  assert.deepEqual(deepCoding, [
+    "qwen/qwen3-coder-480b-a35b-instruct",
+    "qwen/qwen2.5-coder-32b-instruct",
+    "deepseek-ai/deepseek-v3.1",
+  ]);
+});
+
+test("model router removes unavailable provider families before trimming candidates", () => {
+  const openAiOnly = buildClawCloudModelCandidatesForTest({
+    intent: "general",
+    responseMode: "fast",
+    providerAvailability: { openai: true, nvidia: false },
+  });
+  assert.deepEqual(openAiOnly, []);
+
+  const nvidiaOnly = buildClawCloudModelCandidatesForTest({
+    intent: "general",
+    responseMode: "fast",
+    providerAvailability: { openai: false, nvidia: true },
+  });
+  assert.deepEqual(nvidiaOnly, [
+    "meta/llama-4-maverick-17b-128e-instruct",
+    "qwen/qwen3.5-397b-a17b",
+    "deepseek-ai/deepseek-v3.1",
+    "deepseek-ai/deepseek-v3.1-terminus",
+  ]);
 });
 
 test("phase 2 candidate scoring prefers complete coding answers over thin stubs", () => {
@@ -3119,9 +3240,8 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
   assert.equal(modelCompareProfile.domain, "live");
   assert.equal(modelCompareProfile.requiresLiveGrounding, true);
 
-  // buildClawCloudLowConfidenceReply now returns an internal recovery signal
-  // instead of a user-visible "Scoped answer needed" refusal.
-  // The agent layer catches this signal and calls emergencyDirectAnswer() instead.
+  // Low-confidence replies now return clean clarifications instead of
+  // internal markers or fake warming-up messages.
   const lowConfidenceReply = buildClawCloudLowConfidenceReply(
     "Can I sue my landlord immediately?",
     buildClawCloudAnswerQualityProfile({
@@ -3130,7 +3250,7 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
       category: "law",
     }),
   );
-  assert.equal(lowConfidenceReply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
+  assert.match(lowConfidenceReply, /exact topic|exact place|exact date|precise reply/i);
 
   const timeoutLowConfidenceReply = buildClawCloudLowConfidenceReply(
     "why cuba is all blackout",
@@ -3141,7 +3261,7 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
     }),
     "The answer path took too long to complete reliably.",
   );
-  assert.equal(timeoutLowConfidenceReply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
+  assert.match(timeoutLowConfidenceReply, /exact place|exact date|exact event|exact item/i);
 
   const comparisonLowConfidenceReply = buildClawCloudLowConfidenceReply(
     "difference between nginx vs apache vs caddy",
@@ -3151,7 +3271,7 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
       category: "general",
     }),
   );
-  assert.equal(comparisonLowConfidenceReply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
+  assert.match(comparisonLowConfidenceReply, /exact topic|precise reply/i);
 
   const definitionLowConfidenceReply = buildClawCloudLowConfidenceReply(
     "what is rag",
@@ -3161,7 +3281,7 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
       category: "general",
     }),
   );
-  assert.equal(definitionLowConfidenceReply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
+  assert.match(definitionLowConfidenceReply, /exact topic|precise reply/i);
 
   const storyLowConfidenceReply = buildClawCloudLowConfidenceReply(
     "tell me the story of my demon in korean",
@@ -3171,7 +3291,7 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
       category: "culture_story",
     }),
   );
-  assert.equal(storyLowConfidenceReply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
+  assert.match(storyLowConfidenceReply, /exact topic|precise reply/i);
 
   const kalkiLowConfidenceReply = buildClawCloudLowConfidenceReply(
     "what is the story of kalki as is it based on true events",
@@ -3181,7 +3301,7 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
       category: "culture_story",
     }),
   );
-  assert.equal(kalkiLowConfidenceReply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
+  assert.match(kalkiLowConfidenceReply, /exact topic|precise reply/i);
 
   const technicalLowConfidenceReply = buildClawCloudLowConfidenceReply(
     "Explain the difference between idempotency and deduplication in event-driven systems.",
@@ -3191,7 +3311,7 @@ test("answer-quality profiles and confidence scoring stay conservative on high-s
       category: "general",
     }),
   );
-  assert.equal(technicalLowConfidenceReply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
+  assert.match(technicalLowConfidenceReply, /exact topic|precise reply/i);
 
   assert.equal(
     isClawCloudGroundedLiveAnswer({
@@ -5244,6 +5364,26 @@ test("contact ranking stays ambiguous when multiple contacts satisfy the full mu
   }
 });
 
+test("send-message parsing understands Hindi recipient-in-the-middle send requests", () => {
+  const prompt = "Kripiya kr ke ek bahut sundar sa paragraph aap dii ko send kr de jinse unka mood kafi aacha ho jaye";
+  const parsed = parseSendMessageCommand(prompt);
+
+  assert.ok(parsed);
+  assert.equal(parsed?.kind, "contacts");
+  assert.deepEqual(parsed?.contactNames, ["dii"]);
+  assert.match(parsed?.message ?? "", /bahut sundar sa paragraph/i);
+  assert.match(parsed?.message ?? "", /mood kafi aacha ho jaye/i);
+});
+
+test("Hindi recipient-in-the-middle WhatsApp send prompts stay on the send-message route", () => {
+  const prompt = "Kripiya kr ke ek bahut sundar sa paragraph aap dii ko send kr de jinse unka mood kafi aacha ho jaye";
+
+  assert.deepEqual(detectIntentForTest(prompt), {
+    type: "send_message",
+    category: "send_message",
+  });
+});
+
 test("send-message safety blocks scheduled, conditional, and ambiguous recipient commands without breaking normal drafts", () => {
   const scheduled = analyzeSendMessageCommandSafety('Send "Good morning" to Maa tomorrow at 8am');
   assert.ok(scheduled && !scheduled.allowed);
@@ -5553,6 +5693,18 @@ test("unverified WhatsApp history no-rows replies refuse to guess from unrelated
   assert.doesNotMatch(reply, /I checked the chat matched as/i);
 });
 
+test("unverified WhatsApp history replies can surface the closest synced contact without summarizing it", () => {
+  const reply = formatWhatsAppHistoryUnverifiedContactReplyForTest({
+    requestedName: "Hans",
+    candidateName: "Hansraj LPU",
+    candidatePhone: "918949826240",
+  });
+
+  assert.match(reply, /I couldn't verify a synced WhatsApp contact named "Hans"\./i);
+  assert.match(reply, /Closest synced match: Hansraj LPU \(\+918949826240\)\./i);
+  assert.match(reply, /I did not summarize unrelated chats or unknown-number threads/i);
+});
+
 test("recent WhatsApp clarification turns can classify a loose follow-up contact choice", () => {
   assert.equal(
     inferRecentWhatsAppContactFollowUpIntentForTest([
@@ -5650,6 +5802,53 @@ test("recipient confidence rejects partial multi-token word matches that could h
     score: 0.91,
     matchBasis: "word",
   }), true);
+});
+
+test("professional recipient commitment refuses loose live matches but allows strong synced matches", () => {
+  assert.equal(isProfessionallyCommittedRecipientMatchForTest({
+    requestedName: "Aman",
+    resolvedName: "Aman Classmate",
+    exact: false,
+    score: 0.82,
+    matchBasis: "fuzzy",
+    source: "live",
+  }), false);
+
+  assert.equal(isProfessionallyCommittedRecipientMatchForTest({
+    requestedName: "Aman Rajput",
+    resolvedName: "Aman Rajput Up",
+    exact: false,
+    score: 0.96,
+    matchBasis: "prefix",
+    source: "fuzzy",
+  }), true);
+});
+
+test("resolved contact scoring normalizes live 100-point scores before applying confidence gates", () => {
+  assert.equal(normalizeResolvedContactMatchScore(92), 0.92);
+  assert.equal(normalizeResolvedContactMatchScore(0.96), 0.96);
+  assert.equal(
+    classifyResolvedContactMatchConfidence({
+      requestedName: "Aman",
+      resolvedName: "Aman Classmate",
+      exact: false,
+      score: 92,
+      matchBasis: "word",
+      source: "live",
+    }),
+    "confirmation_required",
+  );
+  assert.equal(
+    classifyResolvedContactMatchConfidence({
+      requestedName: "Aman Rajput",
+      resolvedName: "Aman Rajput Up",
+      exact: false,
+      score: 92,
+      matchBasis: "prefix",
+      source: "fuzzy",
+    }),
+    "verified",
+  );
 });
 
 test("full inbound route prioritizes active-contact status and stop commands over casual chat fallbacks", async () => {
@@ -5935,7 +6134,7 @@ test("active contact send receipts stay short and mirror the user's message lang
       warning: null,
     },
   });
-  assert.equal(hinglishReceipt, "didi ko reply WhatsApp par bhej diya. Delivery confirm hone ka wait hai.");
+  assert.equal(hinglishReceipt, "didi (+917876831969) ko reply WhatsApp par bhej diya. Delivery confirm hone ka wait hai.");
 
   const englishReceipt = await buildWhatsAppActiveContactSendReceiptForTest({
     message: "Please tell her I will call later.",
@@ -5955,7 +6154,7 @@ test("active contact send receipts stay short and mirror the user's message lang
       warning: null,
     },
   });
-  assert.equal(englishReceipt, "Message delivered to didi.");
+  assert.equal(englishReceipt, "Message delivered to didi (+917876831969).");
 });
 
 test("contact ranking resolves family aliases from synced WhatsApp names and recent chat history", () => {
@@ -6002,6 +6201,31 @@ test("contact ranking resolves family aliases from synced WhatsApp names and rec
   assert.equal(fromHistory.type, "found");
   if (fromHistory.type === "found") {
     assert.equal(fromHistory.contact.phone, "919876543210");
+  }
+});
+
+test("contact ranking can resolve an exact WhatsApp phone number directly", () => {
+  const resolved = rankContactCandidates("+91 98765 43210", [
+    {
+      name: "Dii",
+      phone: "919876543210",
+      jid: "919876543210@s.whatsapp.net",
+      aliases: ["Dii", "Didi", "Sister"],
+    },
+    {
+      name: "Raj Kumar",
+      phone: "919111111111",
+      jid: "919111111111@s.whatsapp.net",
+      aliases: ["Raj Kumar", "Raj"],
+    },
+  ]);
+
+  assert.equal(resolved.type, "found");
+  if (resolved.type === "found") {
+    assert.equal(resolved.contact.name, "Dii");
+    assert.equal(resolved.contact.phone, "919876543210");
+    assert.equal(resolved.contact.exact, true);
+    assert.equal(resolved.contact.matchBasis, "exact");
   }
 });
 
@@ -8227,6 +8451,55 @@ test("architecture prompts with inbox-style dedupe terminology stay on the codin
   assert.equal(inferAppAccessRequirementForTest(prompt), null);
 });
 
+test("algorithmic implementation prompts stay on the coding path", () => {
+  const prompt = "Given a large grid (up to 10^5 x 10^5) with obstacles, find the shortest path from source to destination where you can remove at most k obstacles. Optimize for both time and space. Explain your approach and provide code.";
+  const agentSource = readFileSync(path.resolve(process.cwd(), "lib/clawcloud-agent.ts"), "utf8");
+
+  assert.deepEqual(detectStrictIntentRouteForTest(prompt), {
+    intent: { type: "coding", category: "coding" },
+    confidence: "high",
+    locked: true,
+    clarificationReply: null,
+  });
+  assert.deepEqual(detectIntentForTest(prompt), { type: "coding", category: "coding" });
+  assert.match(agentSource, /if \(looksLikeAlgorithmicCodingQuestion\(message\)\) {\s*return null;\s*}/);
+});
+
+test("algorithmic coding prompts force deep mode and stay out of the fast direct-answer lane", () => {
+  const gridPrompt = "Given a large grid (up to 10^5 x 10^5) with obstacles, find the shortest path from source to destination where you can remove at most k obstacles. Optimize for both time and space. Explain your approach and provide code.";
+  const subarrayPrompt = "Given an array of integers, find the length of the longest subarray with at most k distinct elements. Optimize for time complexity, explain your approach, and provide code.";
+
+  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest(gridPrompt, "fast"), false);
+  assert.equal(resolveResponseModeForTest("coding", gridPrompt, "fast"), "deep");
+  assert.equal(resolveResponseModeForTest("coding", subarrayPrompt), "deep");
+  assert.equal(resolveResponseModeForTest("coding", subarrayPrompt, "fast"), "deep");
+});
+
+test("model scoring rejects tiny wrong-language fragments for algorithmic coding prompts", () => {
+  const prompt = "Given a large grid with obstacles, find the shortest path from source to destination where you can remove at most k obstacles. Optimize for both time and space. Explain your approach and provide code.";
+  const weakScore = scoreClawCloudModelResponseForTest({
+    intent: "coding",
+    response: "एक लाख",
+    userQuestion: prompt,
+  });
+  const strongScore = scoreClawCloudModelResponseForTest({
+    intent: "coding",
+    response: [
+      "Use BFS on states `(row, col, removed)` and track the smallest removals seen per cell.",
+      "Time complexity is O(m * n * k) in the worst case and space complexity is O(m * n * k).",
+      "```python",
+      "from collections import deque",
+      "def shortest_path(grid, k):",
+      "    return 0",
+      "```",
+    ].join("\n"),
+    userQuestion: prompt,
+  });
+
+  assert.ok(weakScore < 0);
+  assert.ok(strongScore > weakScore);
+});
+
 test("deterministic architecture solvers stay concrete for Stripe and satellite system-design prompts", () => {
   const stripePrompt = "Design a zero-downtime Stripe billing migration from mutable balances to an immutable ledger. I need shadow mode, dual-write, idempotent webhook handling, rollback, and exact guidance on inbox/event dedupe keys.";
   const stripeAnswer = solveCodingArchitectureQuestion(stripePrompt) ?? "";
@@ -8917,8 +9190,7 @@ test("formal orbital and abstract computability prompts stay out of weather and 
     abstractPrompt,
     abstractProfile,
   );
-  // buildClawCloudLowConfidenceReply now returns internal signal — never user-visible refusals
-  assert.equal(abstractLowConfidenceReply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
+  assert.match(abstractLowConfidenceReply, /exact topic|precise reply/i);
 
   const abstractResearchFallback = buildClawCloudLowConfidenceReply(
     abstractPrompt,
@@ -8928,7 +9200,7 @@ test("formal orbital and abstract computability prompts stay out of weather and 
       category: "web_search",
     }),
   );
-  assert.equal(abstractResearchFallback, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
+  assert.match(abstractResearchFallback, /exact place|exact date|exact event|exact item|precise reply/i);
 });
 
 test("hard science computability prompts answer directly across the full inbound route", async () => {
@@ -9152,22 +9424,20 @@ test("reply display normalization preserves numbered lists and keeps follow-up b
   );
 });
 
-test("reply display normalization rewrites the legacy timeout fallback into a recovery signal", () => {
+test("reply display normalization rewrites the legacy timeout fallback into a precise clarification", () => {
   const normalized = normalizeReplyForClawCloudDisplay([
     "I'm not confident enough to answer that safely without better grounding.",
     "",
     "Reason: The answer path took too long to complete reliably.",
   ].join("\n"));
 
-  // Legacy timeout text is sanitized to internal recovery signal — finalizeGuarded intercepts it
-  assert.equal(normalized, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
+  assert.match(normalized, /exact topic|precise reply/i);
 });
 
-test("timeboxed reply fails closed with recovery signal instead of inventing a generic answer", () => {
+test("timeboxed reply fails closed with a precise clarification instead of inventing a generic answer", () => {
   const reply = buildTimeboxedProfessionalReplyForTest("what is rag", "general");
 
-  // No user-visible refusal — returns internal signal for finalizeGuarded to handle
-  assert.equal(reply, "__LOW_CONFIDENCE_RECOVERY_SIGNAL__");
+  assert.match(reply, /exact topic|precise reply/i);
 });
 
 test("timeboxed reply still returns deterministic explain answers when one is available", () => {

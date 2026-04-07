@@ -14,16 +14,25 @@ type LocalWhatsAppResolveResult = {
   name: string;
   phone: string | null;
   jid: string | null;
+  exact?: boolean;
+  score?: number;
+  matchBasis?: "exact" | "prefix" | "word" | "fuzzy" | null;
+  source?: "live" | "fuzzy";
 };
 
 type LocalWhatsAppAmbiguousMatch = {
   name: string;
   phone: string | null;
   jid: string | null;
+  exact?: boolean;
+  score?: number;
+  matchBasis?: "exact" | "prefix" | "word" | "fuzzy" | null;
+  source?: "live" | "fuzzy";
 };
 
 export type ClawCloudWhatsAppResolveResult =
   | { type: "found"; contact: LocalWhatsAppResolveResult }
+  | { type: "confirmation_required"; contact: LocalWhatsAppResolveResult }
   | { type: "ambiguous"; matches: LocalWhatsAppAmbiguousMatch[] };
 
 export type ClawCloudWhatsAppRefreshResult = {
@@ -649,14 +658,22 @@ export async function resolveClawCloudWhatsAppContact(userId: string, contactNam
 
   const json = (await response.json().catch(() => ({}))) as {
     error?: string;
-    type?: "found" | "ambiguous";
+    type?: "found" | "confirmation_required" | "ambiguous";
     name?: string;
     phone?: string | null;
     jid?: string | null;
+    exact?: boolean;
+    score?: number;
+    matchBasis?: "exact" | "prefix" | "word" | "fuzzy" | null;
+    source?: "live" | "fuzzy";
     matches?: Array<{
       name?: string;
       phone?: string | null;
       jid?: string | null;
+      exact?: boolean;
+      score?: number;
+      matchBasis?: "exact" | "prefix" | "word" | "fuzzy" | null;
+      source?: "live" | "fuzzy";
     }>;
   };
 
@@ -668,13 +685,21 @@ export async function resolveClawCloudWhatsAppContact(userId: string, contactNam
     return {
       type: "ambiguous",
       matches: json.matches
-        .filter((match): match is { name: string; phone: string | null; jid: string | null } =>
-          typeof match?.name === "string" && match.name.trim().length > 0,
-        )
+        .filter((match) => typeof match?.name === "string" && match.name.trim().length > 0)
         .map((match) => ({
           name: match.name,
           phone: match.phone ?? null,
           jid: match.jid ?? null,
+          exact: Boolean(match.exact),
+          score: typeof match.score === "number" && Number.isFinite(match.score) ? match.score : undefined,
+          matchBasis:
+            match.matchBasis === "exact"
+            || match.matchBasis === "prefix"
+            || match.matchBasis === "word"
+            || match.matchBasis === "fuzzy"
+              ? match.matchBasis
+              : null,
+          source: match.source === "fuzzy" ? "fuzzy" : "live",
         })),
     };
   }
@@ -684,11 +709,21 @@ export async function resolveClawCloudWhatsAppContact(userId: string, contactNam
   }
 
   return {
-    type: "found",
+    type: json.type === "confirmation_required" ? "confirmation_required" : "found",
     contact: {
       name: json.name,
       phone: json.phone ?? null,
       jid: json.jid ?? null,
+      exact: Boolean(json.exact),
+      score: typeof json.score === "number" && Number.isFinite(json.score) ? json.score : undefined,
+      matchBasis:
+        json.matchBasis === "exact"
+        || json.matchBasis === "prefix"
+        || json.matchBasis === "word"
+        || json.matchBasis === "fuzzy"
+          ? json.matchBasis
+          : null,
+      source: json.source === "fuzzy" ? "fuzzy" : "live",
     },
   };
 }

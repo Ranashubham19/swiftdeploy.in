@@ -79,6 +79,7 @@ import { classifyIntentWithConfidence, resolveIntentOverlap } from "@/lib/clawcl
 import { detectAiModelRoutingDecision, type AiModelRoutingDecision } from "@/lib/clawcloud-ai-model-routing";
 import { detectExpertMode, EXPERT_MODE_PROMPTS, WHATSAPP_BRAIN } from "@/lib/super-brain";
 import {
+  buildPreferredModelOrderForIntent,
   buildClawCloudModelAuditTrail,
   completeClawCloudPrompt,
   completeClawCloudPromptWithTrace,
@@ -241,9 +242,14 @@ import {
   saveContact,
 } from "@/lib/clawcloud-contacts";
 import {
+  classifyResolvedContactMatchConfidence,
   formatAmbiguousReply,
   formatNotFoundReply,
+  isConfidentResolvedContactMatch,
+  isProfessionallyCommittedResolvedContactMatch,
   lookupContactFuzzy,
+  normalizeResolvedContactNameTokens,
+  normalizeResolvedContactMatchScore,
 } from "@/lib/clawcloud-contacts-v2";
 import { extractActiveContactStartCommand } from "@/lib/clawcloud-active-contact-intent";
 import { applyDisclaimer } from "@/lib/clawcloud-disclaimers";
@@ -604,28 +610,6 @@ Greeting deep mode:
 
 const DEEP_FALLBACK = "__DEEP_FALLBACK_INTERNAL__";
 
-const LEGACY_RECOVERY_MODELS: Partial<Record<IntentType, string[]>> = {
-  coding: [
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  math: [
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  research: [
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  general: [
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-};
 
 const BRAIN = `You are *ClawCloud AI* — the world's most advanced AI assistant on WhatsApp, engineered to outperform ChatGPT, Claude, Gemini, and Perplexity on every question.
 
@@ -1209,55 +1193,9 @@ Deep greeting mode:
 - Show capability through tone, not through bullet lists.`,
 };
 
-const RECOVERY_MODELS: Partial<Record<IntentType, string[]>> = {
-  coding: [
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-    "qwen/qwen3-coder-480b-a35b-instruct",
-  ],
-  math: [
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-    "deepseek-ai/deepseek-v3.1",
-  ],
-  science: [
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  history: [
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct",
-  ],
-  health: [
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  research: [
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  general: [
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  explain: [
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  economics: [
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct",
-  ],
-};
+function getRecoveryModels(intent: IntentType) {
+  return buildPreferredModelOrderForIntent(intent, "deep", intent === "coding" ? 4 : 3);
+}
 
 const PROFESSIONAL_RESPONSE_BRAIN = [
   "You are ClawCloud AI on WhatsApp.",
@@ -1376,14 +1314,7 @@ async function emergencyDirectAnswer(
     history,
     intent: emergencyIntent,
     responseMode: "fast",
-    preferredModels: [
-      "meta/llama-3.3-70b-instruct",
-      "qwen/qwen3.5-397b-a17b",
-      "moonshotai/kimi-k2-instruct-0905",
-      "mistralai/mistral-large-3-675b-instruct-2512",
-      "moonshotai/kimi-k2.5",
-      "gpt-5.4-pro",
-    ],
+    preferredModels: buildPreferredModelOrderForIntent(emergencyIntent, "fast", 6),
     maxTokens: 1000,
     fallback: "",
     skipCache: true,
@@ -1677,12 +1608,7 @@ const MULTILINGUAL_NATIVE_ANSWER_ALLOWED_INTENTS = new Set<IntentType>([
   "sports",
 ]);
 
-const MULTILINGUAL_DIRECT_ANSWER_PREFERRED_MODELS = [
-  "moonshotai/kimi-k2-instruct-0905",
-  "moonshotai/kimi-k2-instruct-0905",
-  "qwen/qwen3.5-397b-a17b",
-  "mistralai/mistral-large-3-675b-instruct-2512",
-];
+const MULTILINGUAL_DIRECT_ANSWER_PREFERRED_MODELS = buildPreferredModelOrderForIntent("language", "fast", 4);
 
 const MULTILINGUAL_ROUTING_BRIDGE_TIMEOUT_MS = 4_000;
 
@@ -1795,6 +1721,7 @@ function detectPrimaryDirectAnswerLaneIntent(
 
   if (
     isArchitectureCodingRouteCandidate(trimmed)
+    || looksLikeAlgorithmicCodingQuestion(trimmed)
     || isMathOrStatisticsQuestion(trimmed)
   ) {
     return null;
@@ -2209,7 +2136,6 @@ function isInternalRecoverySignalReply(reply: string | null | undefined) {
     normalized.includes("__fast_fallback_internal__")
     || normalized.includes("__deep_fallback_internal__")
     || normalized.includes("__no_live_data_internal_signal__")
-    || normalized.includes("__low_confidence_recovery_signal__")
     || /^__[\p{L}\p{N}\s-]{0,96}__$/iu.test(value)
     && /(?:signal|fallback|recovery|confidence|error|विश्वास|पुनर्प्राप्ति|संकेत|erro|señal|sinal|segnale|сигнал|错误|信号)/iu.test(collapsed)
   );
@@ -2237,6 +2163,13 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || normalized.includes("i cannot answer")
     || normalized.includes("i'm not confident enough")
     || normalized.includes("i am not confident enough")
+    || normalized.includes("i need the exact topic, name, item, or number")
+    || normalized.includes("i need the exact topic, item, or detail")
+    || normalized.includes("i need the exact city or location")
+    || normalized.includes("i need the exact event, person, place, or date")
+    || normalized.includes("i need the full equation or the exact values")
+    || normalized.includes("i need the exact problem statement, language, or constraints")
+    || normalized.includes("i need the exact word, phrase, or sentence")
     || normalized.includes("outside my expertise")
     || normalized.includes("nvidia generation unavailable")
     || normalized.includes("scope addressed:")
@@ -2894,8 +2827,7 @@ function isDeprecatedInternalFallbackLeak(value: string) {
 }
 
 function buildGenericScopedRecoveryReply() {
-  // Return internal signal — never show "scoped answer needed" to users
-  return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
+  return "I need the exact topic, name, item, or number you want answered to give a precise reply.";
 }
 
 function sanitizeDeprecatedFallbackLeakWithContext(
@@ -2914,7 +2846,7 @@ function sanitizeDeprecatedFallbackLeakWithContext(
 
   if (hasWeatherIntent(safeQuestion)) {
     // No refusal — let finalizeGuarded handle it with emergencyDirectAnswer
-    return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
+    return "I need the exact city or location you want checked to answer the weather accurately.";
   }
 
   if (shouldUseLiveSearch(safeQuestion) || /\b(news|latest|today|current|update|updates|happening)\b/i.test(safeQuestion)) {
@@ -3208,6 +3140,58 @@ function looksOverlyThinDirectDefinitionReply(question: string, reply: string) {
   }
 
   if (sentenceCount === 1 && cleaned.length <= 90 && !hasUsefulAnchor) {
+    return true;
+  }
+
+  return false;
+}
+
+function looksSeverelyIncompleteTechnicalAnswer(
+  question: string,
+  intent: IntentType,
+  reply: string,
+) {
+  const demandingTechnicalQuestion =
+    looksLikeAlgorithmicCodingQuestion(question)
+    || (
+      (intent === "coding" || intent === "math")
+      && /\b(approach|time complexity|space complexity|optimi[sz]e|constraints?|implementation|provide code|write code)\b/i.test(question)
+    );
+
+  if (!demandingTechnicalQuestion) {
+    return false;
+  }
+
+  const cleaned = stripLeadingMetaSentences(reply)
+    .replace(/[`*_]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!cleaned) {
+    return true;
+  }
+
+  const hasCode = /```|function\s|const\s|class\s|return\s|interface\s|def\s|public\s+class|fn\s+\w+/i.test(cleaned);
+  const hasTechnicalScaffold = /\b(approach|algorithm|time complexity|space complexity|o\([^)]+\)|bfs|dfs|queue|heap|priority queue|dynamic programming|state|complexity)\b/i.test(cleaned);
+  const questionDemandsCode = /\b(code|implementation|implement|write code|provide code|sample code)\b/i.test(question);
+  const questionLatinChars = question.match(/[A-Za-z]/g)?.length ?? 0;
+  const answerLatinChars = cleaned.match(/[A-Za-z]/g)?.length ?? 0;
+  const answerNonLatinChars = cleaned.match(/[^\u0000-\u024F\s\d.,:;!?()[\]{}'"`~_*+\-/\\]/gu)?.length ?? 0;
+  const wrongLanguageFragment = questionLatinChars >= 20 && cleaned.length < 80 && answerLatinChars < 6 && answerNonLatinChars >= 4;
+
+  if (wrongLanguageFragment) {
+    return true;
+  }
+
+  if (questionDemandsCode && !hasCode) {
+    return true;
+  }
+
+  if (!hasTechnicalScaffold) {
+    return true;
+  }
+
+  if (cleaned.length < 160 && (!hasCode || !hasTechnicalScaffold)) {
     return true;
   }
 
@@ -7227,7 +7211,7 @@ async function rewriteReplyAsComplete(input: {
     history: await buildSmartHistory(input.userId, input.message, "deep", input.intent),
     intent: input.intent,
     responseMode: "deep",
-    preferredModels: RECOVERY_MODELS[input.intent],
+    preferredModels: getRecoveryModels(input.intent),
     maxTokens: recoveryMaxTokens(input.intent),
     fallback: "",
     skipCache: true,
@@ -7259,7 +7243,7 @@ async function buildProfessionalRecoveryReply(input: {
     history: await buildSmartHistory(input.userId, input.message, "deep", input.intent),
     intent: input.intent,
     responseMode: "deep",
-    preferredModels: RECOVERY_MODELS[input.intent],
+    preferredModels: getRecoveryModels(input.intent),
     maxTokens: recoveryMaxTokens(input.intent),
     fallback: "",
     skipCache: true,
@@ -7314,6 +7298,14 @@ function resolveInboundRouteTimeoutPolicy(message: string): InboundRouteTimeoutP
   }
 
   if (looksLikeStructuredTechnicalChallengePrompt(trimmed)) {
+    return { kind: "deep_reasoning", timeoutMs: INBOUND_AGENT_ROUTE_DEEP_TIMEOUT_MS };
+  }
+
+  if (
+    looksLikeAlgorithmicCodingQuestion(trimmed)
+    || isArchitectureOrDesignQuestion(trimmed)
+    || isMathOrStatisticsQuestion(trimmed)
+  ) {
     return { kind: "deep_reasoning", timeoutMs: INBOUND_AGENT_ROUTE_DEEP_TIMEOUT_MS };
   }
 
@@ -7513,7 +7505,7 @@ function buildTimeboxedProfessionalReply(message: string, intent: IntentType): s
 
   if (hasWeatherIntent(message)) {
     // No refusal — let finalizeGuarded handle it with emergencyDirectAnswer
-    return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
+    return "I need the exact city or location you want checked to answer the weather accurately.";
   }
 
   if (looksLikeCurrentAffairsPowerCrisisQuestion(message)) {
@@ -7713,7 +7705,7 @@ async function ensureProfessionalReply(input: {
 
   if (hasWeatherIntent(input.message)) {
     // No refusal — let finalizeGuarded handle it with emergencyDirectAnswer
-    return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
+    return "I need the exact city or location you want checked to answer the weather accurately.";
   }
 
   if (/\b(news|latest|today)\b/i.test(input.message)) {
@@ -8195,6 +8187,10 @@ function shouldForceDeepResponseMode(intent: IntentType, text: string) {
     return true;
   }
 
+  if (looksLikeAlgorithmicCodingQuestion(text)) {
+    return true;
+  }
+
   if (looksLikeMultilingualTechnicalArchitecturePrompt(text)) {
     return true;
   }
@@ -8274,10 +8270,16 @@ function buildLengthCalibrationInstruction(
 }
 
 function resolveResponseMode(intent: IntentType, text: string, override?: ResponseMode): ResponseMode {
-  if (override) return override;
-
   const lengthProfile = inferAnswerLengthProfile(text);
   const deepByComplexity = shouldForceDeepResponseMode(intent, text);
+
+  if (override === "deep") {
+    return "deep";
+  }
+
+  if (override === "fast" && !deepByComplexity) {
+    return "fast";
+  }
 
   if (lengthProfile === "detailed") {
     return "deep";
@@ -8361,6 +8363,10 @@ async function expertReply(
   }
 
   if (intent === "coding") {
+    if (looksLikeAlgorithmicCodingQuestion(message)) {
+      return null;
+    }
+
     const deterministic = buildDeterministicCodingReply(message);
     if (deterministic) {
       return deterministic;
@@ -8404,6 +8410,26 @@ function isMathOrStatisticsQuestion(text: string): boolean {
     || /\b(value at risk|var|cvar|expected shortfall|stress loss|tail risk|spot price spikes|heat waves|hedging with forwards|forward hedge|hedge book|power retailer)\b/.test(normalized)
     || /\b(if .{0,40}what (is|are|would|will)|given .{0,40}(find|calculate|compute|estimate|what))\b/.test(normalized)
     || /\b(\d+%.*\d+%|\d+\s*(?:out of|of)\s*\d+)\b/.test(normalized)
+  );
+}
+
+function looksLikeAlgorithmicCodingQuestion(text: string): boolean {
+  const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    /\b(shortest path|dijkstra|bellman[- ]ford|floyd[- ]warshall|a\*|astar|union[- ]find|disjoint set|topological sort|segment tree|fenwick tree|binary indexed tree|knapsack|memoi[sz]ation|state compression|breadth[- ]first search|depth[- ]first search|graph traversal)\b/.test(normalized)
+    || /\b(longest|shortest)\s+(?:subarray|substring|subsequence|window)\b/.test(normalized)
+    || (
+      /\b(grid|matrix|graph|tree|array|string|subarray|substring|window|source|destination|obstacle|constraints?)\b/.test(normalized)
+      && /\b(algorithm|path|remove at most|at most(?:\s+\w+)?|at least|exactly|time complexity|space complexity|optimi[sz]e|provide code|implementation|approach|sliding window|two pointers|distinct)\b/.test(normalized)
+    )
+    || (
+      /\b(explain your approach|time complexity|space complexity|provide code|write code|implementation)\b/.test(normalized)
+      && /\b(problem|constraints?|grid|graph|tree|array|matrix|subarray|substring|window|path|node|edge)\b/.test(normalized)
+    )
   );
 }
 
@@ -9238,6 +9264,15 @@ function detectStrictIntentRoute(text: string): StrictIntentRoute | null {
   if (looksLikeCultureStoryQuestion(trimmed)) {
     return {
       intent: { type: "culture", category: "culture_story" },
+      confidence: "high",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
+  if (looksLikeAlgorithmicCodingQuestion(trimmed)) {
+    return {
+      intent: { type: "coding", category: "coding" },
       confidence: "high",
       locked: true,
       clarificationReply: null,
@@ -10628,6 +10663,19 @@ function pickReadableWhatsAppHistoryContactLabel(input: {
   return phone || candidates[0] || null;
 }
 
+function formatWhatsAppResolvedContactLabel(input: {
+  name?: string | null;
+  phone?: string | null;
+}) {
+  const name = String(input.name ?? "").trim();
+  const phone = String(input.phone ?? "").trim();
+  if (name && phone) {
+    return `${name} (+${phone})`;
+  }
+
+  return name || (phone ? `+${phone}` : "");
+}
+
 function buildWhatsAppSummaryBullet(speaker: string, message: string) {
   const cleaned = cleanWhatsAppSummarySnippet(message, 96);
   const lower = cleaned.toLowerCase();
@@ -10816,6 +10864,7 @@ async function buildWhatsAppHistoryReply(
     aliases?: string[];
   } | null = null;
   let blockBroadHistoryFallback = false;
+  let unverifiedContactCandidate: { name: string; phone?: string | null } | null = null;
 
   const contactHintPhone = extractPhoneDigitsForLookup(contactHint);
   const relativeContactHint = looksLikeRelativeWhatsAppContactHint(contactHint);
@@ -10875,20 +10924,42 @@ async function buildWhatsAppHistoryReply(
       }
 
       if (fuzzyResult.type === "found") {
-        resolvedContactName = pickReadableWhatsAppHistoryContactLabel({
-          name: fuzzyResult.contact.name,
-          phone: fuzzyResult.contact.phone,
-          aliases: fuzzyResult.contact.aliases,
-        }) ?? fuzzyResult.contact.name;
-        contactSearchValue = fuzzyResult.contact.phone;
-        resolvedContactScope = {
-          phone: fuzzyResult.contact.phone,
-          jid: fuzzyResult.contact.jid ?? null,
-          aliases: [...new Set([
-            fuzzyResult.contact.name,
-            ...(Array.isArray(fuzzyResult.contact.aliases) ? fuzzyResult.contact.aliases : []),
-          ].map((value) => String(value ?? "").trim()).filter(Boolean))],
-        };
+        const historyMatchConfidence = classifyResolvedContactMatchConfidence({
+          requestedName: contactHint,
+          resolvedName: fuzzyResult.contact.name,
+          exact: Boolean(fuzzyResult.contact.exact),
+          score: normalizeResolvedContactMatchScore(fuzzyResult.contact.score) ?? 0.8,
+          matchBasis: fuzzyResult.contact.matchBasis ?? null,
+          source: "fuzzy",
+        });
+        if (historyMatchConfidence === "verified") {
+          resolvedContactName = formatWhatsAppResolvedContactLabel({
+            name: fuzzyResult.contact.name,
+            phone: fuzzyResult.contact.phone,
+          }) || pickReadableWhatsAppHistoryContactLabel({
+            name: fuzzyResult.contact.name,
+            phone: fuzzyResult.contact.phone,
+            aliases: fuzzyResult.contact.aliases,
+          }) || fuzzyResult.contact.name;
+          contactSearchValue = fuzzyResult.contact.phone;
+          resolvedContactScope = {
+            phone: fuzzyResult.contact.phone,
+            jid: fuzzyResult.contact.jid ?? null,
+            aliases: [...new Set([
+              fuzzyResult.contact.name,
+              ...(Array.isArray(fuzzyResult.contact.aliases) ? fuzzyResult.contact.aliases : []),
+            ].map((value) => String(value ?? "").trim()).filter(Boolean))],
+          };
+        } else {
+          resolvedContactName = contactHint;
+          blockBroadHistoryFallback = true;
+          if (historyMatchConfidence === "confirmation_required") {
+            unverifiedContactCandidate = {
+              name: fuzzyResult.contact.name,
+              phone: fuzzyResult.contact.phone ?? null,
+            };
+          }
+        }
       }
     }
   }
@@ -10943,6 +11014,7 @@ async function buildWhatsAppHistoryReply(
         resolvedContactName,
         resolvedContactScope,
         requireVerifiedContactMatch: blockBroadHistoryFallback,
+        unverifiedContactCandidate,
       }),
     );
   }
@@ -11394,6 +11466,7 @@ function detectIntent(text: string): DetectedIntent {
 
   if (
     looksLikeArchitectureCodingQuestion(t, understoodText, words)
+    || looksLikeAlgorithmicCodingQuestion(understoodText)
     || 
     /\b(python|javascript|typescript|ts|java\b|c\+\+|cpp|golang|go\b|rust|php|swift|kotlin|ruby|scala|bash|shell|sql|html|css|react|node|django|flask|spring|express)\b/.test(t)
     || /\b(in|with)\s+js\b/.test(t)
@@ -11953,15 +12026,12 @@ function looksStructuredTaxReply(answer: string, question: string): boolean {
 }
 
 function buildNewsCoverageRecoveryReply(_question: string): string {
-  // Return internal signal — never ask users to "send a concrete live scope"
-  return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
+  return "I need the exact event, person, place, or date you want checked to answer that accurately.";
 }
 
 function buildProfessionalLiveNewsRecoveryReply(question: string) {
-  // Instead of asking for more details, return the recovery signal so the
-  // agent layer generates a knowledge-based answer. NEVER show meta-statements
-  // like "this is a live news request" to users.
-  return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
+  // Use a precise clarification instead of a meta fallback.
+  return "I need the exact event, person, place, or date you want checked to answer that accurately.";
 }
 
 async function buildLiveCoverageRecoveryReply(
@@ -11998,11 +12068,7 @@ async function buildLiveCoverageRecoveryReply(
     history,
     intent: "research",
     responseMode: "deep",
-    preferredModels: [
-      "meta/llama-3.3-70b-instruct",
-      "mistralai/mistral-large-3-675b-instruct-2512",
-      "moonshotai/kimi-k2-instruct-0905",
-    ],
+    preferredModels: buildPreferredModelOrderForIntent("research", "deep", 3),
     maxTokens: 1_200,
     fallback: "",
     skipCache: true,
@@ -12033,7 +12099,7 @@ async function buildLiveCoverageRecoveryReply(
     history: [],
     intent: "research",
     responseMode: "deep",
-    preferredModels: ["meta/llama-3.3-70b-instruct"],
+    preferredModels: buildPreferredModelOrderForIntent("research", "deep", 1),
     maxTokens: 1_200,
     fallback: "",
     skipCache: true,
@@ -12045,9 +12111,9 @@ async function buildLiveCoverageRecoveryReply(
     return forced;
   }
 
-  // All paths exhausted — return internal recovery signal so the caller
-  // can trigger emergencyDirectAnswer instead of showing a refusal
-  return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
+  // All paths exhausted — fall back to a precise clarification instead of
+  // surfacing an internal marker or meta refusal.
+  return buildNewsCoverageRecoveryReply(question);
 
   if (false) {
   const q = question.trim().slice(0, 100);
@@ -12240,6 +12306,27 @@ async function enforceAnswerQuality(input: {
       && !looksLikeWrongModeAnswer(input.question, repairedAnswer)
     ) {
       answer = repairedAnswer;
+    }
+  }
+
+  if (looksSeverelyIncompleteTechnicalAnswer(input.question, input.intent, answer)) {
+    const repairedAnswer = await tryDirectRecovery(
+      "The draft answer was incomplete for a technical question. Provide the real approach, complexity, and code when the user asked for implementation.",
+    );
+
+    if (
+      repairedAnswer
+      && !looksSeverelyIncompleteTechnicalAnswer(input.question, input.intent, repairedAnswer)
+      && !looksLikeQuestionTopicMismatch(input.question, repairedAnswer)
+      && !looksLikeWrongModeAnswer(input.question, repairedAnswer)
+    ) {
+      answer = repairedAnswer;
+    } else {
+      return buildClawCloudLowConfidenceReply(
+        input.question,
+        profile,
+        "The draft answer was incomplete for the requested technical scope.",
+      );
     }
   }
 
@@ -13357,7 +13444,7 @@ async function applyEndToEndReplyLanguageLock(input: {
         responseForLanguageLock =
           buildDeterministicExplainReply(normalizedMessage)
           || buildDeterministicChatFallback(normalizedMessage, detectIntent(normalizedMessage).type)
-          || "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
+          || buildGenericScopedRecoveryReply();
       }
     }
   }
@@ -13452,7 +13539,7 @@ async function applyEndToEndReplyLanguageLockWithinBudget(input: {
     ? normalizeReplyForClawCloudDisplay(
       buildDeterministicExplainReply(input.message)
       || buildDeterministicChatFallback(input.message, detectIntent(input.message).type)
-      || "__LOW_CONFIDENCE_RECOVERY_SIGNAL__",
+      || buildGenericScopedRecoveryReply(),
     )
     : rawResponse;
   const safeFallbackResult = invalidResponse
@@ -13747,19 +13834,55 @@ async function routeInboundAgentMessageCore(
     if (earlyRecentWhatsAppIntent) {
       const earlyResolvedFollowUp = await lookupContactFuzzy(userId, earlyLooseWhatsAppFollowUpTarget).catch(() => null);
       if (earlyResolvedFollowUp?.type === "found") {
-        return routeInboundAgentMessageCore(
-          userId,
-          buildWhatsAppPendingContactResumePrompt(
-            earlyRecentWhatsAppIntent,
-            {
-              name: earlyResolvedFollowUp.contact.name,
+        const followUpConfidence = classifyResolvedContactMatchConfidence({
+          requestedName: earlyLooseWhatsAppFollowUpTarget,
+          resolvedName: earlyResolvedFollowUp.contact.name,
+          exact: Boolean(earlyResolvedFollowUp.contact.exact),
+          score: normalizeResolvedContactMatchScore(earlyResolvedFollowUp.contact.score) ?? 0.8,
+          matchBasis: earlyResolvedFollowUp.contact.matchBasis ?? null,
+          source: "fuzzy",
+        });
+        if (followUpConfidence === "verified") {
+          return routeInboundAgentMessageCore(
+            userId,
+            buildWhatsAppPendingContactResumePrompt(
+              earlyRecentWhatsAppIntent,
+              {
+                name: earlyResolvedFollowUp.contact.name,
+                phone: earlyResolvedFollowUp.contact.phone,
+                jid: earlyResolvedFollowUp.contact.jid ?? null,
+              },
+              trimmed,
+            ),
+            { conversationStyle: selectedConversationStyle },
+          );
+        }
+
+        if (followUpConfidence === "confirmation_required") {
+          const followUpCategory = earlyRecentWhatsAppIntent === "whatsapp_history"
+            ? "whatsapp_history"
+            : "send_message";
+          const followUpLane = earlyRecentWhatsAppIntent === "active_contact_start"
+            ? "active_contact_start" as const
+            : earlyRecentWhatsAppIntent === "whatsapp_history"
+              ? "whatsapp_history" as const
+              : "send_message" as const;
+          return finalizeAgentReply({
+            userId,
+            locale: "en",
+            preserveRomanScript: false,
+            question: trimmed,
+            intent: "send_message",
+            category: followUpCategory,
+            startedAt: routeStartedAt,
+            reply: buildWhatsAppExactContactRequiredReply({
+              requestedName: earlyLooseWhatsAppFollowUpTarget,
+              resolvedName: earlyResolvedFollowUp.contact.name,
               phone: earlyResolvedFollowUp.contact.phone,
-              jid: earlyResolvedFollowUp.contact.jid ?? null,
-            },
-            trimmed,
-          ),
-          { conversationStyle: selectedConversationStyle },
-        );
+              lane: followUpLane,
+            }),
+          });
+        }
       }
 
       if (earlyResolvedFollowUp?.type === "ambiguous") {
@@ -14128,10 +14251,41 @@ async function routeInboundAgentMessageCore(
       );
     }
 
+    if (resolved.type === "confirmation_required") {
+      await clearWhatsAppPendingContactResolution(userId).catch(() => null);
+      return finalizeActiveContactReply(
+        buildWhatsAppExactContactRequiredReply({
+          requestedName: activeContactSessionCommand.contactName,
+          resolvedName: resolved.contact.name,
+          phone: resolved.contact.phone,
+          lane: "active_contact_start",
+        }),
+      );
+    }
+
     if (resolved.type === "not_found") {
       await clearWhatsAppPendingContactResolution(userId).catch(() => null);
       return finalizeActiveContactReply(
         formatNotFoundReply(activeContactSessionCommand.contactName, resolved.suggestions),
+      );
+    }
+
+    if (!isProfessionallyCommittedRecipientMatch({
+      requestedName: activeContactSessionCommand.contactName,
+      resolvedName: resolved.contact.name,
+      exact: resolved.contact.exact,
+      score: resolved.contact.score,
+      matchBasis: resolved.contact.matchBasis,
+      source: resolved.contact.source,
+    })) {
+      await clearWhatsAppPendingContactResolution(userId).catch(() => null);
+      return finalizeActiveContactReply(
+        buildWhatsAppExactContactRequiredReply({
+          requestedName: activeContactSessionCommand.contactName,
+          resolvedName: resolved.contact.name,
+          phone: resolved.contact.phone,
+          lane: "active_contact_start",
+        }),
       );
     }
 
@@ -14603,11 +14757,7 @@ async function routeInboundAgentMessageCore(
           fallback: "",
           skipCache: true,
           temperature: 0.05,
-          preferredModels: [
-            "qwen/qwen3.5-397b-a17b",
-            "meta/llama-3.3-70b-instruct",
-            "deepseek-ai/deepseek-v3.1-terminus",
-          ],
+          preferredModels: buildPreferredModelOrderForIntent("language", "fast", 3),
         }),
         "",
         8_000,
@@ -14706,11 +14856,7 @@ async function routeInboundAgentMessageCore(
           fallback: "",
           skipCache: true,
           temperature: 0.05,
-          preferredModels: [
-            "qwen/qwen3.5-397b-a17b",
-            "meta/llama-3.3-70b-instruct",
-            "deepseek-ai/deepseek-v3.1-terminus",
-          ],
+          preferredModels: buildPreferredModelOrderForIntent("language", "fast", 3),
         }),
         "",
         8_000,
@@ -14787,6 +14933,11 @@ async function routeInboundAgentMessageCore(
   const primaryDirectAnswerIntent = detectPrimaryDirectAnswerLaneIntent(trimmed, requested.mode);
   if (primaryDirectAnswerIntent) {
     const directAnswerQuestion = stripClawCloudConversationalLeadIn(trimmed).trim() || trimmed;
+    const directAnswerMode = resolveResponseMode(
+      primaryDirectAnswerIntent.type,
+      directAnswerQuestion,
+      requested.mode,
+    );
     const directAnswerInstruction = [
       buildIntentSpecificInstruction(primaryDirectAnswerIntent.type, directAnswerQuestion),
       buildConversationStyleInstruction(selectedConversationStyle),
@@ -14803,8 +14954,8 @@ async function routeInboundAgentMessageCore(
       userId,
       directAnswerQuestion,
       primaryDirectAnswerIntent.type,
-      "fast",
-      requested.explicit || requested.mode === "fast",
+      directAnswerMode,
+      requested.explicit || requested.mode === "fast" || directAnswerMode === "deep",
       directAnswerInstruction,
       undefined,
     );
@@ -14974,19 +15125,50 @@ async function routeInboundAgentMessageCore(
   if (recentWhatsAppFollowUpIntent && looseWhatsAppFollowUpTarget) {
     const followUpResolved = await lookupContactFuzzy(userId, looseWhatsAppFollowUpTarget).catch(() => null);
     if (followUpResolved?.type === "found") {
-      return routeInboundAgentMessageCore(
-        userId,
-        buildWhatsAppPendingContactResumePrompt(
-          recentWhatsAppFollowUpIntent,
-          {
-            name: followUpResolved.contact.name,
+      const followUpConfidence = classifyResolvedContactMatchConfidence({
+        requestedName: looseWhatsAppFollowUpTarget,
+        resolvedName: followUpResolved.contact.name,
+        exact: Boolean(followUpResolved.contact.exact),
+        score: normalizeResolvedContactMatchScore(followUpResolved.contact.score) ?? 0.8,
+        matchBasis: followUpResolved.contact.matchBasis ?? null,
+        source: "fuzzy",
+      });
+      if (followUpConfidence === "verified") {
+        return routeInboundAgentMessageCore(
+          userId,
+          buildWhatsAppPendingContactResumePrompt(
+            recentWhatsAppFollowUpIntent,
+            {
+              name: followUpResolved.contact.name,
+              phone: followUpResolved.contact.phone,
+              jid: followUpResolved.contact.jid ?? null,
+            },
+            trimmed,
+          ),
+          { conversationStyle: selectedConversationStyle },
+        );
+      }
+
+      if (followUpConfidence === "confirmation_required") {
+        const followUpCategory = recentWhatsAppFollowUpIntent === "whatsapp_history"
+          ? "whatsapp_history"
+          : "send_message";
+        const followUpLane = recentWhatsAppFollowUpIntent === "active_contact_start"
+          ? "active_contact_start" as const
+          : recentWhatsAppFollowUpIntent === "whatsapp_history"
+            ? "whatsapp_history" as const
+            : "send_message" as const;
+        return finalizeEarlyTranslated(
+          buildWhatsAppExactContactRequiredReply({
+            requestedName: looseWhatsAppFollowUpTarget,
+            resolvedName: followUpResolved.contact.name,
             phone: followUpResolved.contact.phone,
-            jid: followUpResolved.contact.jid ?? null,
-          },
-          trimmed,
-        ),
-        { conversationStyle: selectedConversationStyle },
-      );
+            lane: followUpLane,
+          }),
+          "send_message",
+          followUpCategory,
+        );
+      }
     }
 
     if (followUpResolved?.type === "ambiguous") {
@@ -15133,6 +15315,9 @@ async function routeInboundAgentMessageCore(
     } else if (resolvedCategory !== "math" && isMathOrStatisticsQuestion(finalMessage)) {
       resolvedType = "math";
       resolvedCategory = "math";
+    } else if (resolvedCategory !== "coding" && looksLikeAlgorithmicCodingQuestion(finalMessage)) {
+      resolvedType = "coding";
+      resolvedCategory = "coding";
     } else if (resolvedCategory !== "coding" && isArchitectureOrDesignQuestion(finalMessage)) {
       resolvedType = "coding";
       resolvedCategory = "coding";
@@ -15239,12 +15424,9 @@ async function routeInboundAgentMessageCore(
       isDocumentBound: options?.isDocumentBound,
     });
 
-    // Intercept low-confidence recovery signal — NEVER show refusal to user
-    // LIMITED to ONE emergency attempt to prevent cascading 17+ API calls
-    if (
-      guardedReply === "__LOW_CONFIDENCE_RECOVERY_SIGNAL__"
-      || isVisibleFallbackReply(guardedReply)
-    ) {
+    // Intercept visible fallback replies and replace them with one emergency
+    // recovery attempt followed by a deterministic last-resort answer.
+    if (isVisibleFallbackReply(guardedReply)) {
       console.log("[finalizeGuarded] Primary reply rejected, attempting ONE emergency recovery");
       const emergencyReply = await emergencyDirectAnswer(
         finalMessage,
@@ -15255,12 +15437,12 @@ async function routeInboundAgentMessageCore(
         guardedReply = emergencyReply;
       } else {
         // Use the original reply if it has real content, otherwise use a clean user-facing message
-        if (preparedReply && !isVisibleFallbackReply(preparedReply) && preparedReply !== "__LOW_CONFIDENCE_RECOVERY_SIGNAL__") {
+        if (preparedReply && !isVisibleFallbackReply(preparedReply)) {
           guardedReply = preparedReply;
         } else {
           // Deterministic fallback — NO further AI calls to prevent cascade
-          console.log("[finalizeGuarded] Emergency recovery failed, using deterministic fallback");
-          guardedReply = "⚡ My AI engine is warming up — please resend your question in a few seconds and I'll answer it fully.";
+          console.log("[finalizeGuarded] Emergency recovery failed, using deterministic last-resort answer");
+          guardedReply = buildTimeboxedProfessionalReply(finalMessage, intent as IntentType).trim() || buildGenericScopedRecoveryReply();
         }
       }
     }
@@ -15877,11 +16059,7 @@ async function routeInboundAgentMessageCore(
           history,
           intent: "research",
           responseMode: "deep",
-          preferredModels: [
-            "meta/llama-3.3-70b-instruct",
-            "mistralai/mistral-large-3-675b-instruct-2512",
-            "moonshotai/kimi-k2-instruct-0905",
-          ],
+          preferredModels: buildPreferredModelOrderForIntent("research", "deep", 3),
           maxTokens: 900,
           fallback: "",
           skipCache: true,
@@ -15926,11 +16104,7 @@ async function routeInboundAgentMessageCore(
           history: memory.recentTurns,
           intent: "research",
           responseMode: "deep",
-          preferredModels: [
-            "meta/llama-3.3-70b-instruct",
-            "mistralai/mistral-large-3-675b-instruct-2512",
-            "moonshotai/kimi-k2-instruct-0905",
-          ],
+          preferredModels: buildPreferredModelOrderForIntent("research", "deep", 3),
           maxTokens: 900,
           fallback: "",
           skipCache: true,
@@ -17807,8 +17981,38 @@ async function handleSendMessageToContact(
     );
   }
 
+  if (resolved.type === "confirmation_required") {
+    return translateMessage(
+      buildWhatsAppExactContactRequiredReply({
+        requestedName: contactName,
+        resolvedName: resolved.contact.name,
+        phone: resolved.contact.phone,
+        lane: "send_message",
+      }),
+      locale,
+    );
+  }
+
   const phone = resolved.contact.phone;
   const resolvedName = resolved.contact.name;
+  if (!isProfessionallyCommittedRecipientMatch({
+    requestedName: contactName,
+    resolvedName,
+    exact: resolved.contact.exact,
+    score: resolved.contact.score,
+    matchBasis: resolved.contact.matchBasis,
+    source: resolved.contact.source,
+  })) {
+    return translateMessage(
+      buildWhatsAppExactContactRequiredReply({
+        requestedName: contactName,
+        resolvedName,
+        phone,
+        lane: "send_message",
+      }),
+      locale,
+    );
+  }
 
   try {
     const sendResult = await sendClawCloudWhatsAppToPhone(phone, message, {
@@ -17909,6 +18113,43 @@ function buildSelfRecipientSafetyReply(requestedName: string) {
   ].join("\n");
 }
 
+function buildWhatsAppExactContactRequiredReply(input: {
+  requestedName: string;
+  resolvedName: string;
+  phone?: string | null;
+  lane: "send_message" | "active_contact_start" | "whatsapp_history";
+}) {
+  const resolvedLabel =
+    formatWhatsAppResolvedContactLabel({
+      name: input.resolvedName,
+      phone: input.phone ?? null,
+    })
+    || input.resolvedName
+    || input.requestedName;
+
+  if (input.lane === "active_contact_start") {
+    return [
+      `I found ${resolvedLabel}, but I need the exact WhatsApp contact before I turn active contact mode on.`,
+      "",
+      "Send the full contact name as saved in WhatsApp or the full number, and I will bind only the right chat.",
+    ].join("\n");
+  }
+
+  if (input.lane === "whatsapp_history") {
+    return [
+      `I found ${resolvedLabel}, but I need the exact WhatsApp contact before I summarize the wrong chat.`,
+      "",
+      "Send the full contact name as saved in WhatsApp or the full number, and I will check only the right conversation.",
+    ].join("\n");
+  }
+
+  return [
+    `I found ${resolvedLabel}, but the match is not exact enough to send automatically.`,
+    "",
+    "Send the full contact name as saved in WhatsApp or the direct number, and I will send it to the right chat immediately.",
+  ].join("\n");
+}
+
 async function loadLikelyWhatsAppSelfPhones(userId: string) {
   const phones = new Set<string>();
   const addPhoneVariants = (raw: string | null | undefined) => {
@@ -17960,30 +18201,6 @@ async function loadLikelyWhatsAppSelfPhones(userId: string) {
   return phones;
 }
 
-const RECIPIENT_GENERIC_TOKENS = new Set([
-  "contact",
-  "classmate",
-  "friend",
-  "mate",
-  "bro",
-  "bhai",
-  "dost",
-  "sir",
-  "madam",
-  "mr",
-  "mrs",
-  "ms",
-]);
-
-function normalizeRecipientNameTokens(value: string) {
-  return String(value ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .map((token) => token.trim())
-    .filter((token) => token.length >= 2 && !RECIPIENT_GENERIC_TOKENS.has(token));
-}
-
 function isConfidentRecipientNameMatch(input: {
   requestedName: string;
   resolvedName: string;
@@ -17991,45 +18208,22 @@ function isConfidentRecipientNameMatch(input: {
   score: number;
   matchBasis: "exact" | "prefix" | "word" | "fuzzy" | null;
 }) {
-  if (input.exact) {
-    return true;
-  }
+  return isConfidentResolvedContactMatch(input);
+}
 
-  const requestedTokens = normalizeRecipientNameTokens(input.requestedName);
-  const resolvedTokens = normalizeRecipientNameTokens(input.resolvedName);
-  if (!requestedTokens.length || !resolvedTokens.length) {
-    return input.score >= 0.9;
-  }
+function isProfessionallyCommittedRecipientMatch(input: {
+  requestedName: string;
+  resolvedName: string;
+  exact: boolean;
+  score: number;
+  matchBasis: "exact" | "prefix" | "word" | "fuzzy" | null;
+  source: "fuzzy" | "live";
+}) {
+  return isProfessionallyCommittedResolvedContactMatch(input);
+}
 
-  const requestedJoined = requestedTokens.join(" ");
-  const resolvedJoined = resolvedTokens.join(" ");
-  if (requestedJoined === resolvedJoined || resolvedJoined.startsWith(`${requestedJoined} `)) {
-    return true;
-  }
-
-  const overlapCount = requestedTokens.filter((token) => resolvedTokens.includes(token)).length;
-  if (overlapCount === requestedTokens.length) {
-    return true;
-  }
-
-  if (input.matchBasis === "word" && input.score >= 0.9 && overlapCount >= 1) {
-    return requestedTokens.length === 1;
-  }
-
-  if (
-    input.matchBasis === "prefix"
-    && requestedTokens[0]
-    && requestedTokens[0].length >= 4
-    && input.score >= 0.93
-  ) {
-    return requestedTokens.length === 1;
-  }
-
-  if (input.matchBasis === "fuzzy" && input.score >= 0.97 && requestedTokens.length > 1) {
-    return true;
-  }
-
-  return false;
+function normalizeRecipientNameTokens(value: string) {
+  return normalizeResolvedContactNameTokens(value);
 }
 
 export function isConfidentRecipientNameMatchForTest(input: {
@@ -18042,29 +18236,171 @@ export function isConfidentRecipientNameMatchForTest(input: {
   return isConfidentRecipientNameMatch(input);
 }
 
+export function isProfessionallyCommittedRecipientMatchForTest(input: {
+  requestedName: string;
+  resolvedName: string;
+  exact: boolean;
+  score: number;
+  matchBasis: "exact" | "prefix" | "word" | "fuzzy" | null;
+  source: "fuzzy" | "live";
+}) {
+  return isProfessionallyCommittedRecipientMatch(input);
+}
+
+type WhatsAppResolvedRecipientContact = {
+  name: string;
+  phone: string | null;
+  jid: string | null;
+  exact: boolean;
+  score: number;
+  matchedAlias: string | null;
+  matchBasis: "exact" | "prefix" | "word" | "fuzzy" | null;
+  source: "fuzzy" | "live";
+};
+
+type WhatsAppResolvedRecipientAmbiguousMatch = {
+  name: string;
+  phone: string | null;
+  jid: string | null;
+  aliases: string[];
+  score: number;
+  exact: boolean;
+  matchedAlias?: string;
+  matchBasis?: "exact" | "prefix" | "word" | "fuzzy";
+};
+
+type WhatsAppRecipientResolveResult =
+  | { type: "found"; contact: WhatsAppResolvedRecipientContact }
+  | { type: "confirmation_required"; contact: WhatsAppResolvedRecipientContact }
+  | { type: "ambiguous"; matches: WhatsAppResolvedRecipientAmbiguousMatch[] }
+  | { type: "not_found"; suggestions: string[] }
+  | { type: "session_unavailable" }
+  | { type: "self_blocked"; contact: WhatsAppResolvedRecipientContact };
+
 async function resolveWhatsAppRecipientWithRetry(
   userId: string,
   requestedName: string,
   options?: {
     avoidPhones?: Set<string>;
   },
-) {
+): Promise<WhatsAppRecipientResolveResult> {
   const shouldAvoidPhone = (phone: string | null | undefined) => {
     const digits = normalizeWhatsAppPhoneDigits(phone);
     return Boolean(digits && options?.avoidPhones?.has(digits));
   };
 
-  let blockedSelfMatch: {
+  let blockedSelfMatch: WhatsAppResolvedRecipientContact | null = null;
+  let verifiedContact: WhatsAppResolvedRecipientContact | null = null;
+  let confirmationRequired: WhatsAppResolvedRecipientContact | null = null;
+  let ambiguousMatches: WhatsAppResolvedRecipientAmbiguousMatch[] | null = null;
+  let suggestions: string[] = [];
+
+  const noteSuggestion = (name: string) => {
+    suggestions = [name, ...suggestions.filter((existing) => existing !== name)];
+  };
+
+  const chooseBetterResolvedRecipientContact = (
+    current: WhatsAppResolvedRecipientContact | null,
+    next: WhatsAppResolvedRecipientContact,
+  ) => {
+    if (!current) {
+      return next;
+    }
+
+    if (next.exact !== current.exact) {
+      return next.exact ? next : current;
+    }
+
+    if (next.score !== current.score) {
+      return next.score > current.score ? next : current;
+    }
+
+    const matchBasisPriority = { exact: 4, prefix: 3, word: 2, fuzzy: 1 } as const;
+    const currentPriority = current.matchBasis ? matchBasisPriority[current.matchBasis] : 0;
+    const nextPriority = next.matchBasis ? matchBasisPriority[next.matchBasis] : 0;
+    if (nextPriority !== currentPriority) {
+      return nextPriority > currentPriority ? next : current;
+    }
+
+    if (next.source !== current.source) {
+      return next.source === "fuzzy" ? next : current;
+    }
+
+    return next.name.length > current.name.length ? next : current;
+  };
+
+  const considerResolvedContact = (found: WhatsAppResolvedRecipientContact) => {
+    if (shouldAvoidPhone(found.phone)) {
+      blockedSelfMatch = chooseBetterResolvedRecipientContact(blockedSelfMatch, found);
+      return;
+    }
+
+    const matchConfidence = classifyResolvedContactMatchConfidence({
+      requestedName,
+      resolvedName: found.name,
+      exact: found.exact,
+      score: found.score,
+      matchBasis:
+        found.matchBasis === "exact"
+        || found.matchBasis === "prefix"
+        || found.matchBasis === "word"
+        || found.matchBasis === "fuzzy"
+          ? found.matchBasis
+          : null,
+      source: found.source,
+    });
+
+    if (matchConfidence === "verified") {
+      verifiedContact = chooseBetterResolvedRecipientContact(verifiedContact, found);
+      return;
+    }
+
+    if (matchConfidence === "confirmation_required") {
+      confirmationRequired = chooseBetterResolvedRecipientContact(confirmationRequired, found);
+      noteSuggestion(found.name);
+      return;
+    }
+
+    noteSuggestion(found.name);
+  };
+
+  const mapFuzzyResolvedContact = (contact: {
     name: string;
     phone: string | null;
-    jid: string | null;
-    exact: boolean;
-    score: number;
-    matchedAlias: string | null;
-    matchBasis: string | null;
-    source: "fuzzy" | "live";
-  } | null = null;
-  let suggestions: string[] = [];
+    jid?: string | null;
+    exact?: boolean;
+    score?: number;
+    matchedAlias?: string;
+    matchBasis?: "exact" | "prefix" | "word" | "fuzzy" | null;
+  }): WhatsAppResolvedRecipientContact => ({
+    name: contact.name,
+    phone: contact.phone,
+    jid: contact.jid ?? null,
+    exact: Boolean(contact.exact),
+    score: normalizeResolvedContactMatchScore(contact.score) ?? 0.8,
+    matchedAlias: contact.matchedAlias ?? null,
+    matchBasis: contact.matchBasis ?? null,
+    source: "fuzzy",
+  });
+
+  const mapLiveResolvedContact = (contact: {
+    name: string;
+    phone: string | null;
+    jid?: string | null;
+    exact?: boolean;
+    score?: number;
+    matchBasis?: "exact" | "prefix" | "word" | "fuzzy" | null;
+    source?: "live" | "fuzzy";
+  }): WhatsAppResolvedRecipientContact => ({
+    name: contact.name,
+    phone: contact.phone,
+    jid: contact.jid ?? null,
+    exact: Boolean(contact.exact),
+    score: normalizeResolvedContactMatchScore(contact.score) ?? 0.82,
+    matchedAlias: contact.name,
+    matchBasis: contact.matchBasis ?? null,
+    source: contact.source === "fuzzy" ? "fuzzy" : "live",
+  });
 
   let sessionUnavailable = false;
   let fuzzyResult = await lookupContactFuzzy(userId, requestedName);
@@ -18072,43 +18408,20 @@ async function resolveWhatsAppRecipientWithRetry(
     suggestions = fuzzyResult.suggestions;
   }
   if (fuzzyResult.type === "found") {
-    const found = {
-      name: fuzzyResult.contact.name,
-      phone: fuzzyResult.contact.phone,
-      jid: fuzzyResult.contact.jid ?? null,
-      exact: Boolean(fuzzyResult.contact.exact),
-      score: Number.isFinite(fuzzyResult.contact.score) ? fuzzyResult.contact.score : 0.8,
-      matchedAlias: fuzzyResult.contact.matchedAlias ?? null,
-      matchBasis: fuzzyResult.contact.matchBasis ?? null,
-      source: "fuzzy" as const,
-    };
-    const confidentNameMatch = isConfidentRecipientNameMatch({
-      requestedName,
-      resolvedName: found.name,
-      exact: found.exact,
-      score: found.score,
-      matchBasis: found.matchBasis,
-    });
-    const avoidedSelf = shouldAvoidPhone(found.phone);
-    if (!avoidedSelf && confidentNameMatch) {
-      return {
-        type: "found" as const,
-        contact: found,
-      };
-    }
-    if (!confidentNameMatch) {
-      suggestions = [found.name, ...suggestions.filter((name) => name !== found.name)];
-    }
-    if (avoidedSelf) {
-      blockedSelfMatch = found;
-    }
+    considerResolvedContact(mapFuzzyResolvedContact(fuzzyResult.contact));
   }
 
   if (fuzzyResult.type === "ambiguous") {
-    return {
-      type: "ambiguous" as const,
-      matches: fuzzyResult.matches,
-    };
+    ambiguousMatches = fuzzyResult.matches.map((match) => ({
+      name: match.name,
+      phone: match.phone,
+      jid: match.jid ?? null,
+      aliases: [...match.aliases],
+      score: normalizeResolvedContactMatchScore(match.score) ?? 0.9,
+      exact: Boolean(match.exact),
+      matchedAlias: match.matchedAlias,
+      matchBasis: match.matchBasis,
+    }));
   }
 
   try {
@@ -18125,43 +18438,20 @@ async function resolveWhatsAppRecipientWithRetry(
   }
 
   if (fuzzyResult.type === "found") {
-    const found = {
-      name: fuzzyResult.contact.name,
-      phone: fuzzyResult.contact.phone,
-      jid: fuzzyResult.contact.jid ?? null,
-      exact: Boolean(fuzzyResult.contact.exact),
-      score: Number.isFinite(fuzzyResult.contact.score) ? fuzzyResult.contact.score : 0.8,
-      matchedAlias: fuzzyResult.contact.matchedAlias ?? null,
-      matchBasis: fuzzyResult.contact.matchBasis ?? null,
-      source: "fuzzy" as const,
-    };
-    const confidentNameMatch = isConfidentRecipientNameMatch({
-      requestedName,
-      resolvedName: found.name,
-      exact: found.exact,
-      score: found.score,
-      matchBasis: found.matchBasis,
-    });
-    const avoidedSelf = shouldAvoidPhone(found.phone);
-    if (!avoidedSelf && confidentNameMatch) {
-      return {
-        type: "found" as const,
-        contact: found,
-      };
-    }
-    if (!confidentNameMatch) {
-      suggestions = [found.name, ...suggestions.filter((name) => name !== found.name)];
-    }
-    if (avoidedSelf) {
-      blockedSelfMatch = blockedSelfMatch ?? found;
-    }
+    considerResolvedContact(mapFuzzyResolvedContact(fuzzyResult.contact));
   }
 
   if (fuzzyResult.type === "ambiguous") {
-    return {
-      type: "ambiguous" as const,
-      matches: fuzzyResult.matches,
-    };
+    ambiguousMatches = fuzzyResult.matches.map((match) => ({
+      name: match.name,
+      phone: match.phone,
+      jid: match.jid ?? null,
+      aliases: [...match.aliases],
+      score: normalizeResolvedContactMatchScore(match.score) ?? 0.9,
+      exact: Boolean(match.exact),
+      matchedAlias: match.matchedAlias,
+      matchBasis: match.matchBasis,
+    }));
   }
 
   try {
@@ -18169,55 +18459,35 @@ async function resolveWhatsAppRecipientWithRetry(
     if (liveResolved) {
       if (liveResolved.type === "ambiguous") {
         const matches = Array.isArray(liveResolved.matches) ? liveResolved.matches : [];
-        return {
-          type: "ambiguous" as const,
-          matches: matches.map((match) => ({
-            name: match.name,
-            phone: match.phone ?? "",
-            jid: match.jid ?? null,
-            aliases: [match.name],
-            score: 0.9,
-            exact: false,
-          })),
-        };
+        ambiguousMatches = matches.map((match) => ({
+          name: match.name,
+          phone: match.phone ?? "",
+          jid: match.jid ?? null,
+          aliases: [match.name],
+          score: normalizeResolvedContactMatchScore(match.score) ?? 0.9,
+          exact: Boolean(match.exact),
+          matchedAlias: match.name,
+          matchBasis: match.matchBasis ?? "fuzzy",
+        }));
       }
 
-      const liveContact = liveResolved.contact;
-      if (!liveContact) {
-        return {
-          type: "not_found" as const,
-          suggestions,
-        };
-      }
-      const found = {
-        name: liveContact.name,
-        phone: liveContact.phone,
-        jid: liveContact.jid,
-        exact: false,
-        score: 0.82,
-        matchedAlias: null,
-        matchBasis: "fuzzy" as const,
-        source: "live" as const,
-      };
-      const confidentNameMatch = isConfidentRecipientNameMatch({
-        requestedName,
-        resolvedName: found.name,
-        exact: found.exact,
-        score: found.score,
-        matchBasis: found.matchBasis,
-      });
-      const avoidedSelf = shouldAvoidPhone(found.phone);
-      if (!avoidedSelf && confidentNameMatch) {
-        return {
-          type: "found" as const,
-          contact: found,
-        };
-      }
-      if (!confidentNameMatch) {
-        suggestions = [found.name, ...suggestions.filter((name) => name !== found.name)];
-      }
-      if (avoidedSelf) {
-        blockedSelfMatch = blockedSelfMatch ?? found;
+      if (liveResolved.type === "found" || liveResolved.type === "confirmation_required") {
+        const liveContact = liveResolved.contact;
+        if (!liveContact) {
+          sessionUnavailable = true;
+        } else {
+          considerResolvedContact(mapLiveResolvedContact({
+            name: liveContact.name,
+            phone: liveContact.phone,
+            jid: liveContact.jid ?? null,
+            exact: Boolean(liveContact.exact),
+            score: typeof liveContact.score === "number" && Number.isFinite(liveContact.score)
+              ? liveContact.score
+              : undefined,
+            matchBasis: liveContact.matchBasis ?? null,
+            source: liveContact.source === "fuzzy" ? "fuzzy" : "live",
+          }));
+        }
       }
     }
   } catch (error) {
@@ -18237,6 +18507,35 @@ async function resolveWhatsAppRecipientWithRetry(
     return {
       type: "self_blocked" as const,
       contact: blockedSelfMatch,
+    };
+  }
+
+  const finalVerifiedContact = verifiedContact as WhatsAppResolvedRecipientContact | null;
+  if (finalVerifiedContact && (finalVerifiedContact.exact || !ambiguousMatches?.length)) {
+    return {
+      type: "found" as const,
+      contact: finalVerifiedContact,
+    };
+  }
+
+  if (ambiguousMatches?.length) {
+    return {
+      type: "ambiguous" as const,
+      matches: ambiguousMatches,
+    };
+  }
+
+  if (finalVerifiedContact) {
+    return {
+      type: "found" as const,
+      contact: finalVerifiedContact,
+    };
+  }
+
+  if (confirmationRequired) {
+    return {
+      type: "confirmation_required" as const,
+      contact: confirmationRequired,
     };
   }
 
@@ -19596,10 +19895,25 @@ export function formatWhatsAppHistoryResolvedNoRowsReplyForTest(input: {
 
 function formatWhatsAppHistoryUnverifiedContactReply(input: {
   requestedName: string;
+  candidateName?: string | null;
+  candidatePhone?: string | null;
 }) {
+  const candidateLabel =
+    input.candidateName
+      ? (
+        formatWhatsAppResolvedContactLabel({
+          name: input.candidateName,
+          phone: input.candidatePhone ?? null,
+        })
+        || input.candidateName
+      )
+      : null;
   return [
     `I couldn't verify a synced WhatsApp contact named "${input.requestedName}".`,
     "",
+    ...(candidateLabel
+      ? [`Closest synced match: ${candidateLabel}.`, ""]
+      : []),
     "I did not summarize unrelated chats or unknown-number threads for this request.",
     "Reply with the exact contact name as saved in WhatsApp or the full phone number, and I will check only that verified chat.",
   ].join("\n");
@@ -19607,6 +19921,8 @@ function formatWhatsAppHistoryUnverifiedContactReply(input: {
 
 export function formatWhatsAppHistoryUnverifiedContactReplyForTest(input: {
   requestedName: string;
+  candidateName?: string | null;
+  candidatePhone?: string | null;
 }) {
   return formatWhatsAppHistoryUnverifiedContactReply(input);
 }
@@ -19622,6 +19938,10 @@ async function buildWhatsAppHistoryNoRowsReply(input: {
     aliases?: string[];
   } | null;
   requireVerifiedContactMatch?: boolean;
+  unverifiedContactCandidate?: {
+    name: string;
+    phone?: string | null;
+  } | null;
 }) {
   const retryMatches: Array<{ name: string; phone?: string | null; jid?: string | null }> = [];
   const requestedName = input.contactHint || input.resolvedContactName || "that contact";
@@ -19629,6 +19949,8 @@ async function buildWhatsAppHistoryNoRowsReply(input: {
   if (input.requireVerifiedContactMatch) {
     return formatWhatsAppHistoryUnverifiedContactReply({
       requestedName,
+      candidateName: input.unverifiedContactCandidate?.name ?? null,
+      candidatePhone: input.unverifiedContactCandidate?.phone ?? null,
     });
   }
 
@@ -20189,9 +20511,10 @@ export function shouldRouteMessageToActiveWhatsAppContactSessionForTest(
 }
 
 function formatWhatsAppActiveContactSessionTarget(session: WhatsAppActiveContactSession) {
-  return session.phone
-    ? `${session.contactName} (+${session.phone})`
-    : session.contactName;
+  return formatWhatsAppResolvedContactLabel({
+    name: session.contactName,
+    phone: session.phone,
+  }) || session.contactName;
 }
 
 function inferWhatsAppActiveContactSecondPersonTone(message: string) {
@@ -20333,6 +20656,38 @@ async function generateWhatsAppActiveContactConversationalReply(input: {
     preserveRomanScript: input.languageResolution.preserveRomanScript,
     targetLanguageName: input.languageResolution.targetLanguageName,
   }).catch(() => candidateReply);
+}
+
+export async function generateAutomaticWhatsAppActiveContactReplyForServer(input: {
+  userId: string;
+  inboundMessage: string;
+  session: WhatsAppActiveContactSession;
+  preferredLocale?: SupportedLocale;
+  conversationStyle?: ClawCloudConversationStyle;
+}) {
+  const cleanMessage = stripWhatsAppRoutingContextPrefix(String(input.inboundMessage ?? "")).trim();
+  if (!cleanMessage) {
+    return "";
+  }
+
+  const preferredLocale = resolveSupportedLocale(
+    input.preferredLocale ?? await getUserLocale(input.userId).catch(() => "en"),
+  ) ?? "en";
+  const draftLanguageChoice = await resolveWhatsAppActiveContactDraftLanguageFromHistory({
+    userId: input.userId,
+    currentMessage: cleanMessage,
+    preferredLocale,
+    session: input.session,
+  });
+
+  return generateWhatsAppActiveContactConversationalReply({
+    currentMessage: cleanMessage,
+    matchedInboundMessage: cleanMessage,
+    recipientLabel: input.session.contactName,
+    conversationStyle: input.conversationStyle ?? "professional",
+    locale: draftLanguageChoice.resolution.locale,
+    languageResolution: draftLanguageChoice.resolution,
+  });
 }
 
 function buildWhatsAppSendActionLabel(action: "message" | "reply") {
@@ -20482,9 +20837,10 @@ async function buildWhatsAppActiveContactSendReceipt(input: {
   });
   const action = input.generatedReplyFromInbound ? "reply" : "message";
   const disposition = classifyClawCloudWhatsAppSendResult(input.sendResult);
+  const targetLabel = formatWhatsAppActiveContactSessionTarget(input.session);
   const baseMessage = buildWhatsAppSingleSendStatusLine({
     sendResult: input.sendResult,
-    targetLabel: input.session.contactName,
+    targetLabel,
     action,
   });
 
@@ -20492,25 +20848,25 @@ async function buildWhatsAppActiveContactSendReceipt(input: {
     switch (disposition) {
       case "already_delivered":
         return input.generatedReplyFromInbound
-          ? `${input.session.contactName} ko wahi reply pehle hi deliver ho chuka hai. Maine duplicate nahi bheja.`
-          : `${input.session.contactName} ko wahi message pehle hi deliver ho chuka hai. Maine duplicate nahi bheja.`;
+          ? `${targetLabel} ko wahi reply pehle hi deliver ho chuka hai. Maine duplicate nahi bheja.`
+          : `${targetLabel} ko wahi message pehle hi deliver ho chuka hai. Maine duplicate nahi bheja.`;
       case "already_pending":
         return input.generatedReplyFromInbound
-          ? `${input.session.contactName} ke liye wahi reply pehle se pending hai. Maine duplicate nahi bheja.`
-          : `${input.session.contactName} ke liye wahi message pehle se pending hai. Maine duplicate nahi bheja.`;
+          ? `${targetLabel} ke liye wahi reply pehle se pending hai. Maine duplicate nahi bheja.`
+          : `${targetLabel} ke liye wahi message pehle se pending hai. Maine duplicate nahi bheja.`;
       case "resubmitted_pending":
         return input.generatedReplyFromInbound
-          ? `${input.session.contactName} ko reply dobara WhatsApp par bheja hai. Delivery confirm hone ka wait hai.`
-          : `${input.session.contactName} ko message dobara WhatsApp par bheja hai. Delivery confirm hone ka wait hai.`;
+          ? `${targetLabel} ko reply dobara WhatsApp par bheja hai. Delivery confirm hone ka wait hai.`
+          : `${targetLabel} ko message dobara WhatsApp par bheja hai. Delivery confirm hone ka wait hai.`;
       case "submitted_pending":
         return input.generatedReplyFromInbound
-          ? `${input.session.contactName} ko reply WhatsApp par bhej diya. Delivery confirm hone ka wait hai.`
-          : `${input.session.contactName} ko message WhatsApp par bhej diya. Delivery confirm hone ka wait hai.`;
+          ? `${targetLabel} ko reply WhatsApp par bhej diya. Delivery confirm hone ka wait hai.`
+          : `${targetLabel} ko message WhatsApp par bhej diya. Delivery confirm hone ka wait hai.`;
       case "delivered":
       default:
         return input.generatedReplyFromInbound
-          ? `${input.session.contactName} ko reply deliver ho gaya.`
-          : `${input.session.contactName} ko message deliver ho gaya.`;
+          ? `${targetLabel} ko reply deliver ho gaya.`
+          : `${targetLabel} ko message deliver ho gaya.`;
     }
   }
 
@@ -20542,25 +20898,7 @@ async function resolveCurrentWhatsAppActiveContactSession(
   const settings = typeof whatsAppSettings === "undefined"
     ? await getWhatsAppSettings(userId).catch(() => null)
     : whatsAppSettings;
-  const ACTIVE_CONTACT_SESSION_TTL_MS = 30 * 60_000;
-  const rawActiveContactSession = settings?.activeContactSession ?? null;
-  const startedAtMs = rawActiveContactSession?.startedAt
-    ? new Date(rawActiveContactSession.startedAt).getTime()
-    : Number.NaN;
-
-  if (
-    rawActiveContactSession?.startedAt
-    && Number.isFinite(startedAtMs)
-    && Date.now() - startedAtMs > ACTIVE_CONTACT_SESSION_TTL_MS
-  ) {
-    void clearWhatsAppActiveContactSession(userId).catch(() => null);
-    console.log(
-      `[agent] Auto-expired active contact session for ${userId} (${rawActiveContactSession.contactName})`,
-    );
-    return null;
-  }
-
-  return rawActiveContactSession;
+  return settings?.activeContactSession ?? null;
 }
 
 function shouldUseRomanHinglishForActiveContactReply(
@@ -20695,13 +21033,17 @@ function buildWhatsAppActiveContactSessionStartedReply(input: {
   previous: WhatsAppActiveContactSession | null;
   useRomanHinglish?: boolean;
 }) {
+  const nextTargetLabel = formatWhatsAppActiveContactSessionTarget(input.next);
+  const previousTargetLabel = input.previous
+    ? formatWhatsAppActiveContactSessionTarget(input.previous)
+    : null;
   if (input.useRomanHinglish) {
     const lines = [
       input.previous
-        ? `Active contact mode ab *${input.previous.contactName}* se *${input.next.contactName}* par move ho gaya hai.`
-        : `Active contact mode ab *${input.next.contactName}* ke liye on hai.`,
+        ? `Active contact mode ab *${previousTargetLabel}* se *${nextTargetLabel}* par move ho gaya hai.`
+        : `Active contact mode ab *${nextTargetLabel}* ke liye on hai.`,
       "",
-      `Ab se, main yahan aapke normal messages ko ${input.next.contactName} ke liye message maanunga jab tak aap mujhe stop karne ko nahi bolte.`,
+      `Ab se, main yahan aapke normal messages ko ${nextTargetLabel} ke liye message maanunga jab tak aap mujhe stop karne ko nahi bolte.`,
       "Simple chat-type follow-ups us contact ko jayenge. Send/reply commands, save-contact commands, aur ClawCloud se help ya knowledge wale sawal isi chat me rahenge.",
       "Jab clear hoga, main us contact ki recent chat language ke hisaab se automatically adapt karunga, unless aap kisi specific message ke liye alag output language bolo.",
       "Agar aap ClawCloud se normal baat karna chahte ho, pehle is mode ko stop karo.",
@@ -20713,10 +21055,10 @@ function buildWhatsAppActiveContactSessionStartedReply(input: {
 
   const lines = [
     input.previous
-      ? `Active contact mode moved from *${input.previous.contactName}* to *${input.next.contactName}*.` 
-      : `Active contact mode is now on for *${input.next.contactName}*.`,
+      ? `Active contact mode moved from *${previousTargetLabel}* to *${nextTargetLabel}*.` 
+      : `Active contact mode is now on for *${nextTargetLabel}*.`,
     "",
-    `From now on, I will treat your normal messages here as messages for ${input.next.contactName} until you tell me to stop.`,
+    `From now on, I will treat your normal messages here as messages for ${nextTargetLabel} until you tell me to stop.`,
     "Plain chat-like follow-ups will go to that contact. Direct send/reply commands, save-contact commands, and ClawCloud help or knowledge questions will stay in this chat.",
     "I will automatically adapt to that contact's recent chat language when it is clear, unless you explicitly ask for a different output language in a specific message.",
     "If you want to talk to ClawCloud normally again, stop this mode first.",
@@ -21136,6 +21478,7 @@ async function handleSendMessageToContactProfessional(
       jid: string | null;
       exact: boolean;
       score: number;
+      matchBasis: "exact" | "prefix" | "word" | "fuzzy" | null;
       source: "fuzzy" | "live";
     }
   >();
@@ -21177,6 +21520,18 @@ async function handleSendMessageToContactProfessional(
       );
     }
 
+    if (resolved.type === "confirmation_required") {
+      return translateMessage(
+        buildWhatsAppExactContactRequiredReply({
+          requestedName,
+          resolvedName: resolved.contact.name,
+          phone: resolved.contact.phone,
+          lane: "send_message",
+        }),
+        locale,
+      );
+    }
+
     if (resolved.type === "found") {
       const resolvedPhoneDigits = String(resolved.contact.phone ?? "").replace(/\D/g, "");
       const resolvedSelfJid = linkedPhoneDigits ? `${linkedPhoneDigits}@s.whatsapp.net` : "";
@@ -21205,9 +21560,30 @@ async function handleSendMessageToContactProfessional(
         jid: resolved.contact.jid ?? null,
         exact: resolved.contact.exact,
         score: resolved.contact.score,
+        matchBasis: resolved.contact.matchBasis,
         source: resolved.contact.source,
       });
-      continue;
+
+      if (isProfessionallyCommittedRecipientMatch({
+        requestedName,
+        resolvedName: resolved.contact.name,
+        exact: resolved.contact.exact,
+        score: resolved.contact.score,
+        matchBasis: resolved.contact.matchBasis,
+        source: resolved.contact.source,
+      })) {
+        continue;
+      }
+
+      return translateMessage(
+        buildWhatsAppExactContactRequiredReply({
+          requestedName,
+          resolvedName: resolved.contact.name,
+          phone: resolved.contact.phone,
+          lane: "send_message",
+        }),
+        locale,
+      );
     }
 
     return translateMessage(
@@ -21235,11 +21611,7 @@ async function handleSendMessageToContactProfessional(
   const canAutoSendSingleRecipient = Boolean(
     isStrictSingleContactCommand
     && singleRecipient
-    && (singleRecipient.phone || singleRecipient.jid)
-    && (
-      singleRecipient.exact
-      || (singleRecipient.source === "fuzzy" && singleRecipient.score >= 0.96)
-    ),
+    && (singleRecipient.phone || singleRecipient.jid),
   );
 
   if (canAutoSendSingleRecipient && singleRecipient) {
@@ -21598,6 +21970,31 @@ function normalizeServerRecoveryReplyCandidate(reply: string | null | undefined)
   return normalized;
 }
 
+function normalizeServerRecoveryReplyForIntent(
+  question: string,
+  intent: IntentType,
+  reply: string | null | undefined,
+) {
+  const normalized = normalizeServerRecoveryReplyCandidate(reply);
+  if (!normalized) {
+    return "";
+  }
+
+  if (looksLikeQuestionTopicMismatch(question, normalized)) {
+    return "";
+  }
+
+  if (
+    intent === "coding"
+    && looksLikeAlgorithmicCodingQuestion(question)
+    && looksSeverelyIncompleteTechnicalAnswer(question, "coding", normalized)
+  ) {
+    return "";
+  }
+
+  return normalized;
+}
+
 function buildDeterministicServerRecoveryReply(question: string) {
   const intent = detectIntent(question).type;
   const candidates = [
@@ -21611,7 +22008,7 @@ function buildDeterministicServerRecoveryReply(question: string) {
   ];
 
   for (const candidate of candidates) {
-    const normalized = normalizeServerRecoveryReplyCandidate(candidate);
+    const normalized = normalizeServerRecoveryReplyForIntent(question, intent, candidate);
     if (normalized) {
       return normalized;
     }
@@ -21673,14 +22070,53 @@ export async function recoverUserFacingReplyForServer(input: {
   candidateReply?: string | null;
 }): Promise<string | null> {
   const intent = detectIntent(input.question).type;
-  const candidate = normalizeServerRecoveryReplyCandidate(input.candidateReply);
+  const candidate = normalizeServerRecoveryReplyForIntent(input.question, intent, input.candidateReply);
   if (candidate) {
     return candidate;
   }
 
+  if (intent === "coding" && looksLikeAlgorithmicCodingQuestion(input.question)) {
+    try {
+      const codingRecovery = await withSoftTimeout(
+        smartReplyDetailed(
+          "server-recovery",
+          input.question,
+          "coding",
+          "deep",
+          true,
+          [
+            "This is a final server-side recovery pass for a hard algorithmic coding prompt.",
+            "Answer directly with the real algorithm, complexity, and complete runnable code.",
+            "Do not ask for clarification when the prompt already includes the problem statement and constraints.",
+          ].join("\n"),
+          undefined,
+          buildPreferredModelOrderForIntent("coding", "deep", 4),
+        ),
+        { reply: "", modelAuditTrail: null },
+        40_000,
+      );
+      const normalizedCodingRecovery = normalizeServerRecoveryReplyForIntent(
+        input.question,
+        intent,
+        codingRecovery.reply,
+      );
+      if (
+        normalizedCodingRecovery
+      ) {
+        return normalizedCodingRecovery;
+      }
+    } catch {
+      // Fall through to the generic recovery layers below.
+    }
+  }
+
   try {
     const emergencyReply = await emergencyDirectAnswer(input.question, [], "");
-    const normalizedEmergencyReply = normalizeServerRecoveryReplyCandidate(emergencyReply);
+    const normalizedEmergencyReply = normalizeServerRecoveryReplyForIntent(
+      input.question,
+      intent,
+      emergencyReply,
+    );
     if (normalizedEmergencyReply) {
       return normalizedEmergencyReply;
     }
@@ -21694,7 +22130,11 @@ export async function recoverUserFacingReplyForServer(input: {
       message: input.question,
       intent,
     });
-    const normalizedProfessionalRecovery = normalizeServerRecoveryReplyCandidate(professionalRecovery);
+    const normalizedProfessionalRecovery = normalizeServerRecoveryReplyForIntent(
+      input.question,
+      intent,
+      professionalRecovery,
+    );
     if (normalizedProfessionalRecovery) {
       return normalizedProfessionalRecovery;
     }

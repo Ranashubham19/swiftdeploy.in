@@ -116,6 +116,13 @@ export type ContactSearchCandidate = {
   identityKey?: string | null;
 };
 
+export type ResolvedContactMatchSource = "fuzzy" | "live";
+
+export type ResolvedContactMatchConfidence =
+  | "verified"
+  | "confirmation_required"
+  | "weak";
+
 type WhatsAppContactRow = {
   jid: string | null;
   phone_number: string | null;
@@ -141,6 +148,156 @@ type ContactScoreDetail = {
   matchedAlias: string;
   matchBasis: ContactMatchBasis;
 };
+
+const RESOLVED_CONTACT_GENERIC_TOKENS = new Set([
+  "contact",
+  "classmate",
+  "friend",
+  "mate",
+  "bro",
+  "bhai",
+  "dost",
+  "sir",
+  "madam",
+  "mr",
+  "mrs",
+  "ms",
+]);
+
+export function normalizeResolvedContactNameTokens(value: string) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2 && !RESOLVED_CONTACT_GENERIC_TOKENS.has(token));
+}
+
+export function normalizeResolvedContactMatchScore(score: number | null | undefined) {
+  if (typeof score !== "number" || !Number.isFinite(score)) {
+    return null;
+  }
+
+  const normalized = score > 1 ? score / 100 : score;
+  return Math.max(0, Math.min(1, normalized));
+}
+
+export function isConfidentResolvedContactMatch(input: {
+  requestedName: string;
+  resolvedName: string;
+  exact: boolean;
+  score: number;
+  matchBasis: ContactMatchBasis | null;
+}) {
+  if (input.exact) {
+    return true;
+  }
+
+  const normalizedScore = normalizeResolvedContactMatchScore(input.score) ?? 0;
+  const requestedTokens = normalizeResolvedContactNameTokens(input.requestedName);
+  const resolvedTokens = normalizeResolvedContactNameTokens(input.resolvedName);
+  if (!requestedTokens.length || !resolvedTokens.length) {
+    return normalizedScore >= 0.9;
+  }
+
+  const requestedJoined = requestedTokens.join(" ");
+  const resolvedJoined = resolvedTokens.join(" ");
+  if (requestedJoined === resolvedJoined || resolvedJoined.startsWith(`${requestedJoined} `)) {
+    return true;
+  }
+
+  const overlapCount = requestedTokens.filter((token) => resolvedTokens.includes(token)).length;
+  if (overlapCount === requestedTokens.length) {
+    return true;
+  }
+
+  if (input.matchBasis === "word" && normalizedScore >= 0.9 && overlapCount >= 1) {
+    return requestedTokens.length === 1;
+  }
+
+  if (
+    input.matchBasis === "prefix"
+    && requestedTokens[0]
+    && requestedTokens[0].length >= 4
+    && normalizedScore >= 0.93
+  ) {
+    return requestedTokens.length === 1;
+  }
+
+  if (input.matchBasis === "fuzzy" && normalizedScore >= 0.97 && requestedTokens.length > 1) {
+    return true;
+  }
+
+  return false;
+}
+
+export function isProfessionallyCommittedResolvedContactMatch(input: {
+  requestedName: string;
+  resolvedName: string;
+  exact: boolean;
+  score: number;
+  matchBasis: ContactMatchBasis | null;
+  source: ResolvedContactMatchSource;
+}) {
+  if (!isConfidentResolvedContactMatch(input)) {
+    return false;
+  }
+
+  if (input.exact) {
+    return true;
+  }
+
+  const normalizedScore = normalizeResolvedContactMatchScore(input.score) ?? 0;
+  const requestedTokens = normalizeResolvedContactNameTokens(input.requestedName);
+  if (!requestedTokens.length) {
+    return input.source === "fuzzy" && normalizedScore >= 0.96;
+  }
+
+  if (input.source === "live") {
+    return false;
+  }
+
+  if (requestedTokens.length === 1) {
+    if (input.matchBasis === "prefix") {
+      return normalizedScore >= 0.96;
+    }
+
+    if (input.matchBasis === "word") {
+      return normalizedScore >= 0.94;
+    }
+
+    return input.matchBasis === "exact" || (input.matchBasis === "fuzzy" && normalizedScore >= 0.97);
+  }
+
+  if (input.matchBasis === "prefix") {
+    return normalizedScore >= 0.92;
+  }
+
+  if (input.matchBasis === "word") {
+    return normalizedScore >= 0.94;
+  }
+
+  return input.matchBasis === "exact" || (input.matchBasis === "fuzzy" && normalizedScore >= 0.97);
+}
+
+export function classifyResolvedContactMatchConfidence(input: {
+  requestedName: string;
+  resolvedName: string;
+  exact: boolean;
+  score: number;
+  matchBasis: ContactMatchBasis | null;
+  source: ResolvedContactMatchSource;
+}): ResolvedContactMatchConfidence {
+  if (isProfessionallyCommittedResolvedContactMatch(input)) {
+    return "verified";
+  }
+
+  if (isConfidentResolvedContactMatch(input)) {
+    return "confirmation_required";
+  }
+
+  return "weak";
+}
 
 function levenshtein(a: string, b: string): number {
   if (a === b) return 0;
@@ -577,6 +734,24 @@ function buildSavedContactCandidates(entries: Array<[string, string]>): ContactS
   return candidates;
 }
 
+function buildPhoneMatchedContact(
+  candidate: ContactSearchCandidate,
+  score: number,
+  exact: boolean,
+): ContactMatch {
+  const normalizedPhone = normalizePhone(String(candidate.phone ?? ""));
+  return {
+    name: candidate.name,
+    phone: normalizedPhone || null,
+    jid: candidate.jid,
+    aliases: [...candidate.aliases],
+    score,
+    exact,
+    matchedAlias: normalizedPhone || undefined,
+    matchBasis: exact ? "exact" : "prefix",
+  };
+}
+
 async function loadWhatsAppContactCandidates(userId: string): Promise<ContactSearchCandidate[]> {
   const supabaseAdmin = getClawCloudSupabaseAdmin();
   const [contactsResult, messagesResult] = await Promise.all([
@@ -682,6 +857,49 @@ export function rankContactCandidates(
 ): FuzzyLookupResult {
   if (!candidates.length) {
     return { type: "not_found", suggestions: [] };
+  }
+
+  const phoneQuery = normalizePhone(rawName);
+  if (phoneQuery) {
+    const exactPhoneMatches = candidates
+      .filter((candidate) => normalizePhone(String(candidate.phone ?? "")) === phoneQuery)
+      .map((candidate) => buildPhoneMatchedContact(candidate, EXACT_SCORE, true));
+    if (exactPhoneMatches.length === 1) {
+      return { type: "found", contact: exactPhoneMatches[0]! };
+    }
+    if (exactPhoneMatches.length > 1) {
+      const matches = exactPhoneMatches.slice(0, 4);
+      return {
+        type: "ambiguous",
+        matches,
+        prompt: buildAmbiguityPrompt(rawName, matches),
+      };
+    }
+
+    const suffixPhoneMatches = candidates
+      .filter((candidate) => {
+        const normalizedPhone = normalizePhone(String(candidate.phone ?? ""));
+        return Boolean(
+          normalizedPhone
+          && phoneQuery.length >= 7
+          && (
+            normalizedPhone.endsWith(phoneQuery)
+            || phoneQuery.endsWith(normalizedPhone)
+          ),
+        );
+      })
+      .map((candidate) => buildPhoneMatchedContact(candidate, STARTS_WITH_SCORE, false));
+    if (suffixPhoneMatches.length === 1) {
+      return { type: "found", contact: suffixPhoneMatches[0]! };
+    }
+    if (suffixPhoneMatches.length > 1) {
+      const matches = suffixPhoneMatches.slice(0, 4);
+      return {
+        type: "ambiguous",
+        matches,
+        prompt: buildAmbiguityPrompt(rawName, matches),
+      };
+    }
   }
 
   const queryVariants = getNameVariants(rawName);

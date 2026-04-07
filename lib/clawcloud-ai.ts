@@ -9,8 +9,8 @@
 // higher-ranked models back to the front after a cooldown.
 //
 // Set these in env vars when you want explicit routing:
-//   NVIDIA_CHAT_MODEL      = meta/llama-3.3-70b-instruct
-//   NVIDIA_GLOBAL_MODELS   = meta/llama-3.3-70b-instruct,qwen/qwen3.5-397b-a17b,...
+//   NVIDIA_CHAT_MODEL      = meta/llama-4-maverick-17b-128e-instruct
+//   NVIDIA_GLOBAL_MODELS   = meta/llama-4-maverick-17b-128e-instruct,qwen/qwen3.5-397b-a17b,...
 // -----------------------------------------------------------------------------
 
 import { env } from "@/lib/env";
@@ -64,7 +64,8 @@ type ModelHealthState = {
   lastSuccessAt: number;
 };
 
-// Live-benchmarked 2026-04-07. GPT-5 flagships first, then NVIDIA by speed.
+// Live-benchmarked 2026-04-07. Stable production routing is enforced below by
+// filtering failed GPT/gemma/llama3 families out of active rotation.
 const GLOBAL_TOP_MODELS = [
   // ── Tier 0: GPT-5 flagships — most advanced AI models available ──
   "gpt-5.4-pro",                                   //  flagship pro — best accuracy
@@ -79,24 +80,49 @@ const GLOBAL_TOP_MODELS = [
   "meta/llama-4-maverick-17b-128e-instruct",       //  1.1s  latest Meta, strong all-domain
   "meta/llama3-8b-instruct",                       //  1.1s  ultra-fast lightweight
   "mistralai/mistral-small-3.1-24b-instruct-2503", //  1.1s  fast + accurate
-  "moonshotai/kimi-k2-instruct-0905",              //  1.2s  top-tier chat
+  "deepseek-ai/deepseek-v3.1-terminus",            //  1.2s  fast reasoning
   "qwen/qwen2.5-coder-32b-instruct",              //  1.3s  code specialist
   "qwen/qwen3-next-80b-a3b-instruct",             //  1.3s  latest Qwen MoE
   "mistralai/mixtral-8x22b-instruct-v0.1",        //  1.4s  strong reasoning
   "qwen/qwen3-coder-480b-a35b-instruct",          //  1.5s  frontier code MoE
   // ── Tier 2: NVIDIA fast + strong (sub-2.5s) ──
-  "moonshotai/kimi-k2-instruct",                   //  1.8s  top-tier chat
+  "deepseek-ai/deepseek-v3.1",                     //  1.8s  strong general
   "deepseek-ai/deepseek-v3.1",                     //  1.8s  strong general
   "qwen/qwen3.5-397b-a17b",                        //  1.9s  frontier MoE all-domain
-  "meta/llama-3.1-8b-instruct",                    //  2.0s  fast lightweight
+  "qwen/qwen2.5-coder-32b-instruct",               //  2.0s  code specialist
   "deepseek-ai/deepseek-v3.1-terminus",             //  2.0s  strong general
-  "meta/llama-3.3-70b-instruct",                    //  2.1s  proven reliable
-  "moonshotai/kimi-k2-thinking",                    //  2.2s  deep reasoning
-  "meta/llama-3.1-70b-instruct",                    //  2.3s  solid all-rounder
-  "moonshotai/kimi-k2.5",                           //  2.5s  advanced reasoning
+  "qwen/qwen3-coder-480b-a35b-instruct",           //  2.1s  frontier code MoE
+  "qwen/qwen3.5-397b-a17b",                        //  2.2s  frontier MoE all-domain
+  "qwen/qwen3-next-80b-a3b-instruct",              //  2.3s  latest Qwen MoE
+  "mistralai/mixtral-8x22b-instruct-v0.1",         //  2.5s  strong reasoning
   // ── Last resort: GPT cheap fallback ──
   "gpt-5.4-nano",                                  //  cheapest GPT, ultra-fast
 ] as const;
+
+const ACTIVE_STABLE_ROUTE_MODELS = [
+  "meta/llama-4-maverick-17b-128e-instruct",
+  "qwen/qwen3.5-397b-a17b",
+  "deepseek-ai/deepseek-v3.1",
+  "deepseek-ai/deepseek-v3.1-terminus",
+  "mistralai/mistral-small-3.1-24b-instruct-2503",
+  "qwen/qwen3-next-80b-a3b-instruct",
+  "mistralai/mixtral-8x22b-instruct-v0.1",
+  "qwen/qwen3-coder-480b-a35b-instruct",
+  "qwen/qwen2.5-coder-32b-instruct",
+] as const;
+
+const DEPRECATED_ROUTE_MODEL_PATTERNS = [
+  /^gpt-5/i,
+  /^google\/gemma-2-27b-it$/i,
+  /^mistralai\/mistral-large-3/i,
+  /^moonshotai\/kimi-k2/i,
+  /^meta\/llama-3\./i,
+  /^meta\/llama3-8b-instruct$/i,
+  /^nvidia\/llama/i,
+  /^qwen\/qwen2\.5-7b/i,
+  /^z-ai\/glm/i,
+  /^deepseek-ai\/deepseek-v3\.2$/i,
+];
 
 const MODEL_HEALTH = new Map<string, ModelHealthState>();
 const MODEL_FAILURE_COOLDOWN_MS = 45_000;
@@ -117,7 +143,7 @@ const INTENT_TIMEOUT_MS: Record<IntentType, number> = {
   finance: 10_000,
   web_search: 10_000,
   creative: 8_000,
-  coding: 10_000,
+  coding: 14_000,
   math: 10_000,
   research: 10_000,
   science: 8_000,
@@ -149,7 +175,7 @@ const INTENT_PARALLELISM: Record<IntentType, number> = {
   web_search: 2,
   creative: 2,
   coding: 2,
-  math: 2,
+  math: 4,
   research: 2,
   science: 2,
   history: 2,
@@ -178,7 +204,7 @@ const INTENT_MAX_TOTAL_MS: Record<IntentType, number> = {
   finance: 22_000,
   web_search: 25_000,
   creative: 20_000,
-  coding: 22_000,
+  coding: 28_000,
   math: 22_000,
   research: 22_000,
   science: 20_000,
@@ -208,7 +234,7 @@ const INTENT_CANDIDATE_LIMIT: Record<IntentType, number> = {
   finance: 2,
   web_search: 2,
   creative: 2,
-  coding: 2,
+  coding: 3,
   math: 2,
   research: 2,
   science: 4,
@@ -284,193 +310,116 @@ const INTENT_HISTORY_CHAR_LIMIT: Record<IntentType, number> = {
   explain: 520,
 };
 
+function buildIntentPriority(models: string[]) {
+  return filterDeprecatedRouteModels(uniqueModels(models));
+}
+
+const FAST_OPERATIONAL_MODEL_PRIORITY = buildIntentPriority([
+  "meta/llama-4-maverick-17b-128e-instruct",
+  "mistralai/mistral-small-3.1-24b-instruct-2503",
+  "deepseek-ai/deepseek-v3.1-terminus",
+  "qwen/qwen3-next-80b-a3b-instruct",
+  "deepseek-ai/deepseek-v3.1",
+  "qwen/qwen3.5-397b-a17b",
+  "mistralai/mixtral-8x22b-instruct-v0.1",
+]);
+
+const GENERAL_MODEL_PRIORITY = buildIntentPriority([
+  "meta/llama-4-maverick-17b-128e-instruct",
+  "qwen/qwen3.5-397b-a17b",
+  "deepseek-ai/deepseek-v3.1",
+  "deepseek-ai/deepseek-v3.1-terminus",
+  "mistralai/mistral-small-3.1-24b-instruct-2503",
+  "qwen/qwen3-next-80b-a3b-instruct",
+  "mistralai/mixtral-8x22b-instruct-v0.1",
+  "qwen/qwen3-coder-480b-a35b-instruct",
+  "qwen/qwen2.5-coder-32b-instruct",
+]);
+
+const REASONING_MODEL_PRIORITY = buildIntentPriority([
+  "qwen/qwen3.5-397b-a17b",
+  "deepseek-ai/deepseek-v3.1",
+  "deepseek-ai/deepseek-v3.1-terminus",
+  "meta/llama-4-maverick-17b-128e-instruct",
+  "mistralai/mixtral-8x22b-instruct-v0.1",
+  "qwen/qwen3-next-80b-a3b-instruct",
+  "mistralai/mistral-small-3.1-24b-instruct-2503",
+]);
+
+const MATH_MODEL_PRIORITY = buildIntentPriority([
+  "meta/llama-4-maverick-17b-128e-instruct",
+  "qwen/qwen3.5-397b-a17b",
+  "mistralai/mistral-small-3.1-24b-instruct-2503",
+  "deepseek-ai/deepseek-v3.1-terminus",
+  "deepseek-ai/deepseek-v3.1",
+  "mistralai/mixtral-8x22b-instruct-v0.1",
+  "qwen/qwen3-next-80b-a3b-instruct",
+]);
+
+// Fast coding traffic on WhatsApp needs lower latency than deep coding review
+// mode. Keep the fast lane biased toward the most reliable sub-2s models, and
+// reserve the largest coder-heavy route for deep mode where longer waits are
+// acceptable.
+const FAST_CODE_MODEL_PRIORITY = buildIntentPriority([
+  "meta/llama-4-maverick-17b-128e-instruct",
+  "mistralai/mistral-small-3.1-24b-instruct-2503",
+  "deepseek-ai/deepseek-v3.1-terminus",
+  "qwen/qwen2.5-coder-32b-instruct",
+  "qwen/qwen3-next-80b-a3b-instruct",
+  "deepseek-ai/deepseek-v3.1",
+  "qwen/qwen3.5-397b-a17b",
+  "qwen/qwen3-coder-480b-a35b-instruct",
+]);
+
+const DEEP_CODE_MODEL_PRIORITY = buildIntentPriority([
+  "qwen/qwen3-coder-480b-a35b-instruct",
+  "qwen/qwen2.5-coder-32b-instruct",
+  "deepseek-ai/deepseek-v3.1",
+  "qwen/qwen3.5-397b-a17b",
+  "meta/llama-4-maverick-17b-128e-instruct",
+  "deepseek-ai/deepseek-v3.1-terminus",
+  "qwen/qwen3-next-80b-a3b-instruct",
+  "mistralai/mistral-small-3.1-24b-instruct-2503",
+]);
+
+const LANGUAGE_MODEL_PRIORITY = buildIntentPriority([
+  "qwen/qwen3.5-397b-a17b",
+  "meta/llama-4-maverick-17b-128e-instruct",
+  "deepseek-ai/deepseek-v3.1",
+  "mistralai/mistral-small-3.1-24b-instruct-2503",
+  "qwen/qwen3-next-80b-a3b-instruct",
+  "deepseek-ai/deepseek-v3.1-terminus",
+  "mistralai/mixtral-8x22b-instruct-v0.1",
+]);
+
 const INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
-  greeting: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.1-8b-instruct",
-    "moonshotai/kimi-k2-instruct",
-  ],
-  help: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.1-8b-instruct",
-    "moonshotai/kimi-k2-instruct",
-  ],
-  memory: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.1-8b-instruct",
-    "moonshotai/kimi-k2-instruct",
-  ],
-  reminder: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.1-8b-instruct",
-    "moonshotai/kimi-k2-instruct",
-  ],
-  send_message: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.1-8b-instruct",
-    "moonshotai/kimi-k2-instruct",
-  ],
-  save_contact: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.1-8b-instruct",
-    "moonshotai/kimi-k2-instruct",
-  ],
-  calendar: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.1-8b-instruct",
-    "moonshotai/kimi-k2-instruct",
-  ],
-  general: [
-    "moonshotai/kimi-k2.5",
-    "z-ai/glm5",
-    "qwen/qwen3.5-397b-a17b",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  coding: [
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "qwen/qwen3-coder-480b-a35b-instruct",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  math: [
-    "z-ai/glm5",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-thinking",
-  ],
-  email: [
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct-0905",
-    "qwen/qwen3.5-397b-a17b",
-  ],
-  spending: [
-    "z-ai/glm5",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-  ],
-  finance: [
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-    "z-ai/glm5",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  web_search: [
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-    "z-ai/glm5",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  research: [
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-    "z-ai/glm5",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  creative: [
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "qwen/qwen3.5-397b-a17b",
-  ],
-  science: [
-    "moonshotai/kimi-k2.5",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "qwen/qwen3.5-397b-a17b",
-    "z-ai/glm5",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  history: [
-    "moonshotai/kimi-k2.5",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "qwen/qwen3.5-397b-a17b",
-    "z-ai/glm5",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  geography: [
-    "moonshotai/kimi-k2.5",
-    "qwen/qwen3.5-397b-a17b",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "z-ai/glm5",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  health: [
-    "moonshotai/kimi-k2.5",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "qwen/qwen3.5-397b-a17b",
-    "z-ai/glm5",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  law: [
-    "moonshotai/kimi-k2.5",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "qwen/qwen3.5-397b-a17b",
-    "z-ai/glm5",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  economics: [
-    "moonshotai/kimi-k2.5",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "qwen/qwen3.5-397b-a17b",
-    "z-ai/glm5",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  culture: [
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-  ],
-  sports: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-  ],
-  technology: [
-    "moonshotai/kimi-k2.5",
-    "qwen/qwen3.5-397b-a17b",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "z-ai/glm5",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  language: [
-    "moonshotai/kimi-k2.5",
-    "qwen/qwen3.5-397b-a17b",
-    "moonshotai/kimi-k2-instruct-0905",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "z-ai/glm5",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  explain: [
-    "moonshotai/kimi-k2.5",
-    "qwen/qwen3.5-397b-a17b",
-    "z-ai/glm5",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-  ],
+  greeting: FAST_OPERATIONAL_MODEL_PRIORITY,
+  help: FAST_OPERATIONAL_MODEL_PRIORITY,
+  memory: FAST_OPERATIONAL_MODEL_PRIORITY,
+  reminder: FAST_OPERATIONAL_MODEL_PRIORITY,
+  send_message: FAST_OPERATIONAL_MODEL_PRIORITY,
+  save_contact: FAST_OPERATIONAL_MODEL_PRIORITY,
+  calendar: FAST_OPERATIONAL_MODEL_PRIORITY,
+  general: GENERAL_MODEL_PRIORITY,
+  coding: FAST_CODE_MODEL_PRIORITY,
+  math: MATH_MODEL_PRIORITY,
+  email: GENERAL_MODEL_PRIORITY,
+  spending: REASONING_MODEL_PRIORITY,
+  finance: REASONING_MODEL_PRIORITY,
+  web_search: REASONING_MODEL_PRIORITY,
+  research: REASONING_MODEL_PRIORITY,
+  creative: GENERAL_MODEL_PRIORITY,
+  science: REASONING_MODEL_PRIORITY,
+  history: GENERAL_MODEL_PRIORITY,
+  geography: GENERAL_MODEL_PRIORITY,
+  health: REASONING_MODEL_PRIORITY,
+  law: REASONING_MODEL_PRIORITY,
+  economics: REASONING_MODEL_PRIORITY,
+  culture: GENERAL_MODEL_PRIORITY,
+  sports: GENERAL_MODEL_PRIORITY,
+  technology: REASONING_MODEL_PRIORITY,
+  language: LANGUAGE_MODEL_PRIORITY,
+  explain: LANGUAGE_MODEL_PRIORITY,
 };
 
 const DEEP_INTENT_TIMEOUT_MS: Record<IntentType, number> = {
@@ -487,7 +436,7 @@ const DEEP_INTENT_TIMEOUT_MS: Record<IntentType, number> = {
   finance: 25_000,
   web_search: 25_000,
   creative: 20_000,
-  coding: 25_000,
+  coding: 30_000,
   math: 22_000,
   research: 25_000,
   science: 20_000,
@@ -517,7 +466,7 @@ const DEEP_INTENT_PARALLELISM: Record<IntentType, number> = {
   finance: 3,
   web_search: 3,
   creative: 2,
-  coding: 3,
+  coding: 4,
   math: 3,
   research: 3,
   science: 2,
@@ -654,167 +603,97 @@ const DEEP_INTENT_HISTORY_CHAR_LIMIT: Record<IntentType, number> = {
 };
 
 const DEEP_INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
-  greeting: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  help: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  memory: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  reminder: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  send_message: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  save_contact: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  calendar: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  general: [
-    "moonshotai/kimi-k2.5",
-    "z-ai/glm5",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "qwen/qwen3.5-397b-a17b",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  coding: [
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  math: [
-    "z-ai/glm5",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  email: [
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  spending: [
-    "z-ai/glm5",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  finance: [
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  web_search: [
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  research: [
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  creative: [
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  science: [
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  history: [
-    "moonshotai/kimi-k2.5",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "z-ai/glm5",
-    "qwen/qwen3.5-397b-a17b",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  geography: [
-    "moonshotai/kimi-k2.5",
-    "qwen/qwen3.5-397b-a17b",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "z-ai/glm5",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  health: [
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  law: [
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct-0905",
-  ],
-  economics: [
-    "meta/llama-3.3-70b-instruct",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct",
-  ],
-  culture: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-  ],
-  sports: [
-    "meta/llama-3.3-70b-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-  ],
-  technology: [
-    "moonshotai/kimi-k2.5",
-    "qwen/qwen3.5-397b-a17b",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "z-ai/glm5",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  language: [
-    "moonshotai/kimi-k2.5",
-    "qwen/qwen3.5-397b-a17b",
-    "moonshotai/kimi-k2-instruct-0905",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "z-ai/glm5",
-    "meta/llama-3.3-70b-instruct",
-  ],
-  explain: [
-    "moonshotai/kimi-k2.5",
-    "qwen/qwen3.5-397b-a17b",
-    "z-ai/glm5",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-    "moonshotai/kimi-k2-instruct-0905",
-    "meta/llama-3.3-70b-instruct",
-  ],
+  greeting: FAST_OPERATIONAL_MODEL_PRIORITY,
+  help: FAST_OPERATIONAL_MODEL_PRIORITY,
+  memory: FAST_OPERATIONAL_MODEL_PRIORITY,
+  reminder: FAST_OPERATIONAL_MODEL_PRIORITY,
+  send_message: FAST_OPERATIONAL_MODEL_PRIORITY,
+  save_contact: FAST_OPERATIONAL_MODEL_PRIORITY,
+  calendar: FAST_OPERATIONAL_MODEL_PRIORITY,
+  general: REASONING_MODEL_PRIORITY,
+  coding: DEEP_CODE_MODEL_PRIORITY,
+  math: REASONING_MODEL_PRIORITY,
+  email: GENERAL_MODEL_PRIORITY,
+  spending: REASONING_MODEL_PRIORITY,
+  finance: REASONING_MODEL_PRIORITY,
+  web_search: REASONING_MODEL_PRIORITY,
+  research: REASONING_MODEL_PRIORITY,
+  creative: GENERAL_MODEL_PRIORITY,
+  science: REASONING_MODEL_PRIORITY,
+  history: REASONING_MODEL_PRIORITY,
+  geography: GENERAL_MODEL_PRIORITY,
+  health: REASONING_MODEL_PRIORITY,
+  law: REASONING_MODEL_PRIORITY,
+  economics: REASONING_MODEL_PRIORITY,
+  culture: GENERAL_MODEL_PRIORITY,
+  sports: GENERAL_MODEL_PRIORITY,
+  technology: REASONING_MODEL_PRIORITY,
+  language: LANGUAGE_MODEL_PRIORITY,
+  explain: LANGUAGE_MODEL_PRIORITY,
 };
 
+type ProviderAvailability = {
+  openai: boolean;
+  nvidia: boolean;
+};
+
+function resolveProviderAvailability(): ProviderAvailability {
+  return {
+    openai: Boolean(env.OPENAI_API_KEY),
+    nvidia: Boolean(env.NVIDIA_API_KEY),
+  };
+}
+
+function hasAnyAiProviderConfigured(availability = resolveProviderAvailability()) {
+  return availability.openai || availability.nvidia;
+}
+
+function filterModelsByConfiguredProviders(
+  models: string[],
+  availability = resolveProviderAvailability(),
+) {
+  return filterDeprecatedRouteModels(models).filter((model) => (
+    isOpenAIModel(model) ? availability.openai : availability.nvidia
+  ));
+}
+
 const DEFAULT_FAST_MODELS = [
+  "meta/llama-4-maverick-17b-128e-instruct",
+  "mistralai/mistral-small-3.1-24b-instruct-2503",
+  "deepseek-ai/deepseek-v3.1-terminus",
+  "qwen/qwen3-next-80b-a3b-instruct",
+  "deepseek-ai/deepseek-v3.1",
+  "qwen/qwen3.5-397b-a17b",
+  "mistralai/mixtral-8x22b-instruct-v0.1",
   ...GLOBAL_TOP_MODELS,
-  "meta/llama-3.3-70b-instruct",
-  "meta/llama-3.1-8b-instruct",
-  "meta/llama3-8b-instruct",
-  "nvidia/llama3-chatqa-1.5-8b",
 ];
 
 const DEFAULT_CHAT_MODELS = [
+  "meta/llama-4-maverick-17b-128e-instruct",
+  "mistralai/mistral-small-3.1-24b-instruct-2503",
+  "deepseek-ai/deepseek-v3.1-terminus",
+  "qwen/qwen3-next-80b-a3b-instruct",
+  "deepseek-ai/deepseek-v3.1",
+  "qwen/qwen3.5-397b-a17b",
   ...GLOBAL_TOP_MODELS,
-  "meta/llama-3.3-70b-instruct",
 ];
 
 const DEFAULT_REASONING_MODELS = [
+  "qwen/qwen3.5-397b-a17b",
+  "deepseek-ai/deepseek-v3.1",
+  "deepseek-ai/deepseek-v3.1-terminus",
+  "meta/llama-4-maverick-17b-128e-instruct",
+  "mistralai/mixtral-8x22b-instruct-v0.1",
   ...GLOBAL_TOP_MODELS,
-  "nvidia/llama-3.1-nemotron-ultra-253b-v1",
 ];
 
 const DEFAULT_CODE_MODELS = [
-  ...GLOBAL_TOP_MODELS,
+  "qwen/qwen3-coder-480b-a35b-instruct",
   "qwen/qwen2.5-coder-32b-instruct",
+  "deepseek-ai/deepseek-v3.1",
+  "meta/llama-4-maverick-17b-128e-instruct",
+  "qwen/qwen3-next-80b-a3b-instruct",
+  ...GLOBAL_TOP_MODELS,
 ];
 
 function splitModelList(raw: string) {
@@ -840,7 +719,7 @@ function uniqueModels(models: string[]) {
   const seen = new Set<string>();
   const result: string[] = [];
 
-  for (const model of models) {
+  for (const model of filterDeprecatedRouteModels(models)) {
     if (seen.has(model)) continue;
     seen.add(model);
     result.push(model);
@@ -849,27 +728,13 @@ function uniqueModels(models: string[]) {
   return result;
 }
 
-function hasExplicitModernNvidiaRoutingConfig() {
-  return [
-    process.env.NVIDIA_CHAT_MODEL,
-    process.env.NVIDIA_FAST_MODEL,
-    process.env.NVIDIA_REASONING_MODEL,
-    process.env.NVIDIA_CODE_MODEL,
-    process.env.NVIDIA_GLOBAL_MODELS,
-    process.env.NVIDIA_FAST_MODELS,
-    process.env.NVIDIA_CHAT_MODELS,
-    process.env.NVIDIA_REASONING_MODELS,
-    process.env.NVIDIA_CODE_MODELS,
-  ].some((value) => Boolean(value?.trim()));
+function filterDeprecatedRouteModels(models: string[]) {
+  return models.filter((model) => !DEPRECATED_ROUTE_MODEL_PATTERNS.some((pattern) => pattern.test(model)));
 }
 
 function applyResilientDefaultModelOrdering(models: string[]) {
   const unique = uniqueModels(models);
-  if (hasExplicitModernNvidiaRoutingConfig()) {
-    return unique;
-  }
-
-  const stableFirst = [...GLOBAL_TOP_MODELS].filter((model) => unique.includes(model));
+  const stableFirst = [...ACTIVE_STABLE_ROUTE_MODELS].filter((model) => unique.includes(model));
   const stableSet = new Set<string>(stableFirst);
   const remaining = unique.filter((model) => !stableSet.has(model));
   return [...stableFirst, ...remaining];
@@ -880,7 +745,13 @@ function configuredModelList(
   primaryValue: string,
   defaults: string[],
 ) {
-  return uniqueModels([...splitModelList(listValue), primaryValue, ...defaults].filter(Boolean));
+  return applyResilientDefaultModelOrdering(
+    uniqueModels(filterDeprecatedRouteModels([
+      ...splitModelList(listValue),
+      primaryValue,
+      ...defaults,
+    ].filter(Boolean))),
+  );
 }
 
 function fastModels() {
@@ -944,16 +815,10 @@ function appendCandidates(
 }
 
 function reorderModels(models: string[], preferredOrder: string[]) {
-  const unique = uniqueModels(models);
-  if (hasExplicitModernNvidiaRoutingConfig() && unique.length > 0) {
-    const [explicitPrimary, ...rest] = unique;
-    const preferred = preferredOrder.filter((model) => rest.includes(model));
-    const remaining = rest.filter((model) => !preferred.includes(model));
-    return [explicitPrimary, ...preferred, ...remaining];
-  }
-  const preferred = preferredOrder.filter((model) => unique.includes(model));
+  const unique = uniqueModels(filterDeprecatedRouteModels(models));
+  const preferred = filterDeprecatedRouteModels(preferredOrder).filter((model) => unique.includes(model));
   const remaining = unique.filter((model) => !preferred.includes(model));
-  return applyResilientDefaultModelOrdering([...preferred, ...remaining]);
+  return [...preferred, ...applyResilientDefaultModelOrdering(remaining)];
 }
 
 function modelHealthState(healthKey: string): ModelHealthState {
@@ -977,15 +842,17 @@ function markModelSuccess(healthKey: string) {
   state.lastSuccessAt = Date.now();
 }
 
-function markModelFailure(healthKey: string) {
+function markModelFailure(healthKey: string, cooldownOverrideMs?: number) {
   const state = modelHealthState(healthKey);
   state.consecutiveFailures += 1;
   state.lastFailureAt = Date.now();
 
-  const cooldown = Math.min(
-    MODEL_FAILURE_COOLDOWN_MS * 2 ** Math.max(0, state.consecutiveFailures - 1),
-    MODEL_FAILURE_MAX_COOLDOWN_MS,
-  );
+  const cooldown = typeof cooldownOverrideMs === "number"
+    ? Math.max(MODEL_FAILURE_COOLDOWN_MS, Math.trunc(cooldownOverrideMs))
+    : Math.min(
+        MODEL_FAILURE_COOLDOWN_MS * 2 ** Math.max(0, state.consecutiveFailures - 1),
+        MODEL_FAILURE_MAX_COOLDOWN_MS,
+      );
   state.cooldownUntil = Date.now() + cooldown;
 }
 
@@ -1085,21 +952,93 @@ function preferredModelsForIntent(intent: IntentType, responseMode: ResponseMode
   return responseMode === "deep" ? DEEP_INTENT_PREFERRED_MODELS[intent] : INTENT_PREFERRED_MODELS[intent];
 }
 
+function providerFamilyForModel(model: string): "openai" | "nvidia" {
+  return isOpenAIModel(model) ? "openai" : "nvidia";
+}
+
+function shouldForceProviderDiversity(intent: IntentType, responseMode: ResponseMode) {
+  return responseMode === "deep"
+    || intent === "coding"
+    || intent === "research"
+    || intent === "science"
+    || intent === "technology";
+}
+
+function ensureProviderDiverseCandidatePool(
+  rankedModels: string[],
+  limit: number,
+  availability: ProviderAvailability,
+  intent: IntentType,
+  responseMode: ResponseMode,
+) {
+  const selected = rankedModels.slice(0, limit);
+  if (
+    limit < 2
+    || !availability.openai
+    || !availability.nvidia
+    || !shouldForceProviderDiversity(intent, responseMode)
+  ) {
+    return selected;
+  }
+
+  const presentFamilies = new Set(selected.map((model) => providerFamilyForModel(model)));
+  if (presentFamilies.size > 1) {
+    return selected;
+  }
+
+  const missingFamily = presentFamilies.has("openai") ? "nvidia" : "openai";
+  const alternate = rankedModels.find((model) => (
+    providerFamilyForModel(model) === missingFamily
+    && !selected.includes(model)
+  ));
+
+  if (!alternate) {
+    return selected;
+  }
+
+  return [...selected.slice(0, Math.max(1, limit - 1)), alternate];
+}
+
+export function buildPreferredModelOrderForIntent(
+  intent: IntentType,
+  responseMode: ResponseMode = "fast",
+  limit?: number,
+) {
+  const availability: ProviderAvailability = { openai: true, nvidia: true };
+  const ordered = reorderModels(
+    filterModelsByConfiguredProviders(baseModelsForIntent(intent), availability),
+    preferredModelsForIntent(intent, responseMode),
+  );
+  return typeof limit === "number" ? ordered.slice(0, limit) : ordered;
+}
+
 function modelCandidatesForIntent(
   intent: IntentType,
   responseMode: ResponseMode = "fast",
   preferredModelsOverride?: string[],
+  availability = resolveProviderAvailability(),
 ): ModelCandidate[] {
   const healthScope = `${responseMode}:${intent}`;
   const preferredModels = preferredModelsOverride?.length
-    ? uniqueModels([...preferredModelsOverride, ...preferredModelsForIntent(intent, responseMode)])
+    ? uniqueModels(filterDeprecatedRouteModels([
+      ...preferredModelsOverride,
+      ...preferredModelsForIntent(intent, responseMode),
+    ]))
     : preferredModelsForIntent(intent, responseMode);
+  const limit = candidateLimitForIntent(intent, responseMode);
   const rankedModels = prioritizeHealthyModels(
-    reorderModels(baseModelsForIntent(intent), preferredModels),
+    reorderModels(filterModelsByConfiguredProviders(baseModelsForIntent(intent), availability), preferredModels),
     healthScope,
   );
+  const selectedModels = ensureProviderDiverseCandidatePool(
+    rankedModels,
+    limit,
+    availability,
+    intent,
+    responseMode,
+  );
 
-  return rankedModels.slice(0, candidateLimitForIntent(intent, responseMode)).map((model) => ({
+  return selectedModels.map((model) => ({
     model,
     timeoutMs: timeoutForIntent(intent, responseMode),
     tier: tierForIntent(intent),
@@ -1387,7 +1326,25 @@ function _set(k: string, v: string) {
 // Types
 
 type Msg = { role: "system" | "user" | "assistant"; content: string };
-type NvResp = { choices?: Array<{ message?: { content?: string } }> };
+type ChatCompletionResp = {
+  choices?: Array<{
+    message?: {
+      content?: string | Array<{ type?: string; text?: string }>;
+    };
+  }>;
+};
+type OpenAIResponsesResp = {
+  output_text?: string | null;
+  output?: Array<{
+    content?: Array<{ type?: string; text?: string }>;
+  }>;
+};
+type AiCallResult = {
+  content: string | null;
+  cancelled?: boolean;
+  cooldownMs?: number;
+  retryable?: boolean;
+};
 type ModelPlannerStrategy = "single_pass" | "collect_and_judge";
 type ModelGenerationResult = {
   candidate: ModelCandidate;
@@ -1611,6 +1568,43 @@ function hasMaterialNumericConflict(a: string, b: string) {
   return !aNumbers.some((value) => bNumbers.includes(value));
 }
 
+function looksLikeAlgorithmicCodingQuestion(question: string) {
+  const normalized = question.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!normalized) return false;
+
+  return (
+    /\b(shortest path|dijkstra|bellman[- ]ford|floyd[- ]warshall|a\*|astar|union[- ]find|disjoint set|topological sort|segment tree|fenwick tree|binary indexed tree|knapsack|memoi[sz]ation|state compression|breadth[- ]first search|depth[- ]first search|graph traversal)\b/.test(normalized)
+    || /\b(longest|shortest)\s+(?:subarray|substring|subsequence|window)\b/.test(normalized)
+    || (
+      /\b(grid|matrix|graph|tree|array|string|subarray|substring|window|source|destination|obstacle|constraints?)\b/.test(normalized)
+      && /\b(algorithm|path|remove at most|at most(?:\s+\w+)?|at least|exactly|time complexity|space complexity|optimi[sz]e|provide code|implementation|approach|sliding window|two pointers|distinct)\b/.test(normalized)
+    )
+    || (
+      /\b(explain your approach|time complexity|space complexity|provide code|write code|implementation)\b/.test(normalized)
+      && /\b(problem|constraints?|grid|graph|tree|array|matrix|subarray|substring|window|path|node|edge)\b/.test(normalized)
+    )
+  );
+}
+
+function questionDemandsCode(question: string) {
+  return /\b(code|implementation|implement|write code|provide code|sample code)\b/i.test(question);
+}
+
+function questionDemandsTechnicalStructure(question: string) {
+  return /\b(approach|time complexity|space complexity|optimi[sz]e|constraints?)\b/i.test(question);
+}
+
+function answerLooksLikeShortWrongLanguageFragment(question: string, answer: string) {
+  const questionLatinChars = question.match(/[A-Za-z]/g)?.length ?? 0;
+  if (questionLatinChars < 20) {
+    return false;
+  }
+
+  const answerLatinChars = answer.match(/[A-Za-z]/g)?.length ?? 0;
+  const answerNonLatinChars = answer.match(/[^\u0000-\u024F\s\d.,:;!?()[\]{}'"`~_*+\-/\\]/gu)?.length ?? 0;
+  return answer.length < 80 && answerLatinChars < 6 && answerNonLatinChars >= 4;
+}
+
 function scoreClawCloudModelResponse(input: {
   intent: IntentType;
   response: string;
@@ -1672,6 +1666,24 @@ function scoreClawCloudModelResponse(input: {
   // Penalty scoring — detect low-quality patterns (stronger penalties for bad patterns)
   if (input.userQuestion && text.toLowerCase() === input.userQuestion.trim().toLowerCase()) {
     score -= 30; // Parroting the question
+  }
+  if (input.userQuestion && looksLikeAlgorithmicCodingQuestion(input.userQuestion)) {
+    if (text.length < 140) score -= 20;
+    if (
+      questionDemandsCode(input.userQuestion)
+      && !/```|function\s|const\s|class\s|return\s|interface\s|def\s|public\s+class|fn\s+\w+/i.test(text)
+    ) {
+      score -= 24;
+    }
+    if (
+      questionDemandsTechnicalStructure(input.userQuestion)
+      && !/\b(approach|algorithm|time complexity|space complexity|o\([^)]+\)|bfs|dfs|queue|heap|priority queue|dynamic programming|state)\b/i.test(text)
+    ) {
+      score -= 18;
+    }
+    if (answerLooksLikeShortWrongLanguageFragment(input.userQuestion, text)) {
+      score -= 35;
+    }
   }
   if (/as an ai|as a language model|as an artificial/i.test(text)) score -= 20;
   if (/\b(i can't|i cannot|i do not have access|i don't have access|i'm unable to)\b/i.test(text)) score -= 16;
@@ -1781,7 +1793,7 @@ function buildJudgeCandidatesForIntent(intent: IntentType, responseMode: Respons
   const healthScope = `judge:${responseMode}:${intent}`;
   const rankedModels = prioritizeHealthyModels(
     reorderModels(
-      uniqueModels([...reasoningModels(), ...chatModels(), ...globalModels()]),
+      filterModelsByConfiguredProviders(uniqueModels([...reasoningModels(), ...chatModels(), ...globalModels()])),
       preferredModelsForIntent(intent, responseMode),
     ),
     healthScope,
@@ -1848,6 +1860,7 @@ async function runCandidateCollectionBatch(input: {
   candidates: ModelCandidate[];
   userQuestion: string;
   intent: IntentType;
+  responseMode: ResponseMode;
 }): Promise<{
   successes: ModelGenerationResult[];
   failures: ClawCloudModelCandidateTrace[];
@@ -1869,14 +1882,16 @@ async function runCandidateCollectionBatch(input: {
 
   const attempts: Array<Promise<BatchAttemptResult>> = input.candidates.map(async (candidate) => {
     const startedAt = Date.now();
-    const out = await _call(
+    const callResult = await _call(
       input.messages,
       input.maxTokens,
       candidate.model,
       candidate.timeoutMs,
+      input.responseMode,
       input.temperature,
     );
     const latencyMs = Date.now() - startedAt;
+    const out = callResult.content;
 
     if (out) {
       markModelSuccess(candidate.healthKey);
@@ -1896,8 +1911,10 @@ async function runCandidateCollectionBatch(input: {
       };
     }
 
-    markModelFailure(candidate.healthKey);
-    console.warn(`[ai] ${candidate.model} failed, trying next model...`);
+    if (!callResult.cancelled) {
+      markModelFailure(candidate.healthKey, callResult.cooldownMs);
+      console.warn(`[ai] ${candidate.model} failed, trying next model...`);
+    }
     return {
       ok: false as const,
       trace: {
@@ -1971,7 +1988,7 @@ async function judgeGeneratedCandidates(input: {
 
     const timeoutMs = Math.min(judgeCandidate.timeoutMs, remainingMs);
     const startedAt = Date.now();
-    const raw = await _call(
+    const callResult = await _call(
       [
         { role: "system", content: judgeSystem },
         { role: "user", content: judgeUser },
@@ -1979,12 +1996,16 @@ async function judgeGeneratedCandidates(input: {
       260,
       judgeCandidate.model,
       timeoutMs,
+      input.responseMode,
       0,
     );
     const latencyMs = Date.now() - startedAt;
+    const raw = callResult.content;
 
     if (!raw) {
-      markModelFailure(judgeCandidate.healthKey);
+      if (!callResult.cancelled) {
+        markModelFailure(judgeCandidate.healthKey, callResult.cooldownMs);
+      }
       continue;
     }
 
@@ -2097,6 +2118,7 @@ async function orchestrateClawCloudPrompt(input: {
         temperature: input.temperature,
         candidates: batch,
         intent: input.intent,
+        responseMode: input.responseMode,
         userQuestion: input.userQuestion,
       });
 
@@ -2128,6 +2150,7 @@ async function orchestrateClawCloudPrompt(input: {
       candidates: batch,
       userQuestion: input.userQuestion,
       intent: input.intent,
+      responseMode: input.responseMode,
     });
 
     successes.push(...batchResult.successes);
@@ -2243,8 +2266,325 @@ async function orchestrateClawCloudPrompt(input: {
 
 // OpenAI model prefixes — routed to api.openai.com instead of NVIDIA
 const OPENAI_MODEL_PREFIXES = ["gpt-", "o1-", "o3-", "o4-", "chatgpt-"];
+const OPENAI_RESPONSES_MODEL_PATTERNS = [/^gpt-5/i, /^o[134]/i, /^chatgpt-/i];
+const NVIDIA_NO_SYSTEM_ROLE_PATTERNS = [/^google\/gemma/i];
+const INVALID_MODEL_COOLDOWN_MS = 30 * 60 * 1000;
 function isOpenAIModel(model: string) {
   return OPENAI_MODEL_PREFIXES.some((p) => model.startsWith(p));
+}
+
+function prefersOpenAIResponsesApi(model: string) {
+  return OPENAI_RESPONSES_MODEL_PATTERNS.some((pattern) => pattern.test(model));
+}
+
+function isOpenAIReasoningModel(model: string) {
+  return prefersOpenAIResponsesApi(model);
+}
+
+function isOpenAIProReasoningModel(model: string) {
+  return isOpenAIReasoningModel(model) && /(?:^|[-.])pro$/i.test(model);
+}
+
+function openAIReasoningEffortForModel(
+  model: string,
+  responseMode: ResponseMode,
+): "low" | "medium" | "high" | "xhigh" | undefined {
+  if (!isOpenAIReasoningModel(model)) {
+    return undefined;
+  }
+
+  if (isOpenAIProReasoningModel(model)) {
+    return "high";
+  }
+
+  if (/^gpt-5\.(?:2|4)/i.test(model)) {
+    return responseMode === "deep" ? "high" : "low";
+  }
+
+  if (/^gpt-5/i.test(model)) {
+    return responseMode === "deep" ? "medium" : "low";
+  }
+
+  if (/^o[134]/i.test(model)) {
+    return responseMode === "deep" ? "medium" : "low";
+  }
+
+  return responseMode === "deep" ? "medium" : "low";
+}
+
+function openAIModelSupportsSampling(model: string, responseMode: ResponseMode) {
+  return !openAIReasoningEffortForModel(model, responseMode);
+}
+
+function nvidiaModelSupportsSystemRole(model: string) {
+  return !NVIDIA_NO_SYSTEM_ROLE_PATTERNS.some((pattern) => pattern.test(model));
+}
+
+function collapseSystemMessagesIntoUserTurn(messages: Msg[]) {
+  const systemInstruction = messages
+    .filter((message) => message.role === "system")
+    .map((message) => message.content.trim())
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+  const nonSystemMessages = messages.filter((message) => message.role !== "system");
+
+  if (!systemInstruction) {
+    return nonSystemMessages;
+  }
+
+  return [
+    {
+      role: "user" as const,
+      content: `Follow these instructions exactly:\n${systemInstruction}`,
+    },
+    ...nonSystemMessages,
+  ];
+}
+
+function coalesceAdjacentMessages(messages: Msg[]) {
+  const merged: Msg[] = [];
+
+  for (const message of messages) {
+    const content = message.content.trim();
+    if (!content) {
+      continue;
+    }
+
+    const last = merged[merged.length - 1];
+    if (last && last.role === message.role) {
+      last.content = `${last.content}\n\n${content}`.trim();
+      continue;
+    }
+
+    merged.push({
+      role: message.role,
+      content,
+    });
+  }
+
+  return merged;
+}
+
+function buildProviderMessages(model: string, messages: Msg[]) {
+  if (isOpenAIModel(model)) {
+    return messages;
+  }
+
+  const providerMessages = nvidiaModelSupportsSystemRole(model)
+    ? messages
+    : collapseSystemMessagesIntoUserTurn(messages);
+
+  return coalesceAdjacentMessages(providerMessages);
+}
+
+function buildOpenAIResponsesBody(
+  messages: Msg[],
+  maxTokens: number,
+  model: string,
+  temperature: number,
+  responseMode: ResponseMode,
+) {
+  const instructions = messages
+    .filter((message) => message.role === "system")
+    .map((message) => message.content.trim())
+    .filter(Boolean)
+    .join("\n\n")
+    .trim() || undefined;
+
+  const input = messages
+    .filter((message) => message.role !== "system")
+    .map((message) => ({
+      role: message.role,
+      content: message.content,
+    }));
+
+  const body: Record<string, unknown> = {
+    model,
+    instructions,
+    input: input.length ? input : [{ role: "user" as const, content: "Respond briefly." }],
+    max_output_tokens: maxTokens,
+  };
+
+  const reasoningEffort = openAIReasoningEffortForModel(model, responseMode);
+  if (reasoningEffort) {
+    body.reasoning = { effort: reasoningEffort };
+  }
+
+  if (openAIModelSupportsSampling(model, responseMode)) {
+    body.temperature = temperature;
+    body.top_p = 0.95;
+  }
+
+  return body;
+}
+
+function buildOpenAIChatBody(
+  messages: Msg[],
+  maxTokens: number,
+  model: string,
+  temperature: number,
+  responseMode: ResponseMode,
+) {
+  const body: Record<string, unknown> = {
+    model,
+    max_completion_tokens: maxTokens,
+    messages,
+  };
+
+  const reasoningEffort = openAIReasoningEffortForModel(model, responseMode);
+  if (reasoningEffort) {
+    body.reasoning_effort = reasoningEffort;
+  }
+
+  if (openAIModelSupportsSampling(model, responseMode)) {
+    body.temperature = temperature;
+    body.top_p = 0.95;
+  }
+
+  return body;
+}
+
+function buildNvidiaChatBody(
+  messages: Msg[],
+  maxTokens: number,
+  model: string,
+  temperature: number,
+) {
+  return {
+    model,
+    max_tokens: maxTokens,
+    temperature,
+    top_p: 0.95,
+    messages,
+  };
+}
+
+function extractChatCompletionText(data: ChatCompletionResp) {
+  const raw = data.choices?.[0]?.message?.content;
+  if (typeof raw === "string") {
+    return raw.trim() || null;
+  }
+
+  if (Array.isArray(raw)) {
+    const joined = raw
+      .map((part) => part?.text ?? "")
+      .join("")
+      .trim();
+    return joined || null;
+  }
+
+  return null;
+}
+
+function extractResponsesApiText(data: OpenAIResponsesResp) {
+  if (typeof data.output_text === "string" && data.output_text.trim()) {
+    return data.output_text.trim();
+  }
+
+  const joined = (data.output ?? [])
+    .flatMap((item) => item.content ?? [])
+    .map((part) => part?.text ?? "")
+    .join("")
+    .trim();
+
+  return joined || null;
+}
+
+function shouldRetryOpenAIWithAlternateTransport(status: number, bodyText: string) {
+  const normalized = bodyText.toLowerCase();
+  return (
+    status === 400 || status === 404
+  ) && (
+    normalized.includes("v1/chat/completions")
+    || normalized.includes("v1/responses")
+    || normalized.includes("max_completion_tokens")
+    || normalized.includes("max_output_tokens")
+    || normalized.includes("unsupported parameter")
+    || normalized.includes("not supported in")
+  );
+}
+
+function inferFailureCooldownMs(status: number, bodyText: string) {
+  const normalized = bodyText.toLowerCase();
+  const looksLikeContractMismatch = (
+    normalized.includes("v1/chat/completions")
+    || normalized.includes("v1/responses")
+    || normalized.includes("max_completion_tokens")
+    || normalized.includes("max_output_tokens")
+    || normalized.includes("unsupported parameter")
+  );
+
+  if (
+    (status === 400 || status === 404)
+    && /"param"\s*:\s*"model"/.test(normalized)
+    && !looksLikeContractMismatch
+  ) {
+    return INVALID_MODEL_COOLDOWN_MS;
+  }
+
+  return undefined;
+}
+
+async function executeJsonModelRequest(input: {
+  model: string;
+  url: string;
+  apiKey: string;
+  body: unknown;
+  timeoutMs: number;
+  signal: AbortSignal;
+  timedOutRef: { current: boolean };
+  cancelledRef: { current: boolean };
+  parse: (data: unknown) => string | null;
+}): Promise<AiCallResult> {
+  const callStartMs = Date.now();
+  console.log(`[ai] calling ${input.model} timeout=${input.timeoutMs}ms url=${input.url}`);
+
+  try {
+    const res = await fetch(input.url, {
+      method: "POST",
+      signal: input.signal,
+      headers: {
+        Authorization: `Bearer ${input.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(input.body),
+    });
+
+    const callLatencyMs = Date.now() - callStartMs;
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      console.error(`[ai] ${res.status} ${input.model} (${callLatencyMs}ms): ${txt.slice(0, 300)}`);
+      return {
+        content: null,
+        cooldownMs: inferFailureCooldownMs(res.status, txt),
+        retryable: shouldRetryOpenAIWithAlternateTransport(res.status, txt),
+      };
+    }
+
+    const data = await res.json().catch(() => null);
+    const content = input.parse(data)?.trim() ?? null;
+    if (!content) {
+      console.error(`[ai] empty ${input.model} (${callLatencyMs}ms)`);
+      return { content: null };
+    }
+
+    console.log(`[ai] ${input.model} OK (${callLatencyMs}ms) len=${content.length}`);
+    return { content };
+  } catch (error) {
+    const callLatencyMs = Date.now() - callStartMs;
+    if ((error as Error)?.name === "AbortError") {
+      if (input.timedOutRef.current) {
+        console.warn(`[ai] timeout on ${input.model} after ${callLatencyMs}ms (limit=${input.timeoutMs}ms)`);
+      } else if (!input.cancelledRef.current) {
+        console.warn(`[ai] cancelled ${input.model} after ${callLatencyMs}ms`);
+      }
+      return { content: null, cancelled: !input.timedOutRef.current };
+    }
+
+    console.error(`[ai] error on ${input.model} after ${callLatencyMs}ms:`, error);
+    return { content: null };
+  }
 }
 
 async function _call(
@@ -2252,73 +2592,115 @@ async function _call(
   maxTokens: number,
   model: string,
   timeoutMs: number,
+  responseMode: ResponseMode,
   temperature = 0.2,
   signal?: AbortSignal,
-): Promise<string | null> {
+): Promise<AiCallResult> {
   const useOpenAI = isOpenAIModel(model);
 
-  if (useOpenAI && !env.OPENAI_API_KEY) return null;
-  if (!useOpenAI && !env.NVIDIA_API_KEY) return null;
-
-  const url = useOpenAI
-    ? "https://api.openai.com/v1/chat/completions"
-    : (() => {
-        const base = (env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1")
-          .replace(/\/+$/, "")
-          .replace(/\/chat\/completions$/i, "")
-          .replace(/\/embeddings$/i, "");
-        return `${/\/v\d+$/i.test(base) ? base : `${base}/v1`}/chat/completions`;
-      })();
-
-  const apiKey = useOpenAI ? env.OPENAI_API_KEY : env.NVIDIA_API_KEY;
+  if (useOpenAI && !env.OPENAI_API_KEY) return { content: null };
+  if (!useOpenAI && !env.NVIDIA_API_KEY) return { content: null };
 
   const ctrl = new AbortController();
-  const onAbort = () => ctrl.abort();
+  const timedOutRef = { current: false };
+  const cancelledRef = { current: false };
+  const onAbort = () => {
+    cancelledRef.current = true;
+    ctrl.abort();
+  };
   if (signal?.aborted) {
+    cancelledRef.current = true;
     ctrl.abort();
   } else if (signal) {
     signal.addEventListener("abort", onAbort, { once: true });
   }
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  const callStartMs = Date.now();
-  console.log(`[ai] calling ${model} timeout=${timeoutMs}ms url=${url}`);
+  const timer = setTimeout(() => {
+    timedOutRef.current = true;
+    ctrl.abort();
+  }, timeoutMs);
 
   try {
-    const res = await fetch(url, {
-      method: "POST",
+    if (useOpenAI) {
+      const apiKey = env.OPENAI_API_KEY!;
+      const primaryTransport = prefersOpenAIResponsesApi(model) ? "responses" : "chat";
+      const attempts = primaryTransport === "responses"
+        ? [
+            {
+              url: "https://api.openai.com/v1/responses",
+              body: buildOpenAIResponsesBody(messages, maxTokens, model, temperature, responseMode),
+              parse: (data: unknown) => extractResponsesApiText(data as OpenAIResponsesResp),
+              kind: "responses" as const,
+            },
+            {
+              url: "https://api.openai.com/v1/chat/completions",
+              body: buildOpenAIChatBody(messages, maxTokens, model, temperature, responseMode),
+              parse: (data: unknown) => extractChatCompletionText(data as ChatCompletionResp),
+              kind: "chat" as const,
+            },
+          ]
+        : [
+            {
+              url: "https://api.openai.com/v1/chat/completions",
+              body: buildOpenAIChatBody(messages, maxTokens, model, temperature, responseMode),
+              parse: (data: unknown) => extractChatCompletionText(data as ChatCompletionResp),
+              kind: "chat" as const,
+            },
+            {
+              url: "https://api.openai.com/v1/responses",
+              body: buildOpenAIResponsesBody(messages, maxTokens, model, temperature, responseMode),
+              parse: (data: unknown) => extractResponsesApiText(data as OpenAIResponsesResp),
+              kind: "responses" as const,
+            },
+          ];
+
+      let lastFailure: AiCallResult = { content: null };
+      for (let index = 0; index < attempts.length; index += 1) {
+        const attempt = attempts[index]!;
+        const result = await executeJsonModelRequest({
+          model,
+          url: attempt.url,
+          apiKey,
+          body: attempt.body,
+          timeoutMs,
+          signal: ctrl.signal,
+          timedOutRef,
+          cancelledRef,
+          parse: attempt.parse,
+        });
+
+        if (result.content || result.cancelled || timedOutRef.current) {
+          return result;
+        }
+
+        lastFailure = result;
+        if (index === attempts.length - 1) {
+          break;
+        }
+
+        if (!result.retryable) {
+          break;
+        }
+      }
+
+      return lastFailure;
+    }
+
+    const base = (env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1")
+      .replace(/\/+$/, "")
+      .replace(/\/chat\/completions$/i, "")
+      .replace(/\/embeddings$/i, "");
+    const url = `${/\/v\d+$/i.test(base) ? base : `${base}/v1`}/chat/completions`;
+    return await executeJsonModelRequest({
+      model,
+      url,
+      apiKey: env.NVIDIA_API_KEY!,
+      body: buildNvidiaChatBody(buildProviderMessages(model, messages), maxTokens, model, temperature),
+      timeoutMs,
       signal: ctrl.signal,
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: maxTokens,
-        temperature,
-        top_p: 0.95,
-        messages,
-      }),
+      timedOutRef,
+      cancelledRef,
+      parse: (data: unknown) => extractChatCompletionText(data as ChatCompletionResp),
     });
-
-    const callLatencyMs = Date.now() - callStartMs;
-    if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      console.error(`[ai] ${res.status} ${model} (${callLatencyMs}ms): ${txt.slice(0, 300)}`);
-      return null;
-    }
-
-    const data = (await res.json()) as NvResp;
-    const content = data.choices?.[0]?.message?.content?.trim() ?? null;
-    console.log(`[ai] ${model} OK (${callLatencyMs}ms) len=${content?.length ?? 0}`);
-    return content;
-  } catch (error) {
-    const callLatencyMs = Date.now() - callStartMs;
-    if ((error as Error)?.name === "AbortError") {
-      console.warn(`[ai] timeout on ${model} after ${callLatencyMs}ms (limit=${timeoutMs}ms)`);
-    } else {
-      console.error(`[ai] error on ${model} after ${callLatencyMs}ms:`, error);
-    }
-    return null;
   } finally {
     clearTimeout(timer);
     if (signal) {
@@ -2333,6 +2715,7 @@ async function runCandidateBatch(input: {
   temperature: number;
   candidates: ModelCandidate[];
   intent: IntentType;
+  responseMode: ResponseMode;
   userQuestion: string;
 }): Promise<{
   winner: ModelGenerationResult | null;
@@ -2347,15 +2730,17 @@ async function runCandidateBatch(input: {
 
   const attempts = input.candidates.map((candidate, index) => (async () => {
     const startedAt = Date.now();
-    const out = await _call(
+    const callResult = await _call(
       input.messages,
       input.maxTokens,
       candidate.model,
       candidate.timeoutMs,
+      input.responseMode,
       input.temperature,
       controllers[index].signal,
     );
     const latencyMs = Date.now() - startedAt;
+    const out = callResult.content;
 
     if (out) {
       markModelSuccess(candidate.healthKey);
@@ -2373,8 +2758,8 @@ async function runCandidateBatch(input: {
       };
     }
 
-    if (!controllers[index].signal.aborted) {
-      markModelFailure(candidate.healthKey);
+    if (!callResult.cancelled && !controllers[index].signal.aborted) {
+      markModelFailure(candidate.healthKey, callResult.cooldownMs);
       failures.set(index, {
         model: candidate.model,
         tier: candidate.tier,
@@ -2448,8 +2833,9 @@ export async function completeClawCloudPromptWithTrace(input: {
 }): Promise<ClawCloudPromptCompletionResult> {
   const traceId = generateTraceId();
   const requestStartedAt = Date.now();
+  const availability = resolveProviderAvailability();
 
-  if (!env.NVIDIA_API_KEY) {
+  if (!hasAnyAiProviderConfigured(availability)) {
     logWarn("ai-engine", "no_api_key", { traceId });
     return {
       answer: input.fallback,
@@ -2517,7 +2903,7 @@ export async function completeClawCloudPromptWithTrace(input: {
       );
 
     // ── PERFORMANCE-BASED MODEL REORDERING ──
-    const candidates = modelCandidatesForIntent(intent, responseMode, input.preferredModels);
+    const candidates = modelCandidatesForIntent(intent, responseMode, input.preferredModels, availability);
     const reorderedModels = reorderModelsByPerformance(
       candidates.map((c) => c.model),
       intent,
@@ -2713,6 +3099,25 @@ export function chooseClawCloudCandidateForTest(input: {
   };
 }
 
+export function buildClawCloudModelCandidatesForTest(input: {
+  intent: IntentType;
+  responseMode?: ResponseMode;
+  preferredModels?: string[];
+  providerAvailability?: Partial<ProviderAvailability>;
+}) {
+  const availability = {
+    ...resolveProviderAvailability(),
+    ...input.providerAvailability,
+  };
+
+  return modelCandidatesForIntent(
+    input.intent,
+    input.responseMode ?? "fast",
+    input.preferredModels,
+    availability,
+  ).map((candidate) => candidate.model);
+}
+
 // Fast path for instant acknowledgements
 
 export async function completeClawCloudFast(input: {
@@ -2721,7 +3126,8 @@ export async function completeClawCloudFast(input: {
   maxTokens?: number;
   fallback: string;
 }): Promise<string> {
-  if (!env.NVIDIA_API_KEY) return input.fallback;
+  const availability = resolveProviderAvailability();
+  if (!hasAnyAiProviderConfigured(availability)) return input.fallback;
 
   const msgs: Msg[] = [];
   const mergedSystem = mergeClawCloudSystemPrompt(input.system);
@@ -2731,14 +3137,26 @@ export async function completeClawCloudFast(input: {
   const ackCandidates: ModelCandidate[] = [];
   appendCandidates(
     ackCandidates,
-    prioritizeHealthyModels(reorderModels(fastModels(), INTENT_PREFERRED_MODELS.greeting), "greeting"),
+    prioritizeHealthyModels(
+      reorderModels(
+        filterModelsByConfiguredProviders(fastModels(), availability),
+        INTENT_PREFERRED_MODELS.greeting,
+      ),
+      "greeting",
+    ),
     INTENT_TIMEOUT_MS.greeting,
     "fast",
     "greeting",
   );
   appendCandidates(
     ackCandidates,
-    prioritizeHealthyModels(reorderModels(chatModels(), INTENT_PREFERRED_MODELS.general), "general"),
+    prioritizeHealthyModels(
+      reorderModels(
+        filterModelsByConfiguredProviders(chatModels(), availability),
+        INTENT_PREFERRED_MODELS.general,
+      ),
+      "general",
+    ),
     INTENT_TIMEOUT_MS.general,
     "chat",
     "general",
@@ -2765,6 +3183,7 @@ export async function completeClawCloudFast(input: {
       temperature: 0.18,
       candidates: batch,
       intent: "greeting",
+      responseMode: "fast",
       userQuestion: input.user,
     });
     if (out.winner?.out) {
