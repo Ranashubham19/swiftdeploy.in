@@ -210,12 +210,16 @@ async function updateApproval(
 }
 
 async function generateApprovals(token: string) {
-  await fetch("/api/approvals/generate", {
+  const response = await fetch("/api/approvals/generate", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
     },
   });
+
+  if (!response.ok) {
+    throw new Error("Unable to generate drafts right now.");
+  }
 }
 
 export function ApprovalsPage({ config }: ApprovalsPageProps) {

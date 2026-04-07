@@ -100,7 +100,7 @@ export const env = {
   ),
   NVIDIA_CHAT_MODEL: readFirstString(
     ["NVIDIA_CHAT_MODEL"],
-    "meta/llama-3.3-70b-instruct",
+    "meta/llama-4-maverick-17b-128e-instruct",
   ),
   NVIDIA_GLOBAL_MODELS: readString("NVIDIA_GLOBAL_MODELS"),
   NVIDIA_FAST_MODELS: readString("NVIDIA_FAST_MODELS"),

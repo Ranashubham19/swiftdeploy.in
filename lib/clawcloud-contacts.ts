@@ -211,6 +211,37 @@ const AMBIGUOUS_RECIPIENT_PLACEHOLDERS = new Set([
   "anybody",
 ]);
 
+const AMBIGUOUS_SEND_MESSAGE_PLACEHOLDERS = new Set([
+  "it",
+  "this",
+  "that",
+  "same",
+  "the same",
+  "same message",
+  "same text",
+  "same msg",
+  "same reply",
+  "same thing",
+  "this message",
+  "that message",
+  "this text",
+  "that text",
+  "this one",
+  "that one",
+  "ye",
+  "yeh",
+  "yehi",
+  "yehi msg",
+  "wo",
+  "woh",
+  "wohi",
+  "wahi",
+  "isko",
+  "isse",
+  "usko",
+  "usse",
+]);
+
 const CONDITIONAL_SEND_CUE_PATTERN =
   /\b(?:if|unless|when|once|whenever|as soon as|until|after\s+(?:he|she|they|you|someone|somebody|anyone|anybody|the client|the team|it)|before\s+(?:he|she|they|you|someone|somebody|anyone|anybody|the client|the team|it))\b/i;
 
@@ -227,6 +258,13 @@ const ABSTRACT_MESSAGE_TEMPLATE_KEYWORD_RE =
   /\b(?:thank(?:s| you)?|thanku|gratitude|appreciation|note|wish|greeting|reply|text|apology|sorry|birthday|congrat(?:s|ulations)?|farewell|welcome|invitation|invite|follow[\s-]?up|reminder)\b/i;
 const ABSTRACT_MESSAGE_TEMPLATE_STYLE_RE =
   /\b(?:professional|formal|polite|warm|sweet|heartfelt|brief|short|nice|proper|kind)\b/i;
+
+const RECIPIENT_TRAILING_OPERATIONAL_NOISE_PATTERNS = [
+  /\b(?:on\s+my\s+behalf|for\s+me|in\s+my\s+name|from\s+my\s+side)\s*$/i,
+  /\b(?:mere?\s+behalf(?:\s+(?:me|mai|mein|par|pe))?|meri\s+taraf\s+se|meri\s+or\s+se)\s*$/i,
+  /\b(?:please|pls|plz|na)\s*$/i,
+] as const;
+
 function cleanupNamePunctuation(value: string) {
   return value
     .normalize("NFKC")
@@ -236,6 +274,44 @@ function cleanupNamePunctuation(value: string) {
     .replace(/[^\p{L}\p{M}\p{N}\s.&+\-/\u0900-\u097F]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function stripRecipientTrailingOperationalNoise(value: string) {
+  let cleaned = cleanupNamePunctuation(value);
+  if (!cleaned) {
+    return "";
+  }
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const pattern of RECIPIENT_TRAILING_OPERATIONAL_NOISE_PATTERNS) {
+      const next = cleanupNamePunctuation(cleaned.replace(pattern, " "));
+      if (next && next !== cleaned) {
+        cleaned = next;
+        changed = true;
+      }
+    }
+  }
+
+  return cleaned;
+}
+
+function normalizeSendMessageBodyForSafety(message: string) {
+  return normalizeClawCloudUnderstandingMessage(String(message ?? ""))
+    .toLowerCase()
+    .replace(/[.!?]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function looksLikeAmbiguousSendMessageBody(message: string) {
+  const normalized = normalizeSendMessageBodyForSafety(message);
+  if (!normalized) {
+    return true;
+  }
+
+  return AMBIGUOUS_SEND_MESSAGE_PLACEHOLDERS.has(normalized);
 }
 
 function escapeRegex(value: string) {
@@ -369,7 +445,9 @@ function buildParsedSendCommand(
   rawRecipients: string,
   message: string,
 ): ParsedSendMessageCommand | null {
-  const cleanedRecipients = rawRecipients.trim().replace(/^[,:-]+|[,:-]+$/g, "").trim();
+  const cleanedRecipients = stripRecipientTrailingOperationalNoise(
+    rawRecipients.trim().replace(/^[,:-]+|[,:-]+$/g, "").trim(),
+  );
   const cleanedMessage = message.trim().replace(/^["']|["']$/g, "").trim();
   if (!cleanedRecipients || !cleanedMessage) {
     return null;
@@ -415,7 +493,7 @@ function buildParsedSendCommand(
 }
 
 const NON_CONTACT_TELL_RECIPIENT_PATTERN =
-  /\b(?:conversation|chat|history|summary|recap|overview|message|messages|text|texts|email|emails|mail|number|details?|story|plot|richest|poorest|largest|smallest|best|worst|top|latest|news|weather|price|prices|capital|math|maths|coding|code)\b/i;
+  /\b(?:conversation|chat|history|summary|recap|overview|message|messages|text|texts|email|emails|mail|number|details?|story|plot|paragraph|note|greeting|wish|draft|letter|caption|poem|essay|richest|poorest|largest|smallest|best|worst|top|latest|news|weather|price|prices|capital|math|maths|coding|code)\b/i;
 
 function looksLikeTellMessageRecipient(rawRecipient: string) {
   const cleaned = cleanupNamePunctuation(rawRecipient);
@@ -429,6 +507,10 @@ function looksLikeTellMessageRecipient(rawRecipient: string) {
 
   const normalized = normalizeContactName(cleaned);
   if (!normalized || AMBIGUOUS_DIRECT_RECIPIENTS.has(normalized)) {
+    return false;
+  }
+
+  if (/\baap\b/i.test(normalized)) {
     return false;
   }
 
@@ -708,7 +790,7 @@ function parseSendMessageCommandCandidate(t: string): ParsedSendMessageCommand |
   // Hindi/Hinglish send patterns:
   // "X likh do maa ko" / "X likh ke bhej do maa ko" / "X bhej do maa ko"
   // "maa ko X likh do" / "maa ko X bhej do"
-  const hindiSendVerbs = "(?:likh(?:\\s*(?:ke|kar))?\\s*(?:bhej|send)?\\s*(?:do|de|dena|dijiye|kar(?:o|na)?)|bhej(?:\\s*(?:do|de|dena|dijiye|na))|send\\s*(?:kar(?:o|do|na)?))";
+  const hindiSendVerbs = "(?:likh(?:\\s*(?:ke|kar))?\\s*(?:bhej|send)?\\s*(?:do|de|dena|dijiye|kar(?:o|na)?)|bhej(?:\\s*(?:do|de|dena|dijiye|na))|send\\s*(?:(?:kar|kr)(?:\\s*(?:do|de|dena|dijiye|na))?|do|de))";
 
   // Pattern: "ek badiya sa good afternoon message likh do maa ko"
   // Matches: <message description> <hindi send verb> <recipient> ko
@@ -719,12 +801,52 @@ function parseSendMessageCommandCandidate(t: string): ParsedSendMessageCommand |
     return buildParsedSendCommand(hindiMessageFirst[2] ?? "", hindiMessageFirst[1] ?? "");
   }
 
+  const hindiEmbeddedRecipientWithTrailingMessage = t.match(
+    new RegExp(
+      `^(?:(?:kripiya|kripya|please|pls|plz)(?:\\s+(?:kr(?:\\s*ke)?|kar(?:\\s*ke)?|karke|krke))?\\s+)?(.+?)\\s+(?:ko|k)\\s+${hindiSendVerbs}\\s+(.+)$`,
+      "i",
+    ),
+  );
+  if (hindiEmbeddedRecipientWithTrailingMessage) {
+    const prefixTokens = cleanupNamePunctuation(
+      String(hindiEmbeddedRecipientWithTrailingMessage[1] ?? ""),
+    )
+      .split(/\s+/)
+      .filter(Boolean);
+    const trailingMessage = String(hindiEmbeddedRecipientWithTrailingMessage[2] ?? "").trim();
+    const maxRecipientTokens = Math.min(4, prefixTokens.length);
+
+    for (let recipientTokenCount = maxRecipientTokens; recipientTokenCount >= 1; recipientTokenCount -= 1) {
+      let messageTokens = prefixTokens.slice(0, -recipientTokenCount);
+      const recipientTokens = prefixTokens.slice(-recipientTokenCount);
+      if (!messageTokens.length) {
+        continue;
+      }
+
+      if ((messageTokens[messageTokens.length - 1] ?? "").toLowerCase() === "aap") {
+        messageTokens = messageTokens.slice(0, -1);
+      }
+
+      const recipient = recipientTokens.join(" ").trim();
+      const messagePrefix = messageTokens.join(" ").trim();
+      if (!messagePrefix || !looksLikeTellMessageRecipient(recipient)) {
+        continue;
+      }
+
+      const message = [messagePrefix, trailingMessage].filter(Boolean).join(" ");
+      return buildParsedSendCommand(recipient, message);
+    }
+  }
+
   // Pattern: "maa ko ek good afternoon message likh do"
   // Matches: <recipient> ko <message description> <hindi send verb>
   const hindiRecipientFirst = t.match(
     new RegExp(`^(.+?)\\s+(?:ko|k)\\s+(.+?)\\s+${hindiSendVerbs}$`, "i"),
   );
-  if (hindiRecipientFirst) {
+  if (
+    hindiRecipientFirst
+    && looksLikeTellMessageRecipient(hindiRecipientFirst[1] ?? "")
+  ) {
     return buildParsedSendCommand(hindiRecipientFirst[1] ?? "", hindiRecipientFirst[2] ?? "");
   }
 
@@ -732,7 +854,10 @@ function parseSendMessageCommandCandidate(t: string): ParsedSendMessageCommand |
   const hindiRecipientVerb = t.match(
     new RegExp(`^(.+?)\\s+(?:ko|k)\\s+${hindiSendVerbs}\\s+(.+)$`, "i"),
   );
-  if (hindiRecipientVerb) {
+  if (
+    hindiRecipientVerb
+    && looksLikeTellMessageRecipient(hindiRecipientVerb[1] ?? "")
+  ) {
     return buildParsedSendCommand(hindiRecipientVerb[1] ?? "", hindiRecipientVerb[2] ?? "");
   }
 
@@ -797,6 +922,14 @@ export function analyzeSendMessageCommandSafety(text: string): SendMessageComman
       parsed,
       issue: "ambiguous_recipient",
       ambiguousRecipients,
+    };
+  }
+
+  if (looksLikeAmbiguousSendMessageBody(parsed.message)) {
+    return {
+      allowed: false,
+      parsed,
+      issue: "ambiguous_message",
     };
   }
 

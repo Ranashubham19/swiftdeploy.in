@@ -45,6 +45,7 @@ const INTENT_SIGNALS: Record<string, SignalPattern[]> = {
     { pattern: /\b(?:debug|fix|error|bug|exception|traceback|stack trace|syntax error|runtime error|type error|segfault|segmentation fault|crash)\b/i, weight: 0.90, signal: "debugging_request" },
     { pattern: /\b(?:python|javascript|typescript|java|c\+\+|rust|golang|ruby|swift|kotlin|react|vue|angular|django|flask|express|nextjs|next\.js|node\.?js|sql|html|css)\b/i, weight: 0.80, signal: "programming_language" },
     { pattern: /\b(?:algorithm|data structure|binary tree|linked list|hash map|graph|dfs|bfs|dynamic programming|dp|recursion|sorting|searching|complexity|big o|o\(n\))\b/i, weight: 0.85, signal: "algorithm_topic" },
+    { pattern: /\b(?:shortest path|dijkstra|bellman[- ]ford|floyd[- ]warshall|topological sort|union[- ]find|disjoint set|segment tree|fenwick tree|knapsack|state compression|grid)\b/i, weight: 0.88, signal: "algorithmic_challenge" },
     { pattern: /\b(?:api|rest|graphql|websocket|grpc|microservice|docker|kubernetes|k8s|ci\/cd|devops|git|deployment|terraform|aws|gcp|azure)\b/i, weight: 0.75, signal: "infrastructure_topic" },
     { pattern: /```[\s\S]*```/m, weight: 0.88, signal: "code_block_present" },
     { pattern: /\b(?:import|export|function|const|let|var|class|def|return|if|else|for|while|try|catch)\b\s*[\({]?/i, weight: 0.70, signal: "code_keywords" },

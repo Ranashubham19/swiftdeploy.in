@@ -213,10 +213,10 @@ export function reorderModelsByPerformance(
 
 const DEDICATED_JUDGE_MODELS = [
   "qwen/qwen3.5-397b-a17b",
-  "moonshotai/kimi-k2.5",
-  "moonshotai/kimi-k2-thinking",
-  "meta/llama-3.3-70b-instruct",
-  "gpt-5.4-pro",
+  "deepseek-ai/deepseek-v3.1",
+  "deepseek-ai/deepseek-v3.1-terminus",
+  "meta/llama-4-maverick-17b-128e-instruct",
+  "mistralai/mixtral-8x22b-instruct-v0.1",
 ];
 
 export function selectIndependentJudge(

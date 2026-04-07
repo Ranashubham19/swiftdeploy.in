@@ -1,4 +1,4 @@
-import { completeClawCloudPrompt } from "@/lib/clawcloud-ai";
+import { buildPreferredModelOrderForIntent, completeClawCloudPrompt } from "@/lib/clawcloud-ai";
 import { detectHinglish } from "@/lib/clawcloud-hinglish";
 import { emailMatchesTld } from "@/lib/clawcloud-intent-match";
 import {
@@ -1239,13 +1239,9 @@ export async function translateMessage(
   const detectedSourceLocale = inferClawCloudMessageLocale(message);
   const isIndicSource = detectedSourceLocale ? INDIAN_LOCALES.has(detectedSourceLocale) : false;
   const sourceLanguageName = detectedSourceLocale ? (localeNames[detectedSourceLocale] ?? null) : null;
-  const indicModels = (isIndicSource || isSanskritTarget) ? [
-    "qwen/qwen3.5-397b-a17b",
-    "meta/llama-3.3-70b-instruct",
-    "deepseek-ai/deepseek-v3.1-terminus",
-    "moonshotai/kimi-k2.5",
-    "mistralai/mistral-large-3-675b-instruct-2512",
-  ] : undefined;
+  const indicModels = (isIndicSource || isSanskritTarget)
+    ? buildPreferredModelOrderForIntent("language", "fast", 5)
+    : undefined;
 
   // For Indic→English translation, romanize first and translate the romanized text
   // (models understand romanized Indic text much better than native scripts)
@@ -1465,13 +1461,7 @@ export async function enforceClawCloudReplyLanguage(input: {
         fallback: secondAttempt,
         skipCache: true,
         temperature: 0.05,
-        preferredModels: [
-          "qwen/qwen3.5-397b-a17b",
-          "meta/llama-3.3-70b-instruct",
-          "deepseek-ai/deepseek-v3.1-terminus",
-          "moonshotai/kimi-k2.5",
-          "mistralai/mistral-large-3-675b-instruct-2512",
-        ],
+        preferredModels: buildPreferredModelOrderForIntent("language", "fast", 5),
       }).catch(() => secondAttempt);
 
       if (looksLikeSanskritMessage(normalizeMessageForLanguageDetection(dedicatedRewrite))) {

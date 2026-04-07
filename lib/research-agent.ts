@@ -15,7 +15,7 @@ import type {
 } from "@/lib/types";
 
 import { rewriteQuestionWithMemory } from "@/lib/conversation-memory";
-import { completeClawCloudPrompt } from "@/lib/clawcloud-ai";
+import { buildPreferredModelOrderForIntent, completeClawCloudPrompt } from "@/lib/clawcloud-ai";
 import { extractWebsiteContent } from "@/lib/crawl";
 import { embedTexts } from "@/lib/embeddings";
 import { inferClawCloudRegionContext, normalizeRegionalQuestion } from "@/lib/clawcloud-region-context";
@@ -796,11 +796,7 @@ async function buildStrictCoverageAnswer(
     user: question,
     intent: "research",
     responseMode: "deep",
-    preferredModels: [
-      "meta/llama-3.3-70b-instruct",
-      "mistralai/mistral-large-3-675b-instruct-2512",
-      "moonshotai/kimi-k2-instruct-0905",
-    ],
+    preferredModels: buildPreferredModelOrderForIntent("research", "deep", 3),
     maxTokens: 1_200,
     fallback: "",
     skipCache: true,

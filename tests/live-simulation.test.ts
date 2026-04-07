@@ -269,8 +269,12 @@ test("Display normalize: catches 'I'm processing your request'", () => {
   assert.ok(isF, "'Processing' message not detected as fallback");
 });
 
-test("Display normalize: catches signal leaks", () => {
-  assert.ok(isVisibleFallbackReplyForTest("__LOW_CONFIDENCE_RECOVERY_SIGNAL__"));
+test("Display normalize: catches precise low-confidence clarifications", () => {
+  assert.ok(
+    isVisibleFallbackReplyForTest(
+      "I need the exact topic, name, item, or number you want answered to give a precise reply.",
+    ),
+  );
 });
 
 test("Display normalize: catches 'I need one missing detail'", () => {

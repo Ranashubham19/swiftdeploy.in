@@ -14,7 +14,7 @@ import { logClawCloudProviderEvent } from "@/lib/clawcloud-provider-telemetry";
 
 const NVIDIA_VISION_MODEL = "microsoft/phi-3.5-vision-instruct";
 const OPENAI_VISION_MODEL = "gpt-4o-mini";
-const NVIDIA_REASONING_MODEL = "meta/llama-3.3-70b-instruct";
+const NVIDIA_REASONING_MODEL = "meta/llama-4-maverick-17b-128e-instruct";
 const OPENAI_REASONING_MODEL = "gpt-4o-mini";
 const VISION_TIMEOUT_MS = 25_000;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MB

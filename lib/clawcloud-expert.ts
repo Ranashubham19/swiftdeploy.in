@@ -1,4 +1,9 @@
-import { completeClawCloudFast, completeClawCloudPrompt, type IntentType } from "@/lib/clawcloud-ai";
+import {
+  buildPreferredModelOrderForIntent,
+  completeClawCloudFast,
+  completeClawCloudPrompt,
+  type IntentType,
+} from "@/lib/clawcloud-ai";
 import { runResearchAgent } from "@/lib/research-agent";
 import { answerWebSearchResult } from "@/lib/clawcloud-news";
 import {
@@ -64,22 +69,9 @@ export async function semanticDomainClassify(question: string): Promise<ExpertDo
   return domain;
 }
 
-const CODING_REVIEW_MODELS = [
-  "moonshotai/kimi-k2.5",
-  "moonshotai/kimi-k2-instruct-0905",
-  "qwen/qwen3-coder-480b-a35b-instruct",
-  "mistralai/mistral-large-3-675b-instruct-2512",
-  "meta/llama-3.3-70b-instruct",
-  "meta/llama-3.3-70b-instruct",
-];
+const CODING_REVIEW_MODELS = buildPreferredModelOrderForIntent("coding", "deep", 5);
 
-const RESEARCH_MEMO_MODELS = [
-  "moonshotai/kimi-k2.5",
-  "moonshotai/kimi-k2-instruct-0905",
-  "mistralai/mistral-large-3-675b-instruct-2512",
-  "meta/llama-3.3-70b-instruct",
-  "meta/llama-3.3-70b-instruct",
-];
+const RESEARCH_MEMO_MODELS = buildPreferredModelOrderForIntent("research", "deep", 5);
 
 type TradingSetup = {
   winRate: number;

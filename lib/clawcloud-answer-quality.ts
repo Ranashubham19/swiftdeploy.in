@@ -1192,19 +1192,32 @@ export async function verifyClawCloudAnswer(input: {
   return parseVerificationBlock(answer);
 }
 
-/**
- * NEVER returns a "share more details" refusal. Instead, returns an internal
- * signal that triggers the emergency direct answer path in the agent layer.
- * This ensures the user ALWAYS gets a substantive answer, never a "scoped answer needed" refusal.
- */
 export function buildClawCloudLowConfidenceReply(
   _question: string,
-  _profile: ClawCloudAnswerQualityProfile,
-  _rationale?: string,
+  profile: ClawCloudAnswerQualityProfile,
+  rationale?: string,
 ): string {
-  // Return internal signal — the agent layer will catch this and generate
-  // a real answer via emergencyDirectAnswer() instead of showing a refusal.
-  return "__LOW_CONFIDENCE_RECOVERY_SIGNAL__";
+  if (profile.intent === "math") {
+    return "I need the full equation or the exact values to calculate that accurately.";
+  }
+
+  if (profile.requiresLiveGrounding) {
+    return "I need the exact place, date, person, item, or market you want checked to answer that accurately.";
+  }
+
+  if (profile.intent === "coding") {
+    return "I need the exact problem statement, language, or constraints to give a precise coding answer.";
+  }
+
+  if (profile.intent === "language") {
+    return "I need the exact word, phrase, or sentence you want translated or explained to answer it accurately.";
+  }
+
+  if (rationale && /scope|detail|specific|precise|verify/i.test(rationale)) {
+    return "I need the exact topic, item, or detail you want answered to give a precise reply.";
+  }
+
+  return "I need the exact topic, name, item, or number you want answered to give a precise reply.";
 }
 
 export function clawCloudConfidenceBelowFloor(

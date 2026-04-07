@@ -72,6 +72,7 @@ function normalizeCurrentAffairsQuestion(question: string) {
     .replace(/\babhi\b/gi, "right now")
     .replace(/\baaj\b/gi, "today")
     .replace(/\b(yudh|jang|jung|ladai|larai)\b/gi, "war")
+    .replace(/\b(?:iseral|isreal|israle|izrael)\b/gi, "israel")
     .replace(/\b(stithi|sthiti|halat|haalat)\b/gi, "status")
     .replace(/\bkyu+n\b/gi, "why")
     .replace(/\bmai\b/gi, "in")

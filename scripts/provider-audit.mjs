@@ -3,8 +3,9 @@ import path from "node:path";
 
 const cwd = process.cwd();
 
-loadEnvFile(path.join(cwd, ".env"));
 loadEnvFile(path.join(cwd, ".env.local"));
+loadEnvFile(path.join(cwd, ".env.vercel.production"));
+loadEnvFile(path.join(cwd, ".env"));
 
 function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) {

@@ -141,15 +141,16 @@ const MODEL_COST_PER_1K_TOKENS: Record<string, number> = {
   "gpt-5-pro": 0.0040,
   "gpt-5": 0.0020,
   // NVIDIA models
-  "moonshotai/kimi-k2.5": 0.0012,
   "google/gemma-2-27b-it": 0.0004,
-  "mistralai/mistral-large-3-675b-instruct-2512": 0.0020,
+  "meta/llama-4-maverick-17b-128e-instruct": 0.0008,
+  "meta/llama3-8b-instruct": 0.0001,
+  "mistralai/mistral-small-3.1-24b-instruct-2503": 0.0007,
+  "qwen/qwen3-next-80b-a3b-instruct": 0.0012,
   "qwen/qwen3.5-397b-a17b": 0.0015,
-  "nvidia/llama-3.3-nemotron-super-49b-v1": 0.0008,
-  "meta/llama-3.3-70b-instruct": 0.0006,
+  "deepseek-ai/deepseek-v3.1": 0.0013,
   "deepseek-ai/deepseek-v3.1-terminus": 0.0014,
-  "moonshotai/kimi-k2-instruct-0905": 0.0010,
-  "meta/llama-3.1-8b-instruct": 0.0001,
+  "qwen/qwen2.5-coder-32b-instruct": 0.0008,
+  "qwen/qwen3-coder-480b-a35b-instruct": 0.0016,
   default: 0.0010,
 };
 
