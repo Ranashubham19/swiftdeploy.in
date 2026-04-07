@@ -8,6 +8,8 @@ export const metadata: Metadata = {
   description: "Public Google OAuth reviewer path for ClawCloud sign-in and Workspace consent.",
 };
 
+export const dynamic = "force-dynamic";
+
 export default function GoogleOauthReviewRoute() {
   return <GoogleOauthReviewPage config={getPublicAppConfig()} />;
 }
