@@ -3218,17 +3218,6 @@ function shouldSkipFinalReplyLanguageRewrite(input: {
     return false;
   }
 
-  const isOperationalCategory =
-    input.category === "send_message"
-    || input.category === "whatsapp_history"
-    || input.category === "save_contact"
-    || input.category === "whatsapp_contacts_sync"
-    || input.category === "whatsapp_settings_status"
-    || input.category === "whatsapp_settings_update";
-  if (!isOperationalCategory) {
-    return false;
-  }
-
   return verifyReplyLanguageMatch({
     userMessage: input.question,
     aiReply: input.candidateReply,

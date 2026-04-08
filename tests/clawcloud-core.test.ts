@@ -6383,7 +6383,7 @@ test("final reply pipeline preserves operational WhatsApp history clarifications
   assert.match(result.response ?? "", /Reply with the exact contact name, full number, or option number/i);
 });
 
-test("final reply pipeline only skips operational language rewrites when the reply already matches the user's language", () => {
+test("final reply pipeline skips verified already-translated replies but still rewrites language mismatches", () => {
   const hindiResolution = resolveClawCloudReplyLanguage({
     message: "tell me the messages of jaideep with me and that too in hindi please",
     preferredLocale: "en",
@@ -6410,6 +6410,21 @@ test("final reply pipeline only skips operational language rewrites when the rep
       alreadyTranslated: true,
       candidateReply: "Koi active contact mode abhi chal nahi raha hai.",
       languageResolution: hinglishResolution,
+    }),
+    true,
+  );
+
+  const englishResolution = resolveClawCloudReplyLanguage({
+    message: "Given a large grid with obstacles, find the shortest path from source to destination where you can remove at most k obstacles.",
+    preferredLocale: "en",
+  });
+  assert.equal(
+    shouldSkipFinalReplyLanguageRewriteForTest({
+      question: "Given a large grid with obstacles, find the shortest path from source to destination where you can remove at most k obstacles.",
+      category: "coding",
+      alreadyTranslated: true,
+      candidateReply: "Use BFS over states (row, column, remaining_k) and prune dominated states with best_remaining.",
+      languageResolution: englishResolution,
     }),
     true,
   );
