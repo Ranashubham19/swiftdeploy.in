@@ -19,7 +19,7 @@ import {
 import { env } from "@/lib/env";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+export const maxDuration = 180;
 
 async function recordAgentMessageObservability(input: {
   userId: string;
