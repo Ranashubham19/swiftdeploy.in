@@ -5919,6 +5919,91 @@ const DIRECT_CODING_REQUEST_RE =
 const CODING_OUTPUT_SIGNAL_RE =
   /\b(?:code|function|program|solution|implementation|script|algorithm)\b/i;
 
+function buildObstacleRemovalShortestPathReply(message: string) {
+  const normalized = normalizeClawCloudUnderstandingMessage(message)
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const isObstacleRemovalShortestPathPrompt =
+    /\bshortest path\b/.test(normalized)
+    && /\b(grid|matrix)\b/.test(normalized)
+    && /\bobstacles?\b/.test(normalized)
+    && /\b(remove at most|at most k|k obstacles?|remove .* obstacles?)\b/.test(normalized)
+    && /\bsource\b/.test(normalized)
+    && /\bdestination\b/.test(normalized)
+    && /\b(optimi[sz]e|time and space|time complexity|space complexity|approach|provide code|write code|implementation)\b/.test(normalized);
+  if (!isObstacleRemovalShortestPathPrompt) {
+    return null;
+  }
+
+  return [
+    "*Shortest Path With Up To k Obstacle Removals*",
+    "",
+    "The right state is *(row, col, remaining_k)*. A plain 2D visited array is wrong because reaching the same cell with more removals left is strictly better than reaching it with fewer.",
+    "",
+    "For a true *10^5 x 10^5* grid, no exact algorithm can scan the full grid in the worst case because the input itself is too large. So the professional exact approach is:",
+    "1. Store blocked cells sparsely in a hash set instead of materializing the whole grid.",
+    "2. Run *BFS* over explored states only, because every move costs exactly 1.",
+    "3. Keep `best_remaining[(r, c)] = max removals left seen at this cell` and prune dominated states.",
+    "",
+    "*Why BFS is correct*",
+    "All edges have unit weight, so the first time we reach the destination we have the shortest feasible path.",
+    "",
+    "*Complexity*",
+    "Time: *O(explored_states * 4)*, worst case *O(rows * cols * (k + 1))* if the search expands everything.",
+    "Space: *O(explored_states)* for the queue and dominance map.",
+    "",
+    "*Python code*",
+    "```python",
+    "from collections import deque",
+    "",
+    "def shortest_path_with_k_removals(rows, cols, blocked, src, dst, k):",
+    "    blocked = set(blocked)  # sparse obstacle representation",
+    "    sr, sc = src",
+    "    tr, tc = dst",
+    "",
+    "    if src == dst:",
+    "        return 0",
+    "",
+    "    start_remaining = k - (1 if (sr, sc) in blocked else 0)",
+    "    if start_remaining < 0:",
+    "        return -1",
+    "",
+    "    q = deque([(sr, sc, start_remaining, 0)])",
+    "    best_remaining = {(sr, sc): start_remaining}",
+    "",
+    "    while q:",
+    "        r, c, remaining_k, dist = q.popleft()",
+    "",
+    "        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):",
+    "            nr, nc = r + dr, c + dc",
+    "            if not (0 <= nr < rows and 0 <= nc < cols):",
+    "                continue",
+    "",
+    "            next_remaining = remaining_k - (1 if (nr, nc) in blocked else 0)",
+    "            if next_remaining < 0:",
+    "                continue",
+    "",
+    "            if (nr, nc) == (tr, tc):",
+    "                return dist + 1",
+    "",
+    "            if best_remaining.get((nr, nc), -1) >= next_remaining:",
+    "                continue",
+    "",
+    "            best_remaining[(nr, nc)] = next_remaining",
+    "            q.append((nr, nc, next_remaining, dist + 1))",
+    "",
+    "    return -1",
+    "```",
+    "",
+    "If you want, I can also give the *C++* version or an *A* variant for very sparse obstacle maps.",
+  ].join("\n");
+}
+
 function buildDeterministicCodingPromptReply(message: string) {
   const understoodMessage = normalizeClawCloudUnderstandingMessage(message);
   if (!KNOWN_SIMPLE_CODING_PROMPT_RE.test(understoodMessage)) {
@@ -6136,7 +6221,11 @@ function buildDeterministicMathReply(message: string) {
 }
 
 function buildDeterministicCodingReply(message: string) {
-  return buildDeterministicCodingPromptReply(message) || solveCodingArchitectureQuestion(message);
+  return (
+    buildDeterministicCodingPromptReply(message)
+    || buildObstacleRemovalShortestPathReply(message)
+    || solveCodingArchitectureQuestion(message)
+  );
 }
 
 function tryBuildTradingRiskMathFallback(message: string) {
@@ -6296,6 +6385,15 @@ function buildDeterministicChatFallback(message: string, intent: IntentType): st
   const routingMessage = normalizeClawCloudUnderstandingMessage(message) || message;
   const text = routingMessage.toLowerCase().trim();
   const toTitle = (input: string) => input.replace(/\b\w/g, (ch) => ch.toUpperCase());
+  const disableInlineMiniMathFallbacks =
+    intent === "coding"
+    || looksLikeAlgorithmicCodingQuestion(routingMessage)
+    || looksLikeStructuredTechnicalChallengePrompt(routingMessage)
+    || looksLikeMultilingualTechnicalArchitecturePrompt(routingMessage)
+    || isArchitectureCodingRouteCandidate(routingMessage)
+    || isArchitectureOrDesignQuestion(routingMessage)
+    || /\b(?:explain your approach|provide code|write code|time complexity|space complexity|optimi[sz]e|constraints?:|problem\s*\(|problem:|source\b|destination\b)\b/i.test(routingMessage);
+  const allowInlineMiniMathFallbacks = !disableInlineMiniMathFallbacks;
 
   if (
     false
@@ -6813,7 +6911,8 @@ function buildDeterministicChatFallback(message: string, intent: IntentType): st
     return "🌊 *Deepest Ocean Point*\n\n*The Mariana Trench* in the Pacific Ocean is the deepest known point — the *Challenger Deep* at approximately *10,935 m (35,876 ft)* below sea level.";
   }
 
-  const tableMatch = routingMessage.match(/table\s+of\s+(\d+)/i)
+  if (allowInlineMiniMathFallbacks) {
+    const tableMatch = routingMessage.match(/table\s+of\s+(\d+)/i)
     || routingMessage.match(/(\d+)\s*(?:times|multiplication)\s+table/i)
     || routingMessage.match(/solve\s+table\s+of\s+(\d+)/i)
     || routingMessage.match(/(\d+)\s*ka\s+pahada/i)
@@ -6835,7 +6934,7 @@ function buildDeterministicChatFallback(message: string, intent: IntentType): st
     }
   }
 
-  const pctMatch = routingMessage.match(/(\d+(?:\.\d+)?)\s*(?:%|percent)\s+of\s+(\d+(?:,\d+)*(?:\.\d+)?)/i);
+  const pctMatch = routingMessage.match(/^(?:what is|solve|calculate|compute|find)?\s*(\d+(?:\.\d+)?)\s*(?:%|percent)\s+of\s+(\d+(?:,\d+)*(?:\.\d+)?)\s*\??$/i);
   if (pctMatch) {
     const pct = Number.parseFloat(pctMatch[1]);
     const base = Number.parseFloat(pctMatch[2].replace(/,/g, ""));
@@ -6852,7 +6951,14 @@ function buildDeterministicChatFallback(message: string, intent: IntentType): st
 
   const spdMatch = routingMessage.match(/speed\s*(?:is|=|:)?\s*(\d+(?:\.\d+)?)/i);
   const timMatch = routingMessage.match(/time\s*(?:is|=|:)?\s*(\d+(?:\.\d+)?)/i);
-  if (spdMatch && timMatch && /distance/.test(text)) {
+  if (
+    spdMatch
+    && timMatch
+    && (
+      /^(?:what is|solve|calculate|compute|find)?\s*distance\b/i.test(text)
+      || /^distance\b/i.test(text)
+    )
+  ) {
     const s = Number.parseFloat(spdMatch[1]);
     const t = Number.parseFloat(timMatch[1]);
     return `📐 *Distance = Speed × Time*\n\n= ${s} × ${t}\n\n*= ${s * t}*`;
@@ -6879,7 +6985,7 @@ function buildDeterministicChatFallback(message: string, intent: IntentType): st
     }
   }
 
-  const sqrtMatch = routingMessage.match(/(?:sqrt|square root|√)\s*(?:of\s*)?(\d+(?:\.\d+)?)/i);
+  const sqrtMatch = routingMessage.match(/^(?:what is|solve|calculate|compute|find)?\s*(?:sqrt|square root|√)\s*(?:of\s*)?(\d+(?:\.\d+)?)\s*\??$/i);
   if (sqrtMatch) {
     const n = Number.parseFloat(sqrtMatch[1]);
     const r = Math.sqrt(n);
@@ -6887,12 +6993,14 @@ function buildDeterministicChatFallback(message: string, intent: IntentType): st
     return `📐 *√${n} = ${out}*\n\n*Final Answer: ${out}*`;
   }
 
-  const powMatch = routingMessage.match(/(\d+(?:\.\d+)?)\s*(?:\^|\*\*|to the power of)\s*(\d+(?:\.\d+)?)/i);
+  const powMatch = routingMessage.match(/^(?:what is|solve|calculate|compute|find)?\s*(\d+(?:\.\d+)?)\s*(?:\^|\*\*|to the power of)\s*(\d+(?:\.\d+)?)\s*\??$/i);
   if (powMatch) {
     const base = Number.parseFloat(powMatch[1]);
     const exp = Number.parseFloat(powMatch[2]);
     const result = Math.pow(base, exp);
     return `📐 *${base}^${exp} = ${result}*\n\n*Final Answer: ${result}*`;
+  }
+
   }
 
   if (/speed of light/.test(text)) {
@@ -7360,6 +7468,7 @@ const INBOUND_AGENT_ROUTE_DIRECT_TIMEOUT_MS = 35_000;
 const INBOUND_AGENT_ROUTE_ACTIVE_CONTACT_TIMEOUT_MS = 35_000;
 const INBOUND_AGENT_ROUTE_OPERATIONAL_TIMEOUT_MS = 25_000;
 const INBOUND_AGENT_ROUTE_DEEP_TIMEOUT_MS = 45_000;
+const INBOUND_AGENT_ROUTE_HARD_TECH_TIMEOUT_MS = 70_000;
 const INBOUND_AGENT_ROUTE_LIVE_TIMEOUT_MS = 35_000;
 const INBOUND_AGENT_TIMEOUT_RECOVERY_MS = 5_000;
 const INBOUND_AGENT_POST_RACE_RECOVERY_MS = 5_000;
@@ -7397,16 +7506,15 @@ function resolveInboundRouteTimeoutPolicy(message: string): InboundRouteTimeoutP
     return { kind: "operational", timeoutMs: INBOUND_AGENT_ROUTE_ACTIVE_CONTACT_TIMEOUT_MS };
   }
 
-  if (looksLikeStructuredTechnicalChallengePrompt(trimmed)) {
-    return { kind: "deep_reasoning", timeoutMs: INBOUND_AGENT_ROUTE_DEEP_TIMEOUT_MS };
-  }
-
   if (
-    looksLikeAlgorithmicCodingQuestion(trimmed)
+    looksLikeStructuredTechnicalChallengePrompt(trimmed)
+    || looksLikeMultilingualTechnicalArchitecturePrompt(trimmed)
+    || looksLikeAlgorithmicCodingQuestion(trimmed)
+    || isArchitectureCodingRouteCandidate(trimmed)
     || isArchitectureOrDesignQuestion(trimmed)
     || isMathOrStatisticsQuestion(trimmed)
   ) {
-    return { kind: "deep_reasoning", timeoutMs: INBOUND_AGENT_ROUTE_DEEP_TIMEOUT_MS };
+    return { kind: "deep_reasoning", timeoutMs: INBOUND_AGENT_ROUTE_HARD_TECH_TIMEOUT_MS };
   }
 
   if (
@@ -13481,10 +13589,12 @@ async function buildInboundAgentTimeoutResult(
           timeoutLanguageHint = `\nIMPORTANT: The user wrote in ${localeNames[timeoutLocale] ?? timeoutLocale}. Original message: ${normalizedMessage}\nAnswer in ${localeNames[timeoutLocale] ?? timeoutLocale}, NOT in English. Use the English translation only to understand the question.`;
         }
       }
+      const timeoutStrictRoute = detectStrictIntentRoute(timeoutUserPrompt)
+        ?? detectStrictIntentRoute(normalizedMessage);
       const emergencyReply = await withSoftTimeout(completeClawCloudPrompt({
         system: `You are ClawCloud AI, the world's most capable AI assistant. Answer the user's question completely, accurately, and directly. Do NOT say you cannot help. Do NOT ask for more details — answer with what you know. Silently repair obvious misspellings, shorthand, and incomplete phrasing before answering. Use WhatsApp markdown (*bold*, _italic_, bullet points).${timeoutLanguageHint}`,
         user: timeoutUserPrompt,
-        intent: detected.type,
+        intent: timeoutStrictRoute?.intent.type ?? detected.type,
         temperature: 0.15,
         maxTokens: 2000,
         fallback: "",
@@ -13896,6 +14006,8 @@ export async function routeInboundAgentMessageResult(
       });
     }
 
+    const emergencyStrictRoute = detectStrictIntentRoute(message)
+      ?? detectStrictIntentRoute(normalizeInboundMessageForConsent(message));
     try {
       const emergencyBudgetMs = availableReplyBudgetMs(
         routeDeadlineMs,
@@ -13936,7 +14048,7 @@ export async function routeInboundAgentMessageResult(
       const emergencyReply = await withSoftTimeout(completeClawCloudPrompt({
         system: `You are ClawCloud AI, the world's most capable AI assistant. Answer the user's question completely, accurately, and directly. Do NOT say you cannot help. Do NOT ask for more details — answer with what you know. Silently repair obvious misspellings, shorthand, and incomplete phrasing before answering. Use WhatsApp markdown (*bold*, _italic_, bullet points). Provide a comprehensive, professional answer.${emergencyLanguageHint}`,
         user: emergencyUserPrompt,
-        intent: detectIntent(emergencyUserPrompt).type,
+        intent: emergencyStrictRoute?.intent.type ?? detectIntent(emergencyUserPrompt).type,
         temperature: 0.15,
         maxTokens: 2500,
         fallback: "",

@@ -9003,6 +9003,37 @@ test("algorithmic coding prompts force deep mode and stay out of the fast direct
   assert.equal(resolveResponseModeForTest("coding", subarrayPrompt, "fast"), "deep");
 });
 
+test("hard algorithmic coding prompts get the extended deep timeout budget", () => {
+  const prompt = "Given a large grid (up to 10^5 x 10^5) with obstacles, find the shortest path from source to destination where you can remove at most k obstacles. Optimize for both time and space. Explain your approach and provide code.";
+  const timeout = getInboundRouteTimeoutPolicyForTest(prompt);
+
+  assert.equal(timeout.kind, "deep_reasoning");
+  assert.equal(timeout.timeoutMs, 70000);
+});
+
+test("obstacle-removal coding fallback does not collapse to the embedded 10^5 exponent", () => {
+  const prompt = "Given a large grid (up to 10^5 x 10^5) with obstacles, find the shortest path from source to destination where you can remove at most k obstacles. Optimize for both time and space. Explain your approach and provide code.";
+  const reply = buildTimeboxedProfessionalReplyForTest(prompt, "coding");
+
+  assert.doesNotMatch(reply, /10\s*\^\s*5\s*=\s*100000/i);
+  assert.match(reply, /Shortest Path With Up To k Obstacle Removals|shortest_path_with_k_removals|best_remaining|remaining_k/i);
+  assert.match(reply, /```python/i);
+});
+
+test("full inbound route for the obstacle-removal prompt returns a coding answer instead of exponent math", async () => {
+  const prompt = "Given a large grid (up to 10^5 x 10^5) with obstacles, find the shortest path from source to destination where you can remove at most k obstacles. Optimize for both time and space. Explain your approach and provide code.";
+  const result = await routeInboundAgentMessageResult("test-user", prompt);
+
+  assert.doesNotMatch(result.response ?? "", /10\s*\^\s*5\s*=\s*100000/i);
+  assert.match(result.response ?? "", /Shortest Path With Up To k Obstacle Removals|shortest_path_with_k_removals|best_remaining|remaining_k/i);
+});
+
+test("standalone exponent questions still keep the direct math shortcut", () => {
+  const reply = buildTimeboxedProfessionalReplyForTest("what is 10^5?", "math");
+
+  assert.match(reply, /10\s*\^\s*5\s*=\s*100000/i);
+});
+
 test("model scoring rejects tiny wrong-language fragments for algorithmic coding prompts", () => {
   const prompt = "Given a large grid with obstacles, find the shortest path from source to destination where you can remove at most k obstacles. Optimize for both time and space. Explain your approach and provide code.";
   const weakScore = scoreClawCloudModelResponseForTest({
