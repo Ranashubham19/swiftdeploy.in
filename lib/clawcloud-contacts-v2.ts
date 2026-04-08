@@ -258,15 +258,7 @@ export function isProfessionallyCommittedResolvedContactMatch(input: {
   }
 
   if (requestedTokens.length === 1) {
-    if (input.matchBasis === "prefix") {
-      return normalizedScore >= 0.96;
-    }
-
-    if (input.matchBasis === "word") {
-      return normalizedScore >= 0.94;
-    }
-
-    return input.matchBasis === "exact" || (input.matchBasis === "fuzzy" && normalizedScore >= 0.97);
+    return input.exact || input.matchBasis === "exact";
   }
 
   if (input.matchBasis === "prefix") {

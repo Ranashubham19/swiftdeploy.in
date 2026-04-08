@@ -1485,7 +1485,7 @@ async function buildBitcoinPriceAnswer(question: string) {
   const btc = data?.bitcoin;
   const preferredValue = btc?.[preferredCurrency];
   const usdValue = btc?.usd;
-  const inrValue = btc?.inr;
+  const rawInrValue = btc?.inr;
   if (!btc || !Number.isFinite(Number(preferredValue ?? Number.NaN)) || !Number.isFinite(Number(usdValue ?? Number.NaN))) {
     if (!env.SERPAPI_API_KEY) {
       return "";
@@ -1520,6 +1520,14 @@ async function buildBitcoinPriceAnswer(question: string) {
   const preferredCode = preferredCurrency.toUpperCase();
   const preferredPrice = Number(preferredValue);
   const usd = Number(usdValue).toLocaleString("en-US", { maximumFractionDigits: 2 });
+  const inrValue = Number.isFinite(Number(rawInrValue ?? Number.NaN))
+    && Number(usdValue) > 0
+    && (() => {
+      const impliedInrPerUsd = Number(rawInrValue) / Number(usdValue);
+      return impliedInrPerUsd >= 30 && impliedInrPerUsd <= 150;
+    })()
+      ? Number(rawInrValue)
+      : null;
   const preferredFormatted = Number.isFinite(preferredPrice)
     ? preferredPrice.toLocaleString(preferredCurrency === "inr" ? "en-IN" : "en-US", {
         maximumFractionDigits: preferredCurrency === "jpy" ? 0 : 2,
@@ -1544,8 +1552,8 @@ async function buildBitcoinPriceAnswer(question: string) {
     `*Bitcoin (BTC) live price:*`,
     preferredFormatted ? `â€¢ ${preferredCode}: *${preferredSymbol}${preferredFormatted}*${requestedCountryName ? ` in ${requestedCountryName}` : ""}` : "",
     `â€¢ USD: *$${usd}*`,
-    Number.isFinite(Number(inrValue ?? Number.NaN))
-      ? `â€¢ INR: *â‚¹${Number(inrValue).toLocaleString("en-IN", { maximumFractionDigits: 2 })}*`
+    typeof inrValue === "number"
+      ? `â€¢ INR: *â‚¹${inrValue.toLocaleString("en-IN", { maximumFractionDigits: 2 })}*`
       : "",
     `â€¢ 24h: *${change}*`,
     "",
@@ -2142,6 +2150,7 @@ const CURATED_SHORT_DEFINITION_FALLBACKS: Record<string, string> = {
   semparo: 'Semparo appears to be a Quenya term that means "for a few reasons."',
   narasimha: "Narasimha is the half-man, half-lion avatar of Vishnu in Hindu tradition. He is known for protecting Prahlada and defeating Hiranyakashipu, symbolizing the victory of dharma over tyranny.",
   narsimha: "Narsimha, more commonly spelled Narasimha, is the half-man, half-lion avatar of Vishnu in Hindu tradition. He is known for protecting Prahlada and defeating Hiranyakashipu, symbolizing the victory of dharma over tyranny.",
+  shali: "Shali most commonly refers to a type of cultivated rice or paddy in Sanskrit and several South Asian language contexts. If you meant a different context such as a title, name, or regional usage, tell me that exact context and I will define that one precisely.",
 };
 
 function buildShortDefinitionFallback(term: string, sources: ResearchSource[]) {

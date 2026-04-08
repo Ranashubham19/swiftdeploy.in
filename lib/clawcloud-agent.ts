@@ -1581,6 +1581,7 @@ const PRIMARY_DIRECT_ANSWER_LANE_ALLOWED_CATEGORIES = new Set<string>([
   "history",
   "geography",
   "culture",
+  "culture_story",
   "technology",
   "language",
   "economics",
@@ -7494,6 +7495,11 @@ function buildTimeboxedProfessionalReply(message: string, intent: IntentType): s
     }
   }
 
+  const deterministicStory = resolveDeterministicKnownStoryReply(message);
+  if (deterministicStory) {
+    return deterministicStory;
+  }
+
   if (isLockedGmailReadIntentMessage(message)) {
     return buildGmailSearchUnavailableReply(message);
   }
@@ -10585,6 +10591,57 @@ async function isWhatsAppConnected(userId: string) {
   return Boolean(runtimeStatus?.connected && !runtimeStatus?.requiresReauth);
 }
 
+function looksLikeWhatsAppContactCountQuestion(message: string) {
+  const normalized = normalizeClawCloudUnderstandingMessage(message).toLowerCase().trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    /^(?:how many|count|total)\s+(?:contacts?|people|numbers?)\b/i.test(normalized)
+    && /\b(?:whatsapp|what'?s?\s*app)\b/i.test(normalized)
+  ) || /\bhow many contacts do i have in my whatsapp\b/i.test(normalized);
+}
+
+async function buildWhatsAppContactCountReply(userId: string) {
+  const runtimeStatus = await getClawCloudWhatsAppRuntimeStatus(userId).catch(() => null);
+  if (!runtimeStatus) {
+    return [
+      "I couldn't verify your synced WhatsApp contact count right now.",
+      "",
+      "Please try again in a moment.",
+    ].join("\n");
+  }
+
+  if (runtimeStatus.contactCount > 0) {
+    const lines = [
+      `Your ClawCloud WhatsApp workspace currently has *${runtimeStatus.contactCount} synced contacts*.`,
+      "",
+      "This count comes from the connected WhatsApp session and synced workspace, not from a guess based on chat history.",
+    ];
+
+    if (runtimeStatus.health === "syncing" || runtimeStatus.syncState !== "idle") {
+      lines.push("", "Sync is still running, so this count can increase as more contacts are imported.");
+    }
+
+    return lines.join("\n");
+  }
+
+  if (runtimeStatus.connected) {
+    return [
+      "Your WhatsApp session is connected, but I do not have any synced contacts counted yet.",
+      "",
+      "The contact sync is still warming up. Try again shortly.",
+    ].join("\n");
+  }
+
+  return [
+    "WhatsApp is not connected right now, so I cannot verify your synced contact count yet.",
+    "",
+    "Reconnect WhatsApp first, then ask again and I will report the real synced count.",
+  ].join("\n");
+}
+
 function formatWhatsAppMessageTimestamp(value: string | null | undefined, timezone = "Asia/Kolkata") {
   if (!value) {
     return "";
@@ -13331,6 +13388,11 @@ async function buildExplicitMultilingualReplySections(input: {
   message: string;
   resolution: ClawCloudReplyLanguageResolution;
 }) {
+  const isUnreliableLockedLanguageReply = (value: string) =>
+    !value.trim()
+    || isVisibleFallbackReply(value)
+    || isLowQualityTemplateReply(value)
+    || /\bi need the exact topic, (?:name, )?item, (?:or detail|or number) you want answered to give a precise reply\b/i.test(value);
   const requestedLocales = [
     input.resolution.locale,
     ...(input.resolution.additionalLocales ?? []),
@@ -13355,7 +13417,11 @@ async function buildExplicitMultilingualReplySections(input: {
           : undefined,
     }).catch(async () => translateMessage(translationBaseMessage, locale, { force: true }).catch(() => ""));
 
-    const trimmed = normalizeReplyForClawCloudDisplay(localized).trim();
+    const trimmed = normalizeReplyForClawCloudDisplay(
+      isUnreliableLockedLanguageReply(localized)
+        ? translationBaseMessage
+        : localized,
+    ).trim();
     if (!trimmed) {
       continue;
     }
@@ -13496,26 +13562,37 @@ async function applyEndToEndReplyLanguageLock(input: {
       responseForLanguageLock,
     )),
   );
+  const finalLockedResponse =
+    (
+      isVisibleFallbackReply(lockedResponse)
+      || isLowQualityTemplateReply(lockedResponse)
+      || /\bi need the exact topic, (?:name, )?item, (?:or detail|or number) you want answered to give a precise reply\b/i.test(lockedResponse)
+    )
+    && responseForLanguageLock.trim()
+    && !isVisibleFallbackReply(responseForLanguageLock)
+    && !isLowQualityTemplateReply(responseForLanguageLock)
+      ? normalizeReplyForClawCloudDisplay(responseForLanguageLock)
+      : lockedResponse;
 
   return {
     ...input.result,
-    response: lockedResponse,
+    response: finalLockedResponse,
     liveAnswerBundle: input.result.liveAnswerBundle
       ? {
         ...input.result.liveAnswerBundle,
-        answer: lockedResponse,
+        answer: finalLockedResponse,
       }
       : null,
     consentRequest: input.result.consentRequest
       ? {
         ...input.result.consentRequest,
-        prompt: lockedResponse,
+        prompt: finalLockedResponse,
       }
       : null,
     styleRequest: input.result.styleRequest
       ? {
         ...input.result.styleRequest,
-        prompt: lockedResponse,
+        prompt: finalLockedResponse,
       }
       : null,
   };
@@ -14569,6 +14646,14 @@ async function routeInboundAgentMessageCore(
     const reply = translatedReply.trim() || baseReply;
 
     return finalizeEarlyWithLocale(reply, localeCommand.locale, "language", "language");
+  }
+
+  if (looksLikeWhatsAppContactCountQuestion(trimmed)) {
+    return finalizeEarlyRaw(
+      await buildWhatsAppContactCountReply(userId),
+      "send_message",
+      "whatsapp_contacts_sync",
+    );
   }
 
   const directTranslation = parseDirectTranslationRequest(trimmed);
@@ -16418,6 +16503,12 @@ async function routeInboundAgentMessageCore(
     case "culture_story": {
       const deterministicStoryFromOriginal = buildDeterministicKnownStoryReply(finalMessage);
       let reasoningQuestion = finalMessage;
+      const looksLikeUnreliableLocalizedStoryAnswer = (candidate: string) =>
+        !candidate.trim()
+        || isVisibleFallbackReply(candidate)
+        || looksLikeQuestionTopicMismatch(reasoningQuestion || finalMessage, candidate)
+        || looksLikeWrongModeAnswer(finalMessage, candidate)
+        || /\bi need the exact topic, (?:name, )?item, (?:or detail|or number) you want answered to give a precise reply\b/i.test(candidate);
       const storyInstruction = [
         conversationStyleInstruction,
         "Generate the story answer in English only for internal reasoning.",
@@ -16505,12 +16596,15 @@ async function routeInboundAgentMessageCore(
         const localizedSections: string[] = [];
         for (const locale of explicitStoryLocales) {
           const localizedStory = await translateMessage(storyText, locale, { force: true }).catch(() => "");
-          if (!localizedStory.trim()) {
+          const finalLocalizedStory = looksLikeUnreliableLocalizedStoryAnswer(localizedStory)
+            ? storyText
+            : localizedStory;
+          if (!finalLocalizedStory.trim()) {
             continue;
           }
           localizedSections.push(`*${localeNames[locale] ?? locale}*`);
           localizedSections.push("");
-          localizedSections.push(localizedStory.trim());
+          localizedSections.push(finalLocalizedStory.trim());
           localizedSections.push("");
         }
 
@@ -16528,22 +16622,10 @@ async function routeInboundAgentMessageCore(
           force: true,
           preserveRomanScript: replyLanguageResolution.preserveRomanScript,
         });
-        if (looksLikeWrongModeAnswer(finalMessage, localizedStory)) {
-          return finalizeRaw(
-            buildClawCloudLowConfidenceReply(
-              finalMessage,
-              buildClawCloudAnswerQualityProfile({
-                question: finalMessage,
-                intent: "culture",
-                category: "culture_story",
-              }),
-              "The localized story answer did not stay in direct story-summary mode.",
-            ),
-            "culture",
-            "culture_story",
-          );
-        }
-        return finalizeTranslated(localizedStory, "culture", "culture_story", {
+        const finalLocalizedStory = looksLikeUnreliableLocalizedStoryAnswer(localizedStory)
+          ? storyText
+          : localizedStory;
+        return finalizeTranslated(finalLocalizedStory, "culture", "culture_story", {
           liveAnswerBundle: storyLiveBundle,
           modelAuditTrail: storyModelAudit,
         });
@@ -20411,6 +20493,39 @@ function formatWhatsAppActiveContactDraftLanguageLabel(choice: WhatsAppActiveCon
   return baseLabel;
 }
 
+function looksLikeActiveContactControlFollowUp(message: string) {
+  const normalized = normalizeClawCloudUnderstandingMessage(String(message ?? "")).trim();
+  if (!normalized) {
+    return false;
+  }
+
+  const lower = normalized.toLowerCase();
+  const wordCount = lower.split(/\s+/).filter(Boolean).length;
+  if (detectLocalePreferenceCommand(normalized).type !== "none") {
+    return true;
+  }
+
+  if (
+    extractExplicitReplyLocaleRequests(normalized).length > 0
+    && (
+      wordCount <= 8
+      || /^(?:now|only|just|say|write|reply|respond|do it|make it|give it|same|i am saying|i'm saying)\b/i.test(normalized)
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    /^(?:now|only|just|say|write|reply|respond|do it|make it|give it|same|i am saying|i'm saying)\b.*\b(?:in|into)\s+[a-z][a-z\s-]{2,20}$/i.test(normalized)
+    || /^(?:shorter|short|longer|formal|informal|professional|polite|friendly|simple|brief|concise)$/i.test(lower)
+    || /^(?:make it|do it|keep it|write it|say it|give it|same)\s+(?:shorter|short|longer|formal|informal|professional|polite|friendly|simple|brief|concise)$/i.test(lower)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 function looksLikeInChatClawCloudRequestDuringActiveContact(message: string) {
   const normalized = normalizeClawCloudUnderstandingMessage(String(message ?? "")).trim();
   if (!normalized) {
@@ -20420,6 +20535,9 @@ function looksLikeInChatClawCloudRequestDuringActiveContact(message: string) {
   const lower = normalized.toLowerCase();
   const words = lower.split(/\s+/).filter(Boolean);
   const directConversationSignal = detectDirectConversationSignal(normalized);
+  if (looksLikeActiveContactControlFollowUp(normalized)) {
+    return true;
+  }
   if (directConversationSignal?.asksCapability || directConversationSignal?.asksAssistantName) {
     return true;
   }
@@ -21288,6 +21406,15 @@ async function sendWhatsAppMessageThroughActiveContactSession(input: {
   }
   // Override input.message with cleaned version for all downstream use
   input = { ...input, message: cleanMessage };
+
+  if (looksLikeActiveContactControlFollowUp(input.message) || looksLikeInChatClawCloudRequestDuringActiveContact(input.message)) {
+    return [
+      `I kept that in this chat because it looks like an instruction for me, not a message for ${input.session.contactName}.`,
+      "",
+      "No WhatsApp message was sent to the contact.",
+      "If you want me to send something, tell me the exact text you want delivered.",
+    ].join("\n");
+  }
 
   if (!input.session.phone && !input.session.jid) {
     await clearWhatsAppActiveContactSession(input.userId).catch(() => null);

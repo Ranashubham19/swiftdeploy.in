@@ -51,6 +51,8 @@ const TRANSLATION_FAILURE_REPLY_PATTERNS = [
   /\bshare the exact topic or full problem statement\b/i,
   /\bshare the exact name, date, version, or location\b/i,
   /\bshare the topic, tone, and target length\b/i,
+  /\bi need the exact (?:topic|name|item|number)\b/i,
+  /\bto give a precise reply\b/i,
   /\bno translation was provided\b/i,
   /\bno translation was provided in the prompt\b/i,
   /\btranslation was not provided\b/i,
@@ -1125,6 +1127,7 @@ function normalizeLocaleRequest(value: string) {
     .trim()
     .replace(/^other[:\s]+/i, "")
     .replace(/^(?:in|into)\s+/i, "")
+    .replace(/\s+(?:got\s+it|understood|ok(?:ay)?)$/i, "")
     .replace(/\s+(?:unless|except|but|and)\b[\s\S]*$/i, "")
     .replace(/[.!?]+$/g, "")
     .trim();
@@ -1132,8 +1135,10 @@ function normalizeLocaleRequest(value: string) {
 
 function extractLocalePreferenceCandidate(message: string): string | null {
   const patterns = [
-    /^(?:ok(?:ay)?[, ]+)?(?:from\s+now(?:\s+on(?:war(?:d|ds?)?)?)?\s+)?(?:always\s+)?(?:reply|respond|answer|speak|talk|write)(?:\s+to\s+me)?\s+in\s+(.+)$/i,
-    /^(?:ok(?:ay)?[, ]+)?(?:from\s+now(?:\s+on(?:war(?:d|ds?)?)?)?\s+)?(?:always\s+)?(?:reply|respond|answer|speak|talk|write)(?:\s+to\s+me)?\s+only\s+in\s+(.+)$/i,
+    /^(?:ok(?:ay)?[, ]+)?(?:from\s+now(?:\s+on(?:war(?:d|ds?)?)?)?\s+)?(?:i(?:'ll|\s+will)?\s+talk(?:\s+(?:to|with)\s+you)?\s+in\s+.+?\s+and\s+)?(?:you(?:'ll|\s+will)?\s+)?(?:reply|respond|answer|speak|talk|write)(?:(?:\s+(?:to|with)\s+me)|(?:\s+me))?(?:\s+only)?\s+in\s+(.+)$/i,
+    /^(?:ok(?:ay)?[, ]+)?(?:from\s+now(?:\s+on(?:war(?:d|ds?)?)?)?\s+)?(?:i(?:'ll|\s+will)?\s+talk(?:\s+(?:to|with)\s+you)?\s+in\s+.+?\s+and\s+you(?:'ll|\s+will)?\s+)?(?:only\s+)?(?:reply|respond|answer|speak|talk|write)(?:(?:\s+(?:to|with)\s+me)|(?:\s+me))?\s+in\s+(.+)$/i,
+    /^(?:ok(?:ay)?[, ]+)?(?:from\s+now(?:\s+on(?:war(?:d|ds?)?)?)?\s+)?(?:always\s+)?(?:reply|respond|answer|speak|talk|write)(?:(?:\s+to\s+me)|(?:\s+me))?\s+in\s+(.+)$/i,
+    /^(?:ok(?:ay)?[, ]+)?(?:from\s+now(?:\s+on(?:war(?:d|ds?)?)?)?\s+)?(?:always\s+)?(?:reply|respond|answer|speak|talk|write)(?:(?:\s+to\s+me)|(?:\s+me))?\s+only\s+in\s+(.+)$/i,
     /^(?:set|change|switch|update)\s+(?:my\s+)?(?:reply\s+)?language(?:\s+to)?\s+(.+)$/i,
     /^(?:switch|change|move|go)\s+back\s+to\s+(.+)$/i,
     /^(?:switch|change)\s+to\s+(.+)$/i,

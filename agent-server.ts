@@ -5242,6 +5242,11 @@ function isEmptyOrFallback(reply: string | null | undefined, sourceMessage?: str
     lower.includes("please provide more context") ||
     lower.includes("give me more details so i can") ||
     lower.includes("tell me which") ||
+    lower.includes("to answer accurately") ||
+    lower.includes("i need the exact topic, name, item, or number") ||
+    lower.includes("precise topic, name, item, or number") ||
+    lower.includes("正確な回答をするために") ||
+    lower.includes("正確なトピック") ||
     // "Couldn't complete" fallback patterns
     lower.includes("couldn't complete a strong answer") ||
     lower.includes("could not complete a strong answer") ||

@@ -3719,6 +3719,15 @@ test("locale preference commands are explicit and do not depend on email domains
     label: "Thai",
   });
 
+  assert.deepEqual(
+    detectLocalePreferenceCommand("From now onward i will talk with you in English and you will only reply me in japanese got it"),
+    {
+      type: "set",
+      locale: "ja",
+      label: "Japanese",
+    },
+  );
+
   assert.deepEqual(detectLocalePreferenceCommand("in chinese only"), {
     type: "set",
     locale: "zh",
@@ -3906,6 +3915,18 @@ test("reply language resolver does not misread Hinglish Maa drafting prompts as 
   assert.equal(resolution.locale, "en");
   assert.equal(resolution.source, "hinglish_message");
   assert.equal(resolution.preserveRomanScript, true);
+});
+
+test("Hinglish detection does not misclassify technical English prompts or short definition questions", () => {
+  assert.equal(
+    detectHinglish("Given a large grid with obstacles, find the shortest path from source to destination where you can remove at most k obstacles."),
+    false,
+  );
+  assert.equal(
+    detectHinglish("Given an array of integers, find the length of the longest subarray with at most k distinct elements."),
+    false,
+  );
+  assert.equal(detectHinglish("What is shali"), false);
 });
 
 test("reply language resolver keeps active-contact Hinglish commands in Roman script", () => {
@@ -5628,6 +5649,20 @@ test("active contact mode parses professional handoff commands and only proxies 
   );
   assert.equal(
     shouldRouteMessageToActiveWhatsAppContactSessionForTest(
+      "Now in german",
+      activeSession,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRouteMessageToActiveWhatsAppContactSessionForTest(
+      "I am saying in german",
+      activeSession,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRouteMessageToActiveWhatsAppContactSessionForTest(
       "Write a short apology note in Hindi",
       activeSession,
     ),
@@ -5848,6 +5883,15 @@ test("professional recipient commitment refuses loose live matches but allows st
     matchBasis: "prefix",
     source: "fuzzy",
   }), true);
+
+  assert.equal(isProfessionallyCommittedRecipientMatchForTest({
+    requestedName: "Aman",
+    resolvedName: "Aman Rajput",
+    exact: false,
+    score: 0.99,
+    matchBasis: "word",
+    source: "fuzzy",
+  }), false);
 });
 
 test("resolved contact scoring normalizes live 100-point scores before applying confidence gates", () => {
@@ -6868,6 +6912,14 @@ test("wrong-mode detection rejects translation-meta replies for story questions"
     looksLikeWrongModeAnswer(
       "tell me the story of my demon in korean",
       "Share the topic, tone, and target length, and I will write the complete piece directly.",
+    ),
+    true,
+  );
+
+  assert.equal(
+    looksLikeWrongModeAnswer(
+      "story of Harry potter in japanese",
+      "正確な回答をするために、正確なトピック、名前、アイテム、または数字を教えてください。",
     ),
     true,
   );
@@ -8616,6 +8668,16 @@ test("topic mismatch detection flags menu-style clarification answers for clear 
     looksLikeQuestionTopicMismatch(
       "Explain the difference between idempotency and deduplication in event-driven systems, and give one concrete payment example where deduplication alone is insufficient.",
       menuAnswer,
+    ),
+    true,
+  );
+});
+
+test("topic mismatch detection rejects short off-topic clarification replies for existing story summaries", () => {
+  assert.equal(
+    looksLikeQuestionTopicMismatch(
+      "story of Harry potter in japanese",
+      "正確な回答をするために、正確なトピック、名前、アイテム、または数字を教えてください。",
     ),
     true,
   );

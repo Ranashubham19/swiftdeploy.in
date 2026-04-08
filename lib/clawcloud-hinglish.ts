@@ -178,6 +178,21 @@ const HINGLISH_WORDS = new Set([
   "jankari",
 ]);
 
+const AMBIGUOUS_HINGLISH_WORDS = new Set([
+  "app",
+  "detail",
+  "internet",
+  "loan",
+  "mobile",
+  "or",
+  "phone",
+  "the",
+  "time",
+  "to",
+  "website",
+  "wifi",
+]);
+
 const HINDI_SUFFIXES = [
   /\b\w+(?:ega|egi|enge|oge|ogi|onga)\b/i,
   /\b\w+(?:ange|angi)\b/i,
@@ -211,17 +226,24 @@ const HINGLISH_PHRASES = [
 ];
 
 export function detectHinglish(message: string): boolean {
-  const words = message.toLowerCase().split(/\s+/).filter(Boolean);
+  const words = message
+    .toLowerCase()
+    .split(/\s+/)
+    .map((word) => word.replace(/^[^a-z]+|[^a-z]+$/g, ""))
+    .filter(Boolean);
   if (words.length < 2) {
     return false;
   }
 
-  const hinglishWordCount = words.filter((word) => HINGLISH_WORDS.has(word)).length;
-  const hinglishRatio = hinglishWordCount / words.length;
+  const hinglishWords = words.filter((word) => HINGLISH_WORDS.has(word));
+  const strongHinglishWordCount = hinglishWords.filter((word) => !AMBIGUOUS_HINGLISH_WORDS.has(word)).length;
+  const hinglishRatio = strongHinglishWordCount / words.length;
   const hasPhrase = HINGLISH_PHRASES.some((pattern) => pattern.test(message));
-  const hasSuffix = HINDI_SUFFIXES.some((pattern) => pattern.test(message));
+  const hasSuffix =
+    strongHinglishWordCount >= 1
+    && HINDI_SUFFIXES.some((pattern) => pattern.test(message));
 
-  return hinglishWordCount >= 2 || hasPhrase || hasSuffix || hinglishRatio > 0.25;
+  return strongHinglishWordCount >= 2 || hasPhrase || hasSuffix || hinglishRatio > 0.25;
 }
 
 export function buildHinglishSystemSnippet(): string {

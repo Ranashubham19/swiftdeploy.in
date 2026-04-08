@@ -1,4 +1,8 @@
-import { completeClawCloudPrompt, type IntentType } from "@/lib/clawcloud-ai";
+import {
+  buildPreferredModelOrderForIntent,
+  completeClawCloudPrompt,
+  type IntentType,
+} from "@/lib/clawcloud-ai";
 import {
   isCompleteIndiaConsumerPriceAnswer,
   looksLikeConsumerStaplePriceQuestion,
@@ -263,6 +267,8 @@ const WRONG_MODE_STORY_CLARIFICATION_PATTERNS = [
   /\bwhat tone\b/i,
   /\btarget length\b/i,
   /\bcreative writing\b/i,
+  /\bto answer accurately\b.*\b(topic|name|item|number)\b/i,
+  /正確な回答.*(?:トピック|名前|アイテム|数字).*教えて/u,
 ];
 
 const WRONG_LANGUAGE_REPLY_PATTERNS = [
@@ -594,6 +600,10 @@ export function looksLikeQuestionTopicMismatch(question: string, answer: string)
     return hitCount === 0;
   }
 
+  if (looksLikeExistingStorySummaryQuestion(question)) {
+    return hitCount === 0 && trimmedAnswer.length > 40;
+  }
+
   return hitCount === 0 && trimmedAnswer.length > 120;
 }
 
@@ -716,6 +726,11 @@ export async function recoverDirectAnswer(input: {
         ? "This is a direct explanation request. Answer clearly and concretely instead of offering a menu or asking for extra framing."
         : "Answer the user's request directly in the most likely intended mode.";
 
+  const preferredModels = buildPreferredModelOrderForIntent(
+    input.intent,
+    "deep",
+    input.intent === "coding" ? 5 : 4,
+  );
   const repaired = await completeClawCloudPrompt({
     system: [
       "You are the direct-answer recovery layer for ClawCloud AI — the world's most capable AI assistant.",
@@ -747,6 +762,7 @@ export async function recoverDirectAnswer(input: {
     history: input.history ?? [],
     intent: input.intent,
     responseMode: "deep",
+    preferredModels,
     maxTokens: 1_800,
     fallback: "",
     skipCache: true,
