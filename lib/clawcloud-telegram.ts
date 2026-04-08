@@ -1,4 +1,5 @@
 import { buildDocumentQuestionPrompt, extractDocumentText, isSupportedDocument } from "@/lib/clawcloud-docs";
+import { buildImageGroundingFailureReply } from "@/lib/clawcloud-media-context";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 import { analyseImage, formatVisionReply, isVisionAvailable } from "@/lib/clawcloud-vision";
 import { isWhisperAvailable, transcribeAudioBuffer } from "@/lib/clawcloud-whisper";
@@ -310,7 +311,10 @@ export async function handleTelegramUpdate(update: TelegramUpdate) {
     if (!photoBuffer) {
       await sendTelegramApiMessage(
         chatId,
-        "I received your Telegram image but could not download it. Please try again.",
+        buildImageGroundingFailureReply({
+          userQuestion: caption,
+          reason: "download_failed",
+        }),
       );
       return;
     }
@@ -324,18 +328,12 @@ export async function handleTelegramUpdate(update: TelegramUpdate) {
       }
     }
 
-    if (caption) {
-      await sendTelegramChatAction(chatId, "typing");
-      const response = await routeTelegramAgentMessage(linkedAccount.user_id, caption);
-      if (response) {
-        await sendTelegramApiMessage(chatId, response);
-      }
-      return;
-    }
-
     await sendTelegramApiMessage(
       chatId,
-      "Image analysis is not available right now. Send a caption with your question, or enable NVIDIA_API_KEY or OPENAI_API_KEY for Telegram image understanding.",
+      buildImageGroundingFailureReply({
+        userQuestion: caption,
+        reason: isVisionAvailable() ? "analysis_failed" : "provider_unavailable",
+      }),
     );
     return;
   }

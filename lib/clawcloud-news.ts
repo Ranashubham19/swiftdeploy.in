@@ -9,12 +9,14 @@ import { buildHistoricalWealthReply, looksLikeHistoricalWealthQuestion } from "@
 import { buildConsumerStaplePriceClarification, looksLikeConsumerStaplePriceQuestion } from "@/lib/clawcloud-india-consumer-prices";
 import { env } from "@/lib/env";
 import {
+  buildFreshDataRequiredReply,
   type ClawCloudLiveSearchRoute,
   extractRichestRankingScope,
   fetchLiveAnswerBundle,
   fetchWorldBankCountryMetricAnswer,
   maybeBuildClawCloudLiveAnswerBundle,
   renderClawCloudAnswerBundle,
+  shouldFailClosedWithoutFreshData,
 } from "@/lib/clawcloud-live-search";
 import { fetchOfficialPricingAnswer } from "@/lib/clawcloud-official-pricing";
 import {
@@ -3127,6 +3129,10 @@ export function buildNoLiveDataReply(question: string): string {
     || isYesNoCurrentAffairsQuestion(question)
   ) {
     return `${buildCurrentAffairsEvidenceAnswer(question, [])}${buildFreshnessLabel([])}`;
+  }
+
+  if (shouldFailClosedWithoutFreshData(question)) {
+    return buildFreshDataRequiredReply(question);
   }
 
   // NEVER return a refusal. Return an internal signal so the agent layer

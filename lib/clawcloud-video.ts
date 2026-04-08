@@ -4,15 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import ffmpegPath from "ffmpeg-static";
+import { buildVideoQuestionPrompt } from "@/lib/clawcloud-media-context";
 import { logClawCloudProviderEvent } from "@/lib/clawcloud-provider-telemetry";
 import { analyseImage, isVisionAvailable } from "@/lib/clawcloud-vision";
 import { isWhisperAvailable, transcribeAudioBuffer } from "@/lib/clawcloud-whisper";
 
 const execFile = promisify(execFileCallback);
 const VIDEO_PROCESS_TIMEOUT_MS = 25_000;
-const MAX_TRANSCRIPT_CHARS = 5_000;
-const MAX_FRAME_ANALYSIS_CHARS = 2_400;
-
 type BuildVideoPromptInput = {
   videoBuffer: Buffer;
   mimeType: string;
@@ -114,37 +112,6 @@ async function extractVideoFrame(
   return readFile(outputPath).catch(() => null);
 }
 
-function buildVideoPrompt(
-  caption: string,
-  transcript: string | null,
-  frameAnalysis: string | null,
-  mimeType: string,
-): string | null {
-  if (!transcript && !frameAnalysis) {
-    return null;
-  }
-
-  const lines = [
-    "User sent a video.",
-    `Type: ${mimeType}`,
-    transcript
-      ? `Audio transcript:\n${transcript.slice(0, MAX_TRANSCRIPT_CHARS).trim()}`
-      : "",
-    frameAnalysis
-      ? [
-        "Representative frame analysis:",
-        "This is based on one extracted frame plus any visible text from that frame.",
-        frameAnalysis.slice(0, MAX_FRAME_ANALYSIS_CHARS).trim(),
-      ].join("\n")
-      : "",
-    caption
-      ? `User question about this video: ${caption}`
-      : "Please summarize this video using the transcript and representative frame details. If motion or context is unclear from the available evidence, say so.",
-  ].filter(Boolean);
-
-  return lines.join("\n\n");
-}
-
 export function isVideoProcessingAvailable(): boolean {
   return Boolean(getFfmpegBinary() && (isWhisperAvailable() || isVisionAvailable()));
 }
@@ -190,7 +157,12 @@ export async function buildVideoPromptFromMedia({
         : Promise.resolve(null),
     ]);
 
-    const prompt = buildVideoPrompt(caption?.trim() ?? "", transcript, frameAnalysis, mimeType);
+    const prompt = buildVideoQuestionPrompt({
+      mimeType,
+      transcript,
+      frameAnalysis,
+      userQuestion: caption?.trim() ?? "",
+    });
 
     logClawCloudProviderEvent(prompt ? "info" : "warn", "video", prompt ? "video_processed" : "video_processing_empty", {
       hasTranscript: Boolean(transcript),

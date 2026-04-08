@@ -145,6 +145,10 @@ function normalizePendingContactResolution(value: unknown): WhatsAppPendingConta
     return null;
   }
 
+  const draftMessage = typeof raw?.draftMessage === "string" && raw.draftMessage.trim()
+    ? raw.draftMessage.trim()
+    : null;
+
   const createdAt = typeof raw?.createdAt === "string" && raw.createdAt.trim()
     ? raw.createdAt.trim()
     : new Date().toISOString();
@@ -154,6 +158,7 @@ function normalizePendingContactResolution(value: unknown): WhatsAppPendingConta
     requestedName,
     resumePrompt,
     options,
+    draftMessage,
     createdAt,
   };
 }

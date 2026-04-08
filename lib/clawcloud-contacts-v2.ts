@@ -108,6 +108,13 @@ const COMMON_NICKNAME_EXPANSIONS: Record<string, string[]> = {
   boss: ["manager", "sir"],
 };
 
+const STRICT_RELATIONSHIP_CONTACT_CANONICALS = new Set([
+  "maa",
+  "papa",
+  "didi",
+  "bhai",
+]);
+
 export type ContactSearchCandidate = {
   name: string;
   phone: string | null;
@@ -173,6 +180,75 @@ export function normalizeResolvedContactNameTokens(value: string) {
     .filter((token) => token.length >= 2 && !RESOLVED_CONTACT_GENERIC_TOKENS.has(token));
 }
 
+function normalizeRelationshipSafeContactName(name: string) {
+  let normalized = String(name ?? "")
+    .normalize("NFKC")
+    .replace(/[\u200d\uFE0F]/g, "")
+    .replace(/[_]+/g, " ")
+    .replace(/[â€œâ€"']/g, "")
+    .replace(/[^\p{L}\p{M}\p{N}\s.&+\-/\u0900-\u097F]/gu, " ")
+    .toLowerCase()
+    .trim();
+
+  if (!normalized) {
+    return "";
+  }
+
+  normalized = normalized.replace(/'s$/, "").trim();
+  normalized = normalized.replace(/\b(?:contact|phone|number)\b/gi, "").replace(/\s+/g, " ").trim();
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  while (words.length > 1) {
+    const lastWord = words[words.length - 1];
+    if (lastWord && HINDI_HONORIFICS.includes(lastWord as (typeof HINDI_HONORIFICS)[number])) {
+      words.pop();
+      continue;
+    }
+    break;
+  }
+
+  return words.join(" ").trim();
+}
+
+function getSingleCanonicalRelationshipAlias(value: string) {
+  const canonical = normalizeContactName(value);
+  const tokens = canonical.split(/\s+/).filter(Boolean);
+  if (tokens.length !== 1) {
+    return null;
+  }
+
+  const token = tokens[0]!;
+  return STRICT_RELATIONSHIP_CONTACT_CANONICALS.has(token) ? token : null;
+}
+
+function hasLiteralRelationshipTokenOverlap(requestedName: string, resolvedName: string) {
+  const requestedTokens = normalizeRelationshipSafeContactName(requestedName)
+    .split(/\s+/)
+    .filter(Boolean);
+  const resolvedTokens = normalizeRelationshipSafeContactName(resolvedName)
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (!requestedTokens.length || !resolvedTokens.length) {
+    return false;
+  }
+
+  return requestedTokens.some((requestedToken) =>
+    resolvedTokens.some((resolvedToken) => namesShareTokenLoosely(requestedToken, resolvedToken)));
+}
+
+function requiresStrictRelationshipAliasConfirmation(input: {
+  requestedName: string;
+  resolvedName: string;
+}) {
+  const requestedRelationshipAlias = getSingleCanonicalRelationshipAlias(input.requestedName);
+  if (!requestedRelationshipAlias) {
+    return false;
+  }
+
+  return !hasLiteralRelationshipTokenOverlap(input.requestedName, input.resolvedName);
+}
+
 export function normalizeResolvedContactMatchScore(score: number | null | undefined) {
   if (typeof score !== "number" || !Number.isFinite(score)) {
     return null;
@@ -189,6 +265,10 @@ export function isConfidentResolvedContactMatch(input: {
   score: number;
   matchBasis: ContactMatchBasis | null;
 }) {
+  if (requiresStrictRelationshipAliasConfirmation(input)) {
+    return false;
+  }
+
   if (input.exact) {
     return true;
   }
@@ -239,6 +319,10 @@ export function isProfessionallyCommittedResolvedContactMatch(input: {
   matchBasis: ContactMatchBasis | null;
   source: ResolvedContactMatchSource;
 }) {
+  if (requiresStrictRelationshipAliasConfirmation(input)) {
+    return false;
+  }
+
   if (!isConfidentResolvedContactMatch(input)) {
     return false;
   }
@@ -280,6 +364,10 @@ export function classifyResolvedContactMatchConfidence(input: {
   matchBasis: ContactMatchBasis | null;
   source: ResolvedContactMatchSource;
 }): ResolvedContactMatchConfidence {
+  if (requiresStrictRelationshipAliasConfirmation(input)) {
+    return "confirmation_required";
+  }
+
   if (isProfessionallyCommittedResolvedContactMatch(input)) {
     return "verified";
   }
@@ -325,16 +413,7 @@ function similarity(a: string, b: string): number {
 }
 
 function normalizeName(name: string): string {
-  let normalized = normalizeContactName(name);
-
-  for (const honorific of HINDI_HONORIFICS) {
-    if (normalized.endsWith(` ${honorific}`)) {
-      normalized = normalized.slice(0, -(honorific.length + 1)).trim();
-      break;
-    }
-  }
-
-  return normalized.trim();
+  return normalizeRelationshipSafeContactName(name);
 }
 
 function getNameVariants(query: string): string[] {
@@ -372,13 +451,6 @@ function expandStoredAliasVariants(alias: string): string[] {
 
   for (const word of words) {
     variants.add(word);
-    for (const expansion of COMMON_NICKNAME_EXPANSIONS[word] ?? []) {
-      variants.add(normalizeName(expansion));
-    }
-  }
-
-  for (const expansion of COMMON_NICKNAME_EXPANSIONS[normalized] ?? []) {
-    variants.add(normalizeName(expansion));
   }
 
   return [...variants].filter(Boolean);

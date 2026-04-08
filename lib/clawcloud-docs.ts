@@ -1,3 +1,5 @@
+import { looksLikeGroundedMediaPrompt } from "@/lib/clawcloud-media-context";
+
 // lib/clawcloud-docs.ts
 // ─────────────────────────────────────────────────────────────────────────────
 // Document text extraction for WhatsApp file attachments.
@@ -321,6 +323,7 @@ export function looksLikeDocumentPrompt(text: string): boolean {
     || text.includes(DOCUMENT_CONTEXT_MARKER_END)
     || /\buser question about this document:/i.test(text)
     || /\bfollow-up question about this document:/i.test(text)
+    || looksLikeGroundedMediaPrompt(text)
   );
 }
 

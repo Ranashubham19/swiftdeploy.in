@@ -73,6 +73,7 @@ export type WhatsAppPendingContactResolution = {
   requestedName: string;
   resumePrompt: string;
   options: WhatsAppPendingContactOption[];
+  draftMessage?: string | null;
   createdAt: string;
 };
 

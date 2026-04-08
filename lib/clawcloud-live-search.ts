@@ -123,6 +123,14 @@ const REALTIME_CONTEXT_CUE = /\b(right now|today|live|currently|as of now|just n
 const REALTIME_ENTITY_CUE = /\b(price|rate|value|worth|nav|stock|share|score|weather|forecast|temperature|aqi|news|updates?|announcement|traffic|exchange rate|result|war|conflict|ceasefire|truce|peace|negotiation|negotiations|sanctions?|strike|attack|missile|terms?|conditions?|demands?)\b/i;
 const VOLATILE_RANKING_CUE = /\b(top\s*\d+|ranking|rank|list|current|latest|as of|updated)\b/i;
 const VOLATILE_ENTITY_CUE = /\b(net worth|billionaire|forbes|ceo|president|prime minister|market cap|most valuable|population|gdp|inflation|unemployment|award|winner|richest people|richest person|wealthiest people|wealthiest person|richest country|largest economy)\b/i;
+const BROAD_FRESHNESS_RECENCY_CUE =
+  /\b(latest|newest|current|currently|today|today's|this week|this month|this year|right now|as of now|recent|recently|updated|update|release date|released|launch(?:ed)?|announced?)\b/i;
+const BROAD_FRESHNESS_ENTITY_CUE =
+  /\b(ceo|cto|cfo|founder|president|prime minister|governor|director|chair(?:man|person|woman)?|leadership|model|version|release|launch|pricing|price|cost|plan|subscription|market cap|net worth|ranking|population|gdp|inflation|unemployment|exchange rate|stock|share|crypto|forecast|weather|score|result|headline|headlines|news|status|situation)\b/i;
+const BROAD_FRESHNESS_SOFTWARE_ENTITY_CUE =
+  /\b(gpt|chatgpt|claude|gemini|llama|mistral|deepseek|openai|anthropic|meta|google|microsoft|apple|tesla|vercel|next\.?js|react|node(?:\.js)?|typescript|python|ios|android|windows)\b/i;
+const STABLE_KNOWLEDGE_BLOCKER_CUE =
+  /\b(history of|historical|ancient|medieval|world war|revolution|dynasty|formula|algorithm|proof|theorem|thermodynamics|quantum mechanics|general relativity)\b/i;
 const COMMON_STOP_WORDS = new Set([
   "a",
   "about",
@@ -841,6 +849,7 @@ function isVolatileQuestion(normalizedQuestion: string) {
   return (
     matchesAny(normalizedQuestion, VOLATILE_PATTERNS)
     || detectWorldBankCountryMetricQuestion(normalizedQuestion) !== null
+    || looksLikeBroadFreshnessSensitiveQuestion(normalizedQuestion)
     || (VOLATILE_RANKING_CUE.test(normalizedQuestion) && VOLATILE_ENTITY_CUE.test(normalizedQuestion))
   );
 }
@@ -856,7 +865,8 @@ function isFreshDataQuestionThatShouldBypassKnowledgeGate(normalizedQuestion: st
   }
 
   return (
-    looksLikeCurrentAffairsQuestion(normalizedQuestion)
+    looksLikeBroadFreshnessSensitiveQuestion(normalizedQuestion)
+    || looksLikeCurrentAffairsQuestion(normalizedQuestion)
     || detectWorldBankCountryMetricQuestion(normalizedQuestion) !== null
     || detectRetailFuelPriceQuestion(normalizedQuestion) !== null
     || looksLikeConsumerStaplePriceQuestion(normalizedQuestion)
@@ -867,6 +877,24 @@ function isFreshDataQuestionThatShouldBypassKnowledgeGate(normalizedQuestion: st
     || looksLikeLatestIphoneQuestion(normalizedQuestion)
     || looksLikeDirectWeatherQuestion(normalizedQuestion)
   );
+}
+
+function looksLikeBroadFreshnessSensitiveQuestion(normalizedQuestion: string) {
+  if (!normalizedQuestion || looksLikeAdvancedStableKnowledgeQuestion(normalizedQuestion)) {
+    return false;
+  }
+
+  if (hasPastYearScope(normalizedQuestion) || STABLE_KNOWLEDGE_BLOCKER_CUE.test(normalizedQuestion)) {
+    return false;
+  }
+
+  const hasRecencyCue = BROAD_FRESHNESS_RECENCY_CUE.test(normalizedQuestion);
+  const hasPrimaryEntityCue = BROAD_FRESHNESS_ENTITY_CUE.test(normalizedQuestion);
+  const hasSoftwareFreshnessCue =
+    /\b(version|model|release|pricing|plans?|cost)\b/i.test(normalizedQuestion)
+    && BROAD_FRESHNESS_SOFTWARE_ENTITY_CUE.test(normalizedQuestion);
+
+  return hasRecencyCue && (hasPrimaryEntityCue || hasSoftwareFreshnessCue);
 }
 
 export function classifyClawCloudLiveSearchTier(question: string): ClawCloudLiveSearchTier {
@@ -932,6 +960,28 @@ export function shouldUseLiveSearch(question: string): boolean {
 
 export function isVolatileLiveSearchQuestion(question: string): boolean {
   return classifyClawCloudLiveSearchTier(question) === "volatile";
+}
+
+export function shouldFailClosedWithoutFreshData(question: string): boolean {
+  const route = classifyClawCloudLiveSearchRoute(question);
+  if (!route.requiresWebSearch) {
+    return false;
+  }
+
+  if (looksLikeHistoricalWealthQuestion(question) || hasPastYearScope(question)) {
+    return false;
+  }
+
+  return route.tier === "realtime" || route.tier === "volatile";
+}
+
+export function buildFreshDataRequiredReply(question: string): string {
+  const route = classifyClawCloudLiveSearchRoute(question);
+  if (!route.requiresWebSearch) {
+    return "";
+  }
+
+  return buildStrictCurrentTimelineReply(question, route, null);
 }
 
 async function fetchJsonWithTimeout<T>(url: string, timeoutMs = 7000): Promise<T | null> {
@@ -1099,7 +1149,7 @@ function buildStrictCurrentTimelineReply(
     freshestAt
       ? `The freshest dated signal I found was ${freshestAt}, which is still too old for a safe ${latestMode}.`
       : `I could not confirm a clearly current dated source for a safe ${latestMode}.`,
-    "If you want, ask for the latest finalized official estimate instead, or retry later for a newer live reading.",
+    "If you want, ask for the latest confirmed official snapshot instead, or retry later for a newer live reading.",
   ].join("\n");
 }
 
@@ -1809,11 +1859,13 @@ function buildLiveSearchQueries(question: string, route: ClawCloudLiveSearchRout
         queries.add(`top richest cities in the world ${year}`);
         queries.add(`wealthiest cities report ${year}`);
       }
-    } else if (/\bceo\b/.test(lower)) {
-      const ofMatch = /ceo\s+of\s+([a-z0-9 .&-]+)/i.exec(q);
-      const company = ofMatch?.[1]?.trim();
+    } else if (/\b(ceo|cto|cfo|founder|president|prime minister|governor|director|chair(?:man|person|woman)?|leadership)\b/.test(lower)) {
+      const roleMatch = /\b(ceo|cto|cfo|founder|president|prime minister|governor|director|chair(?:man|person|woman)?|leadership)\b/i.exec(q);
+      const role = roleMatch?.[1]?.trim() ?? "leadership";
+      const companyMatch = /\b(?:of|at)\s+([a-z0-9 .&-]+)/i.exec(q);
+      const company = companyMatch?.[1]?.trim();
       if (company) {
-        queries.add(historicalYear ? `${company} ceo ${historicalYear}` : `${company} ceo ${year}`);
+        queries.add(historicalYear ? `${company} ${role} ${historicalYear}` : `${company} ${role} official`);
         queries.add(historicalYear ? `${company} leadership team ${historicalYear}` : `${company} leadership team official`);
       }
       queries.add(historicalYear ? `${q} ${historicalYear}` : `${q} official announcement`);

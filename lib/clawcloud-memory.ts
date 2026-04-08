@@ -33,8 +33,17 @@ type ConversationContinuityAnalysis = {
   score: number;
 };
 
-const RAW_RECENT_TURNS = 36;
-const SUMMARY_LOOK_BACK = 90;
+type ContinuityAnchorCandidate = {
+  userTurn: MemoryTurn;
+  assistantTurn: MemoryTurn | null;
+  turnIndex: number;
+  overlap: number;
+  topicOverlap: number;
+  score: number;
+};
+
+const RAW_RECENT_TURNS = 48;
+const SUMMARY_LOOK_BACK = 120;
 const MAX_CONTENT_CHARS = 1_200;
 const MAX_DOCUMENT_CONTENT_CHARS = 4_800;
 const CONTINUITY_TOKEN_STOP_WORDS = new Set([
@@ -125,6 +134,24 @@ function extractTopics(text: string): string[] {
     .slice(0, 5);
 }
 
+function computeTopicOverlap(left: string[], right: string[]) {
+  if (!left.length || !right.length) {
+    return 0;
+  }
+
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  let overlap = 0;
+
+  for (const topic of leftSet) {
+    if (rightSet.has(topic)) {
+      overlap += 1;
+    }
+  }
+
+  return overlap / Math.max(1, Math.min(leftSet.size, rightSet.size));
+}
+
 function normalizeWhitespace(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
@@ -211,6 +238,134 @@ function findLatestSubstantiveTurn(
   return null;
 }
 
+function findNearestSubstantiveAssistantAfter(
+  recentTurns: MemoryTurn[],
+  userTurnIndex: number,
+) {
+  for (let index = userTurnIndex + 1; index < recentTurns.length; index += 1) {
+    const turn = recentTurns[index];
+    if (!turn || turn.role === "user") {
+      break;
+    }
+    if (!isLowSignalTurn(turn)) {
+      return turn;
+    }
+  }
+
+  return null;
+}
+
+function buildContinuityAnchorCandidates(
+  currentMessage: string,
+  recentTurns: MemoryTurn[],
+  activeTopics: string[],
+) {
+  const currentTopics = extractTopics(currentMessage);
+  const hasContextCue = PRONOUN_START.test(currentMessage) || CONTEXTUAL_REFERENCE.test(currentMessage);
+  const hasContinuationCue = CONTINUATION_OPENER.test(currentMessage);
+  const styleOnly = LANGUAGE_OR_STYLE_ONLY_FOLLOW_UP.test(currentMessage);
+  const documentFollowUp = looksLikeDocumentFollowUp(currentMessage);
+  const standaloneQuestion = looksLikeStandaloneQuestion(
+    currentMessage,
+    currentMessage.split(/\s+/).filter(Boolean).length,
+  );
+  const freshAction = looksLikeFreshActionRequest(currentMessage);
+
+  const candidates: ContinuityAnchorCandidate[] = [];
+
+  for (let index = recentTurns.length - 1; index >= 0; index -= 1) {
+    const userTurn = recentTurns[index];
+    if (!userTurn || userTurn.role !== "user" || isLowSignalTurn(userTurn)) {
+      continue;
+    }
+
+    const assistantTurn = findNearestSubstantiveAssistantAfter(recentTurns, index);
+    const combinedContext = `${userTurn.content} ${assistantTurn?.content ?? ""}`.trim();
+    const overlap = Math.max(
+      tokenOverlapScore(currentMessage, userTurn.content),
+      assistantTurn ? tokenOverlapScore(currentMessage, assistantTurn.content) : 0,
+      tokenOverlapScore(currentMessage, combinedContext),
+    );
+    const candidateTopics = extractTopics(combinedContext);
+    const topicOverlap = Math.max(
+      computeTopicOverlap(currentTopics, candidateTopics),
+      !currentTopics.length && (hasContextCue || hasContinuationCue || styleOnly)
+        ? computeTopicOverlap(activeTopics, candidateTopics)
+        : 0,
+    );
+    const distanceFromEnd = Math.max(0, recentTurns.length - index - 1);
+
+    let score = 0;
+    if (index === recentTurns.length - 1) score += 2;
+    else if (distanceFromEnd <= 2) score += 1.5;
+    else if (distanceFromEnd <= 5) score += 1;
+
+    if (overlap >= 0.45) score += 4;
+    else if (overlap >= 0.25) score += 2;
+    else if (overlap > 0) score += 1;
+
+    if (topicOverlap >= 0.6) score += 3;
+    else if (topicOverlap > 0) score += 1.5;
+
+    if (hasContextCue) score += index === recentTurns.length - 1 ? 2 : 1;
+    if (hasContinuationCue) score += index === recentTurns.length - 1 ? 1.5 : 0.75;
+    if (styleOnly) score += index === recentTurns.length - 1 ? 3 : 1;
+    if (documentFollowUp && looksLikeDocumentPrompt(combinedContext)) score += 3;
+    if (assistantTurn && !isLowSignalTurn(assistantTurn)) score += 0.25;
+
+    if (freshAction && overlap === 0 && topicOverlap === 0 && !hasContextCue && !hasContinuationCue) {
+      score -= 3;
+    }
+
+    if (standaloneQuestion && overlap === 0 && topicOverlap === 0 && !hasContextCue && !styleOnly) {
+      score -= 4;
+    }
+
+    candidates.push({
+      userTurn,
+      assistantTurn,
+      turnIndex: index,
+      overlap,
+      topicOverlap,
+      score,
+    });
+  }
+
+  return candidates.sort((left, right) => right.score - left.score || right.turnIndex - left.turnIndex);
+}
+
+function looksLikeStandaloneTopicShift(
+  currentMessage: string,
+  anchorUserTurn: MemoryTurn | null,
+  anchorAssistantTurn: MemoryTurn | null,
+) {
+  const msg = currentMessage.trim();
+  if (!msg) {
+    return false;
+  }
+
+  if (PRONOUN_START.test(msg) || CONTEXTUAL_REFERENCE.test(msg) || CONTINUATION_OPENER.test(msg)) {
+    return false;
+  }
+
+  const wordCount = msg.split(/\s+/).filter(Boolean).length;
+  const standaloneQuestion = looksLikeStandaloneQuestion(msg, wordCount);
+  const freshAction = looksLikeFreshActionRequest(msg);
+  if (!standaloneQuestion && !freshAction && wordCount < 7) {
+    return false;
+  }
+
+  const currentTopics = extractTopics(msg);
+  const anchorTopics = extractTopics(
+    `${anchorUserTurn?.content ?? ""} ${anchorAssistantTurn?.content ?? ""}`.trim(),
+  );
+  if (!currentTopics.length || !anchorTopics.length) {
+    return false;
+  }
+
+  return computeTopicOverlap(currentTopics, anchorTopics) === 0;
+}
+
 function isFollowUpQuestion(currentMessage: string, recentTurns: MemoryTurn[]): boolean {
   if (!recentTurns.length) return false;
 
@@ -244,8 +399,12 @@ function analyzeConversationContinuity(
   activeTopics: string[],
 ): ConversationContinuityAnalysis {
   const msg = currentMessage.trim();
-  const anchorUserTurn = findLatestSubstantiveTurn(recentTurns, "user");
-  const anchorAssistantTurn = findLatestSubstantiveTurn(recentTurns, "assistant");
+  const anchorCandidates = buildContinuityAnchorCandidates(msg, recentTurns, activeTopics);
+  const bestAnchor = anchorCandidates[0] ?? null;
+  const latestUserTurn = findLatestSubstantiveTurn(recentTurns, "user");
+  const latestAssistantTurn = findLatestSubstantiveTurn(recentTurns, "assistant");
+  const anchorUserTurn = bestAnchor?.userTurn ?? latestUserTurn;
+  const anchorAssistantTurn = bestAnchor?.assistantTurn ?? latestAssistantTurn;
 
   if (!recentTurns.length || !msg) {
     return {
@@ -264,30 +423,48 @@ function analyzeConversationContinuity(
     tokenOverlapScore(msg, lastUserContext),
     tokenOverlapScore(msg, lastAssistantContext),
   );
+  const topicOverlap = computeTopicOverlap(
+    extractTopics(msg),
+    extractTopics(`${lastUserContext} ${lastAssistantContext}`.trim()),
+  );
   const hasContextCue = PRONOUN_START.test(msg) || CONTEXTUAL_REFERENCE.test(msg);
   const hasContinuationCue = CONTINUATION_OPENER.test(msg);
   const styleOnly = LANGUAGE_OR_STYLE_ONLY_FOLLOW_UP.test(msg);
   const standaloneQuestion = looksLikeStandaloneQuestion(msg, words);
   const freshAction = looksLikeFreshActionRequest(msg);
+  const standaloneTopicShift = looksLikeStandaloneTopicShift(
+    msg,
+    anchorUserTurn,
+    anchorAssistantTurn,
+  );
 
-  let score = 0;
+  let score = bestAnchor?.score ?? 0;
   if (PRONOUN_START.test(msg)) score += 4;
   if (hasContextCue) score += 2;
   if (hasContinuationCue) score += 2;
   if (styleOnly) score += 3;
   if (looksLikeDocumentFollowUp(msg)) score += 2;
-  if (words <= 3) score += 2;
-  else if (words <= 6 && !standaloneQuestion && !freshAction) score += 1;
+  if (words <= 3) {
+    if (hasContextCue || hasContinuationCue || styleOnly || overlap > 0 || topicOverlap > 0) {
+      score += 1;
+    } else {
+      score -= 2;
+    }
+  } else if (words <= 6 && !standaloneQuestion && !freshAction) score += 1;
   if (overlap >= 0.45) score += 2;
   else if (overlap >= 0.25) score += 1;
+  if (topicOverlap >= 0.6) score += 2;
+  else if (topicOverlap > 0) score += 1;
   if (standaloneQuestion) score -= 4;
   if (freshAction && !hasContextCue && !hasContinuationCue) score -= 3;
-  if (words >= 8 && overlap === 0 && !hasContextCue && !styleOnly) score -= 1;
+  if (standaloneTopicShift) score -= 5;
+  if (words >= 8 && overlap === 0 && topicOverlap === 0 && !hasContextCue && !styleOnly) score -= 1;
 
   const isFollowUp =
     score >= 2
     && Boolean(anchorUserTurn || anchorAssistantTurn)
-    && !(standaloneQuestion && !hasContextCue && !styleOnly);
+    && !(standaloneQuestion && !hasContextCue && !styleOnly)
+    && !standaloneTopicShift;
 
   return {
     isFollowUp,
@@ -539,6 +716,8 @@ export function buildMemorySystemSnippet(
       lines.push(`Resolved question: ${memory.resolvedQuestion}`);
     }
     lines.push("IMPORTANT: Answer in the context of the ongoing conversation. Do not treat this as a standalone question.");
+  } else if (memory.recentTurns.length) {
+    lines.push("Current message appears standalone. Do not merge unrelated old context unless the user clearly refers back to prior chat.");
   }
   if (memory.recentDocumentContext && !looksLikeDocumentPrompt(memory.resolvedQuestion)) {
     lines.push("Recent document context is available from the previous uploaded file. Use it when the user refers back to the document.");

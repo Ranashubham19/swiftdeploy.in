@@ -37,6 +37,11 @@ import {
   isSupportedDocument,
 } from "./lib/clawcloud-docs";
 import {
+  buildImageGroundingFailureReply,
+  buildVideoGroundingFailureReply,
+  buildVoiceNoteQuestionPrompt,
+} from "./lib/clawcloud-media-context";
+import {
   buildVideoPromptFromMedia,
   isVideoProcessingAvailable,
 } from "./lib/clawcloud-video";
@@ -73,6 +78,7 @@ import {
   markLatestWhatsAppThreadState,
   normalizeWhatsAppPriority,
   scoreWhatsAppReplyConfidence,
+  shouldRequireExplicitUserCommandForWhatsAppChat,
   writeWhatsAppAuditLog,
 } from "./lib/clawcloud-whatsapp-control";
 import {
@@ -156,7 +162,6 @@ const DEFAULT_HTTP_REPLY_TIMEOUT_MS = 50_000;
 const DEFAULT_HTTP_REPLY_HEADSTART_MS = 12_000;
 const AGENT_ROUTE_TIMEOUT_BUFFER_MS = 5_000;
 const DIRECT_RECOVERY_REPLY_TIMEOUT_MS = 35_000;
-const ACTIVE_CONTACT_AUTOREPLY_TIMEOUT_MS = 18_000;
 const WHATSAPP_TYPING_HEARTBEAT_MS = Math.max(
   900,
   Number.parseInt(process.env.WA_TYPING_HEARTBEAT_MS ?? "1100", 10) || 1_100,
@@ -564,15 +569,6 @@ function installWhatsAppStdStreamFilter() {
 installWhatsAppStdStreamFilter();
 
 let cachedRouteInboundAgentMessage: RouteInboundAgentMessageFn | null = null;
-type GenerateAutomaticWhatsAppActiveContactReplyFn = (input: {
-  userId: string;
-  inboundMessage: string;
-  session: NonNullable<WhatsAppSettings["activeContactSession"]>;
-  conversationStyle?: "professional" | "casual";
-}) => Promise<string>;
-let cachedGenerateAutomaticWhatsAppActiveContactReply:
-  | GenerateAutomaticWhatsAppActiveContactReplyFn
-  | null = null;
 let cachedWAVersion:
   | {
     version: [number, number, number];
@@ -2232,35 +2228,6 @@ function normalizePhone(value: string | null | undefined) {
   return digits || null;
 }
 
-function formatActiveContactSessionTarget(
-  session: NonNullable<WhatsAppSettings["activeContactSession"]>,
-) {
-  const phone = normalizePhone(session.phone);
-  return phone ? `${session.contactName} (+${phone})` : session.contactName;
-}
-
-function doesActiveContactSessionMatchInbound(input: {
-  settings: WhatsAppSettings | null | undefined;
-  remoteJid?: string | null;
-  remotePhone?: string | null;
-  chatType?: "direct" | "group" | "self" | "broadcast" | "unknown";
-}) {
-  const session = input.settings?.activeContactSession;
-  if (!session || input.chatType !== "direct") {
-    return false;
-  }
-
-  const sessionPhone = normalizePhone(session.phone) ?? phoneFromJid(session.jid);
-  const inboundPhone = normalizePhone(input.remotePhone) ?? phoneFromJid(input.remoteJid);
-  if (sessionPhone && inboundPhone && sessionPhone === inboundPhone) {
-    return true;
-  }
-
-  const sessionJid = toReplyableJid(session.jid)?.toLowerCase() ?? "";
-  const inboundJid = toReplyableJid(input.remoteJid)?.toLowerCase() ?? "";
-  return Boolean(sessionJid && inboundJid && sessionJid === inboundJid);
-}
-
 function deriveSessionCountryCode(record: SessionRecord | null | undefined) {
   const selfDigits = normalizePhone(record?.phone);
   if (!selfDigits || selfDigits.length <= 10) {
@@ -2534,8 +2501,7 @@ function normalizeLiveContactName(value: string | null | undefined) {
   const words = cleaned
     .replace(/\b(?:contact|phone|number)\b/gi, "")
     .split(/\s+/)
-    .filter(Boolean)
-    .map((word) => LIVE_CONTACT_CANONICAL_ALIASES[word] ?? word);
+    .filter(Boolean);
 
   while (words.length > 1) {
     const lastWord = words[words.length - 1];
@@ -2590,13 +2556,6 @@ function expandLiveAliasVariants(value: string | null | undefined) {
 
   for (const word of words) {
     variants.add(word);
-    for (const expansion of LIVE_CONTACT_VARIANT_EXPANSIONS[word] ?? []) {
-      variants.add(normalizeLiveContactName(expansion));
-    }
-  }
-
-  for (const expansion of LIVE_CONTACT_VARIANT_EXPANSIONS[base] ?? []) {
-    variants.add(normalizeLiveContactName(expansion));
   }
 
   return [...variants].filter(Boolean);
@@ -2609,9 +2568,42 @@ function getLiveContactQueryVariants(value: string) {
   }
 
   const variants = new Set<string>(expandLiveAliasVariants(base));
-  for (const word of base.split(/\s+/).filter(Boolean)) {
-    variants.add(word);
+  const words = base.split(/\s+/).filter(Boolean);
+  const canonicalWords = words.map((word) => LIVE_CONTACT_CANONICAL_ALIASES[word] ?? word);
+  const canonicalBase = canonicalWords.join(" ").trim();
+  if (canonicalBase) {
+    variants.add(canonicalBase);
+    variants.add(canonicalBase.replace(/\s+/g, ""));
   }
+
+  for (const word of words) {
+    variants.add(word);
+    const canonicalWord = LIVE_CONTACT_CANONICAL_ALIASES[word] ?? word;
+    if (canonicalWord) {
+      variants.add(canonicalWord);
+      variants.add(canonicalWord.replace(/\s+/g, ""));
+      for (const expansion of LIVE_CONTACT_VARIANT_EXPANSIONS[canonicalWord] ?? []) {
+        const expanded = normalizeLiveContactName(expansion);
+        if (!expanded) {
+          continue;
+        }
+        variants.add(expanded);
+        variants.add(expanded.replace(/\s+/g, ""));
+      }
+    }
+  }
+
+  if (canonicalBase && LIVE_CONTACT_VARIANT_EXPANSIONS[canonicalBase]) {
+    for (const expansion of LIVE_CONTACT_VARIANT_EXPANSIONS[canonicalBase] ?? []) {
+      const expanded = normalizeLiveContactName(expansion);
+      if (!expanded) {
+        continue;
+      }
+      variants.add(expanded);
+      variants.add(expanded.replace(/\s+/g, ""));
+    }
+  }
+
   return [...variants].filter(Boolean);
 }
 
@@ -4621,22 +4613,6 @@ function buildWhatsAppRoutingContext(input: {
   return `[WhatsApp workspace context]\n${notes.map((note) => `- ${note}`).join("\n")}\n\n${input.baseText}`;
 }
 
-function buildWhatsAppActiveContactRoutingContext(input: {
-  baseText: string;
-  session: NonNullable<WhatsAppSettings["activeContactSession"]>;
-}) {
-  return [
-    "[WhatsApp active contact mode]",
-    `- Active contact mode is ON for this exact direct contact: ${formatActiveContactSessionTarget(input.session)}.`,
-    "- This is a real inbound WhatsApp message from that contact.",
-    "- Reply only as the user in this one-to-one conversation.",
-    "- Keep the message natural, concise, and human.",
-    "- Do not mention ClawCloud, tools, policies, or analysis.",
-    "",
-    input.baseText,
-  ].join("\n");
-}
-
 function resolveReplyJid(
   session: SessionRecord,
   targetJid?: string | null,
@@ -5707,18 +5683,6 @@ async function getDirectRouteInboundAgentMessage() {
   return cachedRouteInboundAgentMessage;
 }
 
-async function getGenerateAutomaticWhatsAppActiveContactReply() {
-  if (cachedGenerateAutomaticWhatsAppActiveContactReply) {
-    return cachedGenerateAutomaticWhatsAppActiveContactReply;
-  }
-
-  ensureCanonicalNvidiaEnv();
-  const module = await import("./lib/clawcloud-agent");
-  cachedGenerateAutomaticWhatsAppActiveContactReply =
-    module.generateAutomaticWhatsAppActiveContactReplyForServer;
-  return cachedGenerateAutomaticWhatsAppActiveContactReply;
-}
-
 async function runDirectAgentReply(
   userId: string,
   message: string,
@@ -5987,15 +5951,10 @@ async function handleInbound(
     (session ? resolveReplyJid(session) : null);
 
   const settings = settingsOverride ?? await getWhatsAppSettings(userId).catch(() => defaultWhatsAppSettings);
-  const activeContactSession = settings.activeContactSession;
-  const activeContactSessionMatched =
-    settings.allowDirectSendCommands
-    && doesActiveContactSessionMatchInbound({
-      settings,
-      remoteJid: logFields.remote_jid,
-      remotePhone: logFields.remote_phone,
-      chatType: logFields.chat_type,
-    });
+  if (shouldRequireExplicitUserCommandForWhatsAppChat(logFields.chat_type)) {
+    await markPassiveExternalWhatsAppChatOnly(userId, logFields, messageType);
+    return;
+  }
 
   const stopTypingHeartbeat = jid && session
     ? startWhatsAppTypingHeartbeat(session.sock, jid)
@@ -6021,49 +5980,9 @@ async function handleInbound(
     priority,
     tags: workspaceContact.tags,
   });
-  const routedText = activeContactSessionMatched && activeContactSession
-    ? buildWhatsAppActiveContactRoutingContext({
-      baseText: standardRoutedText,
-      session: activeContactSession,
-    })
-    : standardRoutedText;
+  const routedText = standardRoutedText;
 
   let bestReply: { reply: string | null; path: "A" | "B" | null } = { reply: null, path: null };
-  if (activeContactSessionMatched && activeContactSession) {
-    try {
-      const generateAutomaticWhatsAppActiveContactReply =
-        await getGenerateAutomaticWhatsAppActiveContactReply();
-      const activeContactReply = await Promise.race([
-        generateAutomaticWhatsAppActiveContactReply({
-          userId,
-          inboundMessage: text,
-          session: activeContactSession,
-          conversationStyle: "professional",
-        }),
-        new Promise<string | null>((resolve) => {
-          setTimeout(() => resolve(null), ACTIVE_CONTACT_AUTOREPLY_TIMEOUT_MS);
-        }),
-      ]);
-
-      if (isUsableAgentReply(activeContactReply, text)) {
-        finalReply = activeContactReply!.trim();
-        bestReply = { reply: finalReply, path: "A" };
-        console.log(
-          `[agent] Active contact reply generated for ${userId}: target=${formatActiveContactSessionTarget(activeContactSession)} (${finalReply.length} chars)`,
-        );
-      } else {
-        console.warn(
-          `[agent] Active contact reply generation did not return a sendable answer for ${userId}; falling back to best-effort reply race`,
-        );
-      }
-    } catch (error) {
-      console.error(
-        `[agent] Active contact reply generation failed for ${userId}:`,
-        error instanceof Error ? error.message : error,
-      );
-    }
-  }
-
   if (!finalReply) {
     console.log(`[agent] Starting best-effort reply race for ${userId}`);
     bestReply = await runBestAvailableAgentReply(userId, routedText, text);
@@ -6111,19 +6030,14 @@ async function handleInbound(
     isGroupMessage: logFields.chat_type === "group",
   });
   const userTimeZone = await getUserWhatsAppTimeZone(userId).catch(() => null);
-  const decision = activeContactSessionMatched && activeContactSession
-    ? {
-      action: "send" as const,
-      reason: `Active contact mode is on for ${formatActiveContactSessionTarget(activeContactSession)} until the user stops it.`,
-    }
-    : decideWhatsAppReplyAction({
-      settings,
-      sensitivity,
-      chatType: logFields.chat_type,
-      isGroupMessage: logFields.chat_type === "group",
-      isKnownContact: workspaceContact.isKnown,
-      timeZone: userTimeZone,
-    });
+  const decision = decideWhatsAppReplyAction({
+    settings,
+    sensitivity,
+    chatType: logFields.chat_type,
+    isGroupMessage: logFields.chat_type === "group",
+    isKnownContact: workspaceContact.isKnown,
+    timeZone: userTimeZone,
+  });
   console.log(
     `[agent] Reply decision for ${userId}: action=${decision.action} chatType=${logFields.chat_type} jid=${jid ?? "none"} reason=${decision.reason}`,
   );
@@ -6978,13 +6892,27 @@ async function connectSession(userId: string): Promise<SessionRecord> {
               await sendReply(userId, reply, replyTargetJid);
               mediaHandled = true;
             } else {
-              text = caption || "Can you describe what you see?";
+              await sendReply(
+                userId,
+                buildImageGroundingFailureReply({
+                  userQuestion: caption,
+                  reason: "analysis_failed",
+                }),
+                replyTargetJid,
+              );
+              mediaHandled = true;
             }
           } else {
-            text = caption || "I received your image but couldn't download it. Please try again.";
+            await sendReply(
+              userId,
+              buildImageGroundingFailureReply({
+                userQuestion: caption,
+                reason: "download_failed",
+              }),
+              replyTargetJid,
+            );
+            mediaHandled = true;
           }
-        } else if (caption) {
-          text = caption;
         } else {
           await sendReply(
             userId,
@@ -7020,7 +6948,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
               console.log(
                 `[agent] Transcript: "${transcript.slice(0, 80)}${transcript.length > 80 ? "..." : ""}"`,
               );
-              text = `[Voice note transcribed]: ${transcript}`;
+              text = buildVoiceNoteQuestionPrompt(transcript);
             } else {
               await sendReply(
                 userId,
@@ -7120,7 +7048,15 @@ async function connectSession(userId: string): Promise<SessionRecord> {
             if (videoPrompt) {
               text = videoPrompt;
             } else if (caption) {
-              text = caption;
+              await sendReply(
+                userId,
+                buildVideoGroundingFailureReply({
+                  userQuestion: caption,
+                  reason: "analysis_failed",
+                }),
+                replyTargetJid,
+              );
+              mediaHandled = true;
             } else {
               await sendReply(
                 userId,
@@ -7145,7 +7081,15 @@ async function connectSession(userId: string): Promise<SessionRecord> {
             mediaHandled = true;
           }
         } else if (caption) {
-          text = caption;
+          await sendReply(
+            userId,
+            buildVideoGroundingFailureReply({
+              userQuestion: caption,
+              reason: "provider_unavailable",
+            }),
+            replyTargetJid,
+          );
+          mediaHandled = true;
         } else {
           await sendReply(
             userId,

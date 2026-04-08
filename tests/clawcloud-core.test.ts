@@ -42,6 +42,13 @@ import {
   normalizeResolvedContactMatchScore,
   rankContactCandidates,
 } from "@/lib/clawcloud-contacts-v2";
+import {
+  buildImageGroundingFailureReply,
+  buildVideoGroundingFailureReply,
+  buildVideoQuestionPrompt,
+  buildVoiceNoteQuestionPrompt,
+  looksLikeGroundedMediaPrompt,
+} from "@/lib/clawcloud-media-context";
 import { analyzeConversationContinuityForTest } from "@/lib/clawcloud-memory";
 import { detectDriveIntent } from "@/lib/clawcloud-drive";
 import { answerHolidayQuery, detectHolidayQuery } from "@/lib/clawcloud-holidays";
@@ -56,6 +63,7 @@ import {
   extractImagePrompt,
   getImageGenerationStatus,
 } from "@/lib/clawcloud-imagegen";
+import { looksLikeVisionPlaceholderReplyForTest } from "@/lib/clawcloud-vision";
 import { solveCodingArchitectureQuestion, solveHardMathQuestion } from "@/lib/clawcloud-expert";
 import {
   buildClawCloudSafetyReply,
@@ -171,6 +179,7 @@ import {
   resolveClawCloudReplyLanguage,
   buildClawCloudReplyLanguageInstruction,
   stripExplicitReplyLocaleRequestForContent,
+  verifyReplyLanguageMatch,
 } from "@/lib/clawcloud-i18n";
 import { resolveSupportedLocale } from "@/lib/clawcloud-locales";
 import { detectHinglish } from "@/lib/clawcloud-hinglish";
@@ -197,19 +206,23 @@ import {
   isConfidentRecipientNameMatchForTest,
   isProfessionallyCommittedRecipientMatchForTest,
   buildWhatsAppPendingContactResumePromptForTest,
+  buildWhatsAppPendingDraftReviewReplyForTest,
   buildWhatsAppSendAmbiguousContactReplyForTest,
   maybePromoteVisibleResponseWithLiveBundleForTest,
   maybeBuildDeterministicProfessionalGreetingDraftForTest,
   maybeBuildDeterministicStructuredWhatsAppDraftForTest,
   maybeBuildDeterministicWhatsAppActiveContactReplyForTest,
   autoCorrectWhatsAppOutgoingMessageForTest,
+  isUnsafeStyledWhatsAppDraftCandidateForTest,
   buildWhatsAppActiveContactStatusRecoveryPlanForTest,
   buildWhatsAppActiveContactSendReceiptForTest,
   detectWhatsAppActiveContactQuotedIncomingMessageForTest,
   looksLikeAssistantReplyRepairRequestForTest,
   parseWhatsAppActiveContactSessionCommandForTest,
   resolveWhatsAppPendingContactSelectionForTest,
+  resolveWhatsAppPendingDraftReviewActionForTest,
   resolveWhatsAppActiveContactDraftLanguageForTest,
+  resolveWhatsAppActiveContactSessionCommandWithContextForTest,
   resolveWhatsAppDraftingModeForTest,
   shouldPreviewRecipientTargetedWhatsAppDraftForTest,
   detectPendingApprovalContextQuestionForTest,
@@ -239,6 +252,7 @@ import {
   shouldUseSimpleKnowledgeFastLaneForTest,
   shouldUseMultilingualRoutingBridgeForTest,
   shouldRouteMessageToActiveWhatsAppContactSessionForTest,
+  shouldSkipFinalReplyLanguageRewriteForTest,
   stripClawCloudTrailingFollowUpForTest,
   usesPastYearAsCurrentForTest,
 } from "@/lib/clawcloud-agent";
@@ -742,6 +756,22 @@ test("agent server assistant replies refuse non-self chat targets", () => {
   assert.match(source, /Blocked non-self assistant reply/);
 });
 
+test("agent server enforces explicit user commands before any external-chat reply generation", () => {
+  const source = readFileSync(path.resolve(process.cwd(), "agent-server.ts"), "utf8");
+
+  assert.match(source, /shouldRequireExplicitUserCommandForWhatsAppChat\(logFields\.chat_type\)/);
+  assert.match(source, /await markPassiveExternalWhatsAppChatOnly\(userId, logFields, messageType\);/);
+  assert.doesNotMatch(source, /generateAutomaticWhatsAppActiveContactReplyForServer/);
+  assert.doesNotMatch(source, /Active contact reply generated for/);
+});
+
+test("freshness-sensitive live questions fail closed before emergency model-memory fallback", () => {
+  const source = readFileSync(path.resolve(process.cwd(), "lib/clawcloud-agent.ts"), "utf8");
+
+  assert.match(source, /const noLiveDataReply = buildNoLiveDataReply\(question\)\.trim\(\);/);
+  assert.match(source, /shouldFailClosedWithoutFreshData\(question\)/);
+});
+
 test("agent server keeps a wider answer window and no longer emits resend-the-question fallbacks", () => {
   const source = readFileSync(path.resolve(process.cwd(), "agent-server.ts"), "utf8");
 
@@ -767,7 +797,7 @@ test("emergency direct answers use the shared preferred-model helper instead of 
   assert.match(source, /export function getInboundRouteTotalDeadlineMs\(message: string\)/);
   assert.match(source, /export async function recoverUserFacingReplyForServer/);
   assert.match(source, /preferredModels:\s*buildPreferredModelOrderForIntent\(emergencyIntent,\s*"fast",\s*6\)/);
-  assert.match(source, /const MULTILINGUAL_DIRECT_ANSWER_PREFERRED_MODELS = buildPreferredModelOrderForIntent\("language",\s*"fast",\s*4\)/);
+  assert.match(source, /const MULTILINGUAL_DIRECT_ANSWER_PREFERRED_MODELS = buildPreferredModelOrderForIntent\("language",\s*"deep",\s*4\)/);
 });
 
 test("server recovery no longer ships the old generic strong-answer fallback copy", () => {
@@ -3033,6 +3063,26 @@ test("memory snippet carries tone and continuity signals for casual conversation
   assert.match(snippet, /Resolved question:/i);
 });
 
+test("memory snippet warns the model not to merge unrelated old chat into new standalone requests", () => {
+  const snippet = buildMemorySystemSnippet({
+    recentTurns: [
+      { role: "user", content: "Compare Claude and GPT for strategy work" },
+      { role: "assistant", content: "Claude is often more natural in long-form writing." },
+    ],
+    topicSummary: "",
+    activeTopics: ["ai"],
+    isFollowUp: false,
+    resolvedQuestion: "Weather in Delhi today",
+    recentDocumentContext: null,
+    userToneProfile: "",
+    userEmotionalContext: "",
+    continuityHint: null,
+  });
+
+  assert.match(snippet, /appears standalone/i);
+  assert.match(snippet, /Do not merge unrelated old context/i);
+});
+
 test("casual talk instruction tells the model to sound human and use prior thread context", () => {
   const instruction = buildClawCloudCasualTalkInstruction({
     message: "and what about this one?",
@@ -3094,6 +3144,36 @@ test("conversation continuity understands roman-hindi pronoun follow-ups as part
   assert.equal(continuity.isFollowUp, true);
   assert.equal(continuity.anchorUserTurn, "ab tum dii se baat karoge mere behalf pe");
   assert.match(continuity.resolvedQuestion, /ab tum dii se baat karoge mere behalf pe/i);
+});
+
+test("conversation continuity prefers the older matching topic over a newer unrelated thread", () => {
+  const continuity = analyzeConversationContinuityForTest({
+    currentMessage: "which one has better admin controls in gmail and outlook?",
+    recentTurns: [
+      { role: "user", content: "Compare Gmail and Outlook for startup ops" },
+      { role: "assistant", content: "Gmail is simpler while Outlook is stronger in Microsoft-heavy teams." },
+      { role: "user", content: "Compare Slack and Teams for internal communication" },
+      { role: "assistant", content: "Slack feels faster while Teams is better inside Microsoft environments." },
+    ],
+  });
+
+  assert.equal(continuity.isFollowUp, true);
+  assert.equal(continuity.anchorUserTurn, "Compare Gmail and Outlook for startup ops");
+  assert.match(continuity.resolvedQuestion, /Gmail and Outlook/i);
+  assert.doesNotMatch(continuity.resolvedQuestion, /Slack|Teams/i);
+});
+
+test("conversation continuity keeps short fresh questions standalone when no real context link exists", () => {
+  const continuity = analyzeConversationContinuityForTest({
+    currentMessage: "weather delhi",
+    recentTurns: [
+      { role: "user", content: "Compare Claude and GPT for product strategy work" },
+      { role: "assistant", content: "GPT is broader while Claude often feels more natural in writing." },
+    ],
+  });
+
+  assert.equal(continuity.isFollowUp, false);
+  assert.equal(continuity.resolvedQuestion, "weather delhi");
 });
 
 test("phase 4 profile formatting separates confirmed profile facts from pending suggestions", () => {
@@ -3585,24 +3665,30 @@ test("deterministic math solver handles repeated-positive Bayesian diagnostic pr
   assert.match(reply, /37\.5%/i);
 });
 
-test("simple knowledge fast lane stays on direct explainers and avoids live or personal-tool routes", () => {
-  assert.equal(shouldUseSimpleKnowledgeFastLaneForTest("why is the sky blue"), true);
-  assert.equal(shouldUseSimpleKnowledgeFastLaneForTest("how does photosynthesis work"), true);
+test("simple knowledge fast lane only activates on explicit fast mode and avoids live or personal-tool routes", () => {
+  assert.equal(shouldUseSimpleKnowledgeFastLaneForTest("why is the sky blue"), false);
+  assert.equal(shouldUseSimpleKnowledgeFastLaneForTest("how does photosynthesis work"), false);
+  assert.equal(shouldUseSimpleKnowledgeFastLaneForTest("why is the sky blue", "fast"), true);
   assert.equal(shouldUseSimpleKnowledgeFastLaneForTest("latest news about ai"), false);
   assert.equal(shouldUseSimpleKnowledgeFastLaneForTest("show my gmail inbox"), false);
   assert.equal(shouldUseSimpleKnowledgeFastLaneForTest("deep: what is artificial intelligence", "deep"), false);
 });
 
-test("primary direct-answer lane catches standalone knowledge prompts beyond wh-questions", () => {
+test("primary direct-answer lane requires explicit fast mode and still stays out of contact routes", () => {
   assert.equal(shouldUseSimpleKnowledgeFastLaneForTest("overview of photosynthesis"), false);
-  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("overview of photosynthesis"), true);
-  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("photosynthesis process"), true);
-  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("what is cuba"), true);
-  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("ok then what is cuba"), true);
+  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("overview of photosynthesis"), false);
+  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("overview of photosynthesis", "fast"), true);
+  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("photosynthesis process"), false);
+  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("photosynthesis process", "fast"), true);
+  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("what is cuba"), false);
+  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("what is cuba", "fast"), true);
+  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("ok then what is cuba"), false);
+  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("ok then what is cuba", "fast"), true);
   assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("latest stock market news"), false);
   assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("who is the richest person of the world"), false);
   assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("show my gmail inbox"), false);
   assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("Talk to Maa on my behalf"), false);
+  assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("read and tell me the message of Papa", "fast"), false);
   assert.equal(shouldUsePrimaryDirectAnswerLaneForTest("deep: overview of photosynthesis", "deep"), false);
 });
 
@@ -4128,6 +4214,49 @@ test("localized capability replies stay conversational and mirror the current la
   const spanishReply = buildLocalizedCapabilityReplyForTest("que puedes hacer", "es");
   assert.match(spanishReply, /Puedo ayudarte/i);
   assert.match(spanishReply, /Dime la tarea exacta/i);
+});
+
+test("reply language verification rejects wrong-language answers and keeps same-language locks strict", () => {
+  const hindiResolution = resolveClawCloudReplyLanguage({
+    message: "tell me the messages of jaideep with me and that too in hindi please",
+    preferredLocale: "en",
+  });
+  assert.equal(hindiResolution.locale, "hi");
+  assert.equal(
+    verifyReplyLanguageMatch({
+      userMessage: "tell me the messages of jaideep with me and that too in hindi please",
+      aiReply: "Here are the latest messages from Jaideep.",
+      resolution: hindiResolution,
+    }).verified,
+    false,
+  );
+
+  const japaneseResolution = resolveClawCloudReplyLanguage({
+    message: "Harry Potter の物語を日本語で教えて",
+    preferredLocale: "en",
+  });
+  assert.equal(japaneseResolution.locale, "ja");
+  assert.equal(
+    verifyReplyLanguageMatch({
+      userMessage: "Harry Potter の物語を日本語で教えて",
+      aiReply: "This is still in English.",
+      resolution: japaneseResolution,
+    }).verified,
+    false,
+  );
+
+  const hinglishResolution = resolveClawCloudReplyLanguage({
+    message: "reply in hinglish",
+    preferredLocale: "en",
+  });
+  assert.equal(
+    verifyReplyLanguageMatch({
+      userMessage: "reply in hinglish",
+      aiReply: "Main theek hoon, tu bata?",
+      resolution: hinglishResolution,
+    }).verified,
+    true,
+  );
 });
 
 test("Roman Punjabi wellbeing prompts are treated as direct conversation instead of drifting into status replies", () => {
@@ -5107,6 +5236,16 @@ test("send-message parsing survives soft prefixes and understanding-layer typo c
   assert.equal(corrected?.message, "call me when free");
 });
 
+test("whatsapp drafting mode treats beautiful detailed greeting prompts as generated drafts instead of literal send text", () => {
+  assert.equal(
+    resolveWhatsAppDraftingModeForTest(
+      "send a very beautiful prompt in detail of good morning in hindi to maa",
+      "a very beautiful prompt in detail of good morning in hindi",
+    ),
+    "styled",
+  );
+});
+
 test("send-message parsing strips trailing behalf noise and blocks placeholder carry-over text", () => {
   const stripped = parseSendMessageCommand("send hii to mohan on my behalf");
   assert.ok(stripped);
@@ -5175,12 +5314,47 @@ test("recipient-targeted write prompts stay in preview mode while explicit send 
   );
   assert.equal(
     shouldPreviewRecipientTargetedWhatsAppDraftForTest("send a professional good afternoon message to maa"),
-    false,
+    true,
   );
   assert.equal(
     shouldPreviewRecipientTargetedWhatsAppDraftForTest("maa ko good afternoon bhej do"),
     false,
   );
+});
+
+test("styled WhatsApp drafts fail closed when the generated text is still a meta prompt or wrong-language descriptor", () => {
+  assert.equal(isUnsafeStyledWhatsAppDraftCandidateForTest({
+    candidate: "A very beautiful detailed good morning message in Hindi.",
+    fallback: "a very beautiful prompt in detail of good morning in hindi",
+    languageResolution: {
+      locale: "hi",
+      source: "explicit_request",
+      detectedLocale: "hi",
+      preserveRomanScript: false,
+    },
+  }), true);
+
+  assert.equal(isUnsafeStyledWhatsAppDraftCandidateForTest({
+    candidate: "सुप्रभात माँ, आशा है आपका दिन सुख और शांति से भरा रहे।",
+    fallback: "a very beautiful prompt in detail of good morning in hindi",
+    languageResolution: {
+      locale: "hi",
+      source: "explicit_request",
+      detectedLocale: "hi",
+      preserveRomanScript: false,
+    },
+  }), false);
+});
+
+test("deterministic professional greeting drafts can produce Hindi good-morning messages", () => {
+  const draft = maybeBuildDeterministicProfessionalGreetingDraftForTest({
+    requestedMessage: "good morning",
+    recipientLabel: "Maa",
+    conversationStyle: "professional",
+    locale: "hi",
+  });
+
+  assert.match(draft ?? "", /सुप्रभात/);
 });
 
 test("send-message parsing ignores internal style markers during approval replay", () => {
@@ -5286,9 +5460,95 @@ test("pending contact resume keeps draft prompts as drafts after contact disambi
       jid: null,
     },
     "ek good afternoon message likh do maa ko",
+    "maa",
   );
 
-  assert.equal(resumePrompt, "ek good afternoon message likh do Maa Home ko");
+  assert.equal(resumePrompt, "ek good afternoon message likh do +919876543210 ko");
+});
+
+test("pending contact selection keeps literal family labels distinct after ambiguity", () => {
+  const pending = {
+    kind: "send_message" as const,
+    requestedName: "Maa",
+    resumePrompt: "send a professional good morning message to maa",
+    options: [
+      { name: "Mom", phone: "919800000001", jid: null },
+      { name: "Maa", phone: "919800000002", jid: null },
+    ],
+    createdAt: new Date().toISOString(),
+  };
+
+  const selected = resolveWhatsAppPendingContactSelectionForTest({
+    message: "maa",
+    pending,
+  });
+
+  assert.equal(selected.type, "selected");
+  if (selected.type === "selected") {
+    assert.equal(selected.option.name, "Maa");
+  }
+});
+
+test("pending WhatsApp draft review understands send improve and replacement follow-ups", () => {
+  const pending = {
+    kind: "send_message" as const,
+    requestedName: "Maa",
+    resumePrompt: "send a very beautiful prompt in detail of good morning in hindi to maa",
+    draftMessage: "सुप्रभात माँ, आपका दिन बहुत सुंदर और शांतिपूर्ण रहे।",
+    options: [{ name: "Maa", phone: "919800000002", jid: null }],
+    createdAt: new Date().toISOString(),
+  };
+
+  assert.deepEqual(
+    resolveWhatsAppPendingDraftReviewActionForTest({
+      message: "Send",
+      pending,
+    }),
+    { type: "approve" },
+  );
+  assert.deepEqual(
+    resolveWhatsAppPendingDraftReviewActionForTest({
+      message: "Improve",
+      pending,
+    }),
+    { type: "rewrite", feedback: null },
+  );
+  assert.deepEqual(
+    resolveWhatsAppPendingDraftReviewActionForTest({
+      message: "Aapka din shubh ho maa",
+      pending,
+    }),
+    { type: "replace", message: "Aapka din shubh ho maa" },
+  );
+});
+
+test("pending WhatsApp draft review can re-show the current draft with explicit safe instructions", () => {
+  const option = { name: "Maa", phone: "919800000002", jid: null };
+  const pending = {
+    kind: "send_message" as const,
+    requestedName: "Maa",
+    resumePrompt: "send a very beautiful prompt in detail of good morning in hindi to maa",
+    draftMessage: "सुप्रभात माँ, आपका दिन बहुत सुंदर और शांतिपूर्ण रहे।",
+    options: [option] as [typeof option],
+    createdAt: new Date().toISOString(),
+  };
+
+  assert.deepEqual(
+    resolveWhatsAppPendingDraftReviewActionForTest({
+      message: "show me the draft",
+      pending,
+    }),
+    { type: "review" },
+  );
+
+  const reply = buildWhatsAppPendingDraftReviewReplyForTest({
+    ...pending,
+    options: pending.options as [typeof option],
+  });
+  assert.match(reply, /WhatsApp draft ready for Maa \(\+919800000002\):/i);
+  assert.match(reply, /Send - send this exact draft now/i);
+  assert.match(reply, /Replace: your exact final message/i);
+  assert.match(reply, /Cancel - do not send anything/i);
 });
 
 test("contact ranking drops fuzzy near-miss names when stronger exact-name matches exist", () => {
@@ -5712,7 +5972,7 @@ test("pending WhatsApp contact resolution understands exact-name and go-for foll
     {
       type: "selected",
       option: pending.options[0],
-      resumePrompt: "Show WhatsApp history with Hansraj Lpu",
+      resumePrompt: "just read the message of me with +918949826240",
     },
   );
 
@@ -5724,7 +5984,52 @@ test("pending WhatsApp contact resolution understands exact-name and go-for foll
     {
       type: "selected",
       option: pending.options[0],
-      resumePrompt: "Show WhatsApp history with Hansraj Lpu",
+      resumePrompt: "just read the message of me with +918949826240",
+    },
+  );
+});
+
+test("pending WhatsApp contact resolution accepts natural ordinal follow-ups and binds history to the exact phone", () => {
+  const pending = {
+    kind: "whatsapp_history" as const,
+    requestedName: "papa ji",
+    resumePrompt: "Summarize the chat with papa ji",
+    createdAt: new Date().toISOString(),
+    options: [
+      {
+        name: "Papa",
+        phone: "918988163144",
+        jid: "918988163144@s.whatsapp.net",
+      },
+      {
+        name: "deepak rishu pai prateek cousin",
+        phone: "918580951765",
+        jid: "918580951765@s.whatsapp.net",
+      },
+    ],
+  };
+
+  assert.deepEqual(
+    resolveWhatsAppPendingContactSelectionForTest({
+      message: "1st one papa",
+      pending,
+    }),
+    {
+      type: "selected",
+      option: pending.options[0],
+      resumePrompt: "Summarize the chat with +918988163144",
+    },
+  );
+
+  assert.deepEqual(
+    resolveWhatsAppPendingContactSelectionForTest({
+      message: "go with 8988163144",
+      pending,
+    }),
+    {
+      type: "selected",
+      option: pending.options[0],
+      resumePrompt: "Summarize the chat with +918988163144",
     },
   );
 });
@@ -5766,7 +6071,7 @@ test("unverified WhatsApp history replies can surface the closest synced contact
   assert.match(reply, /I did not summarize unrelated chats or unknown-number threads/i);
 });
 
-test("recent WhatsApp clarification turns can classify a loose follow-up contact choice", () => {
+test("recent WhatsApp clarification turns no longer auto-resume from vague context-only follow-ups", () => {
   assert.equal(
     inferRecentWhatsAppContactFollowUpIntentForTest([
       {
@@ -5774,12 +6079,17 @@ test("recent WhatsApp clarification turns can classify a loose follow-up contact
         content: "Try searching with a more specific contact name or a keyword from the message to get accurate results for the WhatsApp messages from Hansraj LPU.",
       },
     ]),
-    "whatsapp_history",
+    null,
   );
 
   assert.equal(
     extractWhatsAppLooseContactFollowUpTargetForTest("go for hansraj lpu"),
     "hansraj lpu",
+  );
+
+  assert.equal(
+    extractWhatsAppLooseContactFollowUpTargetForTest("Hansraj Lpu"),
+    null,
   );
 });
 
@@ -5811,7 +6121,7 @@ test("pending WhatsApp contact selection accepts a unique exact-name follow-up e
     {
       type: "selected",
       option: pending.options[0],
-      resumePrompt: "Send message to Aman Rajput: a professional thank-you greeting in Thai on WhatsApp",
+      resumePrompt: "Send a professional thank-you greeting to +919111111111 in Thai on WhatsApp",
     },
   );
 });
@@ -5921,6 +6231,53 @@ test("resolved contact scoring normalizes live 100-point scores before applying 
   );
 });
 
+test("family relationship synonym matches require confirmation when the visible contact label differs", () => {
+  assert.equal(isConfidentRecipientNameMatchForTest({
+    requestedName: "Maa",
+    resolvedName: "Mom",
+    exact: true,
+    score: 1,
+    matchBasis: "exact",
+  }), false);
+
+  assert.equal(isProfessionallyCommittedRecipientMatchForTest({
+    requestedName: "Maa",
+    resolvedName: "Mom",
+    exact: true,
+    score: 1,
+    matchBasis: "exact",
+    source: "fuzzy",
+  }), false);
+
+  assert.equal(
+    classifyResolvedContactMatchConfidence({
+      requestedName: "Maa",
+      resolvedName: "Mom",
+      exact: true,
+      score: 1,
+      matchBasis: "exact",
+      source: "fuzzy",
+    }),
+    "confirmation_required",
+  );
+
+  const ranked = rankContactCandidates("Maa", [
+    {
+      name: "Mom",
+      phone: "919800000001",
+      jid: null,
+      aliases: ["Mom"],
+      identityKey: "phone:919800000001",
+    },
+  ]);
+
+  assert.equal(ranked.type, "found");
+  if (ranked.type === "found") {
+    assert.equal(ranked.contact.exact, false);
+    assert.match(ranked.contact.matchBasis ?? "", /^(?:word|prefix)$/);
+  }
+});
+
 test("full inbound route prioritizes active-contact status and stop commands over casual chat fallbacks", async () => {
   const start = await routeInboundAgentMessageResult("test-user", "Talk to Aman on my behalf");
   assert.match(start.response ?? "", /WhatsApp web session is not active right now\./i);
@@ -5941,6 +6298,29 @@ test("full inbound route prioritizes active-contact status and stop commands ove
   assert.match(stop.response ?? "", /Koi active contact mode abhi chal nahi raha hai\./i);
   assert.match(stop.response ?? "", /Talk to Maa on my behalf/i);
   assert.doesNotMatch(stop.response ?? "", /kya aap mujhe bata sakte/i);
+});
+
+test("active contact mode can resolve a generic stop command only when a session is currently active", () => {
+  const activeSession = {
+    contactName: "Maa",
+    phone: "919876543210",
+    jid: "919876543210@s.whatsapp.net",
+    startedAt: "2026-04-03T00:00:00.000Z",
+    sourceMessage: "Talk to Maa on my behalf",
+  };
+
+  assert.deepEqual(
+    resolveWhatsAppActiveContactSessionCommandWithContextForTest("stop", activeSession),
+    { type: "stop", contactName: null },
+  );
+  assert.deepEqual(
+    resolveWhatsAppActiveContactSessionCommandWithContextForTest("band karo", activeSession),
+    { type: "stop", contactName: null },
+  );
+  assert.deepEqual(
+    resolveWhatsAppActiveContactSessionCommandWithContextForTest("stop", null),
+    { type: "none" },
+  );
 });
 
 test("intent detection keeps persistent contact-mode handoff commands out of research fallbacks", () => {
@@ -6001,6 +6381,38 @@ test("final reply pipeline preserves operational WhatsApp history clarifications
   assert.match(result.response ?? "", /Keep this in the WhatsApp history lane/i);
   assert.match(result.response ?? "", /1\. hansraj lpu - \+918949826240/i);
   assert.match(result.response ?? "", /Reply with the exact contact name, full number, or option number/i);
+});
+
+test("final reply pipeline only skips operational language rewrites when the reply already matches the user's language", () => {
+  const hindiResolution = resolveClawCloudReplyLanguage({
+    message: "tell me the messages of jaideep with me and that too in hindi please",
+    preferredLocale: "en",
+  });
+  assert.equal(
+    shouldSkipFinalReplyLanguageRewriteForTest({
+      question: "tell me the messages of jaideep with me and that too in hindi please",
+      category: "whatsapp_history",
+      alreadyTranslated: true,
+      candidateReply: "I found multiple WhatsApp contacts matching \"jaideep\".",
+      languageResolution: hindiResolution,
+    }),
+    false,
+  );
+
+  const hinglishResolution = resolveClawCloudReplyLanguage({
+    message: "abhi kis se baat kar rahe ho",
+    preferredLocale: "en",
+  });
+  assert.equal(
+    shouldSkipFinalReplyLanguageRewriteForTest({
+      question: "abhi kis se baat kar rahe ho",
+      category: "send_message",
+      alreadyTranslated: true,
+      candidateReply: "Koi active contact mode abhi chal nahi raha hai.",
+      languageResolution: hinglishResolution,
+    }),
+    true,
+  );
 });
 
 test("active-contact Hinglish status and stop replies stay in Roman Hinglish through the final reply pipeline", async () => {
@@ -6497,7 +6909,7 @@ test("self-chat WhatsApp delivery receipts recover durable aliases for numeric c
   assert.equal(resolved.type, "found");
   if (resolved.type === "found") {
     assert.equal(resolved.contact.phone, "917876831969");
-    assert.equal(resolved.contact.matchBasis, "exact");
+    assert.match(resolved.contact.matchBasis ?? "", /^(?:exact|word|prefix)$/);
   }
 });
 
@@ -7310,6 +7722,13 @@ test("current-affairs verification requests build stronger event queries", () =>
   assert.deepEqual(buildCurrentAffairsQueries("tarun holi delhi case"), []);
   assert.equal(classifyClawCloudLiveSearchTier("did usa gave 48 hours ultimatum"), "realtime");
   assert.equal(classifyClawCloudLiveSearchTier("is strait of hormuz closed or open"), "realtime");
+  assert.equal(classifyClawCloudLiveSearchTier("who is the current founder of OpenAI"), "volatile");
+  assert.equal(shouldUseLiveSearch("who is the current founder of OpenAI"), true);
+  assert.equal(classifyClawCloudLiveSearchTier("what is the latest Samsung model right now"), "volatile");
+  assert.equal(shouldUseLiveSearch("what is the latest Samsung model right now"), true);
+  assert.match(buildNoLiveDataReply("who is the current founder of OpenAI"), /\*Freshness check\*/i);
+  assert.match(buildNoLiveDataReply("what is the latest Samsung model right now"), /\*Freshness check\*/i);
+  assert.equal(buildNoLiveDataReply("search the web for how does a b+ tree work"), "__NO_LIVE_DATA_INTERNAL_SIGNAL__");
   assert.match(
     buildCurrentAffairsClarificationReply("did north korea entered the current war"),
     /Current-affairs clarification/i,
@@ -8020,6 +8439,8 @@ test("outbound review parser understands approve, cancel, and rewrite replies", 
   assert.deepEqual(parseOutboundReviewDecisionForTest("Yes, send it"), { kind: "approve" });
   assert.deepEqual(parseOutboundReviewDecisionForTest("No, cancel it"), { kind: "cancel" });
   assert.deepEqual(parseOutboundReviewDecisionForTest("send now please"), { kind: "approve" });
+  assert.deepEqual(parseOutboundReviewDecisionForTest("ok summarize"), { kind: "none" });
+  assert.deepEqual(parseOutboundReviewDecisionForTest("do it professionally"), { kind: "none" });
   assert.deepEqual(parseOutboundReviewDecisionForTest("Rewrite it more professional and shorter"), {
     kind: "rewrite",
     feedback: "more professional and shorter",
@@ -9070,6 +9491,63 @@ test("whatsapp history summaries prefer the resolved contact name over phone-lik
   assert.doesNotMatch(summary, /916230291184 said/i);
 });
 
+test("voice note prompts stay grounded in transcript context", () => {
+  const prompt = buildVoiceNoteQuestionPrompt(
+    "Kal sham tak final payment bhej dena.",
+    "Draft a polite reply to this voice note.",
+  );
+
+  assert.match(prompt, /--- Media evidence ---/);
+  assert.match(prompt, /Source: voice note transcript/);
+  assert.match(prompt, /User request about this voice note:/);
+  assert.equal(looksLikeGroundedMediaPrompt(prompt), true);
+});
+
+test("video prompts keep transcript and frame evidence together", () => {
+  const prompt = buildVideoQuestionPrompt({
+    mimeType: "video/mp4",
+    transcript: "Payment request expires in 5 minutes.",
+    frameAnalysis: "Visible text: Scan the one-time QR code to pay. Paytm. PhonePe. Transfer Rs 1499.97.",
+    userQuestion: "What does this video ask me to do?",
+  });
+
+  assert.ok(prompt);
+  assert.match(prompt ?? "", /Audio transcript:/);
+  assert.match(prompt ?? "", /Representative frame evidence:/);
+  assert.match(prompt ?? "", /User question about this video:/);
+  assert.equal(looksLikeGroundedMediaPrompt(prompt ?? ""), true);
+});
+
+test("media failure replies refuse caption-only guessing", () => {
+  const imageReply = buildImageGroundingFailureReply({
+    userQuestion: "How much do I have to pay in this screenshot?",
+    reason: "analysis_failed",
+  });
+  const videoReply = buildVideoGroundingFailureReply({
+    userQuestion: "Tell me what happens in this video.",
+    reason: "provider_unavailable",
+  });
+
+  assert.match(imageReply, /not going to guess from the caption alone/i);
+  assert.match(videoReply, /will not answer from the caption alone/i);
+});
+
+test("vision placeholder replies are rejected before they reach WhatsApp users", () => {
+  const placeholder = [
+    "Extracted Text from Image:",
+    "Since the original message was an image, I'll assume the extracted text is available.",
+    "However, I don't have the actual extracted text.",
+  ].join("\n");
+
+  assert.equal(looksLikeVisionPlaceholderReplyForTest(placeholder), true);
+  assert.equal(
+    looksLikeVisionPlaceholderReplyForTest(
+      "This is a Paytm and PhonePe payment QR screen requesting a transfer of Rs 1499.97.",
+    ),
+    false,
+  );
+});
+
 test("workspace knowledge questions stay explanatory instead of triggering live tool actions", () => {
   assert.equal(detectBillingIntent("How to cancel a Google Calendar event"), null);
   assert.equal(detectBillingIntent("How to cancel my subscription"), "cancel");
@@ -9267,9 +9745,10 @@ test("multilingual Japanese technical architecture prompts lock to a direct tech
   assert.equal(resolveResponseModeForTest("technology", prompt), "deep");
 });
 
-test("simple easy prompts still stay fast", () => {
-  assert.equal(resolveResponseModeForTest("science", "What is osmosis?"), "fast");
-  assert.equal(resolveResponseModeForTest("history", "Who was Ashoka?"), "fast");
+test("simple knowledge prompts now default to deep mode unless fast is explicitly requested", () => {
+  assert.equal(resolveResponseModeForTest("science", "What is osmosis?"), "deep");
+  assert.equal(resolveResponseModeForTest("history", "Who was Ashoka?"), "deep");
+  assert.equal(resolveResponseModeForTest("science", "What is osmosis?", "fast"), "fast");
 });
 
 test("AI model comparison prompts do not get swallowed by the primary conversation lane", async () => {

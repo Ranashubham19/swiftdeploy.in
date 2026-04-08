@@ -39,6 +39,7 @@ import {
   looksLikeAmbiguousCurrentWarQuestion,
   looksLikeCurrentAffairsPowerCrisisQuestion,
 } from "@/lib/clawcloud-current-affairs";
+import { looksLikeGroundedMediaPrompt } from "@/lib/clawcloud-media-context";
 import {
   buildHistoricalPowerRankingReply,
   looksLikeHistoricalPowerRankingQuestion,
@@ -199,6 +200,7 @@ import {
   romanizeIfIndicScript,
   setUserLocale,
   translateMessage,
+  verifyReplyLanguageMatch,
   type SupportedLocale,
 } from "@/lib/clawcloud-i18n";
 import { localeNames, resolveSupportedLocale } from "@/lib/clawcloud-locales";
@@ -296,6 +298,7 @@ import {
   detectShortDefinitionLookup,
   extractRichestRankingScope,
   renderClawCloudAnswerBundle,
+  shouldFailClosedWithoutFreshData,
   shouldUseLiveSearch,
 } from "@/lib/clawcloud-live-search";
 import { normalizeRegionalQuestion } from "@/lib/clawcloud-region-context";
@@ -1273,6 +1276,15 @@ async function emergencyDirectAnswer(
 ): Promise<string> {
   // No more early-exit for news — fall through to the knowledge-based answer below
   const isNewsQ = detectNewsQuestion(question);
+  const noLiveDataReply = buildNoLiveDataReply(question).trim();
+  if (
+    shouldFailClosedWithoutFreshData(question)
+    && noLiveDataReply
+    && noLiveDataReply !== "__NO_LIVE_DATA_INTERNAL_SIGNAL__"
+  ) {
+    return normalizeResearchMarkdownForWhatsApp(noLiveDataReply);
+  }
+
   const emergencyIntent = detectIntent(question).type;
   const deadlineMs = Date.now() + Math.max(1_500, timeoutMs);
   const runBoundedEmergencyPrompt = async (
@@ -1609,7 +1621,32 @@ const MULTILINGUAL_NATIVE_ANSWER_ALLOWED_INTENTS = new Set<IntentType>([
   "sports",
 ]);
 
-const MULTILINGUAL_DIRECT_ANSWER_PREFERRED_MODELS = buildPreferredModelOrderForIntent("language", "fast", 4);
+const DEEP_DEFAULT_QA_INTENTS = new Set<IntentType>([
+  "general",
+  "explain",
+  "science",
+  "history",
+  "geography",
+  "culture",
+  "technology",
+  "language",
+  "economics",
+  "research",
+  "coding",
+  "math",
+  "health",
+  "law",
+  "finance",
+  "sports",
+  "creative",
+  "web_search",
+]);
+
+function shouldDefaultToDeepQuestionMode(intent: IntentType) {
+  return DEEP_DEFAULT_QA_INTENTS.has(intent);
+}
+
+const MULTILINGUAL_DIRECT_ANSWER_PREFERRED_MODELS = buildPreferredModelOrderForIntent("language", "deep", 4);
 
 const MULTILINGUAL_ROUTING_BRIDGE_TIMEOUT_MS = 4_000;
 
@@ -1688,7 +1725,7 @@ function detectPrimaryDirectAnswerLaneIntent(
   override?: ResponseMode,
 ): DetectedIntent | null {
   const trimmed = message.trim();
-  if (!trimmed || override === "deep") {
+  if (!trimmed || override !== "fast") {
     return null;
   }
 
@@ -2603,18 +2640,15 @@ async function finalizeAgentReply(input: {
       : replyWithDisclaimer;
   }
 
-  const shouldSkipFinalLanguageRewrite =
-    input.alreadyTranslated
-    && (
-      input.category === "send_message"
-      || input.category === "whatsapp_history"
-      || input.category === "save_contact"
-      || input.category === "whatsapp_contacts_sync"
-      || input.category === "whatsapp_settings_status"
-      || input.category === "whatsapp_settings_update"
-    );
+  const shouldSkipFinalLanguageRewrite = shouldSkipFinalReplyLanguageRewrite({
+    question: input.question,
+    category: input.category,
+    alreadyTranslated: Boolean(input.alreadyTranslated),
+    candidateReply: translatedReply,
+    languageResolution: finalReplyLanguageResolution,
+  });
 
-  const finalReply = shouldSkipFinalLanguageRewrite
+  let finalReply = shouldSkipFinalLanguageRewrite
     ? translatedReply
     : await enforceClawCloudReplyLanguage({
       message: translatedReply,
@@ -2625,6 +2659,32 @@ async function finalizeAgentReply(input: {
       specialReplyLanguage?.targetLanguageName,
       translatedReply,
     ));
+
+  const finalReplyLanguageCheck = verifyReplyLanguageMatch({
+    userMessage: input.question,
+    aiReply: finalReply,
+    resolution: finalReplyLanguageResolution,
+  });
+  if (!finalReplyLanguageCheck.verified) {
+    const correctionSeed = input.alreadyTranslated ? replyWithSuggestion : replyWithDisclaimer;
+    const correctedReply = await enforceClawCloudReplyLanguage({
+      message: correctionSeed,
+      locale: finalReplyLanguageResolution.locale,
+      preserveRomanScript: finalReplyLanguageResolution.preserveRomanScript,
+      targetLanguageName: specialReplyLanguage?.targetLanguageName,
+    }).catch(() => "");
+    if (
+      correctedReply.trim()
+      && verifyReplyLanguageMatch({
+        userMessage: input.question,
+        aiReply: correctedReply,
+        resolution: finalReplyLanguageResolution,
+      }).verified
+    ) {
+      finalReply = correctedReply;
+    }
+  }
+
   const normalizedFinalReply = normalizeReplyForClawCloudDisplay(finalReply);
 
   void logIntentAnalytics(
@@ -3145,6 +3205,45 @@ function looksOverlyThinDirectDefinitionReply(question: string, reply: string) {
   }
 
   return false;
+}
+
+function shouldSkipFinalReplyLanguageRewrite(input: {
+  question: string;
+  category: string;
+  alreadyTranslated: boolean;
+  candidateReply: string;
+  languageResolution: ClawCloudReplyLanguageResolution;
+}) {
+  if (!input.alreadyTranslated) {
+    return false;
+  }
+
+  const isOperationalCategory =
+    input.category === "send_message"
+    || input.category === "whatsapp_history"
+    || input.category === "save_contact"
+    || input.category === "whatsapp_contacts_sync"
+    || input.category === "whatsapp_settings_status"
+    || input.category === "whatsapp_settings_update";
+  if (!isOperationalCategory) {
+    return false;
+  }
+
+  return verifyReplyLanguageMatch({
+    userMessage: input.question,
+    aiReply: input.candidateReply,
+    resolution: input.languageResolution,
+  }).verified;
+}
+
+export function shouldSkipFinalReplyLanguageRewriteForTest(input: {
+  question: string;
+  category: string;
+  alreadyTranslated: boolean;
+  candidateReply: string;
+  languageResolution: ClawCloudReplyLanguageResolution;
+}) {
+  return shouldSkipFinalReplyLanguageRewrite(input);
 }
 
 function looksSeverelyIncompleteTechnicalAnswer(
@@ -8127,6 +8226,28 @@ const HIGH_STAKES_DEEP_MODE_INTENTS = new Set<IntentType>([
   "finance",
 ]);
 
+const SHORT_ANSWER_PROFILE_PATTERNS = [
+  /\b(in short|short answer|brief(?:ly)?|concise|tldr|tl;dr)\b/,
+  /\b(quick answer|just the answer|shortly)\b/,
+  /\b(one|1|two|2|three|3)\s+(line|lines|sentence|sentences)\b/,
+  /\b(within|under|max(?:imum)?|at most)\s+\d+\s+(words?|lines?|sentences?)\b/,
+];
+
+const DETAILED_ANSWER_PROFILE_PATTERNS = [
+  /\b(in detail|detailed|comprehensive|thorough(?:ly)?|deep dive|step[-\s]?by[-\s]?step)\b/,
+  /\b(full (?:answer|story|analysis|explanation|details?)|end[-\s]?to[-\s]?end)\b/,
+  /\b(vistar se|detail mai|poori detail|puri detail)\b/,
+];
+
+function hasExplicitConciseAnswerRequest(text: string) {
+  const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return SHORT_ANSWER_PROFILE_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 function inferAnswerLengthProfile(text: string): AnswerLengthProfile {
   const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
   if (!normalized) {
@@ -8140,25 +8261,13 @@ function inferAnswerLengthProfile(text: string): AnswerLengthProfile {
   let shortScore = 0;
   let detailedScore = 0;
 
-  const shortPatterns = [
-    /\b(in short|short answer|brief(?:ly)?|concise|tldr|tl;dr)\b/,
-    /\b(quick answer|just the answer|shortly)\b/,
-    /\b(one|1|two|2|three|3)\s+(line|lines|sentence|sentences)\b/,
-    /\b(within|under|max(?:imum)?|at most)\s+\d+\s+(words?|lines?|sentences?)\b/,
-  ];
-  const detailedPatterns = [
-    /\b(in detail|detailed|comprehensive|thorough(?:ly)?|deep dive|step[-\s]?by[-\s]?step)\b/,
-    /\b(full (?:answer|story|analysis|explanation|details?)|end[-\s]?to[-\s]?end)\b/,
-    /\b(vistar se|detail mai|poori detail|puri detail)\b/,
-  ];
-
-  for (const pattern of shortPatterns) {
+  for (const pattern of SHORT_ANSWER_PROFILE_PATTERNS) {
     if (pattern.test(normalized)) {
       shortScore += 1;
     }
   }
 
-  for (const pattern of detailedPatterns) {
+  for (const pattern of DETAILED_ANSWER_PROFILE_PATTERNS) {
     if (pattern.test(normalized)) {
       detailedScore += 1;
     }
@@ -8247,7 +8356,9 @@ function buildLengthCalibrationInstruction(
   }
 
   const profile = inferAnswerLengthProfile(question);
-  if (profile === "short") {
+  const deepDetailedByDefault = mode === "deep" && shouldDefaultToDeepQuestionMode(intent);
+
+  if (profile === "short" && !deepDetailedByDefault) {
     return [
       "LENGTH CALIBRATION:",
       "- The user asked for a concise answer.",
@@ -8256,12 +8367,17 @@ function buildLengthCalibrationInstruction(
     ].join("\n");
   }
 
-  if (profile === "detailed") {
+  if (profile === "detailed" || deepDetailedByDefault) {
     return [
       "LENGTH CALIBRATION:",
-      "- The user asked for a detailed answer.",
+      profile === "detailed"
+        ? "- The user asked for a detailed answer."
+        : "- This question is on the deep-answer route, so deliver a full professional answer even if the wording is short.",
       "- Cover the requested scope fully with clear structure and complete reasoning.",
       "- Do not truncate important steps, caveats, or practical implications.",
+      deepDetailedByDefault && profile !== "detailed"
+        ? "- Do not reduce the reply to a one-line definition unless the user explicitly asked for a brief answer."
+        : "",
       mode === "deep" || intent === "math" || intent === "coding" || intent === "research"
         ? "- Use explicit sections or stepwise breakdown when it improves clarity."
         : "- Keep flow natural while still delivering full depth.",
@@ -8283,7 +8399,11 @@ function resolveResponseMode(intent: IntentType, text: string, override?: Respon
     return "deep";
   }
 
-  if (override === "fast" && !deepByComplexity) {
+  if (deepByComplexity) {
+    return "deep";
+  }
+
+  if (override === "fast") {
     return "fast";
   }
 
@@ -8291,11 +8411,19 @@ function resolveResponseMode(intent: IntentType, text: string, override?: Respon
     return "deep";
   }
 
-  if (lengthProfile === "short" && !deepByComplexity) {
+  if (hasExplicitConciseAnswerRequest(text)) {
     return "fast";
   }
 
-  return deepByComplexity ? "deep" : "fast";
+  if (shouldDefaultToDeepQuestionMode(intent)) {
+    return "deep";
+  }
+
+  if (lengthProfile === "short") {
+    return "fast";
+  }
+
+  return "fast";
 }
 
 async function expertReply(
@@ -10968,7 +11096,9 @@ async function buildWhatsAppHistoryReply(
           [
             `I found multiple WhatsApp contacts matching "${contactHint}".`,
             "",
-            ...fuzzyResult.matches.map((match, index) => `${index + 1}. ${match.name}`),
+            ...fuzzyResult.matches.map((match, index) =>
+              `${index + 1}. ${match.name}${match.phone ? ` - +${match.phone}` : ""}`,
+            ),
             "",
             "Reply with the exact contact name, full number, or option number and I will check the right chat.",
           ].join("\n"),
@@ -11100,6 +11230,7 @@ function looksLikeDocumentContext(text: string) {
     || /---\s*document content\s*---/i.test(text)
     || /---\s*end of document\s*---/i.test(text)
     || /\buser question about this document:/i.test(text)
+    || looksLikeGroundedMediaPrompt(text)
   );
 }
 
@@ -13034,6 +13165,23 @@ async function routeInboundAgentMessageResultCore(
     });
   }
 
+  const pendingDraftReview = shouldBypassPendingContactSelection
+    ? { handled: false, response: "" }
+    : await handleWhatsAppPendingDraftReview({
+      userId,
+      message: normalizedMessage,
+      locale: resolveSupportedLocale(await getUserLocale(userId).catch(() => "en")) ?? "en",
+      conversationStyle: baselineConversationStyle,
+      pending: preflightWhatsAppSettings?.pendingContactResolution ?? null,
+    });
+  if (pendingDraftReview.handled) {
+    return {
+      response: pendingDraftReview.response,
+      liveAnswerBundle: null,
+      modelAuditTrail: null,
+    };
+  }
+
   // Resolve app-access approval decisions before any fast-lane routing so
   // simple "Yes/No" confirmations cannot be hijacked by other lanes.
   const pendingDecision = await resolveLatestAppAccessConsentDecision(userId, normalizedMessage);
@@ -13890,101 +14038,6 @@ async function routeInboundAgentMessageCore(
     || preflightSaveContactCommand !== null
     || preflightWhatsAppSettingsIntent !== null
     || preflightProtectedWhatsAppClarification !== null;
-  const earlyLooseWhatsAppFollowUpTarget = extractWhatsAppLooseContactFollowUpTarget(trimmed);
-
-  if (earlyLooseWhatsAppFollowUpTarget) {
-    const earlyMemory = await withSoftTimeout(
-      buildConversationMemory(userId, trimmed),
-      {
-        recentTurns: [],
-        topicSummary: "",
-        activeTopics: [],
-        resolvedQuestion: trimmed,
-        isFollowUp: false,
-        recentDocumentContext: null,
-        userToneProfile: "neutral",
-        userEmotionalContext: "neutral",
-        continuityHint: null,
-      },
-      NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS,
-    );
-    const earlyRecentWhatsAppIntent = inferRecentWhatsAppContactFollowUpIntent(earlyMemory.recentTurns);
-    if (earlyRecentWhatsAppIntent) {
-      const earlyResolvedFollowUp = await lookupContactFuzzy(userId, earlyLooseWhatsAppFollowUpTarget).catch(() => null);
-      if (earlyResolvedFollowUp?.type === "found") {
-        const followUpConfidence = classifyResolvedContactMatchConfidence({
-          requestedName: earlyLooseWhatsAppFollowUpTarget,
-          resolvedName: earlyResolvedFollowUp.contact.name,
-          exact: Boolean(earlyResolvedFollowUp.contact.exact),
-          score: normalizeResolvedContactMatchScore(earlyResolvedFollowUp.contact.score) ?? 0.8,
-          matchBasis: earlyResolvedFollowUp.contact.matchBasis ?? null,
-          source: "fuzzy",
-        });
-        if (followUpConfidence === "verified") {
-          return routeInboundAgentMessageCore(
-            userId,
-            buildWhatsAppPendingContactResumePrompt(
-              earlyRecentWhatsAppIntent,
-              {
-                name: earlyResolvedFollowUp.contact.name,
-                phone: earlyResolvedFollowUp.contact.phone,
-                jid: earlyResolvedFollowUp.contact.jid ?? null,
-              },
-              trimmed,
-            ),
-            { conversationStyle: selectedConversationStyle },
-          );
-        }
-
-        if (followUpConfidence === "confirmation_required") {
-          const followUpCategory = earlyRecentWhatsAppIntent === "whatsapp_history"
-            ? "whatsapp_history"
-            : "send_message";
-          const followUpLane = earlyRecentWhatsAppIntent === "active_contact_start"
-            ? "active_contact_start" as const
-            : earlyRecentWhatsAppIntent === "whatsapp_history"
-              ? "whatsapp_history" as const
-              : "send_message" as const;
-          return finalizeAgentReply({
-            userId,
-            locale: "en",
-            preserveRomanScript: false,
-            question: trimmed,
-            intent: "send_message",
-            category: followUpCategory,
-            startedAt: routeStartedAt,
-            reply: buildWhatsAppExactContactRequiredReply({
-              requestedName: earlyLooseWhatsAppFollowUpTarget,
-              resolvedName: earlyResolvedFollowUp.contact.name,
-              phone: earlyResolvedFollowUp.contact.phone,
-              lane: followUpLane,
-            }),
-          });
-        }
-      }
-
-      if (earlyResolvedFollowUp?.type === "ambiguous") {
-        await rememberWhatsAppPendingContactResolution({
-          userId,
-          kind: earlyRecentWhatsAppIntent,
-          requestedName: earlyLooseWhatsAppFollowUpTarget,
-          resumePrompt: trimmed,
-          matches: earlyResolvedFollowUp.matches,
-        });
-        return finalizeAgentReply({
-          userId,
-          locale: "en",
-          preserveRomanScript: false,
-          question: trimmed,
-          intent: "send_message",
-          category: "send_message",
-          startedAt: routeStartedAt,
-          reply: formatAmbiguousReply(earlyLooseWhatsAppFollowUpTarget, earlyResolvedFollowUp.matches),
-        });
-      }
-    }
-  }
-
   const protectedWhatsAppClarification = preflightProtectedWhatsAppClarification;
   if (protectedWhatsAppClarification) {
     return finalizeAgentReply({
@@ -14194,7 +14247,10 @@ async function routeInboundAgentMessageCore(
 
   const whatsAppSettings = await getWhatsAppSettings(userId).catch(() => null);
   const activeContactSession = await resolveCurrentWhatsAppActiveContactSession(userId, whatsAppSettings);
-  const activeContactSessionCommand = parseWhatsAppActiveContactSessionCommand(trimmed);
+  const activeContactSessionCommand = resolveWhatsAppActiveContactSessionCommandWithContext(
+    trimmed,
+    activeContactSession,
+  );
   const forceRomanHinglishActiveContactReply = activeContactSessionCommand.type !== "none"
     && looksLikeRomanHinglishActiveContactCommand(trimmed);
   const activeContactReplyLanguage = activeContactSessionCommand.type !== "none"
@@ -15204,74 +15260,6 @@ async function routeInboundAgentMessageCore(
       .slice(-4),
   });
   const responseLocale = replyLanguageResolution.locale;
-  const recentWhatsAppFollowUpIntent = inferRecentWhatsAppContactFollowUpIntent(memory.recentTurns);
-  const looseWhatsAppFollowUpTarget = recentWhatsAppFollowUpIntent
-    ? extractWhatsAppLooseContactFollowUpTarget(trimmed)
-    : null;
-  if (recentWhatsAppFollowUpIntent && looseWhatsAppFollowUpTarget) {
-    const followUpResolved = await lookupContactFuzzy(userId, looseWhatsAppFollowUpTarget).catch(() => null);
-    if (followUpResolved?.type === "found") {
-      const followUpConfidence = classifyResolvedContactMatchConfidence({
-        requestedName: looseWhatsAppFollowUpTarget,
-        resolvedName: followUpResolved.contact.name,
-        exact: Boolean(followUpResolved.contact.exact),
-        score: normalizeResolvedContactMatchScore(followUpResolved.contact.score) ?? 0.8,
-        matchBasis: followUpResolved.contact.matchBasis ?? null,
-        source: "fuzzy",
-      });
-      if (followUpConfidence === "verified") {
-        return routeInboundAgentMessageCore(
-          userId,
-          buildWhatsAppPendingContactResumePrompt(
-            recentWhatsAppFollowUpIntent,
-            {
-              name: followUpResolved.contact.name,
-              phone: followUpResolved.contact.phone,
-              jid: followUpResolved.contact.jid ?? null,
-            },
-            trimmed,
-          ),
-          { conversationStyle: selectedConversationStyle },
-        );
-      }
-
-      if (followUpConfidence === "confirmation_required") {
-        const followUpCategory = recentWhatsAppFollowUpIntent === "whatsapp_history"
-          ? "whatsapp_history"
-          : "send_message";
-        const followUpLane = recentWhatsAppFollowUpIntent === "active_contact_start"
-          ? "active_contact_start" as const
-          : recentWhatsAppFollowUpIntent === "whatsapp_history"
-            ? "whatsapp_history" as const
-            : "send_message" as const;
-        return finalizeEarlyTranslated(
-          buildWhatsAppExactContactRequiredReply({
-            requestedName: looseWhatsAppFollowUpTarget,
-            resolvedName: followUpResolved.contact.name,
-            phone: followUpResolved.contact.phone,
-            lane: followUpLane,
-          }),
-          "send_message",
-          followUpCategory,
-        );
-      }
-    }
-
-    if (followUpResolved?.type === "ambiguous") {
-      await rememberWhatsAppPendingContactResolution({
-        userId,
-        kind: recentWhatsAppFollowUpIntent,
-        requestedName: looseWhatsAppFollowUpTarget,
-        resumePrompt: trimmed,
-        matches: followUpResolved.matches,
-      });
-      return finalizeEarlyTranslated(
-        formatAmbiguousReply(looseWhatsAppFollowUpTarget, followUpResolved.matches),
-        "send_message",
-        "send_message",
-      );
-    }
-  }
   const multilingualRoutingBridge = await resolveMultilingualRoutingBridge(
     finalMessage,
     replyLanguageResolution,
@@ -18214,7 +18202,7 @@ function buildWhatsAppExactContactRequiredReply(input: {
     return [
       `I found ${resolvedLabel}, but I need the exact WhatsApp contact before I turn active contact mode on.`,
       "",
-      "Send the full contact name as saved in WhatsApp or the full number, and I will bind only the right chat.",
+      "Repeat the full active-contact command with the exact contact name as saved in WhatsApp or the full number, and I will bind only the right chat.",
     ].join("\n");
   }
 
@@ -18222,14 +18210,22 @@ function buildWhatsAppExactContactRequiredReply(input: {
     return [
       `I found ${resolvedLabel}, but I need the exact WhatsApp contact before I summarize the wrong chat.`,
       "",
-      "Send the full contact name as saved in WhatsApp or the full number, and I will check only the right conversation.",
+      "Repeat the WhatsApp history request with the exact contact name as saved in WhatsApp or the full number, and I will check only the right conversation.",
     ].join("\n");
   }
 
   return [
     `I found ${resolvedLabel}, but the match is not exact enough to send automatically.`,
     "",
-    "Send the full contact name as saved in WhatsApp or the direct number, and I will send it to the right chat immediately.",
+    "Repeat the full send command with the exact contact name as saved in WhatsApp or the direct number, and I will send it to the right chat immediately.",
+  ].join("\n");
+}
+
+function buildUnsafeWhatsAppDraftBlockedReply() {
+  return [
+    "I couldn't draft a clean WhatsApp message from that request, so I did not send anything.",
+    "",
+    "Tell me the exact final text, or ask me to preview the message and I will keep it here first.",
   ].join("\n");
 }
 
@@ -18642,6 +18638,7 @@ async function generateStyledWhatsAppDraft(input: {
   if (draftingMode === "verbatim") {
     return autoCorrectWhatsAppOutgoingMessage(fallback, input.conversationStyle);
   }
+  const allowLongDraft = shouldAllowLongStyledWhatsAppDraft(input.originalRequest);
   const draftLanguageResolution = input.languageResolution ?? resolveClawCloudReplyLanguage({
     message: input.originalRequest,
     preferredLocale: input.locale,
@@ -18658,7 +18655,12 @@ async function generateStyledWhatsAppDraft(input: {
     preserveRomanScript: draftLanguageResolution.preserveRomanScript,
   });
   if (deterministicStructuredDraft) {
-    return deterministicStructuredDraft;
+    return finalizeStyledWhatsAppDraftOrEmpty({
+      candidate: deterministicStructuredDraft,
+      fallback,
+      allowLongDraft,
+      languageResolution: draftLanguageResolution,
+    });
   }
 
   const draftTemplateGreeting = extractStyledGreetingTemplateSeed(understoodRequestedMessage);
@@ -18670,10 +18672,15 @@ async function generateStyledWhatsAppDraft(input: {
   });
   if (deterministicGreetingDraft) {
     if (draftLanguageResolution.locale === "en" && !draftLanguageResolution.preserveRomanScript) {
-      return deterministicGreetingDraft;
+      return finalizeStyledWhatsAppDraftOrEmpty({
+        candidate: deterministicGreetingDraft,
+        fallback,
+        allowLongDraft,
+        languageResolution: draftLanguageResolution,
+      });
     }
 
-    return enforceClawCloudReplyLanguage({
+    const localizedDeterministicGreetingDraft = await enforceClawCloudReplyLanguage({
       message: deterministicGreetingDraft,
       locale: draftLanguageResolution.locale,
       preserveRomanScript: draftLanguageResolution.preserveRomanScript,
@@ -18682,9 +18689,14 @@ async function generateStyledWhatsAppDraft(input: {
       draftSpecialReplyLanguageName,
       deterministicGreetingDraft,
     ));
+    return finalizeStyledWhatsAppDraftOrEmpty({
+      candidate: localizedDeterministicGreetingDraft,
+      fallback,
+      allowLongDraft,
+      languageResolution: draftLanguageResolution,
+    });
   }
 
-  const allowLongDraft = shouldAllowLongStyledWhatsAppDraft(input.originalRequest);
   const draftLanguageLabel = localeNames[draftLanguageResolution.locale] ?? "English";
   const languageInstruction = draftLanguageResolution.preserveRomanScript
     ? draftLanguageResolution.locale === "en"
@@ -18742,10 +18754,11 @@ async function generateStyledWhatsAppDraft(input: {
     );
   });
 
-  return applyStyledWhatsAppDraftSafetyBounds({
+  return finalizeStyledWhatsAppDraftOrEmpty({
     candidate: languageLockedDraft.trim(),
     fallback,
     allowLongDraft,
+    languageResolution: draftLanguageResolution,
   });
 }
 
@@ -18801,18 +18814,24 @@ function looksLikeAbstractStyledWhatsAppDraftRequest(originalRequest: string, re
   }
 
   const hasMessageSurface =
-    /\b(?:message|note|wish|greeting|reply|text)\b/.test(normalizedMessage);
+    /\b(?:message|note|wish|greeting|reply|text|prompt)\b/.test(normalizedMessage);
   const hasStyleCue =
-    /\b(?:professional|formal|polite|warm|sweet|heartfelt|brief|short|kind|nice|casual)\b/.test(`${normalizedRequest} ${normalizedMessage}`);
+    /\b(?:professional|formal|polite|warm|sweet|heartfelt|brief|short|kind|nice|casual|beautiful|detailed|detail|elaborate|lovely)\b/.test(`${normalizedRequest} ${normalizedMessage}`);
   const hasLanguageCue =
     /\b(?:in|into)\s+(?:english|hindi|hinglish|roman hindi|punjabi|urdu|arabic|korean|japanese|spanish|french|german|italian|portuguese|turkish)\b/.test(normalizedRequest);
+  const hasGreetingCue =
+    /\b(?:good morning|good afternoon|good evening|good night|hello|hi|hey|namaste)\b/.test(normalizedMessage);
   const hasDescriptorIntent =
-    /\b(?:gratitude|appreciat(?:e|ion)|apolog(?:y|ize|ise)|birthday|congrat(?:s|ulations)?|farewell|invite|invitation|follow[\s-]?up|reminder|wish|greeting|note)\b/.test(normalizedMessage)
+    /\b(?:gratitude|appreciat(?:e|ion)|apolog(?:y|ize|ise)|birthday|congrat(?:s|ulations)?|farewell|invite|invitation|follow[\s-]?up|reminder|wish|greeting|note|prompt)\b/.test(normalizedMessage)
     || (/\b(?:thank(?:s| you)?|thanku|welcome)\b/.test(normalizedMessage) && hasMessageSurface);
   const hasStructuredActCue =
     /\b(?:thank(?:s| you)?|thanku|appreciat(?:e|ion)|apolog(?:y|ize|ise)|sorry|birthday|congrat(?:s|ulations)?|farewell|welcome|invite|invitation|follow[\s-]?up|reminder)\b/.test(normalizedMessage);
 
-  return hasDescriptorIntent || (hasStructuredActCue && (hasStyleCue || hasLanguageCue));
+  return (
+    hasDescriptorIntent
+    || (hasStructuredActCue && (hasStyleCue || hasLanguageCue))
+    || (hasGreetingCue && hasMessageSurface && (hasStyleCue || hasLanguageCue))
+  );
 }
 
 function resolveWhatsAppDraftingMode(originalRequest: string, requestedMessage: string) {
@@ -19225,6 +19244,78 @@ function sanitizeStyledWhatsAppDraftForHumanDelivery(text: string) {
   return cleanedLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+const STYLED_WHATSAPP_DRAFT_META_LANGUAGE_RE =
+  /\b(?:message|text|reply|wish|greeting|note|prompt)\b.{0,24}\b(?:in|into)\s+(?:english|hindi|hinglish|roman hindi|punjabi|urdu|arabic|korean|japanese|spanish|french|german|italian|portuguese|turkish)\b/i;
+const STYLED_WHATSAPP_DRAFT_DESCRIPTOR_ONLY_RE =
+  /^(?:a|an)\s+(?:(?:very|really|beautiful|detailed|detail|professional|formal|polite|warm|sweet|heartfelt|brief|short|kind|nice|casual|proper|lovely)\s+){0,10}(?:(?:good morning|good afternoon|good evening|good night|hello|hi|hey)\s+)?(?:message|text|reply|wish|greeting|note|prompt)\b(?:.*)$/i;
+
+function normalizeStyledWhatsAppDraftCandidateText(value: string) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[`"'_*~]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isUnsafeStyledWhatsAppDraftCandidate(input: {
+  candidate: string;
+  fallback: string;
+  languageResolution: ClawCloudReplyLanguageResolution;
+}) {
+  const cleanedCandidate = sanitizeStyledWhatsAppDraftForHumanDelivery(input.candidate).trim();
+  if (!cleanedCandidate) {
+    return true;
+  }
+
+  const normalizedCandidate = normalizeStyledWhatsAppDraftCandidateText(cleanedCandidate);
+  const normalizedFallback = normalizeStyledWhatsAppDraftCandidateText(input.fallback);
+  if (!normalizedCandidate) {
+    return true;
+  }
+
+  if (normalizedCandidate === normalizedFallback) {
+    return true;
+  }
+
+  if (/\bprompt\b/i.test(normalizedCandidate)) {
+    return true;
+  }
+
+  if (STYLED_WHATSAPP_DRAFT_META_LANGUAGE_RE.test(normalizedCandidate)) {
+    return true;
+  }
+
+  if (STYLED_WHATSAPP_DRAFT_DESCRIPTOR_ONLY_RE.test(normalizedCandidate)) {
+    return true;
+  }
+
+  if (input.languageResolution.preserveRomanScript && input.languageResolution.locale === "en") {
+    return !detectHinglish(cleanedCandidate);
+  }
+
+  if (!input.languageResolution.preserveRomanScript && input.languageResolution.locale !== "en") {
+    const candidateLocale = inferClawCloudMessageLocale(cleanedCandidate);
+    if (
+      input.languageResolution.locale === "hi"
+      && /[\u0900-\u097f]/u.test(cleanedCandidate)
+      && candidateLocale === "ne"
+    ) {
+      return false;
+    }
+    return Boolean(candidateLocale && candidateLocale !== input.languageResolution.locale);
+  }
+
+  return false;
+}
+
+export function isUnsafeStyledWhatsAppDraftCandidateForTest(input: {
+  candidate: string;
+  fallback: string;
+  languageResolution: ClawCloudReplyLanguageResolution;
+}) {
+  return isUnsafeStyledWhatsAppDraftCandidate(input);
+}
+
 function shouldAllowLongStyledWhatsAppDraft(originalRequest: string) {
   const normalizedRequest = String(originalRequest ?? "").toLowerCase();
   return /\b(?:long|detailed|detail|elaborate|comprehensive|full|in detail|vistar|paragraph)\b/.test(normalizedRequest);
@@ -19239,7 +19330,9 @@ function extractStyledGreetingTemplateSeed(requestedMessage: string) {
   const greetingMatch = normalized.match(
     /(?:^|\b)(good morning|good afternoon|good evening|good night|hello|hi|hey)(?:\b|$)/,
   );
-  const looksTemplate = /\b(?:professional|formal|polite)\b/.test(normalized) && /\b(?:message|text|wish|greeting)\b/.test(normalized);
+  const looksTemplate =
+    /\b(?:professional|formal|polite|beautiful|detailed|detail|warm|sweet|heartfelt|lovely)\b/.test(normalized)
+    && /\b(?:message|text|wish|greeting|prompt)\b/.test(normalized);
   if (!looksTemplate || !greetingMatch?.[1]) {
     return null;
   }
@@ -19276,6 +19369,29 @@ function applyStyledWhatsAppDraftSafetyBounds(input: {
   return candidate;
 }
 
+function finalizeStyledWhatsAppDraftOrEmpty(input: {
+  candidate: string;
+  fallback: string;
+  allowLongDraft: boolean;
+  languageResolution: ClawCloudReplyLanguageResolution;
+}) {
+  const boundedCandidate = applyStyledWhatsAppDraftSafetyBounds({
+    candidate: input.candidate,
+    fallback: input.fallback,
+    allowLongDraft: input.allowLongDraft,
+  });
+
+  if (isUnsafeStyledWhatsAppDraftCandidate({
+    candidate: boundedCandidate,
+    fallback: input.fallback,
+    languageResolution: input.languageResolution,
+  })) {
+    return "";
+  }
+
+  return boundedCandidate;
+}
+
 function extractPrimaryRecipientNameForGreeting(recipientLabel: string) {
   const cleaned = String(recipientLabel ?? "")
     .replace(/\(\s*\+?\d[\d\s-]{6,}\s*\)/g, " ")
@@ -19303,7 +19419,10 @@ function maybeBuildDeterministicProfessionalGreetingDraft(input: {
   conversationStyle: ClawCloudConversationStyle;
   locale: SupportedLocale;
 }) {
-  if (input.conversationStyle !== "professional" || input.locale !== "en") {
+  if (
+    input.conversationStyle !== "professional"
+    || (input.locale !== "en" && input.locale !== "hi")
+  ) {
     return null;
   }
 
@@ -19318,6 +19437,25 @@ function maybeBuildDeterministicProfessionalGreetingDraft(input: {
 
   const recipientName = extractPrimaryRecipientNameForGreeting(input.recipientLabel);
   const recipientSuffix = recipientName ? ` ${recipientName}` : "";
+
+  if (input.locale === "hi") {
+    if (/^(?:hi+|hello+|hey+|hlo+|helo+|namaste)$/.test(normalized)) {
+      return `नमस्ते${recipientSuffix}। आशा है आप कुशलपूर्वक होंगे। आपका दिन शुभ रहे।`;
+    }
+    if (/^good\s*morning$/.test(normalized)) {
+      return `सुप्रभात${recipientSuffix}। आशा है आपका दिन सुख, शांति और प्रसन्नता से भरा रहे।`;
+    }
+    if (/^good\s*afternoon$/.test(normalized)) {
+      return `शुभ दोपहर${recipientSuffix}। आशा है आपका दिन शांतिपूर्ण और सुखद चल रहा होगा।`;
+    }
+    if (/^good\s*evening$/.test(normalized)) {
+      return `शुभ संध्या${recipientSuffix}। आशा है आपका दिन अच्छा रहा होगा और शाम सुखद बीते।`;
+    }
+    if (/^good\s*night$/.test(normalized)) {
+      return `शुभ रात्रि${recipientSuffix}। आशा है आपको सुकूनभरी और शांत नींद मिले।`;
+    }
+    return null;
+  }
 
   if (/^(?:hi+|hello+|hey+|hlo+|helo+)$/.test(normalized)) {
     return `Hi${recipientSuffix}, hope you're doing well.`;
@@ -19659,13 +19797,26 @@ function buildWhatsAppPendingContactResumePrompt(
   kind: WhatsAppPendingContactResolution["kind"],
   option: WhatsAppPendingContactOption,
   originalPrompt: string,
+  requestedName?: string | null,
 ) {
   const selectedLabel = option.name;
+  const selectedPhone = normalizeWhatsAppPhoneDigits(option.phone ?? option.jid ?? null);
+  const selectedReference = selectedPhone ? `+${selectedPhone}` : selectedLabel;
   switch (kind) {
     case "active_contact_start":
-      return `Talk to ${selectedLabel} on my behalf`;
-    case "whatsapp_history":
-      return `Show WhatsApp history with ${selectedLabel}`;
+      return `Talk to ${selectedReference} on my behalf`;
+    case "whatsapp_history": {
+      const resumePrompt = replaceRequestedContactInPrompt(
+        originalPrompt,
+        requestedName ?? "",
+        selectedReference,
+      );
+      if (resumePrompt.trim() && resumePrompt !== originalPrompt) {
+        return resumePrompt;
+      }
+
+      return `Show WhatsApp history with ${selectedReference}`;
+    }
     case "send_message": {
       const parsed = parseSendMessageCommand(originalPrompt);
       const messageText = parsed?.message?.trim();
@@ -19682,14 +19833,14 @@ function buildWhatsAppPendingContactResumePrompt(
         const resumePrompt = replaceRequestedContactInPrompt(
           originalPrompt,
           requestedName ?? "",
-          selectedLabel,
+          selectedReference,
         );
         if (resumePrompt.trim()) {
           return resumePrompt;
         }
       }
 
-      return `Send message to ${selectedLabel}: ${messageText}`;
+      return `Send message to ${selectedReference}: ${messageText}`;
     }
     default:
       return originalPrompt;
@@ -19700,8 +19851,9 @@ export function buildWhatsAppPendingContactResumePromptForTest(
   kind: WhatsAppPendingContactResolution["kind"],
   option: WhatsAppPendingContactOption,
   originalPrompt: string,
+  requestedName?: string | null,
 ) {
-  return buildWhatsAppPendingContactResumePrompt(kind, option, originalPrompt);
+  return buildWhatsAppPendingContactResumePrompt(kind, option, originalPrompt, requestedName);
 }
 
 function buildWhatsAppPendingContactResolutionReply(
@@ -19716,6 +19868,266 @@ function buildWhatsAppPendingContactResolutionReply(
     "",
     "Reply with the exact contact name, the full number, or the option number.",
   ].join("\n");
+}
+
+function isWhatsAppPendingDraftReview(
+  pending: WhatsAppPendingContactResolution | null | undefined,
+): pending is WhatsAppPendingContactResolution & {
+  draftMessage: string;
+  options: [WhatsAppPendingContactOption, ...WhatsAppPendingContactOption[]];
+} {
+  return Boolean(
+    pending
+    && pending.kind === "send_message"
+    && typeof pending.draftMessage === "string"
+    && pending.draftMessage.trim()
+    && pending.options.length === 1,
+  );
+}
+
+function buildWhatsAppPendingDraftReviewReply(
+  pending: WhatsAppPendingContactResolution & {
+    draftMessage: string;
+    options: [WhatsAppPendingContactOption, ...WhatsAppPendingContactOption[]];
+  },
+) {
+  const target = pending.options[0]!;
+  const targetLabel = formatWhatsAppResolvedContactLabel({
+    name: target.name,
+    phone: target.phone,
+  }) || target.name;
+  return [
+    `WhatsApp draft ready for ${targetLabel}:`,
+    "",
+    pending.draftMessage,
+    "",
+    "Reply with:",
+    "Send - send this exact draft now",
+    "Improve - regenerate a better draft for the same contact",
+    "Replace: your exact final message",
+    "Cancel - do not send anything",
+  ].join("\n");
+}
+
+export function buildWhatsAppPendingDraftReviewReplyForTest(
+  pending: WhatsAppPendingContactResolution & {
+    draftMessage: string;
+    options: [WhatsAppPendingContactOption, ...WhatsAppPendingContactOption[]];
+  },
+) {
+  return buildWhatsAppPendingDraftReviewReply(pending);
+}
+
+type WhatsAppPendingDraftReviewAction =
+  | { type: "none" }
+  | { type: "review" }
+  | { type: "approve" }
+  | { type: "cancel" }
+  | { type: "rewrite"; feedback: string | null }
+  | { type: "replace"; message: string };
+
+function resolveWhatsAppPendingDraftReviewAction(input: {
+  message: string;
+  pending: WhatsAppPendingContactResolution | null | undefined;
+}): WhatsAppPendingDraftReviewAction {
+  if (!isWhatsAppPendingDraftReview(input.pending)) {
+    return { type: "none" };
+  }
+
+  const trimmed = normalizeWhatsAppPendingContactSelectionText(input.message);
+  if (!trimmed) {
+    return { type: "none" };
+  }
+
+  if (detectPendingApprovalContextQuestion(trimmed) === "review") {
+    return { type: "review" };
+  }
+
+  const replaceMatch = trimmed.match(/^(?:replace|use\s+this|send\s+this\s+instead)\s*[:\-]\s*([\s\S]+)$/i);
+  if (replaceMatch?.[1]?.trim()) {
+    return {
+      type: "replace",
+      message: replaceMatch[1].trim(),
+    };
+  }
+
+  const reviewDecision = parseOutboundReviewDecision(trimmed);
+  if (reviewDecision.kind === "approve") {
+    return { type: "approve" };
+  }
+  if (reviewDecision.kind === "cancel") {
+    return { type: "cancel" };
+  }
+  if (reviewDecision.kind === "rewrite") {
+    return {
+      type: "rewrite",
+      feedback: reviewDecision.feedback,
+    };
+  }
+
+  if (
+    !/^(?:what|why|how|when|where|who|which|can\s+you|could\s+you|would\s+you|help|explain|summari[sz]e|compare|show)\b/i.test(trimmed)
+    && trimmed.length >= 2
+  ) {
+    return {
+      type: "replace",
+      message: trimmed,
+    };
+  }
+
+  return { type: "none" };
+}
+
+export function resolveWhatsAppPendingDraftReviewActionForTest(input: {
+  message: string;
+  pending: WhatsAppPendingContactResolution | null | undefined;
+}) {
+  return resolveWhatsAppPendingDraftReviewAction(input);
+}
+
+async function handleWhatsAppPendingDraftReview(input: {
+  userId: string;
+  message: string;
+  locale: SupportedLocale;
+  conversationStyle: ClawCloudConversationStyle;
+  pending: WhatsAppPendingContactResolution | null | undefined;
+}) {
+  const pending = input.pending;
+  if (!isWhatsAppPendingDraftReview(pending)) {
+    return { handled: false, response: "" };
+  }
+
+  const action = resolveWhatsAppPendingDraftReviewAction({
+    message: input.message,
+    pending,
+  });
+  if (action.type === "none") {
+    return { handled: false, response: "" };
+  }
+
+  if (action.type === "review") {
+    return {
+      handled: true,
+      response: await translateMessage(buildWhatsAppPendingDraftReviewReply(pending), input.locale),
+    };
+  }
+
+  if (action.type === "cancel") {
+    await clearWhatsAppPendingContactResolution(input.userId).catch(() => null);
+    return {
+      handled: true,
+      response: await translateMessage(
+        `Okay, I won't send that WhatsApp draft to ${pending.options[0]!.name}.`,
+        input.locale,
+      ),
+    };
+  }
+
+  const target = pending.options[0]!;
+  const languageResolution = resolveClawCloudReplyLanguage({
+    message: pending.resumePrompt,
+    preferredLocale: input.locale,
+  });
+
+  if (action.type === "approve") {
+    try {
+      const sendResult = await sendClawCloudWhatsAppToPhone(target.phone, pending.draftMessage, {
+        userId: input.userId,
+        contactName: target.name,
+        jid: target.jid ?? null,
+        source: "direct_command",
+        waitForAckMs: 6_000,
+        requireRegisteredNumber: true,
+        metadata: {
+          send_path: "pending_preview_review",
+          original_request: pending.resumePrompt,
+        },
+      });
+      await clearWhatsAppPendingContactResolution(input.userId).catch(() => null);
+      void upsertAnalyticsDaily(input.userId, { wa_messages_sent: 1, tasks_run: 1 }).catch(() => null);
+      const targetLabel = formatWhatsAppResolvedContactLabel({
+        name: target.name,
+        phone: target.phone,
+      }) || target.name;
+      return {
+        handled: true,
+        response: await translateMessage(
+          [
+            buildWhatsAppSingleSendStatusLine({
+              sendResult,
+              targetLabel,
+              action: "message",
+            }),
+            "",
+            `Sent text: "${pending.draftMessage}"`,
+            ...(sendResult.warning ? ["", `Note: ${sendResult.warning}`] : []),
+          ].join("\n"),
+          input.locale,
+        ),
+      };
+    } catch (error) {
+      console.error("[agent] pending WhatsApp draft send failed:", error);
+      return {
+        handled: true,
+        response: await translateMessage(
+          [
+            `I couldn't send the WhatsApp message to ${target.name}.`,
+            "",
+            "Reconnect WhatsApp in the dashboard and try again.",
+          ].join("\n"),
+          input.locale,
+        ),
+      };
+    }
+  }
+
+  const allowLongDraft = shouldAllowLongStyledWhatsAppDraft(pending.resumePrompt);
+  const nextDraftCandidate = action.type === "replace"
+    ? finalizeStyledWhatsAppDraftOrEmpty({
+      candidate: action.message,
+      fallback: pending.draftMessage,
+      allowLongDraft,
+      languageResolution,
+    })
+    : await generateStyledWhatsAppDraft({
+      originalRequest: [
+        pending.resumePrompt,
+        "",
+        "Revise the current WhatsApp draft for the same contact.",
+        `Current draft: ${pending.draftMessage}`,
+        action.feedback?.trim()
+          ? `Additional instruction: ${action.feedback.trim()}`
+          : "Additional instruction: make it better while preserving the same meaning, language, and intent.",
+      ].join("\n"),
+      requestedMessage: pending.draftMessage,
+      recipientLabel: target.name,
+      conversationStyle: input.conversationStyle,
+      locale: input.locale,
+      languageResolution,
+    });
+
+  if (!nextDraftCandidate.trim()) {
+    return {
+      handled: true,
+      response: await translateMessage(buildUnsafeWhatsAppDraftBlockedReply(), input.locale),
+    };
+  }
+
+  const refreshedPending: WhatsAppPendingContactResolution = {
+    ...pending,
+    draftMessage: nextDraftCandidate,
+    createdAt: new Date().toISOString(),
+  };
+  await setWhatsAppPendingContactResolution(input.userId, refreshedPending).catch(() => null);
+
+  return {
+    handled: true,
+    response: await translateMessage(buildWhatsAppPendingDraftReviewReply({
+      ...refreshedPending,
+      draftMessage: nextDraftCandidate,
+      options: refreshedPending.options as [WhatsAppPendingContactOption, ...WhatsAppPendingContactOption[]],
+    }), input.locale),
+  };
 }
 
 function isFreshWhatsAppPendingContactResolution(
@@ -19742,6 +20154,26 @@ function normalizeWhatsAppPendingContactSelectionText(value: string) {
     .trim();
 }
 
+const STRICT_PENDING_CONTACT_CANONICALS = new Set([
+  "maa",
+  "papa",
+  "didi",
+  "bhai",
+]);
+
+function normalizeLiteralWhatsAppPendingContactOptionName(value: string) {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .replace(/[\u200d\uFE0F]/g, "")
+    .replace(/[_]+/g, " ")
+    .replace(/[â€œâ€"']/g, "")
+    .replace(/[^\p{L}\p{M}\p{N}\s.&+\-/\u0900-\u097F]/gu, " ")
+    .toLowerCase()
+    .replace(/\b(?:contact|phone|number)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function stripWhatsAppPendingContactSelectionTrailingNoise(value: string) {
   return String(value ?? "")
     .replace(/\b(?:say|saying|send|sending|reply|replying|message|messages|msg|text|texts|chat|please|pls|plz|now|right\s+now)\b(?:\s+\b(?:say|saying|send|sending|reply|replying|message|messages|msg|text|texts|chat|please|pls|plz|now|right\s+now)\b)*$/i, "")
@@ -19754,7 +20186,7 @@ function matchWhatsAppPendingContactSelectionByIndex(
   options: WhatsAppPendingContactOption[],
 ) {
   const normalized = text.toLowerCase();
-  const numericMatch = normalized.match(/^(?:option\s*)?(\d{1,2})$/i);
+  const numericMatch = normalized.match(/^(?:option\s*)?(\d{1,2})(?:\s+(?:one))?(?:\s+.+)?$/i);
   if (numericMatch) {
     const index = Number(numericMatch[1]);
     if (index >= 1 && index <= options.length) {
@@ -19776,7 +20208,9 @@ function matchWhatsAppPendingContactSelectionByIndex(
     "4th": 4,
     four: 4,
   };
-  const ordinalMatch = normalized.match(/^(?:the\s+)?(first|1st|one|second|2nd|two|third|3rd|three|fourth|4th|four)(?:\s+one)?$/i);
+  const ordinalMatch = normalized.match(
+    /^(?:the\s+)?(first|1st|one|second|2nd|two|third|3rd|three|fourth|4th|four)(?:\s+one)?(?:\s+.+)?$/i,
+  );
   if (!ordinalMatch) {
     return null;
   }
@@ -19794,6 +20228,10 @@ function matchWhatsAppPendingContactSelectionByLabel(
   options: WhatsAppPendingContactOption[],
 ) {
   const digits = normalizeWhatsAppPhoneDigits(text);
+  const literalVariants = [...new Set([
+    normalizeLiteralWhatsAppPendingContactOptionName(text),
+    normalizeLiteralWhatsAppPendingContactOptionName(stripWhatsAppPendingContactSelectionTrailingNoise(text)),
+  ].filter(Boolean))];
   const normalizedVariants = [...new Set([
     normalizeContactName(text),
     normalizeContactName(stripWhatsAppPendingContactSelectionTrailingNoise(text)),
@@ -19810,23 +20248,38 @@ function matchWhatsAppPendingContactSelectionByLabel(
     }
   }
 
-  for (const normalized of normalizedVariants) {
-    for (const option of options) {
-      if (normalizeContactName(option.name) === normalized) {
-        return option;
-      }
+  for (const literal of literalVariants) {
+    const literalMatches = options.filter((option) =>
+      normalizeLiteralWhatsAppPendingContactOptionName(option.name) === literal);
+    if (literalMatches.length === 1) {
+      return literalMatches[0] ?? null;
+    }
+    if (literalMatches.length > 1) {
+      return null;
     }
   }
 
-  const strongTokenMatches = normalizedVariants
-    .map((normalized) => {
-      const requestedTokens = normalizeRecipientNameTokens(normalized);
+  for (const normalized of normalizedVariants) {
+    const canonicalMatches = options.filter((option) => normalizeContactName(option.name) === normalized);
+    if (canonicalMatches.length === 1) {
+      return canonicalMatches[0] ?? null;
+    }
+    if (canonicalMatches.length > 1 && STRICT_PENDING_CONTACT_CANONICALS.has(normalized)) {
+      return null;
+    }
+  }
+
+  const strongTokenMatches = literalVariants
+    .map((literal) => {
+      const requestedTokens = normalizeRecipientNameTokens(literal);
       if (requestedTokens.length < 2) {
         return [] as WhatsAppPendingContactOption[];
       }
 
       return options.filter((option) => {
-        const optionTokens = normalizeRecipientNameTokens(option.name);
+        const optionTokens = normalizeRecipientNameTokens(
+          normalizeLiteralWhatsAppPendingContactOptionName(option.name),
+        );
         return requestedTokens.every((token) => optionTokens.includes(token));
       });
     })
@@ -19880,6 +20333,7 @@ function resolveWhatsAppPendingContactSelection(input: {
         pending.kind,
         option,
         pending.resumePrompt,
+        pending.requestedName,
       ),
     };
   }
@@ -19932,6 +20386,7 @@ async function rememberWhatsAppPendingContactResolution(input: {
   requestedName: string;
   resumePrompt: string;
   matches: Array<{ name: string; phone?: string | null; jid?: string | null }>;
+  draftMessage?: string | null;
 }) {
   const options = buildWhatsAppPendingContactOptions(input.matches);
   if (!options.length) {
@@ -19944,6 +20399,9 @@ async function rememberWhatsAppPendingContactResolution(input: {
     requestedName: input.requestedName,
     resumePrompt: input.resumePrompt,
     options,
+    draftMessage: typeof input.draftMessage === "string" && input.draftMessage.trim()
+      ? input.draftMessage.trim()
+      : null,
     createdAt: new Date().toISOString(),
   }).catch(() => null);
 }
@@ -20238,19 +20696,22 @@ function inferRecentWhatsAppContactFollowUpIntent(
   }
 
   if (
-    /active contact mode|stop talking to|normal messages here as messages for/i.test(lastAssistantTurn)
+    /reply with the exact contact name, full number, or option number/i.test(lastAssistantTurn)
+    && /whatsapp contact-mode lane/i.test(lastAssistantTurn)
   ) {
     return "active_contact_start";
   }
 
   if (
-    /whatsapp messages|right chat|chat history|specific contact name|exact contact name/i.test(lastAssistantTurn)
+    /reply with the exact contact name, full number, or option number/i.test(lastAssistantTurn)
+    && /whatsapp history lane/i.test(lastAssistantTurn)
   ) {
     return "whatsapp_history";
   }
 
   if (
-    /exact contact name or phone number instead|couldn't send the whatsapp message/i.test(lastAssistantTurn)
+    /reply with the exact contact name, full number, or option number/i.test(lastAssistantTurn)
+    && /whatsapp send lane/i.test(lastAssistantTurn)
   ) {
     return "send_message";
   }
@@ -20271,6 +20732,13 @@ function extractWhatsAppLooseContactFollowUpTarget(message: string) {
     return null;
   }
 
+  const hasExplicitSelectionCue =
+    /^(?:go\s+for|go\s+with|choose|pick|select|use|take|reply\s+with|with|for)\s+/i.test(trimmed)
+    || /^\+?\d[\d\s-]{6,}$/.test(stripped);
+  if (!hasExplicitSelectionCue) {
+    return null;
+  }
+
   if (
     /^(?:what|why|how|when|where|who|which)\b/i.test(stripped)
     || parseWhatsAppActiveContactSessionCommand(stripped).type !== "none"
@@ -20281,6 +20749,47 @@ function extractWhatsAppLooseContactFollowUpTarget(message: string) {
   }
 
   return stripped;
+}
+
+function looksLikeGenericCurrentActiveContactStopCommand(message: string) {
+  const normalized = normalizeWhatsAppPendingContactSelectionText(message);
+  if (!normalized) {
+    return false;
+  }
+
+  return [
+    /^(?:stop|stop\s+it|stop\s+this|stop\s+now)\b/i,
+    /^(?:cancel|cancel\s+it|cancel\s+this)\b/i,
+    /^(?:end|end\s+it|end\s+this)\b/i,
+    /^(?:band\s+kar(?:o|do)?|band\s+kr(?:o|do)?|rok\s+do|ruk\s+ja(?:o|iye)?)\b/i,
+    /^(?:stop\s+talking|stop\s+replying|stop\s+messaging)\b/i,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function resolveWhatsAppActiveContactSessionCommandWithContext(
+  text: string,
+  session: WhatsAppActiveContactSession | null | undefined,
+): WhatsAppActiveContactSessionCommand {
+  const parsed = parseWhatsAppActiveContactSessionCommand(text);
+  if (parsed.type !== "none") {
+    return parsed;
+  }
+
+  if (session && looksLikeGenericCurrentActiveContactStopCommand(text)) {
+    return {
+      type: "stop",
+      contactName: null,
+    };
+  }
+
+  return parsed;
+}
+
+export function resolveWhatsAppActiveContactSessionCommandWithContextForTest(
+  text: string,
+  session: WhatsAppActiveContactSession | null | undefined,
+) {
+  return resolveWhatsAppActiveContactSessionCommandWithContext(text, session);
 }
 
 export function inferRecentWhatsAppContactFollowUpIntentForTest(
@@ -21572,6 +22081,12 @@ function shouldPreviewRecipientTargetedWhatsAppDraft(originalRequest: string) {
     return true;
   }
 
+  const parsed = parseSendMessageCommand(originalRequest);
+  const requestedMessage = parsed?.message?.trim() ?? "";
+  if (requestedMessage && resolveWhatsAppDraftingMode(originalRequest, requestedMessage) === "styled") {
+    return true;
+  }
+
   const explicitImmediateSend =
     /\b(?:send|sned|snd|reply|replly|tell)\b/i.test(normalized)
     || /^(?:message|mesage|msg|whatsapp|whatsap|whatsaap|wa)\b/i.test(normalized)
@@ -21657,6 +22172,7 @@ async function handleSendMessageToContactProfessional(
 
   const { parsed } = analysis;
   const rawMessage = parsed.message;
+  const shouldPreviewFirst = shouldPreviewRecipientTargetedWhatsAppDraft(text);
 
   if (parsed.kind === "phone" && parsed.phone) {
     const professionalDraft = await generateStyledWhatsAppDraft({
@@ -21666,6 +22182,39 @@ async function handleSendMessageToContactProfessional(
       conversationStyle,
       locale,
     });
+    if (!professionalDraft.trim()) {
+      return translateMessage(buildUnsafeWhatsAppDraftBlockedReply(), locale);
+    }
+
+    if (shouldPreviewFirst) {
+      await rememberWhatsAppPendingContactResolution({
+        userId,
+        kind: "send_message",
+        requestedName: parsed.contactName || `+${parsed.phone}`,
+        resumePrompt: text,
+        draftMessage: professionalDraft,
+        matches: [{
+          name: parsed.contactName || `+${parsed.phone}`,
+          phone: parsed.phone,
+          jid: `${parsed.phone}@s.whatsapp.net`,
+        }],
+      });
+
+      return translateMessage(
+        [
+          `✍️ *Draft message for +${parsed.phone}:*`,
+          "",
+          `"${professionalDraft}"`,
+          "",
+          "━━━",
+          "Reply with:",
+          "• *Send* — to send this message now",
+          "• *Improve* — to make it better",
+          "• Or type your own version",
+        ].join("\n"),
+        locale,
+      );
+    }
 
     try {
       const sendResult = await sendClawCloudWhatsAppToPhone(parsed.phone, professionalDraft, {
@@ -21872,6 +22421,9 @@ async function handleSendMessageToContactProfessional(
     conversationStyle,
     locale,
   });
+  if (!professionalDraft.trim()) {
+    return translateMessage(buildUnsafeWhatsAppDraftBlockedReply(), locale);
+  }
 
   const isStrictSingleContactCommand = parsed.kind === "contacts" && parsed.contactNames.length === 1;
   const singleRecipient = recipients.length === 1 ? recipients[0] : null;
@@ -21882,17 +22434,14 @@ async function handleSendMessageToContactProfessional(
   );
 
   if (canAutoSendSingleRecipient && singleRecipient) {
-    // Draft-style prompts stay in review.
-    // Only explicit send/reply/message phrasing should send immediately.
-    const shouldPreviewFirst = shouldPreviewRecipientTargetedWhatsAppDraft(text);
-
     if (shouldPreviewFirst) {
       // Show draft and ask for confirmation before sending
       await rememberWhatsAppPendingContactResolution({
         userId,
         kind: "send_message",
         requestedName: singleRecipient.name,
-        resumePrompt: `send "${professionalDraft}" to ${singleRecipient.name}`,
+        resumePrompt: text,
+        draftMessage: professionalDraft,
         matches: [{
           name: singleRecipient.name,
           phone: singleRecipient.phone ?? "",
@@ -21967,6 +22516,19 @@ async function handleSendMessageToContactProfessional(
         `I found ${singleRecipient?.name || "a contact"}, but the match is not exact enough to send automatically.`,
         "",
         "Send me the full contact name or the direct number and I will send it right away.",
+      ].join("\n"),
+      locale,
+    );
+  }
+
+  if (recipients.length > 1 && shouldPreviewFirst) {
+    return translateMessage(
+      [
+        "I drafted the WhatsApp message, but I did not auto-send a generated draft to multiple contacts.",
+        "",
+        `"${professionalDraft}"`,
+        "",
+        "Send the exact final text with the specific contacts once you are happy with it, or send it to one contact first and review it there.",
       ].join("\n"),
       locale,
     );

@@ -44,6 +44,11 @@ const tldLocaleMap: Record<string, SupportedLocale> = {
 };
 
 const INDIAN_LOCALES = new Set<SupportedLocale>(["hi", "pa", "ta", "te", "kn", "bn", "mr", "gu"]);
+const DEFAULT_LATIN_SCRIPT_LOCALES = new Set<SupportedLocale>([
+  "en", "es", "fr", "de", "pt", "it", "tr", "id", "ms", "sw", "nl", "pl",
+  "vi", "ro", "hu", "cs", "fi", "sv", "no", "da", "hr", "sk", "af", "fil",
+  "az", "uz", "ha", "yo", "ig",
+]);
 
 const TRANSLATION_FAILURE_REPLY_PATTERNS = [
   /\bi could not complete a reliable direct answer\b/i,
@@ -912,18 +917,18 @@ export function buildClawCloudReplyLanguageInstruction(resolution: ClawCloudRepl
     }
 
     if (resolution.detectedLocale === "en") {
-      return "The user explicitly asked for the answer in English. Reply fully in natural English.";
+      return "The user explicitly asked for the answer in English. Reply ONLY in natural English.";
     }
 
     if (resolution.preserveRomanScript) {
-      return `The user explicitly asked for the answer in ${detectedLanguageName}. Reply fully in natural ${detectedLanguageName} using Roman script only. Do not switch into a native script.`;
+      return `The user explicitly asked for the answer in ${detectedLanguageName}. Reply ONLY in natural ${detectedLanguageName} using Roman script only. Do not switch into a native script or any other language.`;
     }
 
-    return `The user explicitly asked for the answer in ${detectedLanguageName}. Reply fully in that language and keep the answer natural and fluent.`;
+    return `The user explicitly asked for the answer in ${detectedLanguageName}. Reply ONLY in that language and keep the answer natural and fluent. Do not switch into English or any other language unless the user explicitly asks for it.`;
   }
 
   if (resolution.source === "hinglish_message") {
-    return "The user is writing in Hinglish. Reply in natural Hinglish using Roman script, and keep the same casual human tone.";
+    return "The user is writing in Hinglish. Reply ONLY in natural Hinglish using Roman script, and keep the same casual human tone.";
   }
 
   if (resolution.source === "mirrored_message" && resolution.detectedLocale) {
@@ -936,21 +941,21 @@ export function buildClawCloudReplyLanguageInstruction(resolution: ClawCloudRepl
     }
 
     if (resolution.preserveRomanScript) {
-      return `The user is writing in ${mirroredLanguageName} using Roman script. Mirror that language naturally and keep the reply fully in Roman script only. Do not switch into native scripts.`;
+      return `The user is writing in ${mirroredLanguageName} using Roman script. Mirror that language naturally and keep the reply ONLY in Roman script for that language. Do not switch into native scripts or any other language.`;
     }
 
-    return `The user is writing in ${mirroredLanguageName}. Mirror that language naturally in your reply and preserve the user's tone and formality.`;
+    return `The user is writing in ${mirroredLanguageName}. Mirror that language naturally in your reply and preserve the user's tone and formality. Reply ONLY in that language unless the user explicitly asks for a different output language.`;
   }
 
   if (resolution.preserveRomanScript && resolution.locale !== "en") {
-    return `Reply in ${getRequestedLanguageDisplayName(resolution.locale, resolution.targetLanguageName)} using natural Roman script only. Do not switch into native scripts unless the user explicitly asks for that script.`;
+    return `Reply ONLY in ${getRequestedLanguageDisplayName(resolution.locale, resolution.targetLanguageName)} using natural Roman script only. Do not switch into native scripts or any other language unless the user explicitly asks for that script.`;
   }
 
   if (resolution.locale === "en") {
-    return "Reply in natural English by default. Only switch into Hindi, Hinglish, or any other language if the user explicitly asks for it or clearly writes the current message in that language.";
+    return "Reply ONLY in natural English by default. Only switch into another language if the user explicitly asks for it or clearly writes the current message in that language.";
   }
 
-  return `Reply in ${getRequestedLanguageDisplayName(resolution.locale, resolution.targetLanguageName)} unless the user explicitly asks for a different output language.`;
+  return `Reply ONLY in ${getRequestedLanguageDisplayName(resolution.locale, resolution.targetLanguageName)} unless the user explicitly asks for a different output language.`;
 }
 
 /**
@@ -963,7 +968,8 @@ export function verifyReplyLanguageMatch(input: {
   resolution: ClawCloudReplyLanguageResolution;
 }): { verified: boolean; expected: string; detected: string | null } {
   const expectedLocale = input.resolution.locale;
-  const replyLocale = inferClawCloudMessageLocale(input.aiReply);
+  const normalizedReply = normalizeMessageForLanguageDetection(input.aiReply);
+  const replyLocale = inferClawCloudMessageLocale(normalizedReply);
   const expectedLanguage = input.resolution.targetLanguageName ?? expectedLocale;
 
   if (!input.aiReply.trim() || input.aiReply.trim().length < 20) {
@@ -988,6 +994,17 @@ export function verifyReplyLanguageMatch(input: {
   }
 
   if (!replyLocale) {
+    if (!input.resolution.preserveRomanScript && LATIN_SCRIPT_MESSAGE_RE.test(normalizedReply)) {
+      const expectsNonLatinByDefault = !DEFAULT_LATIN_SCRIPT_LOCALES.has(expectedLocale);
+      if (expectsNonLatinByDefault) {
+        return { verified: false, expected: expectedLocale, detected: "en" };
+      }
+
+      const looksLatinEnglish = looksLikeLikelyEnglishReply(normalizedReply);
+      if (looksLatinEnglish) {
+        return { verified: false, expected: expectedLocale, detected: "en" };
+      }
+    }
     return { verified: true, expected: expectedLocale, detected: null };
   }
 

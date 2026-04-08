@@ -180,6 +180,7 @@ function buildImageDescriptionPrompt() {
     "- NEVER say 'The image contains...', 'The image displays...', 'I can see...', 'It is accompanied by...'",
     "- NEVER describe visual elements: colors, backgrounds, birds, flowers, fonts, layout, watermarks, website URLs",
     "- NEVER mention 'status bar', 'dark theme', 'notification icon', 'blurred background'",
+    "- NEVER say you need extracted text, that you are assuming extracted text exists, or that the user should provide OCR text first",
     "- NEVER translate or transcribe the text unless asked — just RESPOND to its meaning",
     "- NEVER give a second paragraph about what the image 'suggests' or 'indicates'",
     "",
@@ -191,7 +192,9 @@ function buildImageExtractionPrompt() {
   return [
     "Read this image carefully.",
     "Transcribe the visible text exactly, including names, labels, row values, codes, dates, and numbers.",
+    "If this is a screenshot, QR payment page, invoice, booking page, or dashboard, capture the app names, payment rails, amounts, timers, statuses, warnings, and identifiers that are visibly shown.",
     "If the image contains a table, grid, or dashboard, rewrite each important row or field as a separate bullet.",
+    "If anything is unreadable or cut off, say that it is unreadable instead of guessing.",
     "Do not answer any question yet and do not guess missing values.",
     "Reply exactly in this format:",
     "VISIBLE_TEXT:",
@@ -210,6 +213,7 @@ function buildGroundedReasoningPrompt(
   return [
     "You are answering a question about an image using extracted visual evidence only.",
     "Use only the evidence below.",
+    "Reply in the same language as the user's question unless the user explicitly asked for another language.",
     "Follow every rule in the user's question in the exact order given.",
     "If the winning answer has an owner, engineer, assignee, or named person attached to it, include that name in the final answer.",
     "If a row is excluded by a rule, say so briefly.",
@@ -228,6 +232,109 @@ function buildGroundedReasoningPrompt(
     "- <short bullet citing the exact row/value used>",
     "- <short bullet showing the rule or tie-break>",
   ].join("\n");
+}
+
+function buildImageEvidenceSummaryPrompt(
+  extractedEvidence: string,
+  userQuestion: string,
+) {
+  const trimmedQuestion = userQuestion.trim();
+
+  return [
+    "You are preparing a final reply from extracted image evidence only.",
+    "Use only the evidence below.",
+    "Reply in the same language as the user's question when a question is provided. Otherwise match the dominant language visible in the image.",
+    "If the image is a screenshot, payment page, QR code, table, or dashboard, focus on the exact visible content such as app names, amounts, timers, statuses, warnings, codes, and identifiers.",
+    "If any detail is partial or unreadable, say that briefly instead of guessing.",
+    "",
+    trimmedQuestion ? "User question:" : "Task:",
+    trimmedQuestion || "Summarize what this image shows in a concise, professional way.",
+    "",
+    "Extracted image evidence:",
+    extractedEvidence.trim().slice(0, 6_000),
+    "",
+    trimmedQuestion
+      ? "Reply with a direct answer followed by 1-2 short bullets citing the exact visible evidence."
+      : "Reply with 2-4 sentences that explain the most important visible details and the key action or conclusion the user should notice.",
+  ].join("\n");
+}
+
+function hasMeaningfulImageEvidence(extractedEvidence: string) {
+  const normalized = extractedEvidence
+    .replace(/visible_text:/gi, "")
+    .replace(/structured_facts:/gi, "")
+    .replace(/[-:\s]/g, "")
+    .trim();
+
+  return normalized.length >= 24;
+}
+
+function looksLikeVisionPlaceholderReply(raw: string) {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return true;
+  }
+
+  return [
+    /\bextract(?:ed)? text from image\b/i,
+    /\bassume the extracted text is available\b/i,
+    /\bdon'?t have the actual extracted text\b/i,
+    /\bprovide the extracted text\b/i,
+    /\bshare the extracted text\b/i,
+    /\bwait for more information about the image\b/i,
+    /\boriginal message was an image\b/i,
+    /\bi (?:cannot|can't|do not|don't) have the (?:actual )?extracted text\b/i,
+    /\bi (?:cannot|can't|do not|don't) (?:see|view|access) the image\b/i,
+    /^\s*(?:visible_text|structured_facts):/i,
+  ].some((pattern) => pattern.test(trimmed));
+}
+
+async function runEvidenceSummary(
+  extractedEvidence: string,
+  userQuestion: string,
+  nvidiaUrl: string,
+  nvidiaKey?: string,
+  openaiKey?: string,
+): Promise<string | null> {
+  const messages: TextMessage[] = [
+    {
+      role: "user",
+      content: buildImageEvidenceSummaryPrompt(extractedEvidence, userQuestion),
+    },
+  ];
+
+  if (nvidiaKey) {
+    const result = await callTextModel(
+      messages,
+      nvidiaUrl,
+      nvidiaKey,
+      NVIDIA_REASONING_MODEL,
+    );
+    if (result) {
+      return result;
+    }
+  }
+
+  if (openaiKey) {
+    const result = await callTextModel(
+      messages,
+      "https://api.openai.com/v1/chat/completions",
+      openaiKey,
+      OPENAI_REASONING_MODEL,
+    );
+    if (result) {
+      return result;
+    }
+  }
+
+  return null;
+}
+
+function logRejectedVisionReply(stage: string, raw: string) {
+  logClawCloudProviderEvent("warn", "vision", "analysis_rejected", {
+    stage,
+    preview: raw.trim().slice(0, 180),
+  });
 }
 
 async function runVisionPrompt(
@@ -401,16 +508,16 @@ export async function analyseImage(
     had_question: hasUserQuestion,
   });
 
-  if (hasUserQuestion) {
-    const extractedEvidence = await runVisionPrompt(
-      dataUrl,
-      buildImageExtractionPrompt(),
-      nvidiaUrl,
-      nvidiaKey,
-      openaiKey,
-    );
+  const extractedEvidence = await runVisionPrompt(
+    dataUrl,
+    buildImageExtractionPrompt(),
+    nvidiaUrl,
+    nvidiaKey,
+    openaiKey,
+  );
 
-    if (extractedEvidence) {
+  if (extractedEvidence && hasMeaningfulImageEvidence(extractedEvidence)) {
+    if (hasUserQuestion) {
       const groundedAnswer = await runGroundedReasoning(
         extractedEvidence,
         userQuestion,
@@ -418,9 +525,26 @@ export async function analyseImage(
         nvidiaKey,
         openaiKey,
       );
-      if (groundedAnswer) {
+      if (groundedAnswer && !looksLikeVisionPlaceholderReply(groundedAnswer)) {
         return groundedAnswer;
       }
+      if (groundedAnswer) {
+        logRejectedVisionReply("grounded_reasoning", groundedAnswer);
+      }
+    }
+
+    const evidenceSummary = await runEvidenceSummary(
+      extractedEvidence,
+      userQuestion,
+      nvidiaUrl,
+      nvidiaKey,
+      openaiKey,
+    );
+    if (evidenceSummary && !looksLikeVisionPlaceholderReply(evidenceSummary)) {
+      return evidenceSummary;
+    }
+    if (evidenceSummary) {
+      logRejectedVisionReply("evidence_summary", evidenceSummary);
     }
   }
 
@@ -428,6 +552,8 @@ export async function analyseImage(
     ? [
         "Study this image carefully and read the visible text exactly before answering.",
         "Use only the contents of the image.",
+        "Reply in the same language as the user's question unless the user asked for another language.",
+        "Do not say that extracted text is missing, that OCR is unavailable, or that the user should provide the extracted text first.",
         "Question:",
         userQuestion.trim(),
         "",
@@ -442,8 +568,11 @@ export async function analyseImage(
     nvidiaKey,
     openaiKey,
   );
-  if (result) {
+  if (result && !looksLikeVisionPlaceholderReply(result)) {
     return result;
+  }
+  if (result) {
+    logRejectedVisionReply("fallback_prompt", result);
   }
 
   if (!nvidiaKey && !openaiKey) {
@@ -469,7 +598,10 @@ export function isVisionAvailable(): boolean {
  * through despite prompt instructions.
  */
 function cleanVisionResponse(raw: string): string {
-  let cleaned = raw;
+  let cleaned = raw.trim();
+
+  cleaned = cleaned.replace(/^final answer:\s*/i, "");
+  cleaned = cleaned.replace(/\nwhy:\s*/i, "\n\nWhy:\n");
 
   // Strip description-style opening phrases
   const descriptionPrefixes = [
@@ -496,6 +628,10 @@ function cleanVisionResponse(raw: string): string {
   }
 
   return cleaned.trim();
+}
+
+export function looksLikeVisionPlaceholderReplyForTest(raw: string) {
+  return looksLikeVisionPlaceholderReply(raw);
 }
 
 /**

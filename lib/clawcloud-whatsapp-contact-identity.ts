@@ -1,4 +1,4 @@
-import { formatContactDisplayName, normalizeContactName } from "@/lib/clawcloud-contacts";
+import { formatContactDisplayName } from "@/lib/clawcloud-contacts";
 
 export type ClawCloudWhatsAppContactIdentityQuality =
   | "phone"
@@ -76,6 +76,21 @@ type IdentityGraphState<T> = {
   preparedSeeds: PreparedIdentitySeed<T>[];
 };
 
+const IDENTITY_CONTACT_HONORIFICS = [
+  "ji",
+  "sir",
+  "madam",
+  "mam",
+  "bhai",
+  "bhaiya",
+  "didi",
+  "saab",
+  "sahab",
+  "uncle",
+  "aunty",
+  "auntie",
+] as const;
+
 function cleanText(value: string | null | undefined) {
   const cleaned = String(value ?? "")
     .normalize("NFKC")
@@ -121,7 +136,29 @@ function normalizeIdentityAlias(value: string | null | undefined) {
     return "";
   }
 
-  return normalizeContactName(cleaned);
+  const words = cleaned
+    .normalize("NFKC")
+    .replace(/[\u200d\uFE0F]/g, "")
+    .replace(/[_]+/g, " ")
+    .replace(/[â€œâ€"']/g, "")
+    .replace(/[^\p{L}\p{M}\p{N}\s.&+\-/\u0900-\u097F]/gu, " ")
+    .toLowerCase()
+    .replace(/\b(?:contact|phone|number)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  while (words.length > 1) {
+    const lastWord = words[words.length - 1];
+    if (lastWord && IDENTITY_CONTACT_HONORIFICS.includes(lastWord as (typeof IDENTITY_CONTACT_HONORIFICS)[number])) {
+      words.pop();
+      continue;
+    }
+    break;
+  }
+
+  return words.join(" ").trim();
 }
 
 function expandIdentityAliasVariants(value: string | null | undefined) {
