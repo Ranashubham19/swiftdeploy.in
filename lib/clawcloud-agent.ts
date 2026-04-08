@@ -14279,6 +14279,9 @@ async function routeInboundAgentMessageCore(
     liveAnswerBundle?: ClawCloudAnswerBundle | null,
   ) => {
     const replyLanguage = await resolveReplyLocale(trimmed);
+    const alreadyTranslated =
+      replyLanguage.locale === "en"
+      && !replyLanguage.preserveRomanScript;
     return finalizeAgentReply({
       userId,
       locale: replyLanguage.locale,
@@ -14288,6 +14291,7 @@ async function routeInboundAgentMessageCore(
       category,
       startedAt: routeStartedAt,
       reply,
+      alreadyTranslated,
       liveAnswerBundle,
     });
   };
