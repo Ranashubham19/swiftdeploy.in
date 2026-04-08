@@ -18,6 +18,8 @@ import type { ClawCloudModelAuditTrail } from "@/lib/types";
 import { screenInput, screenOutput, buildSafeRefusal, sanitizeOutput } from "@/lib/clawcloud-safety-filter";
 import { logSafetyBlock, logCacheHit, logInfo, logWarn, recordIntentQuery, recordCacheHit, recordCacheMiss, recordFallback, incrementActiveRequests, decrementActiveRequests, generateTraceId } from "@/lib/clawcloud-observability";
 import { recordModelPerformance, reorderModelsByPerformance, getAdaptiveTimeout } from "@/lib/clawcloud-model-health-persistence";
+import { recordAiModelMetric } from "@/lib/clawcloud-ai-metrics";
+import { isModelCircuitOpen, recordCircuitSuccess, recordCircuitFailure } from "@/lib/clawcloud-ai-circuit-breaker";
 
 export type IntentType =
   | "greeting"
@@ -128,35 +130,35 @@ const MODEL_HEALTH = new Map<string, ModelHealthState>();
 const MODEL_FAILURE_COOLDOWN_MS = 45_000;
 const MODEL_FAILURE_MAX_COOLDOWN_MS = 8 * 60 * 1000;
 
-// Per-model timeout — reduced to fail fast and move to the next model quickly
+// Per-model timeout — generous enough for complex reasoning without being too permissive
 const INTENT_TIMEOUT_MS: Record<IntentType, number> = {
-  greeting: 5_000,
-  help: 5_000,
-  memory: 5_000,
-  reminder: 5_000,
-  send_message: 6_000,
-  save_contact: 5_000,
-  calendar: 6_000,
-  general: 8_000,
-  email: 8_000,
-  spending: 8_000,
-  finance: 10_000,
-  web_search: 10_000,
-  creative: 8_000,
-  coding: 14_000,
-  math: 10_000,
-  research: 10_000,
-  science: 8_000,
-  history: 8_000,
-  geography: 8_000,
-  health: 8_000,
-  law: 8_000,
-  economics: 8_000,
-  culture: 8_000,
-  sports: 8_000,
-  technology: 8_000,
-  language: 8_000,
-  explain: 8_000,
+  greeting: 12_000,
+  help: 12_000,
+  memory: 12_000,
+  reminder: 12_000,
+  send_message: 15_000,
+  save_contact: 12_000,
+  calendar: 15_000,
+  general: 30_000,
+  email: 30_000,
+  spending: 30_000,
+  finance: 45_000,
+  web_search: 45_000,
+  creative: 30_000,
+  coding: 60_000,
+  math: 45_000,
+  research: 45_000,
+  science: 30_000,
+  history: 30_000,
+  geography: 25_000,
+  health: 30_000,
+  law: 30_000,
+  economics: 30_000,
+  culture: 25_000,
+  sports: 25_000,
+  technology: 30_000,
+  language: 25_000,
+  explain: 30_000,
 };
 
 // Parallelism 2 for all knowledge intents — race two models to beat NVIDIA timeouts
@@ -191,33 +193,33 @@ const INTENT_PARALLELISM: Record<IntentType, number> = {
 };
 
 const INTENT_MAX_TOTAL_MS: Record<IntentType, number> = {
-  greeting: 8_000,
-  help: 8_000,
-  memory: 8_000,
-  reminder: 8_000,
-  send_message: 10_000,
-  save_contact: 10_000,
-  calendar: 10_000,
-  general: 20_000,
-  email: 16_000,
-  spending: 16_000,
-  finance: 22_000,
-  web_search: 25_000,
-  creative: 20_000,
-  coding: 28_000,
-  math: 22_000,
-  research: 22_000,
-  science: 20_000,
-  history: 16_000,
-  geography: 12_000,
-  health: 20_000,
-  law: 20_000,
-  economics: 20_000,
-  culture: 14_000,
-  sports: 12_000,
-  technology: 20_000,
-  language: 12_000,
-  explain: 22_000,
+  greeting: 20_000,
+  help: 20_000,
+  memory: 20_000,
+  reminder: 20_000,
+  send_message: 25_000,
+  save_contact: 25_000,
+  calendar: 25_000,
+  general: 60_000,
+  email: 50_000,
+  spending: 50_000,
+  finance: 75_000,
+  web_search: 80_000,
+  creative: 60_000,
+  coding: 100_000,
+  math: 75_000,
+  research: 80_000,
+  science: 60_000,
+  history: 50_000,
+  geography: 40_000,
+  health: 60_000,
+  law: 60_000,
+  economics: 60_000,
+  culture: 45_000,
+  sports: 40_000,
+  technology: 60_000,
+  language: 40_000,
+  explain: 70_000,
 };
 
 const INTENT_CANDIDATE_LIMIT: Record<IntentType, number> = {
@@ -315,23 +317,23 @@ function buildIntentPriority(models: string[]) {
 }
 
 const FAST_OPERATIONAL_MODEL_PRIORITY = buildIntentPriority([
-  "meta/llama-4-maverick-17b-128e-instruct",
   "mistralai/mistral-small-3.1-24b-instruct-2503",
+  "meta/llama-4-maverick-17b-128e-instruct",
+  "mistralai/mixtral-8x22b-instruct-v0.1",
   "deepseek-ai/deepseek-v3.1-terminus",
   "qwen/qwen3-next-80b-a3b-instruct",
   "deepseek-ai/deepseek-v3.1",
   "qwen/qwen3.5-397b-a17b",
-  "mistralai/mixtral-8x22b-instruct-v0.1",
 ]);
 
 const GENERAL_MODEL_PRIORITY = buildIntentPriority([
-  "meta/llama-4-maverick-17b-128e-instruct",
-  "qwen/qwen3.5-397b-a17b",
-  "deepseek-ai/deepseek-v3.1",
-  "deepseek-ai/deepseek-v3.1-terminus",
   "mistralai/mistral-small-3.1-24b-instruct-2503",
-  "qwen/qwen3-next-80b-a3b-instruct",
+  "meta/llama-4-maverick-17b-128e-instruct",
   "mistralai/mixtral-8x22b-instruct-v0.1",
+  "deepseek-ai/deepseek-v3.1-terminus",
+  "qwen/qwen3-next-80b-a3b-instruct",
+  "deepseek-ai/deepseek-v3.1",
+  "qwen/qwen3.5-397b-a17b",
   "qwen/qwen3-coder-480b-a35b-instruct",
   "qwen/qwen2.5-coder-32b-instruct",
 ]);
@@ -361,8 +363,8 @@ const MATH_MODEL_PRIORITY = buildIntentPriority([
 // reserve the largest coder-heavy route for deep mode where longer waits are
 // acceptable.
 const FAST_CODE_MODEL_PRIORITY = buildIntentPriority([
-  "meta/llama-4-maverick-17b-128e-instruct",
   "mistralai/mistral-small-3.1-24b-instruct-2503",
+  "meta/llama-4-maverick-17b-128e-instruct",
   "deepseek-ai/deepseek-v3.1-terminus",
   "qwen/qwen2.5-coder-32b-instruct",
   "qwen/qwen3-next-80b-a3b-instruct",
@@ -423,33 +425,33 @@ const INTENT_PREFERRED_MODELS: Record<IntentType, string[]> = {
 };
 
 const DEEP_INTENT_TIMEOUT_MS: Record<IntentType, number> = {
-  greeting: 7_000,
-  help: 7_000,
-  memory: 7_000,
-  reminder: 7_000,
-  send_message: 9_000,
-  save_contact: 8_000,
-  calendar: 10_000,
-  general: 20_000,
-  email: 18_000,
-  spending: 18_000,
-  finance: 25_000,
-  web_search: 25_000,
-  creative: 20_000,
-  coding: 30_000,
-  math: 22_000,
-  research: 25_000,
-  science: 20_000,
-  history: 18_000,
-  geography: 15_000,
-  health: 20_000,
-  law: 20_000,
-  economics: 20_000,
-  culture: 18_000,
-  sports: 15_000,
-  technology: 20_000,
-  language: 15_000,
-  explain: 22_000,
+  greeting: 20_000,
+  help: 20_000,
+  memory: 20_000,
+  reminder: 20_000,
+  send_message: 25_000,
+  save_contact: 20_000,
+  calendar: 25_000,
+  general: 60_000,
+  email: 55_000,
+  spending: 55_000,
+  finance: 80_000,
+  web_search: 80_000,
+  creative: 60_000,
+  coding: 100_000,
+  math: 75_000,
+  research: 80_000,
+  science: 60_000,
+  history: 55_000,
+  geography: 45_000,
+  health: 60_000,
+  law: 60_000,
+  economics: 60_000,
+  culture: 50_000,
+  sports: 45_000,
+  technology: 60_000,
+  language: 45_000,
+  explain: 70_000,
 };
 
 const DEEP_INTENT_PARALLELISM: Record<IntentType, number> = {
@@ -483,33 +485,33 @@ const DEEP_INTENT_PARALLELISM: Record<IntentType, number> = {
 };
 
 const DEEP_INTENT_MAX_TOTAL_MS: Record<IntentType, number> = {
-  greeting: 10_000,
-  help: 10_000,
-  memory: 10_000,
-  reminder: 10_000,
-  send_message: 12_000,
-  save_contact: 12_000,
-  calendar: 12_000,
-  general: 30_000,
-  email: 25_000,
-  spending: 25_000,
-  finance: 35_000,
-  web_search: 35_000,
-  creative: 30_000,
-  coding: 35_000,
-  math: 30_000,
-  research: 35_000,
-  science: 30_000,
-  history: 25_000,
-  geography: 20_000,
-  health: 30_000,
-  law: 30_000,
-  economics: 30_000,
-  culture: 25_000,
-  sports: 20_000,
-  technology: 30_000,
-  language: 20_000,
-  explain: 30_000,
+  greeting: 30_000,
+  help: 30_000,
+  memory: 30_000,
+  reminder: 30_000,
+  send_message: 35_000,
+  save_contact: 35_000,
+  calendar: 35_000,
+  general: 90_000,
+  email: 80_000,
+  spending: 80_000,
+  finance: 110_000,
+  web_search: 115_000,
+  creative: 90_000,
+  coding: 150_000,
+  math: 110_000,
+  research: 115_000,
+  science: 90_000,
+  history: 80_000,
+  geography: 65_000,
+  health: 90_000,
+  law: 90_000,
+  economics: 90_000,
+  culture: 70_000,
+  sports: 65_000,
+  technology: 90_000,
+  language: 65_000,
+  explain: 100_000,
 };
 
 const DEEP_INTENT_CANDIDATE_LIMIT: Record<IntentType, number> = {
@@ -1881,6 +1883,22 @@ async function runCandidateCollectionBatch(input: {
   }
 
   const attempts: Array<Promise<BatchAttemptResult>> = input.candidates.map(async (candidate) => {
+    // Skip models with an open circuit breaker
+    if (isModelCircuitOpen(candidate.model)) {
+      console.warn(`[ai] circuit open for ${candidate.model}, skipping in collection batch`);
+      return {
+        ok: false as const,
+        trace: {
+          model: candidate.model,
+          tier: candidate.tier,
+          status: "failed" as const,
+          latencyMs: 0,
+          heuristicScore: null,
+          preview: null,
+        },
+      };
+    }
+
     const startedAt = Date.now();
     const callResult = await _call(
       input.messages,
@@ -1892,9 +1910,19 @@ async function runCandidateCollectionBatch(input: {
     );
     const latencyMs = Date.now() - startedAt;
     const out = callResult.content;
+    const timedOut = !out && !callResult.cancelled && latencyMs >= candidate.timeoutMs * 0.95;
 
     if (out) {
       markModelSuccess(candidate.healthKey);
+      recordCircuitSuccess(candidate.model);
+      recordAiModelMetric({
+        model: candidate.model,
+        intent: input.intent,
+        responseMode: input.responseMode,
+        latencyMs,
+        success: true,
+        timedOut: false,
+      });
       return {
         ok: true as const,
         result: {
@@ -1913,7 +1941,16 @@ async function runCandidateCollectionBatch(input: {
 
     if (!callResult.cancelled) {
       markModelFailure(candidate.healthKey, callResult.cooldownMs);
-      console.warn(`[ai] ${candidate.model} failed, trying next model...`);
+      recordCircuitFailure(candidate.model);
+      recordAiModelMetric({
+        model: candidate.model,
+        intent: input.intent,
+        responseMode: input.responseMode,
+        latencyMs,
+        success: false,
+        timedOut,
+      });
+      console.warn(`[ai] ${candidate.model} failed${timedOut ? " (timeout)" : ""}, trying next model...`);
     }
     return {
       ok: false as const,
@@ -2721,14 +2758,27 @@ async function runCandidateBatch(input: {
   winner: ModelGenerationResult | null;
   failures: ClawCloudModelCandidateTrace[];
 }> {
-  for (const candidate of input.candidates) {
+  // Filter out models whose circuit breaker is open before attempting
+  const activeCandidates = input.candidates.filter((candidate) => {
+    if (isModelCircuitOpen(candidate.model)) {
+      console.warn(`[ai] circuit open for ${candidate.model}, skipping`);
+      return false;
+    }
+    return true;
+  });
+
+  // If all candidates are circuit-open, fall back to the full list so we
+  // don't silently return nothing — the circuit breaker is advisory, not hard.
+  const candidates = activeCandidates.length > 0 ? activeCandidates : input.candidates;
+
+  for (const candidate of candidates) {
     console.log(`[ai] trying ${candidate.model}`);
   }
 
-  const controllers = input.candidates.map(() => new AbortController());
+  const controllers = candidates.map(() => new AbortController());
   const failures = new Map<number, ClawCloudModelCandidateTrace>();
 
-  const attempts = input.candidates.map((candidate, index) => (async () => {
+  const attempts = candidates.map((candidate, index) => (async () => {
     const startedAt = Date.now();
     const callResult = await _call(
       input.messages,
@@ -2741,9 +2791,19 @@ async function runCandidateBatch(input: {
     );
     const latencyMs = Date.now() - startedAt;
     const out = callResult.content;
+    const timedOut = !out && !callResult.cancelled && latencyMs >= candidate.timeoutMs * 0.95;
 
     if (out) {
       markModelSuccess(candidate.healthKey);
+      recordCircuitSuccess(candidate.model);
+      recordAiModelMetric({
+        model: candidate.model,
+        intent: input.intent,
+        responseMode: input.responseMode,
+        latencyMs,
+        success: true,
+        timedOut: false,
+      });
       return {
         candidate,
         out,
@@ -2760,6 +2820,15 @@ async function runCandidateBatch(input: {
 
     if (!callResult.cancelled && !controllers[index].signal.aborted) {
       markModelFailure(candidate.healthKey, callResult.cooldownMs);
+      recordCircuitFailure(candidate.model);
+      recordAiModelMetric({
+        model: candidate.model,
+        intent: input.intent,
+        responseMode: input.responseMode,
+        latencyMs,
+        success: false,
+        timedOut,
+      });
       failures.set(index, {
         model: candidate.model,
         tier: candidate.tier,
@@ -2768,7 +2837,7 @@ async function runCandidateBatch(input: {
         heuristicScore: null,
         preview: null,
       });
-      console.warn(`[ai] ${candidate.model} failed, trying next model...`);
+      console.warn(`[ai] ${candidate.model} failed${timedOut ? " (timeout)" : ""}, trying next model...`);
     }
 
     throw new Error(`No usable response from ${candidate.model}`);

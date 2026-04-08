@@ -1209,31 +1209,140 @@ export async function verifyClawCloudAnswer(input: {
 }
 
 export function buildClawCloudLowConfidenceReply(
-  _question: string,
+  question: string,
   profile: ClawCloudAnswerQualityProfile,
   rationale?: string,
 ): string {
+  // Detect if this is a service-side issue (timeout/model failure) vs. a genuine
+  // ambiguity in the user's question. Service-side failures should give a helpful
+  // structured response rather than asking the user to rephrase.
+  const isServiceSideFailure = rationale
+    ? /timeout|timed out|model.*fail|all.*fail|no.*response|inference.*fail|circuit.*open|unavailable/i.test(rationale)
+    : false;
+
+  if (isServiceSideFailure) {
+    const capabilityLines: string[] = [
+      "⚡ *Temporary service delay* — our AI inference is taking longer than usual right now.",
+      "",
+      "I can help you with:",
+      "• 💻 *Coding* — write, debug, explain, or review code in any language",
+      "• 🧮 *Math* — solve equations, statistics, financial calculations step by step",
+      "• 🔬 *Science & Research* — explain concepts, summarize findings, analyze data",
+      "• ⚖️ *Law & Health* — general guidance with appropriate caveats",
+      "• 📈 *Finance & Economics* — market concepts, calculations, analysis",
+      "• 🌍 *General knowledge* — history, geography, culture, sports, technology",
+      "• ✍️ *Creative writing* — stories, poems, emails, summaries",
+      "",
+      "💡 *To get the best answer:*",
+      "• Be specific — include names, numbers, dates, or context",
+      "• For code: mention the language and what the code should do",
+      "• For math: include the full equation or all known values",
+      "",
+      "Please try your question again in a moment — this is a temporary issue, not a problem with your question.",
+    ];
+    return capabilityLines.join("\n");
+  }
+
   if (profile.intent === "math") {
-    return "I need the full equation or the exact values to calculate that accurately.";
+    return [
+      "🧮 *Math question detected*",
+      "",
+      "To calculate accurately, I need:",
+      "• The full equation or formula",
+      "• All known values with their units",
+      "• What you want to solve for",
+      "",
+      "Example: _\"Solve for x: 2x + 5 = 13\"_ or _\"Calculate compound interest: ₹50,000 at 8% for 3 years\"_",
+    ].join("\n");
   }
 
   if (profile.requiresLiveGrounding) {
-    return "I need the exact place, date, person, item, or market you want checked to answer that accurately.";
+    return [
+      "🔍 *Live data needed*",
+      "",
+      "To fetch the most accurate current information, please specify:",
+      "• The exact place, city, or country",
+      "• The specific date or time period",
+      "• The exact person, company, or item",
+      "• The market or exchange (for financial data)",
+      "",
+      "Example: _\"Current petrol price in Mumbai\"_ or _\"USD to INR rate today\"_",
+    ].join("\n");
   }
 
   if (profile.intent === "coding") {
-    return "I need the exact problem statement, language, or constraints to give a precise coding answer.";
+    return [
+      "💻 *Coding question detected*",
+      "",
+      "For a precise answer, please include:",
+      "• The programming language (Python, JavaScript, TypeScript, etc.)",
+      "• What the code should do — input and expected output",
+      "• Any constraints or requirements",
+      "• The error message if you're debugging",
+      "",
+      "Example: _\"Write a Python function that sorts a list of dictionaries by a key\"_",
+    ].join("\n");
   }
 
   if (profile.intent === "language") {
-    return "I need the exact word, phrase, or sentence you want translated or explained to answer it accurately.";
+    return [
+      "🗣️ *Language question detected*",
+      "",
+      "Please share:",
+      "• The exact word, phrase, or sentence to translate or explain",
+      "• The source language and target language",
+      "• Whether you want translation, pronunciation, or meaning",
+      "",
+      "Example: _\"Translate 'good morning' to Hindi\"_ or _\"What does 'ephemeral' mean?\"_",
+    ].join("\n");
+  }
+
+  if (profile.intent === "health") {
+    return [
+      "⚕️ *Health question detected*",
+      "",
+      "I can provide general health information. For a helpful answer, please share:",
+      "• The specific symptom, condition, or medication you're asking about",
+      "• Any relevant context (age, duration, severity)",
+      "",
+      "⚠️ For personal medical advice, always consult a qualified doctor.",
+    ].join("\n");
+  }
+
+  if (profile.intent === "law") {
+    return [
+      "⚖️ *Legal question detected*",
+      "",
+      "I can explain general legal concepts. For a helpful answer, please share:",
+      "• The specific law, section, or legal situation",
+      "• The jurisdiction (India, US, UK, etc.)",
+      "• What outcome or information you need",
+      "",
+      "⚠️ For advice specific to your situation, consult a qualified advocate.",
+    ].join("\n");
   }
 
   if (rationale && /scope|detail|specific|precise|verify/i.test(rationale)) {
-    return "I need the exact topic, item, or detail you want answered to give a precise reply.";
+    return [
+      "🔍 *More detail needed*",
+      "",
+      "To give you a precise answer, please include:",
+      "• The exact topic, name, or item you're asking about",
+      "• Any relevant numbers, dates, or context",
+      "",
+      "The more specific your question, the more accurate my answer will be.",
+    ].join("\n");
   }
 
-  return "I need the exact topic, name, item, or number you want answered to give a precise reply.";
+  return [
+    "💡 *Question received*",
+    "",
+    "To give you the most accurate answer, please be more specific:",
+    "• Include the exact topic, name, item, or number",
+    "• Add any relevant context or constraints",
+    "",
+    "I can help with coding, math, science, law, health, finance, history, and much more — just ask!",
+  ].join("\n");
 }
 
 export function clawCloudConfidenceBelowFloor(
