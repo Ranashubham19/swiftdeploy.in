@@ -2947,10 +2947,30 @@ function resolveRecoveryIntent(question: string, intent?: string): IntentType {
   return detectIntent(question).type;
 }
 
+function looksLikeWhatsAppContactSelectionFollowUp(message: string) {
+  const normalized = normalizeWhatsAppPendingContactSelectionText(message);
+  if (!normalized || /[?？]$/.test(normalized)) {
+    return false;
+  }
+
+  return (
+    /^(?:go\s+for|go\s+with|choose|pick|select|use|take|reply\s+with|with|for)\b/i.test(normalized)
+    || /^(?:option\s*\d+|\d+(?:st|nd|rd|th)?\s+one|first\s+one|second\s+one|third\s+one|fourth\s+one)\b/i.test(normalized)
+  );
+}
+
 function buildIntentAlignedRecoveryReply(question?: string, intent?: string) {
   const safeQuestion = question?.trim() ?? "";
   if (!safeQuestion) {
     return "Reply with the exact question or task and I will answer that directly.";
+  }
+
+  if (looksLikeWhatsAppContactSelectionFollowUp(safeQuestion)) {
+    return [
+      "I kept this in the WhatsApp contact-selection lane instead of guessing.",
+      "",
+      "Reply with the exact contact name as saved in WhatsApp, the full number, or the option number and I will continue with the right chat only.",
+    ].join("\n");
   }
 
   const resolvedIntent = resolveRecoveryIntent(safeQuestion, intent);
@@ -2984,14 +3004,14 @@ function buildIntentAlignedRecoveryReply(question?: string, intent?: string) {
     return deterministicChat.trim();
   }
 
-  const bestEffort = bestEffortProfessionalTemplateV2(resolvedIntent, safeQuestion);
-  if (bestEffort.trim() && !isVisibleFallbackReply(bestEffort) && !isLowQualityTemplateReply(bestEffort)) {
-    return bestEffort.trim();
+  const bestEffort = bestEffortProfessionalTemplateV2(resolvedIntent, safeQuestion)?.trim() ?? "";
+  if (bestEffort && !isVisibleFallbackReply(bestEffort) && !isLowQualityTemplateReply(bestEffort)) {
+    return bestEffort;
   }
 
-  const universal = buildUniversalDomainFallback(resolvedIntent, safeQuestion);
-  if (universal.trim() && !isVisibleFallbackReply(universal) && !isLowQualityTemplateReply(universal)) {
-    return universal.trim();
+  const universal = buildUniversalDomainFallback(resolvedIntent, safeQuestion)?.trim() ?? "";
+  if (universal && !isVisibleFallbackReply(universal) && !isLowQualityTemplateReply(universal)) {
+    return universal;
   }
 
   return buildClawCloudLowConfidenceReply(
@@ -13761,6 +13781,27 @@ async function handlePendingApprovalContextQuestion(userId: string, message: str
   return { handled: false, response: "" };
 }
 
+function shouldBypassWhatsAppPendingContactSelection(
+  message: string,
+  activeContactSessionCommandType?: string | null,
+) {
+  return (
+    activeContactSessionCommandType !== null
+    && activeContactSessionCommandType !== undefined
+    && activeContactSessionCommandType !== "none"
+  )
+    || parseSendMessageCommand(message) !== null
+    || parseSaveContactCommand(message) !== null
+    || detectWhatsAppSettingsCommandIntent(message) !== null;
+}
+
+export function shouldBypassWhatsAppPendingContactSelectionForTest(
+  message: string,
+  activeContactSessionCommandType?: string | null,
+) {
+  return shouldBypassWhatsAppPendingContactSelection(message, activeContactSessionCommandType);
+}
+
 async function routeInboundAgentMessageResultCore(
   userId: string,
   message: string,
@@ -13784,11 +13825,10 @@ async function routeInboundAgentMessageResultCore(
     ?? "professional";
 
   const shouldBypassPendingContactSelection =
-    activeContactSessionCommand.type !== "none"
-    || parseSendMessageCommand(normalizedMessage) !== null
-    || parseSaveContactCommand(normalizedMessage) !== null
-    || detectWhatsAppSettingsCommandIntent(normalizedMessage) !== null
-    || looksLikeInChatClawCloudRequestDuringActiveContact(normalizedMessage);
+    shouldBypassWhatsAppPendingContactSelection(
+      normalizedMessage,
+      activeContactSessionCommand.type,
+    );
   const preflightWhatsAppSettings = shouldBypassPendingContactSelection
     ? null
     : await getWhatsAppSettings(userId).catch(() => null);

@@ -244,6 +244,7 @@ import {
   looksLikeAssistantReplyRepairRequestForTest,
   parseWhatsAppActiveContactSessionCommandForTest,
   resolveWhatsAppPendingContactSelectionForTest,
+  shouldBypassWhatsAppPendingContactSelectionForTest,
   resolveWhatsAppPendingDraftReviewActionForTest,
   resolveWhatsAppActiveContactDraftLanguageForTest,
   resolveWhatsAppActiveContactSessionCommandWithContextForTest,
@@ -1736,6 +1737,23 @@ test("intent-aligned recovery for coding stays answer-shaped instead of generic 
   assert.doesNotMatch(reply, /exact topic, name, item, or number/i);
   assert.doesNotMatch(reply, /exact problem statement, language, or constraints/i);
   assert.match(reply, /sliding window|two pointers|time complexity|space complexity|```/i);
+});
+
+test("intent-aligned recovery keeps WhatsApp contact-selection follow-ups in the contact lane", () => {
+  const reply = buildIntentAlignedRecoveryReplyForTest("go for hansraj lpu", "send_message");
+
+  assert.match(reply, /contact-selection lane/i);
+  assert.match(reply, /exact contact name as saved in WhatsApp/i);
+  assert.match(reply, /full number, or the option number/i);
+});
+
+test("intent-aligned recovery tolerates null best-effort templates without throwing", () => {
+  const reply = buildIntentAlignedRecoveryReplyForTest(
+    "Can you write an article about artificial intelligence in simple words?",
+    "general",
+  );
+
+  assert.ok(reply.length > 0);
 });
 
 test("unified answer assessment prioritizes live grounding defects for freshness-sensitive questions", () => {
@@ -6327,6 +6345,21 @@ test("pending WhatsApp contact resolution understands exact-name and go-for foll
       option: pending.options[0],
       resumePrompt: "just read the message of me with +918949826240",
     },
+  );
+});
+
+test("pending WhatsApp contact selection is not bypassed for short follow-up choices", () => {
+  assert.equal(
+    shouldBypassWhatsAppPendingContactSelectionForTest("go for hansraj lpu", "none"),
+    false,
+  );
+  assert.equal(
+    shouldBypassWhatsAppPendingContactSelectionForTest("1st one hansraj lpu", "none"),
+    false,
+  );
+  assert.equal(
+    shouldBypassWhatsAppPendingContactSelectionForTest("Send hello to Hansraj Lpu", "none"),
+    true,
   );
 });
 
