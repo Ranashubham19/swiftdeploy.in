@@ -5835,6 +5835,10 @@ test("verified WhatsApp history selections rewrite short follow-ups to the exact
     looksLikeWhatsAppHistoryContinuationWithoutExplicitContactForTest("ok summarize"),
     true,
   );
+  assert.equal(
+    looksLikeWhatsAppHistoryContinuationWithoutExplicitContactForTest("latest submarine india launch in indian Ocean"),
+    false,
+  );
 
   const resumePrompt = buildWhatsAppHistoryFollowUpResumePromptForTest(
     "ok summarize",
@@ -5850,6 +5854,13 @@ test("verified WhatsApp history selections rewrite short follow-ups to the exact
   );
 
   assert.equal(resumePrompt, "Summarize the WhatsApp chat with +919898163144");
+});
+
+test("explicit live public questions bypass stale WhatsApp carryover state", () => {
+  assert.equal(
+    shouldBypassWhatsAppPendingContactSelectionForTest("latest submarine india launch in indian Ocean", "none"),
+    true,
+  );
 });
 
 test("pending WhatsApp draft review understands send improve and replacement follow-ups", () => {

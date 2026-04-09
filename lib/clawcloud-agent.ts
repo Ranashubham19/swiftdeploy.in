@@ -9808,9 +9808,42 @@ function looksLikeVolatileLiveQuery(text: string): boolean {
   const freshnessSignals = /\b(latest|current|today|right now|currently|newest|recent|as of now|update|updates|live)\b/.test(normalized);
   const volatileSurface =
     shouldUseLiveSearch(normalized)
-    || /\b(news|headline|headlines|price|pricing|ceo|founder|president|prime minister|ranking|rankings|richest|net worth|worth|version|release|model|weather|score|schedule|election|war|outage|inflation|gdp|population|api pricing)\b/.test(normalized);
+    || /\b(news|headline|headlines|price|pricing|ceo|founder|president|prime minister|ranking|rankings|richest|net worth|worth|version|release|model|weather|score|schedule|election|war|outage|inflation|gdp|population|api pricing|submarine|warship|destroyer|frigate|navy|naval|military|defen(?:s|c)e|launch)\b/.test(normalized);
 
   return freshnessSignals && volatileSurface;
+}
+
+function shouldBypassWhatsAppCarryoverForLockedRoute(message: string) {
+  if (
+    detectNewsQuestion(message)
+    || hasWeatherIntent(message)
+    || looksLikeVolatileLiveQuery(message)
+    || looksLikeHardTechnicalDeepRoutePrompt(message)
+    || looksLikeAlgorithmicCodingQuestion(message)
+    || looksLikeAbstractScienceComputabilityPrompt(message)
+    || looksLikeStructuredTechnicalChallengePrompt(message)
+    || looksLikeCultureStoryQuestion(message)
+    || looksLikeMultilingualTechnicalArchitecturePrompt(message)
+    || isMathOrStatisticsQuestion(message)
+  ) {
+    return true;
+  }
+
+  const strictRoute = detectStrictIntentRoute(message);
+  if (!strictRoute?.locked) {
+    return false;
+  }
+
+  const category = String(strictRoute.intent.category ?? "").trim().toLowerCase();
+  if (!category) {
+    return false;
+  }
+
+  return !(
+    category === "send_message"
+    || category === "save_contact"
+    || category.startsWith("whatsapp_")
+  );
 }
 
 function looksLikeLockedWhatsAppHistoryRoute(text: string): boolean {
@@ -13801,7 +13834,8 @@ function shouldBypassWhatsAppPendingContactSelection(
   )
     || parseSendMessageCommand(message) !== null
     || parseSaveContactCommand(message) !== null
-    || detectWhatsAppSettingsCommandIntent(message) !== null;
+    || detectWhatsAppSettingsCommandIntent(message) !== null
+    || shouldBypassWhatsAppCarryoverForLockedRoute(message);
 }
 
 export function shouldBypassWhatsAppPendingContactSelectionForTest(
@@ -21324,10 +21358,7 @@ function looksLikeWhatsAppHistoryContinuationWithoutExplicitContact(message: str
     return false;
   }
 
-  return (
-    /^(?:ok|okay|haan|han|yes|yep|hmm|hm)\s+(?:summarize|summary|show|tell|check|continue|more|latest)\b/i.test(normalized)
-    || /\b(?:summarize|summary|show more|more messages|latest message|last message|last few messages|latest visible message|continue the chat summary|chat summary|conversation summary)\b/i.test(normalized)
-  );
+  return /^(?:(?:ok|okay|haan|han|yes|yep|hmm|hm)\s+)?(?:summarize|summary|show\s+more|more\s+messages|continue|more|latest|latest\s+message|last\s+message|last\s+few\s+messages|latest\s+visible\s+message|chat\s+summary|conversation\s+summary|continue(?:\s+the)?\s+chat\s+summary)\s*$/i.test(normalized);
 }
 
 function buildWhatsAppHistoryFollowUpResumePrompt(
