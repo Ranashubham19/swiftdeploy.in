@@ -99,6 +99,21 @@ async function main() {
     }
     | null;
 
+  const regressionRun = runTsxJsonScript("scripts/clawcloud-whatsapp-regression.ts");
+  const regressionJson = chooseJsonReport<{
+    total?: number;
+    passed?: number;
+    failed?: number;
+    results?: Array<{ prompt: string; ok: boolean }>;
+  }>(regressionRun, "tmp-clawcloud-whatsapp-regression.json") as
+    | {
+      total?: number;
+      passed?: number;
+      failed?: number;
+      results?: Array<{ prompt: string; ok: boolean }>;
+    }
+    | null;
+
   let liveRun:
     | {
       ok: boolean;
@@ -138,7 +153,7 @@ async function main() {
     {
       key: "replay",
       label: "WhatsApp replay",
-      weight: 45,
+      weight: 35,
       score: replayJson ? extractNumber(replayJson.passRate, 0) : null,
       details: {
         passed: replayJson?.passed ?? 0,
@@ -149,9 +164,25 @@ async function main() {
       },
     },
     {
+      key: "regression",
+      label: "Regression suite",
+      weight: 20,
+      score: regressionJson
+        ? Number(
+          ((extractNumber(regressionJson.passed, 0) / Math.max(extractNumber(regressionJson.total, 0), 1)) * 100).toFixed(1),
+        )
+        : null,
+      details: {
+        passed: regressionJson?.passed ?? 0,
+        failed: regressionJson?.failed ?? 0,
+        failedCases: (regressionJson?.results ?? []).filter((item) => !item.ok).map((item) => item.prompt),
+        commandOk: regressionRun.ok,
+      },
+    },
+    {
       key: "benchmark",
       label: "Hard benchmark",
-      weight: 35,
+      weight: 30,
       score: benchmarkJson ? extractNumber(benchmarkJson.overall?.percentage, 0) : null,
       details: {
         weakCases: (benchmarkJson?.results ?? [])
@@ -169,7 +200,7 @@ async function main() {
     sections.push({
       key: "live_api",
       label: "Live API QA",
-      weight: 20,
+      weight: 15,
       score: liveJson
         ? Number(
           ((extractNumber(liveJson.passed, 0) / Math.max(extractNumber(liveJson.total, 0), 1)) * 100).toFixed(1),
@@ -207,6 +238,7 @@ async function main() {
     sections: Object.fromEntries(sections.map((section) => [section.key, summarizeSection(section)])),
     commandStatus: {
       replay: { ok: replayRun.ok, exitCode: replayRun.exitCode },
+      regression: { ok: regressionRun.ok, exitCode: regressionRun.exitCode },
       benchmark: { ok: benchmarkRun.ok, exitCode: benchmarkRun.exitCode },
       live: withLive
         ? { ok: liveRun?.ok ?? false, exitCode: liveRun?.exitCode ?? 1 }
@@ -217,7 +249,7 @@ async function main() {
   writeJsonReport(reportPath, report);
   console.log(JSON.stringify(report, null, 2));
 
-  if (!replayRun.ok || !benchmarkRun.ok || (withLive && !liveRun?.ok)) {
+  if (!replayRun.ok || !regressionRun.ok || !benchmarkRun.ok || (withLive && !liveRun?.ok)) {
     process.exitCode = 1;
   }
 }

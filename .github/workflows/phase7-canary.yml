@@ -1,4 +1,4 @@
-name: Phase 7 Canary
+name: Phase 11 Canary
 
 on:
   workflow_dispatch:

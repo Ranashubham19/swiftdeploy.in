@@ -26,6 +26,7 @@ import {
   localeNames,
   resolveClawCloudReplyLanguage,
   translateMessage,
+  verifyReplyLanguageMatch,
 } from "@/lib/clawcloud-i18n";
 import { detectTaxQuery } from "@/lib/clawcloud-tax";
 
@@ -60,6 +61,12 @@ export type ClawCloudAnswerVerification = {
   rationale: string;
   revisedAnswer: string;
 };
+
+export type ClawCloudDomainValidationIssue =
+  | "missing_code"
+  | "math_incomplete"
+  | "wrong_language"
+  | "contact_verification_missing";
 
 const HEALTH_PATTERNS = [
   /\b(symptom|symptoms|disease|illness|diagnosis|diagnose|medicine|medication|tablet|capsule|dose|dosage|treatment|doctor|hospital|surgery|side effects?|infection|fever|pain|blood pressure|cholesterol|diabetes|cancer|anxiety|depression|pregnan|mental health)\b/i,
@@ -849,7 +856,7 @@ export function buildClawCloudAnswerQualityProfile(input: {
   const isEducationalQuery = /^(?:explain|what (?:is|are|was|were)|how (?:does|do|did|is)|describe|define|discuss|compare|analyze|summarize|tell me about|overview of)\b/i.test(question);
   const isHighStakes = domain === "health" || domain === "mental_health" || domain === "legal" || domain === "tax" || domain === "finance";
   const requiresLiveGrounding = domain === "live" || domain === "finance";
-  const requiresEvidence = requiresLiveGrounding || (
+  const requiresEvidence = requiresLiveGrounding || isDocumentBound || (
     !isEducationalQuery && (domain === "health" || domain === "mental_health" || domain === "legal")
   );
   const requiresVerification =
@@ -874,8 +881,12 @@ export function buildClawCloudAnswerQualityProfile(input: {
 export function buildClawCloudEvidenceInstruction(profile: ClawCloudAnswerQualityProfile): string {
   if (profile.domain === "document") {
     return [
-      "Answer using only the document text already provided.",
-      "Do not introduce outside facts or assumptions as if they are proven.",
+      "Grounded attachment mode:",
+      "- Answer using only the attachment evidence already provided in the prompt.",
+      "- If this is a document, use only the extracted document text already shown.",
+      "- If this is a voice note, image, or video prompt, use only the transcript, OCR, or frame evidence already shown.",
+      "- Do not mix in outside facts, old chat memory, or caption-only guesses as if they are proven.",
+      "- If the evidence is incomplete or unclear, say that briefly and ask for a clearer resend instead of guessing.",
     ].join("\n");
   }
 
@@ -934,6 +945,78 @@ export function clawCloudAnswerHasEvidenceSignals(
 
   if (profile.isHighStakes && matchesAny(answer, HIGH_STAKES_EVIDENCE_PATTERNS)) {
     return true;
+  }
+
+  return false;
+}
+
+function extractGroundedAttachmentEvidenceText(question: string) {
+  const normalized = question.replace(/\r\n/g, "\n").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const mediaMatch = normalized.match(
+    /---\s*media evidence\s*---\s*([\s\S]*?)\s*---\s*end of media evidence\s*---/i,
+  );
+  if (mediaMatch?.[1]?.trim()) {
+    return mediaMatch[1].trim();
+  }
+
+  const documentMatch = normalized.match(
+    /---\s*document content\s*---\s*([\s\S]*?)\s*---\s*end of document\s*---/i,
+  );
+  if (documentMatch?.[1]?.trim()) {
+    return documentMatch[1].trim();
+  }
+
+  return "";
+}
+
+function extractGroundedAttachmentNumberSignals(text: string) {
+  const matches = text.match(/\b\d[\d.,:/-]*\b/g) ?? [];
+  return [...new Set(matches.map((value) => value.trim().toLowerCase()).filter((value) => value.length >= 2))];
+}
+
+function looksLikeGroundedAttachmentFailClosedReply(answer: string) {
+  return /(?:not going to guess|will not guess|could not extract|couldn't extract|could not download|couldn't download|transcription is not available|analysis is not available|partial document content|unclear audio|caption alone|filename or caption alone|audio alone|attachment evidence|resend the (?:voice note|video|image|file))/i.test(answer);
+}
+
+export function isClawCloudGroundedAttachmentAnswer(question: string, answer: string) {
+  const trimmedAnswer = answer.trim();
+  if (!trimmedAnswer) {
+    return false;
+  }
+
+  if (looksLikeGroundedAttachmentFailClosedReply(trimmedAnswer)) {
+    return true;
+  }
+
+  const evidenceText = extractGroundedAttachmentEvidenceText(question);
+  if (!evidenceText) {
+    return false;
+  }
+
+  const normalizedAnswer = trimmedAnswer.normalize("NFKC").toLowerCase();
+  const evidenceSignals = extractTopicSignals(evidenceText).filter((signal) => signal.length >= 3);
+  const matchedSignals = evidenceSignals.filter((signal) => normalizedAnswer.includes(signal));
+  const evidenceNumbers = extractGroundedAttachmentNumberSignals(evidenceText);
+  const matchedNumbers = evidenceNumbers.filter((signal) => normalizedAnswer.includes(signal));
+
+  if (matchedNumbers.length >= 2) {
+    return true;
+  }
+
+  if (matchedSignals.length >= 2) {
+    return true;
+  }
+
+  if (matchedSignals.length >= 1 && matchedNumbers.length >= 1) {
+    return true;
+  }
+
+  if (/[\uac00-\ud7af\u3040-\u30ff\u4e00-\u9fff]/u.test(evidenceText)) {
+    return matchedSignals.length >= 1 || matchedNumbers.length >= 1;
   }
 
   return false;
@@ -1049,6 +1132,129 @@ function hasUnsafeAdviceSignals(answer: string, profile: ClawCloudAnswerQualityP
   return false;
 }
 
+function questionExplicitlyRequestsCode(question: string) {
+  return /\b(?:provide code|write code|show code|sample code|give code|implement|implementation|program in|solution in|code in|c\+\+|cpp|python|java|javascript|typescript|go|rust|c#|c sharp)\b/i.test(question);
+}
+
+function answerHasSubstantialCode(answer: string) {
+  const trimmed = answer.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (/```[\s\S]{12,}```/.test(trimmed)) {
+    return true;
+  }
+
+  const codeLikeLineCount = trimmed
+    .split(/\r?\n/)
+    .filter((line) => /(?:^\s*(?:def|class|function|const|let|var|public|private|static|#include|using\s+namespace|import\s+\w|for\s*\(|while\s*\(|if\s*\(|return\b|System\.out\.println|console\.log|printf\s*\())/i.test(line))
+    .length;
+  return codeLikeLineCount >= 3;
+}
+
+function looksLikeMathQuestionRequiringWorkedAnswer(question: string, intent: string) {
+  if (intent !== "math") {
+    return false;
+  }
+
+  return (
+    /\b(?:solve|calculate|compute|evaluate|find|derive|integrate|differentiate|probability|expected value|variance|standard deviation|mean|median|emi|cagr|roi|interest|equation|formula|proof|final answer|show (?:the )?steps)\b/i.test(question)
+    || /\d/.test(question)
+  );
+}
+
+function answerHasWorkedMathSignals(answer: string) {
+  const trimmed = answer.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  const numericSignals = trimmed.match(/\b\d+(?:\.\d+)?\b/g) ?? [];
+  return (
+    /=/.test(trimmed)
+    || /\b(?:final answer|therefore|thus|so the|hence|result|answer is)\b/i.test(trimmed)
+    || /[+\-*/^%]=?|√|∑|∫/.test(trimmed)
+    || /\b(?:step 1|step 2)\b/i.test(trimmed)
+    || (/\b(?:formula|substitute|calculation)\b/i.test(trimmed) && numericSignals.length >= 1)
+  );
+}
+
+function stripCodeBlocksForLanguageValidation(answer: string) {
+  return answer
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`[^`\n]+`/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function looksLikeContactOperationalCategory(category: string) {
+  return /^(?:send_message|whatsapp_history|whatsapp_contacts_sync)$/i.test(category);
+}
+
+function answerLooksLikeContactCompletion(answer: string) {
+  return /\b(?:reply delivered to|message sent to|sent to\s+\*|sent to\s+\+|last few messages from|messages reviewed for this summary|professional brief|chat summary for|summary of the chat with|stopped active contact mode for|active contact mode is now on for)\b/i.test(answer);
+}
+
+function answerHasContactAmbiguitySignals(answer: string) {
+  return /\b(?:multiple whatsapp contacts matching|match is not exact enough|closest match|ambiguous recipient|exact contact name|full number|option number|right chat|confirmation_required|tell me the exact contact name|reply with the exact contact name)\b/i.test(answer);
+}
+
+export function detectClawCloudDomainValidationIssues(input: {
+  question: string;
+  answer: string;
+  profile: ClawCloudAnswerQualityProfile;
+}): ClawCloudDomainValidationIssue[] {
+  const issues = new Set<ClawCloudDomainValidationIssue>();
+  const question = input.question.trim();
+  const answer = input.answer.trim();
+
+  if (!answer) {
+    return [];
+  }
+
+  if (
+    input.profile.intent === "coding"
+    && questionExplicitlyRequestsCode(question)
+    && !answerHasSubstantialCode(answer)
+  ) {
+    issues.add("missing_code");
+  }
+
+  if (
+    looksLikeMathQuestionRequiringWorkedAnswer(question, input.profile.intent)
+    && !answerHasWorkedMathSignals(answer)
+  ) {
+    issues.add("math_incomplete");
+  }
+
+  const languageProbe = stripCodeBlocksForLanguageValidation(answer);
+  if (languageProbe.length >= 20) {
+    const languageResolution = resolveClawCloudReplyLanguage({
+      message: question,
+      preferredLocale: "en",
+    });
+    const languageCheck = verifyReplyLanguageMatch({
+      userMessage: question,
+      aiReply: languageProbe,
+      resolution: languageResolution,
+    });
+    if (!languageCheck.verified) {
+      issues.add("wrong_language");
+    }
+  }
+
+  if (
+    looksLikeContactOperationalCategory(input.profile.category)
+    && answerLooksLikeContactCompletion(answer)
+    && answerHasContactAmbiguitySignals(answer)
+  ) {
+    issues.add("contact_verification_missing");
+  }
+
+  return [...issues];
+}
+
 function compareConfidence(
   left: ClawCloudAnswerConfidence,
   right: ClawCloudAnswerConfidence,
@@ -1072,6 +1278,10 @@ export function scoreClawCloudAnswerConfidence(input: {
   }
 
   let score = 0;
+  const domainIssues = detectClawCloudDomainValidationIssues(input);
+  const hasGroundedEvidence = input.profile.isDocumentBound
+    ? isClawCloudGroundedAttachmentAnswer(input.question, answer)
+    : clawCloudAnswerHasEvidenceSignals(answer, input.profile);
 
   // Length signals — longer, more detailed answers are usually higher quality
   if (answer.length >= 100) score += 1;
@@ -1079,8 +1289,8 @@ export function scoreClawCloudAnswerConfidence(input: {
   if (answer.length >= 500) score += 1;
 
   // Evidence and grounding signals
-  if (clawCloudAnswerHasEvidenceSignals(answer, input.profile)) score += 2;
-  if (input.profile.requiresEvidence && !clawCloudAnswerHasEvidenceSignals(answer, input.profile)) score -= 2;
+  if (hasGroundedEvidence) score += 2;
+  if (input.profile.requiresEvidence && !hasGroundedEvidence) score -= 2;
 
   // Structured response signals (sections, headers, numbered steps)
   if (/\n.*\n/.test(answer)) score += 1; // Multi-paragraph
@@ -1100,6 +1310,7 @@ export function scoreClawCloudAnswerConfidence(input: {
   // Safety penalty signals
   if (hasUnsafeAdviceSignals(answer, input.profile)) score -= 4;
   if (input.profile.isAdvice && !/\bconsult\b/i.test(answer) && input.profile.isHighStakes) score -= 2;
+  if (domainIssues.length) score -= Math.min(4, domainIssues.length * 2);
 
   // Generic/lazy response penalties
   if (/\bas an ai\b/i.test(answer)) score -= 3;
@@ -1156,6 +1367,26 @@ export async function verifyClawCloudAnswer(input: {
     return null;
   }
 
+  const languageResolution = resolveClawCloudReplyLanguage({
+    message: input.question,
+    preferredLocale: "en",
+  });
+  const domainSpecificChecklist = [
+    input.profile.intent === "coding"
+      ? "11. CODING VALIDATION: If the user asked for code, the answer must contain complete runnable code or clearly complete pseudocode plus the real approach and complexity."
+      : "",
+    input.profile.intent === "math"
+      ? "11. MATH VALIDATION: The answer must show the governing formula or reasoning path and must clearly state the solved result or final answer."
+      : "",
+    input.profile.isDocumentBound
+      ? "11. ATTACHMENT GROUNDING: The answer must stay grounded to the provided transcript, OCR, frame evidence, or document text. Reject any answer that guesses beyond that evidence."
+      : "",
+    looksLikeContactOperationalCategory(input.profile.category)
+      ? "11. CONTACT VALIDATION: Reject any send/history/contact reply that claims completion while recipient identity is still ambiguous or not exact."
+      : "",
+    "12. LANGUAGE MATCH: The answer must stay in the user's language or the explicitly requested target language.",
+  ].filter(Boolean);
+
   const verifierPrompt = [
     "You are the final answer quality verifier for ClawCloud AI — the world's most advanced AI assistant.",
     "Your job is to catch errors, fabrications, and quality issues BEFORE the answer reaches the user.",
@@ -1172,6 +1403,7 @@ export async function verifyClawCloudAnswer(input: {
     "8. CODE QUALITY (if applicable): Is code complete, runnable, with all imports? No TODO/placeholder comments?",
     "9. MATH ACCURACY (if applicable): Are all calculations correct? Does the final answer have correct units?",
     "10. SOURCE QUALITY: Are any cited sources plausible and real? Fabricated citations are a REJECT.",
+    ...domainSpecificChecklist,
     "",
     "VERDICT CRITERIA:",
     "- REJECT if: fabricated facts/citations, factually wrong answer, empty/generic response, dangerous unqualified advice, incomplete code with placeholders, math with wrong result.",
@@ -1191,6 +1423,7 @@ export async function verifyClawCloudAnswer(input: {
       `Domain: ${input.profile.domain}`,
       `Requires evidence: ${input.profile.requiresEvidence ? "yes" : "no"}`,
       `Requires live grounding: ${input.profile.requiresLiveGrounding ? "yes" : "no"}`,
+      `Expected reply language: ${languageResolution.targetLanguageName ?? languageResolution.locale}`,
       `Question: ${input.question}`,
       "",
       "Candidate answer:",

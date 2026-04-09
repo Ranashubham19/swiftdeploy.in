@@ -25,7 +25,8 @@
     "qa:benchmark": "tsx scripts/clawcloud-hard-benchmark.ts",
     "qa:scorecard": "tsx scripts/clawcloud-scorecard.ts",
     "qa:canary": "tsx scripts/clawcloud-daily-canary.ts",
-    "qa:phase7": "node scripts/clawcloud-phase7-release-gate.mjs"
+    "qa:phase7": "node scripts/clawcloud-phase7-release-gate.mjs",
+    "qa:phase11": "node scripts/clawcloud-phase7-release-gate.mjs"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",

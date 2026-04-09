@@ -28,6 +28,7 @@ export type ClawCloudAnswerObservabilitySnapshot = {
   judgeUsed: boolean;
   materialDisagreement: boolean;
   needsClarification: boolean;
+  qualityFlags: string[];
 };
 
 export type ClawCloudAnswerObservabilitySummary = {
@@ -46,6 +47,16 @@ export type ClawCloudAnswerObservabilitySummary = {
   modelAuditedRate: number;
   disagreementCount: number;
   disagreementRate: number;
+  blockedGoodAnswerCount: number;
+  blockedGoodAnswerRate: number;
+  wrongLanguageCount: number;
+  wrongLanguageRate: number;
+  staleLiveAnswerCount: number;
+  staleLiveAnswerRate: number;
+  mediaGroundingFailureCount: number;
+  mediaGroundingFailureRate: number;
+  ambiguousContactCount: number;
+  ambiguousContactRate: number;
   avgLatencyMs: number;
   topIntents: Array<{
     intent: string;
@@ -64,6 +75,9 @@ type ClawCloudAnswerObservabilityRecord = {
   live_evidence_count?: number | null;
   model_audited?: boolean | null;
   material_disagreement?: boolean | null;
+  metadata?: {
+    quality_flags?: unknown;
+  } | null;
 };
 
 function trimPreview(value: string | null | undefined, limit = 240) {
@@ -82,6 +96,73 @@ function normalizeNumber(value: unknown) {
 
 function roundPercent(value: number) {
   return Number(value.toFixed(1));
+}
+
+function normalizeQualityFlags(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [] as string[];
+  }
+
+  return [...new Set(
+    value
+      .map((item) => typeof item === "string" ? item.trim() : "")
+      .filter(Boolean),
+  )];
+}
+
+function deriveObservabilityQualityFlags(input: {
+  category: string;
+  hadVisibleFallback: boolean;
+  responseText?: string | null;
+  liveAnswerBundle?: ClawCloudAnswerBundle | null;
+  modelAuditTrail?: ClawCloudModelAuditTrail | null;
+}) {
+  const flags = new Set<string>();
+  const responseText = trimPreview(input.responseText, 4000).toLowerCase();
+
+  if (input.hadVisibleFallback) {
+    flags.add("visible_fallback");
+  }
+
+  if (
+    input.modelAuditTrail
+    && input.modelAuditTrail.selectedBy === "fallback"
+    && input.modelAuditTrail.candidates.some((candidate) => candidate.status !== "failed")
+  ) {
+    flags.add("blocked_good_answer");
+  }
+
+  if (
+    /\b(reply with the exact contact name|full number|option number|exact whatsapp contact|right chat)\b/i.test(responseText)
+  ) {
+    flags.add("ambiguous_contact");
+  }
+
+  if (
+    /\b(image|video|voice note|audio|recording|document|pdf)\b/i.test(responseText)
+    && /\b(?:couldn't|could not|can't|cannot|not enough|share a clearer|grounded|transcript)\b/i.test(responseText)
+  ) {
+    flags.add("media_grounding_failure");
+  }
+
+  if (
+    !input.liveAnswerBundle
+    && (
+      /\b(?:couldn't verify|could not verify|not enough reliable information|latest reliable|current data|fresh sources)\b/i.test(responseText)
+      || (
+        /\b(?:latest|current|today|right now)\b/i.test(responseText)
+        && /\b(?:cannot|couldn't|could not|unable)\b/i.test(responseText)
+      )
+    )
+  ) {
+    flags.add("stale_live_answer");
+  }
+
+  if (/\b(?:reply only in|wrong language|rewrite your entire reply)\b/i.test(responseText)) {
+    flags.add("wrong_language");
+  }
+
+  return [...flags];
 }
 
 export function looksLikeClawCloudRefusal(response: string | null | undefined) {
@@ -116,12 +197,21 @@ export function buildClawCloudAnswerObservabilitySnapshot(input: {
   latencyMs: number;
   charCount: number;
   hadVisibleFallback: boolean;
+  responseText?: string | null;
   liveAnswerBundle?: ClawCloudAnswerBundle | null;
   modelAuditTrail?: ClawCloudModelAuditTrail | null;
+  qualityFlags?: string[];
 }): ClawCloudAnswerObservabilitySnapshot {
   const liveAnswerBundle = input.liveAnswerBundle ?? null;
   const modelAuditTrail = input.modelAuditTrail ?? null;
   const liveEvidenceCount = liveAnswerBundle?.evidence.length ?? 0;
+  const derivedQualityFlags = deriveObservabilityQualityFlags({
+    category: input.category,
+    hadVisibleFallback: input.hadVisibleFallback,
+    responseText: input.responseText,
+    liveAnswerBundle,
+    modelAuditTrail,
+  });
 
   return {
     intent: input.intent.trim() || "general",
@@ -142,6 +232,7 @@ export function buildClawCloudAnswerObservabilitySnapshot(input: {
     judgeUsed: Boolean(modelAuditTrail?.judge?.used),
     materialDisagreement: Boolean(modelAuditTrail?.judge?.materialDisagreement),
     needsClarification: Boolean(modelAuditTrail?.judge?.needsClarification),
+    qualityFlags: [...new Set([...(input.qualityFlags ?? []), ...derivedQualityFlags])],
   };
 }
 
@@ -163,6 +254,21 @@ export function summarizeClawCloudAnswerObservabilityRecords(
   ).length;
   const modelAuditedCount = records.filter((record) => normalizeBoolean(record.model_audited)).length;
   const disagreementCount = records.filter((record) => normalizeBoolean(record.material_disagreement)).length;
+  const blockedGoodAnswerCount = records.filter((record) =>
+    normalizeQualityFlags(record.metadata?.quality_flags).includes("blocked_good_answer"),
+  ).length;
+  const wrongLanguageCount = records.filter((record) =>
+    normalizeQualityFlags(record.metadata?.quality_flags).includes("wrong_language"),
+  ).length;
+  const staleLiveAnswerCount = records.filter((record) =>
+    normalizeQualityFlags(record.metadata?.quality_flags).includes("stale_live_answer"),
+  ).length;
+  const mediaGroundingFailureCount = records.filter((record) =>
+    normalizeQualityFlags(record.metadata?.quality_flags).includes("media_grounding_failure"),
+  ).length;
+  const ambiguousContactCount = records.filter((record) =>
+    normalizeQualityFlags(record.metadata?.quality_flags).includes("ambiguous_contact"),
+  ).length;
   const avgLatencyMs = totalResponses
     ? Math.round(
       records.reduce((sum, record) => sum + normalizeNumber(record.latency_ms), 0)
@@ -210,6 +316,16 @@ export function summarizeClawCloudAnswerObservabilityRecords(
     modelAuditedRate: totalResponses ? roundPercent((modelAuditedCount / totalResponses) * 100) : 0,
     disagreementCount,
     disagreementRate: modelAuditedCount ? roundPercent((disagreementCount / modelAuditedCount) * 100) : 0,
+    blockedGoodAnswerCount,
+    blockedGoodAnswerRate: totalResponses ? roundPercent((blockedGoodAnswerCount / totalResponses) * 100) : 0,
+    wrongLanguageCount,
+    wrongLanguageRate: totalResponses ? roundPercent((wrongLanguageCount / totalResponses) * 100) : 0,
+    staleLiveAnswerCount,
+    staleLiveAnswerRate: totalResponses ? roundPercent((staleLiveAnswerCount / totalResponses) * 100) : 0,
+    mediaGroundingFailureCount,
+    mediaGroundingFailureRate: totalResponses ? roundPercent((mediaGroundingFailureCount / totalResponses) * 100) : 0,
+    ambiguousContactCount,
+    ambiguousContactRate: totalResponses ? roundPercent((ambiguousContactCount / totalResponses) * 100) : 0,
     avgLatencyMs,
     topIntents,
   };
@@ -255,7 +371,10 @@ export async function recordClawCloudAnswerObservability(input: {
     judge_used: snapshot?.judgeUsed ?? false,
     material_disagreement: snapshot?.materialDisagreement ?? false,
     needs_clarification: snapshot?.needsClarification ?? false,
-    metadata: input.metadata ?? {},
+    metadata: {
+      ...(input.metadata ?? {}),
+      quality_flags: snapshot?.qualityFlags ?? [],
+    },
   };
 
   try {
@@ -288,6 +407,7 @@ export async function getClawCloudAnswerObservabilitySummary(userId: string, win
         "live_evidence_count",
         "model_audited",
         "material_disagreement",
+        "metadata",
       ].join(","))
       .eq("user_id", userId)
       .gte("created_at", sinceIso)

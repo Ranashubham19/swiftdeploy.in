@@ -39,14 +39,12 @@ function looksLikeFreshActionCommand(text: string) {
 
 function looksLikeApprove(text: string) {
   return [
-    /^(?:yes|yep|yeah|haan|han)(?:\s+please)?\s*[.!?]*$/i,
-    /^(?:ok|okay|sure|fine|alright)(?:\s+please)?\s*[.!?]*$/i,
     /^(?:yes|yep|yeah|haan|han|ok|okay|sure|fine|alright)(?:\s*,)?\s+(?:send|create|save|approve|confirm|go ahead|proceed)(?:\s+(?:it|this|that|them|now|please))*\s*[.!?]*$/i,
     /^(?:send|send it|send this|send now)(?:\s+please)?\s*[.!?]*$/i,
     /^(?:please\s+)?send(?:\s+(?:it|this|that|them|now))?(?:\s+please)?\s*[.!?]*$/i,
     /^(?:create|create it|save|save it)(?:\s+(?:this|that))?(?:\s+draft)?(?:\s+please)?\s*[.!?]*$/i,
-    /^(?:approve|approved|confirm|confirmed|go ahead|proceed|looks good|looks great|ship it|do it)(?:\s+please)?\s*[.!?]*$/i,
-    /^(?:go ahead|proceed|looks good|looks great)(?:,?\s+and)?\s+(?:send|create|save|approve|confirm)(?:\s+(?:it|this|that|them|now|please))*\s*[.!?]*$/i,
+    /^(?:approve|approved|confirm|confirmed|go ahead|proceed|ship it)(?:\s+please)?\s*[.!?]*$/i,
+    /^(?:go ahead|proceed)(?:,?\s+and)?\s+(?:send|create|save|approve|confirm)(?:\s+(?:it|this|that|them|now|please))*\s*[.!?]*$/i,
   ].some((pattern) => pattern.test(text));
 }
 

@@ -1352,6 +1352,9 @@ type ModelGenerationResult = {
   latencyMs: number;
   heuristicScore: number;
   preview: string;
+  selectionIssues: ClawCloudModelSelectionIssue[];
+  selectionPenalty: number;
+  isStructurallyValid: boolean;
 };
 type ModelJudgeConfidence = "high" | "medium" | "low";
 type ModelJudgeDecision = {
@@ -1400,6 +1403,13 @@ export interface ClawCloudModelOrchestrationTrace {
   candidates: ClawCloudModelCandidateTrace[];
   judge: ClawCloudModelJudgeTrace | null;
 }
+
+type ClawCloudModelSelectionIssue =
+  | "visible_fallback"
+  | "missing_code"
+  | "math_incomplete"
+  | "live_evidence_missing"
+  | "wrong_language_fragment";
 
 export interface ClawCloudPromptCompletionResult {
   answer: string;
@@ -1605,6 +1615,134 @@ function answerLooksLikeShortWrongLanguageFragment(question: string, answer: str
   return answer.length < 80 && answerLatinChars < 6 && answerNonLatinChars >= 4;
 }
 
+const MODEL_SELECTION_VISIBLE_FALLBACK_PATTERNS = [
+  /\b(?:exact topic, name, item, or number)\b/i,
+  /\b(?:exact problem statement, language, or constraints)\b/i,
+  /\b(?:not enough reliable information|could not verify|unable to verify)\b/i,
+  /\b(?:send your exact question|share the exact topic|scoped live answer needed)\b/i,
+  /\b(?:as an ai|as a language model)\b/i,
+];
+
+const MODEL_SELECTION_LIVE_EVIDENCE_PATTERNS = [
+  /\blive data as of\b/i,
+  /\bdata fetched:\s*/i,
+  /\bsource note:\s*/i,
+  /\bsearched:\s*/i,
+  /\bsources?:\s*/i,
+  /\bpublished:\s*/i,
+  /\baccording to\b/i,
+  /\bofficial\b/i,
+  /\bas of\b/i,
+];
+
+function questionRequiresLiveEvidenceForSelection(intent: IntentType, question: string) {
+  const normalized = question.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!normalized) return false;
+
+  if (intent === "web_search") {
+    return true;
+  }
+
+  if (
+    /\b(latest|current|today|right now|as of|released?|release date|launch(?:ed)?|price|pricing|cost|rank(?:ing)?|founder|ceo|net worth|inflation|gdp|stock price|trading|market)\b/.test(normalized)
+  ) {
+    return intent === "finance"
+      || intent === "economics"
+      || intent === "research"
+      || intent === "science"
+      || intent === "technology";
+  }
+
+  if (intent === "finance") {
+    return /\b(aapl|tsla|nvda|nifty|sensex|share price|stock|market|buy|sell)\b/.test(normalized);
+  }
+
+  return false;
+}
+
+function questionRequiresWorkedMathForSelection(intent: IntentType, question: string) {
+  if (intent !== "math" && intent !== "finance" && intent !== "economics") {
+    return false;
+  }
+
+  return /\b(?:solve|calculate|compute|evaluate|derive|integrate|differentiate|emi|sip|cagr|roi|probability|variance|standard deviation|confidence interval|final answer|show (?:the )?steps)\b/i.test(question);
+}
+
+function answerHasWorkedMathForSelection(answer: string) {
+  const trimmed = answer.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  return (
+    /=/.test(trimmed)
+    || /\b(?:final answer|therefore|thus|so the|hence|result|answer is)\b/i.test(trimmed)
+    || /\b(?:step 1|step 2|formula|substitute|calculation)\b/i.test(trimmed)
+    || /[+\-*/^%]=?|√|∑|∫/.test(trimmed)
+    || ((trimmed.match(/\b\d+(?:\.\d+)?\b/g) ?? []).length >= 2)
+  );
+}
+
+function evaluateGeneratedCandidateSelection(input: {
+  intent: IntentType;
+  question: string;
+  answer: string;
+}) {
+  const issues: ClawCloudModelSelectionIssue[] = [];
+
+  if (MODEL_SELECTION_VISIBLE_FALLBACK_PATTERNS.some((pattern) => pattern.test(input.answer))) {
+    issues.push("visible_fallback");
+  }
+
+  if (looksLikeAlgorithmicCodingQuestion(input.question)) {
+    if (questionDemandsCode(input.question) && !/```|function\s|const\s|class\s|return\s|interface\s|def\s|public\s+class|fn\s+\w+/i.test(input.answer)) {
+      issues.push("missing_code");
+    }
+  }
+
+  if (
+    questionRequiresWorkedMathForSelection(input.intent, input.question)
+    && !answerHasWorkedMathForSelection(input.answer)
+  ) {
+    issues.push("math_incomplete");
+  }
+
+  if (
+    questionRequiresLiveEvidenceForSelection(input.intent, input.question)
+    && !MODEL_SELECTION_LIVE_EVIDENCE_PATTERNS.some((pattern) => pattern.test(input.answer))
+  ) {
+    issues.push("live_evidence_missing");
+  }
+
+  if (answerLooksLikeShortWrongLanguageFragment(input.question, input.answer)) {
+    issues.push("wrong_language_fragment");
+  }
+
+  const penaltyWeights: Record<ClawCloudModelSelectionIssue, number> = {
+    visible_fallback: 100,
+    wrong_language_fragment: 90,
+    missing_code: 80,
+    math_incomplete: 75,
+    live_evidence_missing: 70,
+  };
+
+  const selectionPenalty = issues.reduce((sum, issue) => sum + penaltyWeights[issue], 0);
+
+  return {
+    issues,
+    selectionPenalty,
+    isStructurallyValid: issues.length === 0,
+  };
+}
+
+function pickBestValidGeneratedCandidate(results: ModelGenerationResult[]) {
+  const valid = results.filter((result) => result.isStructurallyValid);
+  if (valid.length) {
+    return rankGeneratedCandidates(valid)[0] ?? null;
+  }
+  return null;
+}
+
 function scoreClawCloudModelResponse(input: {
   intent: IntentType;
   response: string;
@@ -1718,12 +1856,25 @@ function scoreClawCloudModelResponse(input: {
 
 function detectMaterialCandidateDisagreement(input: {
   intent: IntentType;
-  candidates: Array<{ out: string; heuristicScore: number }>;
+  candidates: Array<{
+    out: string;
+    heuristicScore: number;
+    isStructurallyValid?: boolean;
+    selectionPenalty?: number;
+  }>;
   threshold?: number;
 }) {
   if (input.candidates.length < 2) return false;
 
-  const ranked = [...input.candidates].sort((left, right) => right.heuristicScore - left.heuristicScore);
+  const ranked = [...input.candidates].sort((left, right) => {
+    if (Boolean(right.isStructurallyValid) !== Boolean(left.isStructurallyValid)) {
+      return Number(Boolean(right.isStructurallyValid)) - Number(Boolean(left.isStructurallyValid));
+    }
+    if ((left.selectionPenalty ?? 0) !== (right.selectionPenalty ?? 0)) {
+      return (left.selectionPenalty ?? 0) - (right.selectionPenalty ?? 0);
+    }
+    return right.heuristicScore - left.heuristicScore;
+  });
   const strongest = ranked[0];
   const challenger = ranked[1];
   if (!strongest || !challenger) return false;
@@ -1895,6 +2046,11 @@ async function runCandidateCollectionBatch(input: {
 
     if (out) {
       markModelSuccess(candidate.healthKey);
+      const selection = evaluateGeneratedCandidateSelection({
+        intent: input.intent,
+        question: input.userQuestion,
+        answer: out,
+      });
       return {
         ok: true as const,
         result: {
@@ -1907,6 +2063,9 @@ async function runCandidateCollectionBatch(input: {
             userQuestion: input.userQuestion,
           }),
           preview: buildCandidatePreview(out),
+          selectionIssues: selection.issues,
+          selectionPenalty: selection.selectionPenalty,
+          isStructurallyValid: selection.isStructurallyValid,
         },
       };
     }
@@ -1968,6 +2127,7 @@ async function judgeGeneratedCandidates(input: {
         `Candidate ${label}`,
         `Model: ${candidate.candidate.model}`,
         `Heuristic score: ${candidate.heuristicScore}`,
+        `Validation: ${candidate.isStructurallyValid ? "VALID" : `ISSUES -> ${candidate.selectionIssues.join(", ")}`}`,
         candidate.out.slice(0, 2_200),
       ].join("\n");
     })
@@ -2043,6 +2203,12 @@ async function judgeGeneratedCandidates(input: {
 
 function rankGeneratedCandidates(results: ModelGenerationResult[]) {
   return [...results].sort((left, right) => {
+    if (right.isStructurallyValid !== left.isStructurallyValid) {
+      return Number(right.isStructurallyValid) - Number(left.isStructurallyValid);
+    }
+    if (left.selectionPenalty !== right.selectionPenalty) {
+      return left.selectionPenalty - right.selectionPenalty;
+    }
     if (right.heuristicScore !== left.heuristicScore) {
       return right.heuristicScore - left.heuristicScore;
     }
@@ -2177,15 +2343,20 @@ async function orchestrateClawCloudPrompt(input: {
   }
 
   const ranked = rankGeneratedCandidates(successes);
-  const heuristicWinner = ranked[0] ?? null;
-  const scoreGap = ranked.length > 1
-    ? (ranked[0]?.heuristicScore ?? 0) - (ranked[1]?.heuristicScore ?? 0)
+  const validRanked = ranked.filter((candidate) => candidate.isStructurallyValid);
+  const heuristicWinner = validRanked[0] ?? ranked[0] ?? null;
+  const scoreGap = validRanked.length > 1
+    ? (validRanked[0]?.heuristicScore ?? 0) - (validRanked[1]?.heuristicScore ?? 0)
+    : ranked.length > 1
+      ? (ranked[0]?.heuristicScore ?? 0) - (ranked[1]?.heuristicScore ?? 0)
     : Number.POSITIVE_INFINITY;
   const materialDisagreement = detectMaterialCandidateDisagreement({
     intent: input.intent,
-    candidates: ranked.map((candidate) => ({
+    candidates: (validRanked.length >= 2 ? validRanked : ranked).map((candidate) => ({
       out: candidate.out,
       heuristicScore: candidate.heuristicScore,
+      isStructurallyValid: candidate.isStructurallyValid,
+      selectionPenalty: candidate.selectionPenalty,
     })),
     threshold: planner.disagreementThreshold,
   });
@@ -2193,9 +2364,10 @@ async function orchestrateClawCloudPrompt(input: {
   let selected = heuristicWinner;
   let selectedBy: ClawCloudModelOrchestrationTrace["selectedBy"] = "heuristic";
   let judgeTrace: ClawCloudModelJudgeTrace | null = null;
+  const candidatePoolForJudge = validRanked.length ? validRanked : ranked;
 
   const shouldInvokeJudge = planner.judgeEnabled
-    && ranked.length > 1
+    && candidatePoolForJudge.length > 1
     && (
       materialDisagreement
       || input.responseMode === "deep"
@@ -2205,7 +2377,7 @@ async function orchestrateClawCloudPrompt(input: {
     && (input.deadlineMs - Date.now()) >= planner.judgeMinRemainingMs;
 
   if (shouldInvokeJudge) {
-    const evaluatedCandidates = ranked.slice(0, Math.min(ranked.length, 3));
+    const evaluatedCandidates = candidatePoolForJudge.slice(0, Math.min(candidatePoolForJudge.length, 3));
     judgeTrace = await judgeGeneratedCandidates({
       intent: input.intent,
       responseMode: input.responseMode,
@@ -2231,24 +2403,46 @@ async function orchestrateClawCloudPrompt(input: {
     };
   }
 
+  if ((!selected || !selected.isStructurallyValid) && validRanked.length) {
+    selected = validRanked[0] ?? selected;
+    selectedBy = "heuristic";
+  }
+
+  const hasCompetingValidAnswers = validRanked.length > 1;
   const judgeConfidenceLow = judgeTrace?.used
     ? judgeTrace.confidence === "low" || judgeTrace.needsClarification
     : false;
-  const heuristicConfidenceLow = materialDisagreement && scoreGap < 8;
-  const confidentWinner = selected
-    && !(judgeConfidenceLow || heuristicConfidenceLow)
-    ? true
-    : Boolean(selected && planner.allowLowConfidenceWinner);
+  const heuristicConfidenceLow = hasCompetingValidAnswers && materialDisagreement && scoreGap < 8;
+  const unresolvedHighStakesTieWithoutJudge = (
+    hasCompetingValidAnswers
+    && materialDisagreement
+    && !judgeTrace?.used
+    && isHighStakesIntent(input.intent)
+    && scoreGap < 12
+  );
+  const unresolvedConflict = (
+    hasCompetingValidAnswers
+    && materialDisagreement
+    && (
+      judgeConfidenceLow
+      || heuristicConfidenceLow
+      || unresolvedHighStakesTieWithoutJudge
+    )
+  );
+  const hasValidWinner = Boolean(selected?.isStructurallyValid);
+  const canShipSelectedAnswer = hasValidWinner && !unresolvedConflict;
+  const selectedAnswer = canShipSelectedAnswer ? (selected?.out?.trim() ?? null) : null;
+  const selectedModel = canShipSelectedAnswer ? (selected?.candidate.model ?? null) : null;
 
   return {
-    answer: confidentWinner ? selected?.out ?? null : null,
+    answer: selectedAnswer,
     trace: {
       intent: input.intent,
       responseMode: input.responseMode,
       planner,
-      selectedBy: confidentWinner ? selectedBy : "fallback",
-      selectedModel: confidentWinner ? (selected?.candidate.model ?? null) : null,
-      candidates: buildCandidateTrace(successes, failures, confidentWinner ? (selected?.candidate.model ?? null) : null),
+      selectedBy: canShipSelectedAnswer ? selectedBy : "fallback",
+      selectedModel,
+      candidates: buildCandidateTrace(successes, failures, selectedModel),
       judge: judgeTrace ?? (planner.judgeEnabled ? {
         used: false,
         model: null,
@@ -2721,12 +2915,24 @@ async function runCandidateBatch(input: {
   winner: ModelGenerationResult | null;
   failures: ClawCloudModelCandidateTrace[];
 }> {
+  type CandidateBatchSuccess = {
+    ok: true;
+    index: number;
+    result: ModelGenerationResult;
+  };
+  type CandidateBatchFailure = {
+    ok: false;
+    index: number;
+    trace: ClawCloudModelCandidateTrace;
+  };
+
   for (const candidate of input.candidates) {
     console.log(`[ai] trying ${candidate.model}`);
   }
 
   const controllers = input.candidates.map(() => new AbortController());
   const failures = new Map<number, ClawCloudModelCandidateTrace>();
+  const successes: ModelGenerationResult[] = [];
 
   const attempts = input.candidates.map((candidate, index) => (async () => {
     const startedAt = Date.now();
@@ -2744,62 +2950,90 @@ async function runCandidateBatch(input: {
 
     if (out) {
       markModelSuccess(candidate.healthKey);
+      const selection = evaluateGeneratedCandidateSelection({
+        intent: input.intent,
+        question: input.userQuestion,
+        answer: out,
+      });
       return {
-        candidate,
-        out,
+        ok: true as const,
         index,
-        latencyMs,
-        heuristicScore: scoreClawCloudModelResponse({
-          intent: input.intent,
-          response: out,
-          userQuestion: input.userQuestion,
-        }),
-        preview: buildCandidatePreview(out),
-      };
+        result: {
+          candidate,
+          out,
+          latencyMs,
+          heuristicScore: scoreClawCloudModelResponse({
+            intent: input.intent,
+            response: out,
+            userQuestion: input.userQuestion,
+          }),
+          preview: buildCandidatePreview(out),
+          selectionIssues: selection.issues,
+          selectionPenalty: selection.selectionPenalty,
+          isStructurallyValid: selection.isStructurallyValid,
+        },
+      } satisfies CandidateBatchSuccess;
     }
 
     if (!callResult.cancelled && !controllers[index].signal.aborted) {
       markModelFailure(candidate.healthKey, callResult.cooldownMs);
-      failures.set(index, {
+      console.warn(`[ai] ${candidate.model} failed, trying next model...`);
+    }
+    return {
+      ok: false as const,
+      index,
+      trace: {
         model: candidate.model,
         tier: candidate.tier,
-        status: "failed",
+        status: "failed" as const,
         latencyMs,
         heuristicScore: null,
         preview: null,
-      });
-      console.warn(`[ai] ${candidate.model} failed, trying next model...`);
-    }
-
-    throw new Error(`No usable response from ${candidate.model}`);
+      },
+    } satisfies CandidateBatchFailure;
   })());
 
-  try {
-    const winner = await Promise.any(attempts);
-    for (let index = 0; index < controllers.length; index += 1) {
-      if (index !== winner.index) {
-        controllers[index].abort();
+  const pending = new Map(
+    attempts.map((attempt, index) => [
+      index,
+      attempt.then((result) => ({ index, result })),
+    ]),
+  );
+
+  while (pending.size) {
+    const settled = await Promise.race(pending.values());
+    pending.delete(settled.index);
+
+    if (settled.result.ok) {
+      const winner = settled.result.result;
+      successes.push(winner);
+
+      if (winner.isStructurallyValid) {
+        for (let index = 0; index < controllers.length; index += 1) {
+          if (index !== settled.result.index) {
+            controllers[index].abort();
+          }
+        }
+        return {
+          winner,
+          failures: [...failures.values()],
+        };
       }
+
+      continue;
     }
-    return {
-      winner: {
-        candidate: winner.candidate,
-        out: winner.out,
-        latencyMs: winner.latencyMs,
-        heuristicScore: winner.heuristicScore,
-        preview: winner.preview,
-      },
-      failures: [...failures.values()],
-    };
-  } catch {
-    for (const controller of controllers) {
-      controller.abort();
-    }
-    return {
-      winner: null,
-      failures: [...failures.values()],
-    };
+
+    failures.set(settled.index, settled.result.trace);
   }
+
+  for (const controller of controllers) {
+    controller.abort();
+  }
+
+  return {
+    winner: pickBestValidGeneratedCandidate(successes),
+    failures: [...failures.values()],
+  };
 }
 
 export async function completeClawCloudPrompt(input: {
@@ -3033,67 +3267,102 @@ export function chooseClawCloudCandidateForTest(input: {
   responses: Array<{ response: string; model?: string; tier?: ModelTier }>;
   judgeDecision?: Partial<ModelJudgeDecision> & { winnerIndex: number };
 }) {
-  const generated = input.responses.map((entry, index) => ({
-    candidate: {
-      model: entry.model ?? `test-model-${index + 1}`,
-      timeoutMs: 2_000,
-      tier: entry.tier ?? "chat",
-      healthKey: `test:${index + 1}`,
-    },
-    out: entry.response,
-    latencyMs: 100 + index,
-    heuristicScore: scoreClawCloudModelResponse({
+  const generated = input.responses.map((entry, index) => {
+    const selection = evaluateGeneratedCandidateSelection({
       intent: input.intent,
-      response: entry.response,
-      userQuestion: input.userQuestion,
-    }),
-    preview: buildCandidatePreview(entry.response),
-  }));
+      question: input.userQuestion,
+      answer: entry.response,
+    });
+    return {
+      candidate: {
+        model: entry.model ?? `test-model-${index + 1}`,
+        timeoutMs: 2_000,
+        tier: entry.tier ?? "chat",
+        healthKey: `test:${index + 1}`,
+      },
+      out: entry.response,
+      latencyMs: 100 + index,
+      heuristicScore: scoreClawCloudModelResponse({
+        intent: input.intent,
+        response: entry.response,
+        userQuestion: input.userQuestion,
+      }),
+      preview: buildCandidatePreview(entry.response),
+      selectionIssues: selection.issues,
+      selectionPenalty: selection.selectionPenalty,
+      isStructurallyValid: selection.isStructurallyValid,
+    };
+  });
   const planner = buildClawCloudModelPlannerDecision({
     intent: input.intent,
     responseMode: input.responseMode,
     availableCandidates: generated.length,
   });
   const ranked = rankGeneratedCandidates(generated);
-  const heuristicWinner = ranked[0] ?? null;
-  const scoreGap = ranked.length > 1
-    ? (ranked[0]?.heuristicScore ?? 0) - (ranked[1]?.heuristicScore ?? 0)
+  const validRanked = ranked.filter((candidate) => candidate.isStructurallyValid);
+  const heuristicWinner = validRanked[0] ?? ranked[0] ?? null;
+  const scoreGap = validRanked.length > 1
+    ? (validRanked[0]?.heuristicScore ?? 0) - (validRanked[1]?.heuristicScore ?? 0)
+    : ranked.length > 1
+      ? (ranked[0]?.heuristicScore ?? 0) - (ranked[1]?.heuristicScore ?? 0)
     : Number.POSITIVE_INFINITY;
   const materialDisagreement = detectMaterialCandidateDisagreement({
     intent: input.intent,
-    candidates: ranked.map((candidate) => ({
+    candidates: (validRanked.length >= 2 ? validRanked : ranked).map((candidate) => ({
       out: candidate.out,
       heuristicScore: candidate.heuristicScore,
+      isStructurallyValid: candidate.isStructurallyValid,
+      selectionPenalty: candidate.selectionPenalty,
     })),
     threshold: planner.disagreementThreshold,
   });
 
   let selected = heuristicWinner;
   let selectedBy: ClawCloudModelOrchestrationTrace["selectedBy"] = planner.judgeEnabled ? "heuristic" : "single_success";
+  const candidatePoolForJudge = validRanked.length ? validRanked : ranked;
 
   if (input.judgeDecision) {
-    const judged = ranked[input.judgeDecision.winnerIndex] ?? null;
+    const judged = candidatePoolForJudge[input.judgeDecision.winnerIndex] ?? null;
     if (judged) {
       selected = judged;
       selectedBy = "judge";
     }
   }
 
+  if ((!selected || !selected.isStructurallyValid) && validRanked.length) {
+    selected = validRanked[0] ?? selected;
+    selectedBy = "heuristic";
+  }
+
+  const hasCompetingValidAnswers = validRanked.length > 1;
   const judgeConfidenceLow = input.judgeDecision
     ? input.judgeDecision.confidence === "low" || Boolean(input.judgeDecision.needsClarification)
     : false;
-  const heuristicConfidenceLow = materialDisagreement && scoreGap < 8;
-  const confidentWinner = selected
-    && !(judgeConfidenceLow || heuristicConfidenceLow)
-    ? true
-    : Boolean(selected && planner.allowLowConfidenceWinner);
+  const heuristicConfidenceLow = hasCompetingValidAnswers && materialDisagreement && scoreGap < 8;
+  const unresolvedHighStakesTieWithoutJudge = (
+    hasCompetingValidAnswers
+    && materialDisagreement
+    && !input.judgeDecision
+    && isHighStakesIntent(input.intent)
+    && scoreGap < 12
+  );
+  const unresolvedConflict = (
+    hasCompetingValidAnswers
+    && materialDisagreement
+    && (
+      judgeConfidenceLow
+      || heuristicConfidenceLow
+      || unresolvedHighStakesTieWithoutJudge
+    )
+  );
+  const selectedIndex = selected?.isStructurallyValid && !unresolvedConflict
+    ? generated.findIndex((candidate) => candidate.candidate.model === selected?.candidate.model)
+    : null;
 
   return {
     planner,
-    selectedIndex: confidentWinner && selected
-      ? generated.findIndex((candidate) => candidate.candidate.model === selected?.candidate.model)
-      : null,
-    selectedBy: confidentWinner ? selectedBy : "fallback",
+    selectedIndex,
+    selectedBy: selectedIndex !== null ? selectedBy : "fallback",
     materialDisagreement,
     scores: generated.map((candidate) => candidate.heuristicScore),
   };

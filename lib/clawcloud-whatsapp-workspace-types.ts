@@ -68,6 +68,16 @@ export type WhatsAppPendingContactResolutionKind =
   | "whatsapp_history"
   | "send_message";
 
+export type WhatsAppVerifiedContactSelection = {
+  kind: WhatsAppPendingContactResolutionKind;
+  requestedName: string;
+  contactName: string;
+  phone: string | null;
+  jid: string | null;
+  resumePrompt: string;
+  verifiedAt: string;
+};
+
 export type WhatsAppPendingContactResolution = {
   kind: WhatsAppPendingContactResolutionKind;
   requestedName: string;
@@ -106,6 +116,7 @@ export type WhatsAppSettings = {
   quietHoursEnd: string | null;
   activeContactSession: WhatsAppActiveContactSession | null;
   pendingContactResolution: WhatsAppPendingContactResolution | null;
+  recentVerifiedContactSelection: WhatsAppVerifiedContactSelection | null;
 };
 
 export type WhatsAppReplyApproval = {
@@ -299,4 +310,5 @@ export const defaultWhatsAppSettings: WhatsAppSettings = {
   quietHoursEnd: null,
   activeContactSession: null,
   pendingContactResolution: null,
+  recentVerifiedContactSelection: null,
 };

@@ -54,10 +54,10 @@ jobs:
       - name: Run canary dry-run
         run: npm run qa:canary -- --dry-run
 
-      - name: Run Phase 7 release gate
+      - name: Run Phase 11 release gate
         env:
           NEXT_PUBLIC_APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
           NEXTJS_URL: ${{ secrets.NEXTJS_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
           AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
-        run: npm run qa:phase7
+        run: npm run qa:phase11

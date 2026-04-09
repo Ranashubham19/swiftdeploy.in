@@ -66,6 +66,19 @@ export interface SystemHealthSnapshot {
   lastResetAt: number;
 }
 
+export type AnswerQualityMetricKey =
+  | "visible_fallback"
+  | "blocked_good_answer"
+  | "wrong_language"
+  | "stale_live_answer"
+  | "media_grounding_failure"
+  | "ambiguous_contact";
+
+export interface AnswerQualityMetricsSnapshot {
+  totalSignals: number;
+  counts: Record<AnswerQualityMetricKey, number>;
+}
+
 // ---------------------------------------------------------------------------
 // STRUCTURED LOGGER
 // ---------------------------------------------------------------------------
@@ -228,6 +241,15 @@ const SYSTEM_COUNTERS = {
   startedAt: Date.now(),
 };
 
+const ANSWER_QUALITY_COUNTS: Record<AnswerQualityMetricKey, number> = {
+  visible_fallback: 0,
+  blocked_good_answer: 0,
+  wrong_language: 0,
+  stale_live_answer: 0,
+  media_grounding_failure: 0,
+  ambiguous_contact: 0,
+};
+
 function getOrCreateModelMetrics(model: string, intent: string, responseMode: string): ModelMetrics {
   const key = `${model}:${intent}:${responseMode}`;
   let metrics = MODEL_METRICS.get(key);
@@ -373,6 +395,29 @@ export function incrementActiveRequests() {
 
 export function decrementActiveRequests() {
   SYSTEM_COUNTERS.activeRequests = Math.max(0, SYSTEM_COUNTERS.activeRequests - 1);
+}
+
+export function recordAnswerQualitySignals(flags: string[]) {
+  for (const flag of flags) {
+    if (flag in ANSWER_QUALITY_COUNTS) {
+      ANSWER_QUALITY_COUNTS[flag as AnswerQualityMetricKey] += 1;
+    }
+  }
+}
+
+export function getAnswerQualityMetricsSnapshot(): AnswerQualityMetricsSnapshot {
+  const counts = { ...ANSWER_QUALITY_COUNTS };
+  const totalSignals = Object.values(counts).reduce((sum, value) => sum + value, 0);
+  return {
+    totalSignals,
+    counts,
+  };
+}
+
+export function resetAnswerQualityMetricsForTest() {
+  for (const key of Object.keys(ANSWER_QUALITY_COUNTS) as AnswerQualityMetricKey[]) {
+    ANSWER_QUALITY_COUNTS[key] = 0;
+  }
 }
 
 // ---------------------------------------------------------------------------

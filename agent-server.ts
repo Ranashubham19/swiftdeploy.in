@@ -32,6 +32,7 @@ import {
   isImageGenAvailable,
 } from "./lib/clawcloud-imagegen";
 import {
+  buildDocumentGroundingFailureReply,
   buildDocumentQuestionPrompt,
   extractDocumentText,
   isSupportedDocument,
@@ -39,6 +40,7 @@ import {
 import {
   buildImageGroundingFailureReply,
   buildVideoGroundingFailureReply,
+  buildVoiceNoteGroundingFailureReply,
   buildVoiceNoteQuestionPrompt,
 } from "./lib/clawcloud-media-context";
 import {
@@ -6952,7 +6954,9 @@ async function connectSession(userId: string): Promise<SessionRecord> {
             } else {
               await sendReply(
                 userId,
-                "I received your voice note but couldn't transcribe it. Please try again or type your message.",
+                buildVoiceNoteGroundingFailureReply({
+                  reason: "analysis_failed",
+                }),
                 replyTargetJid,
               );
               mediaHandled = true;
@@ -6960,7 +6964,9 @@ async function connectSession(userId: string): Promise<SessionRecord> {
           } else {
             await sendReply(
               userId,
-              "I received your voice note but couldn't download it. Please try again.",
+              buildVoiceNoteGroundingFailureReply({
+                reason: "download_failed",
+              }),
               replyTargetJid,
             );
             mediaHandled = true;
@@ -6968,7 +6974,9 @@ async function connectSession(userId: string): Promise<SessionRecord> {
         } else {
           await sendReply(
             userId,
-            "I received your voice note, but voice transcription is temporarily unavailable. Please type your message instead.",
+            buildVoiceNoteGroundingFailureReply({
+              reason: "provider_unavailable",
+            }),
             replyTargetJid,
           );
           mediaHandled = true;
@@ -7002,7 +7010,11 @@ async function connectSession(userId: string): Promise<SessionRecord> {
             } else {
               await sendReply(
                 userId,
-                `I received *${fileName}* but couldn't extract text from it. Supported formats are PDF, DOCX, XLSX, TXT, CSV, Markdown, and JSON.`,
+                buildDocumentGroundingFailureReply({
+                  fileName,
+                  userQuestion: caption,
+                  reason: "analysis_failed",
+                }),
                 replyTargetJid,
               );
               mediaHandled = true;
@@ -7010,7 +7022,11 @@ async function connectSession(userId: string): Promise<SessionRecord> {
           } else {
             await sendReply(
               userId,
-              `I received *${fileName}* but couldn't download it. Please try again.`,
+              buildDocumentGroundingFailureReply({
+                fileName,
+                userQuestion: caption,
+                reason: "download_failed",
+              }),
               replyTargetJid,
             );
             mediaHandled = true;
@@ -7018,7 +7034,11 @@ async function connectSession(userId: string): Promise<SessionRecord> {
         } else {
           await sendReply(
             userId,
-            `I received *${fileName}* but that file type is not supported yet.\n\nSupported formats: *PDF, DOCX, XLSX, TXT, CSV, Markdown, and JSON.*`,
+            buildDocumentGroundingFailureReply({
+              fileName,
+              userQuestion: caption,
+              reason: "unsupported_type",
+            }),
             replyTargetJid,
           );
           mediaHandled = true;
@@ -7060,14 +7080,9 @@ async function connectSession(userId: string): Promise<SessionRecord> {
             } else {
               await sendReply(
                 userId,
-                [
-                  "I received your video but could not extract enough audio or visual detail to answer confidently.",
-                  "",
-                  "Try one of these:",
-                  "- add a caption with your question",
-                  "- send the key frame as an image",
-                  "- send the audio as a voice note",
-                ].join("\n"),
+                buildVideoGroundingFailureReply({
+                  reason: "analysis_failed",
+                }),
                 replyTargetJid,
               );
               mediaHandled = true;
@@ -7075,7 +7090,10 @@ async function connectSession(userId: string): Promise<SessionRecord> {
           } else {
             await sendReply(
               userId,
-              "I received your video but couldn't download it. Please try again.",
+              buildVideoGroundingFailureReply({
+                userQuestion: caption,
+                reason: "download_failed",
+              }),
               replyTargetJid,
             );
             mediaHandled = true;

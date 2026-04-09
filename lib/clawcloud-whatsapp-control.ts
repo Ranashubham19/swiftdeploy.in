@@ -12,6 +12,7 @@ import {
   type WhatsAppReplyMode,
   type WhatsAppSensitivity,
   type WhatsAppSettings,
+  type WhatsAppVerifiedContactSelection,
 } from "@/lib/clawcloud-whatsapp-workspace-types";
 
 const automationModes = new Set<WhatsAppAutomationMode>([
@@ -163,6 +164,60 @@ function normalizePendingContactResolution(value: unknown): WhatsAppPendingConta
   };
 }
 
+function normalizeVerifiedContactSelection(value: unknown): WhatsAppVerifiedContactSelection | null {
+  const raw = value && typeof value === "object"
+    ? value as Partial<Record<keyof WhatsAppVerifiedContactSelection, unknown>>
+    : null;
+  const kind = typeof raw?.kind === "string"
+    ? raw.kind.trim()
+    : "";
+  const allowedKinds = new Set<WhatsAppPendingContactResolutionKind>([
+    "active_contact_start",
+    "whatsapp_history",
+    "send_message",
+  ]);
+  if (!allowedKinds.has(kind as WhatsAppPendingContactResolutionKind)) {
+    return null;
+  }
+
+  const requestedName = typeof raw?.requestedName === "string" && raw.requestedName.trim()
+    ? raw.requestedName.trim()
+    : null;
+  const contactName = typeof raw?.contactName === "string" && raw.contactName.trim()
+    ? raw.contactName.trim()
+    : null;
+  const resumePrompt = typeof raw?.resumePrompt === "string" && raw.resumePrompt.trim()
+    ? raw.resumePrompt.trim()
+    : null;
+  if (!requestedName || !contactName || !resumePrompt) {
+    return null;
+  }
+
+  const phone = typeof raw?.phone === "string" && raw.phone.trim()
+    ? raw.phone.trim()
+    : null;
+  const jid = typeof raw?.jid === "string" && raw.jid.trim()
+    ? raw.jid.trim()
+    : null;
+  if (!phone && !jid) {
+    return null;
+  }
+
+  const verifiedAt = typeof raw?.verifiedAt === "string" && raw.verifiedAt.trim()
+    ? raw.verifiedAt.trim()
+    : new Date().toISOString();
+
+  return {
+    kind: kind as WhatsAppPendingContactResolutionKind,
+    requestedName,
+    contactName,
+    phone,
+    jid,
+    resumePrompt,
+    verifiedAt,
+  };
+}
+
 function normalizeSettings(value: unknown): WhatsAppSettings {
   const raw = value && typeof value === "object"
     ? (value as Partial<Record<keyof WhatsAppSettings, unknown>>)
@@ -219,6 +274,11 @@ function normalizeSettings(value: unknown): WhatsAppSettings {
     pendingContactResolution: normalizePendingContactResolution(
       raw.pendingContactResolution
       ?? (raw as Record<string, unknown>).pending_contact_resolution
+      ?? null,
+    ),
+    recentVerifiedContactSelection: normalizeVerifiedContactSelection(
+      raw.recentVerifiedContactSelection
+      ?? (raw as Record<string, unknown>).recent_verified_contact_selection
       ?? null,
     ),
   };
@@ -301,6 +361,20 @@ export async function setWhatsAppPendingContactResolution(
 
 export async function clearWhatsAppPendingContactResolution(userId: string) {
   await setWhatsAppPendingContactResolution(userId, null);
+}
+
+export async function setWhatsAppRecentVerifiedContactSelection(
+  userId: string,
+  selection: WhatsAppVerifiedContactSelection | null,
+) {
+  const settings = await upsertWhatsAppSettings(userId, {
+    recentVerifiedContactSelection: selection,
+  });
+  return settings.recentVerifiedContactSelection;
+}
+
+export async function clearWhatsAppRecentVerifiedContactSelection(userId: string) {
+  await setWhatsAppRecentVerifiedContactSelection(userId, null);
 }
 
 export async function writeWhatsAppAuditLog(

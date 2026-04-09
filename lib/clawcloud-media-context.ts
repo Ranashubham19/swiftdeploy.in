@@ -38,6 +38,29 @@ export function buildVoiceNoteQuestionPrompt(
   ].join("\n");
 }
 
+export function buildVoiceNoteGroundingFailureReply(input: {
+  userQuestion?: string | null;
+  reason: MediaFailureReason;
+}) {
+  const hadQuestion = Boolean(String(input.userQuestion ?? "").trim());
+
+  if (input.reason === "download_failed") {
+    return hadQuestion
+      ? "I received your voice note and your question, but I could not download the audio reliably. I will not guess from partial audio. Please resend the voice note or type the exact part you want me to answer."
+      : "I received your voice note, but I could not download the audio reliably. Please resend it or type the exact part you want me to answer.";
+  }
+
+  if (input.reason === "provider_unavailable") {
+    return hadQuestion
+      ? "I received your voice note and your question, but transcription is not available on this deployment right now. I am not going to guess from the audio alone. Please resend it later or type the exact line or question you want me to answer."
+      : "I received your voice note, but transcription is not available on this deployment right now. Please resend it later or type the exact line or question you want me to answer.";
+  }
+
+  return hadQuestion
+    ? "I received your voice note and your question, but I could not extract a reliable enough transcript to answer accurately. I am not going to guess from unclear audio. Please resend the voice note or type the exact line or question you want me to answer."
+    : "I received your voice note, but I could not extract a reliable enough transcript to answer accurately. Please resend it or type the exact line or question you want me to answer.";
+}
+
 export function buildVideoQuestionPrompt(input: {
   mimeType: string;
   transcript?: string | null;

@@ -16,6 +16,7 @@ import {
   isValidSharedSecret,
   requireClawCloudAuth,
 } from "@/lib/clawcloud-supabase";
+import { recordAnswerQualitySignals } from "@/lib/clawcloud-observability";
 import { env } from "@/lib/env";
 
 export const runtime = "nodejs";
@@ -33,6 +34,9 @@ async function recordAgentMessageObservability(input: {
   inputKind: string;
   metadata?: Record<string, unknown> | null;
 }) {
+  if (input.result.observability?.qualityFlags?.length) {
+    recordAnswerQualitySignals(input.result.observability.qualityFlags);
+  }
   await recordClawCloudAnswerObservability({
     userId: input.userId,
     question: input.message,
@@ -119,6 +123,7 @@ export async function POST(request: NextRequest) {
                 judgeUsed: false,
                 materialDisagreement: false,
                 needsClarification: false,
+                qualityFlags: [],
               },
             },
           });
@@ -243,6 +248,7 @@ export async function POST(request: NextRequest) {
               judgeUsed: false,
               materialDisagreement: false,
               needsClarification: false,
+              qualityFlags: [],
             },
           },
         });

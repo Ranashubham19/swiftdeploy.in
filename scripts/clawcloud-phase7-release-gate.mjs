@@ -1,8 +1,9 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
-const REPORT_PATH = "tmp-clawcloud-phase7-release-gate.json";
+const REPORT_PATH = "tmp-clawcloud-phase11-release-gate.json";
 const MIN_SCORECARD_OVERALL = 95;
 const MIN_REPLAY_SCORE = 100;
+const MIN_REGRESSION_SCORE = 95;
 const MIN_BENCHMARK_SCORE = 90;
 const MIN_LIVE_API_SCORE = 90;
 
@@ -106,6 +107,7 @@ async function main() {
   const scorecardJson = readJsonFile("tmp-clawcloud-scorecard.json");
   const overallScore = readNumber(scorecardJson?.overall?.score, 0);
   const replayScore = readNumber(scorecardJson?.sections?.replay?.score, 0);
+  const regressionScore = readNumber(scorecardJson?.sections?.regression?.score, 0);
   const benchmarkScore = readNumber(scorecardJson?.sections?.benchmark?.score, 0);
   const liveApiScore = readNumber(scorecardJson?.sections?.live_api?.score, 0);
   const requireLiveApiScorecard = Boolean(scorecardJson?.withLive || hasLiveApiQaConfig());
@@ -137,14 +139,20 @@ async function main() {
       detail: `Benchmark score ${benchmarkScore} / ${MIN_BENCHMARK_SCORE}.`,
     },
     {
+      key: "regression_threshold",
+      ok: regressionScore >= MIN_REGRESSION_SCORE,
+      detail: `Regression score ${regressionScore} / ${MIN_REGRESSION_SCORE}.`,
+    },
+    {
       key: "scorecard_components",
       ok:
         scorecardJson?.commandStatus?.replay?.ok === true
+        && scorecardJson?.commandStatus?.regression?.ok === true
         && scorecardJson?.commandStatus?.benchmark?.ok === true
         && (!requireLiveApiScorecard || scorecardJson?.commandStatus?.live?.ok === true),
       detail: requireLiveApiScorecard
-        ? "Replay, benchmark, and live API sections must all pass."
-        : "Replay and benchmark sections must both pass.",
+        ? "Replay, regression, benchmark, and live API sections must all pass."
+        : "Replay, regression, and benchmark sections must all pass.",
     },
     {
       key: "scorecard_freshness",
@@ -188,8 +196,8 @@ async function main() {
         qualityGateWorkflow.includes("name: Quality Gate")
         && qualityGateWorkflow.includes("phase0-quality")
         && qualityGateWorkflow.includes("npm run build")
-        && qualityGateWorkflow.includes("npm run qa:phase7"),
-      detail: "Quality Gate workflow must run build and Phase 7 release checks.",
+        && qualityGateWorkflow.includes("npm run qa:phase11"),
+      detail: "Quality Gate workflow must run build and the Phase 11 release checks.",
     },
     {
       key: "scheduled_canary_workflow",
@@ -208,6 +216,7 @@ async function main() {
     thresholds: {
       minScorecardOverall: MIN_SCORECARD_OVERALL,
       minReplayScore: MIN_REPLAY_SCORE,
+      minRegressionScore: MIN_REGRESSION_SCORE,
       minBenchmarkScore: MIN_BENCHMARK_SCORE,
       minLiveApiScore: MIN_LIVE_API_SCORE,
     },
@@ -215,6 +224,7 @@ async function main() {
       ok: Boolean(scorecardJson),
       overallScore,
       replayScore,
+      regressionScore,
       benchmarkScore,
       liveApiScore: scorecardJson?.withLive ? liveApiScore : null,
       label: scorecardJson?.overall?.label ?? null,

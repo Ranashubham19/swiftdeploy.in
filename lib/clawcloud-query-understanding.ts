@@ -9,8 +9,11 @@ const DIRECT_QUERY_CORRECTIONS: Record<string, string> = {
   captial: "capital",
   chineese: "chinese",
   cdoe: "code",
+  converstion: "conversation",
   contnue: "continue",
   contonue: "continue",
+  currnet: "current",
+  currenlty: "currently",
   descibe: "describe",
   detialed: "detailed",
   detailled: "detailed",
@@ -28,14 +31,18 @@ const DIRECT_QUERY_CORRECTIONS: Record<string, string> = {
   gmal: "gmail",
   helllo: "hello",
   hindii: "hindi",
+  histroy: "history",
   inboc: "inbox",
   inbxo: "inbox",
   japnese: "japanese",
   javscript: "javascript",
   javasript: "javascript",
   koreean: "korean",
+  latets: "latest",
   mailbx: "mailbox",
   mesage: "message",
+  mesages: "messages",
+  messges: "messages",
   moive: "movie",
   movi: "movie",
   nw: "now",
@@ -43,7 +50,10 @@ const DIRECT_QUERY_CORRECTIONS: Record<string, string> = {
   pyhton: "python",
   profestional: "professional",
   profesisonal: "professional",
+  reaad: "read",
   replly: "reply",
+  shwo: "show",
+  smmarize: "summarize",
   spanis: "spanish",
   stroy: "story",
   summarise: "summarize",
@@ -330,6 +340,10 @@ function expandTelegraphicQuery(input: string) {
 
 function applyContextualPhraseRepairs(input: string) {
   let repaired = input;
+
+  repaired = repaired.replace(/\btell\s+mw\b/gi, "tell me");
+  repaired = repaired.replace(/\bgive\s+mw\b/gi, "give me");
+  repaired = repaired.replace(/\bshow\s+mw\b/gi, "show me");
 
   repaired = repaired.replace(
     /\b(tell me|give me|explain)\s+(?:the\s+)?(?:full\s+)?(?:detailed\s+)?movie\s+of\b/gi,

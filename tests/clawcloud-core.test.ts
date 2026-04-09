@@ -19,7 +19,12 @@ import {
   looksLikeClawCloudRefusal,
   summarizeClawCloudAnswerObservabilityRecords,
 } from "@/lib/clawcloud-answer-observability";
-import { setLogLevel } from "@/lib/clawcloud-observability";
+import {
+  getAnswerQualityMetricsSnapshot,
+  recordAnswerQualitySignals,
+  resetAnswerQualityMetricsForTest,
+  setLogLevel,
+} from "@/lib/clawcloud-observability";
 import {
   buildPreferredModelOrderForIntent,
   buildClawCloudModelCandidatesForTest,
@@ -44,11 +49,15 @@ import {
 } from "@/lib/clawcloud-contacts-v2";
 import {
   buildImageGroundingFailureReply,
+  buildVoiceNoteGroundingFailureReply,
   buildVideoGroundingFailureReply,
   buildVideoQuestionPrompt,
   buildVoiceNoteQuestionPrompt,
   looksLikeGroundedMediaPrompt,
 } from "@/lib/clawcloud-media-context";
+import {
+  buildDocumentGroundingFailureReply,
+} from "@/lib/clawcloud-docs";
 import { analyzeConversationContinuityForTest } from "@/lib/clawcloud-memory";
 import { detectDriveIntent } from "@/lib/clawcloud-drive";
 import { answerHolidayQuery, detectHolidayQuery } from "@/lib/clawcloud-holidays";
@@ -184,6 +193,7 @@ import {
 import { resolveSupportedLocale } from "@/lib/clawcloud-locales";
 import { detectHinglish } from "@/lib/clawcloud-hinglish";
 import {
+  assessClawCloudAnswerDraftForTest,
   buildUnhandledWhatsAppOperationalClarificationForTest,
   buildDeterministicAssistantMetaReplyForTest,
   buildDeterministicConversationReplyForTest,
@@ -200,12 +210,14 @@ import {
   buildDeterministicExplainReplyForTest,
   buildLocalizedDeterministicKnownStoryReplyForTest,
   buildCodingFallbackV2,
+  buildIntentAlignedRecoveryReplyForTest,
   buildTimeboxedProfessionalReplyForTest,
   formatWhatsAppHistoryResolvedNoRowsReplyForTest,
   formatWhatsAppHistoryUnverifiedContactReplyForTest,
   isConfidentRecipientNameMatchForTest,
   isProfessionallyCommittedRecipientMatchForTest,
   buildWhatsAppPendingContactResumePromptForTest,
+  buildWhatsAppHistoryFollowUpResumePromptForTest,
   buildWhatsAppPendingDraftReviewReplyForTest,
   buildWhatsAppSendAmbiguousContactReplyForTest,
   maybePromoteVisibleResponseWithLiveBundleForTest,
@@ -240,6 +252,7 @@ import {
   isLikelyWhatsAppSelfLabelForTest,
   getInboundRouteTimeoutPolicyForTest,
   looksOverlyThinDirectDefinitionReplyForTest,
+  looksLikeWhatsAppHistoryContinuationWithoutExplicitContactForTest,
   normalizeReplyForClawCloudDisplay,
   polishClawCloudAnswerStyleForTest,
   routeInboundAgentMessageResult,
@@ -1587,7 +1600,7 @@ test("phase 2 candidate scoring prefers complete coding answers over thin stubs"
   assert.equal(choice.selectedBy === "heuristic" || choice.selectedBy === "judge", true);
 });
 
-test("phase 2 disagreement handling falls back when high-stakes candidates conflict", () => {
+test("phase 7 disagreement handling fails closed when high-stakes candidates conflict and no valid winner emerges", () => {
   const responses = [
     "India's latest inflation rate is 4.1%, based on the latest CPI release and official data summary.",
     "India's latest inflation rate is 7.9%, based on the latest CPI release and official data summary.",
@@ -1621,6 +1634,186 @@ test("phase 2 disagreement handling falls back when high-stakes candidates confl
   assert.equal(choice.selectedIndex, null);
   assert.equal(choice.selectedBy, "fallback");
   assert.equal(choice.materialDisagreement, true);
+});
+
+test("phase 7 selection prefers the strongest structurally valid coding answer over an invalid judged winner", () => {
+  const choice = chooseClawCloudCandidateForTest({
+    intent: "coding",
+    responseMode: "deep",
+    userQuestion: [
+      "Given an array of integers, find the length of the longest subarray with at most k distinct elements.",
+      "Optimize for O(n) time.",
+      "Explain your approach and provide code.",
+    ].join(" "),
+    responses: [
+      {
+        response: "Use a sliding window with a frequency map and keep shrinking when distinct elements exceed k.",
+      },
+      {
+        response: [
+          "Use a sliding window with a frequency map.",
+          "",
+          "```ts",
+          "function longestAtMostKDistinct(nums: number[], k: number): number {",
+          "  const freq = new Map<number, number>();",
+          "  let left = 0;",
+          "  let best = 0;",
+          "  for (let right = 0; right < nums.length; right += 1) {",
+          "    freq.set(nums[right], (freq.get(nums[right]) ?? 0) + 1);",
+          "    while (freq.size > k) {",
+          "      const next = (freq.get(nums[left]) ?? 0) - 1;",
+          "      if (next <= 0) freq.delete(nums[left]); else freq.set(nums[left], next);",
+          "      left += 1;",
+          "    }",
+          "    best = Math.max(best, right - left + 1);",
+          "  }",
+          "  return best;",
+          "}",
+          "```",
+          "",
+          "Time complexity: O(n). Space complexity: O(k).",
+        ].join("\n"),
+      },
+    ],
+    judgeDecision: {
+      winnerIndex: 0,
+      confidence: "low",
+      needsClarification: true,
+      materialDisagreement: true,
+    },
+  });
+
+  assert.equal(choice.selectedIndex, 1);
+  assert.notEqual(choice.selectedBy, "fallback");
+});
+
+test("phase 7 selection treats batches with only structurally invalid coding answers as no valid winner", () => {
+  const choice = chooseClawCloudCandidateForTest({
+    intent: "coding",
+    responseMode: "deep",
+    userQuestion: [
+      "Given an array of integers, find the length of the longest subarray with at most k distinct elements.",
+      "Optimize for O(n) time.",
+      "Explain your approach and provide code.",
+    ].join(" "),
+    responses: [
+      { response: "Use a sliding window." },
+      { response: "Track frequencies and move two pointers to keep at most k distinct values." },
+    ],
+  });
+
+  assert.equal(choice.selectedIndex, null);
+  assert.equal(choice.selectedBy, "fallback");
+});
+
+test("intent-aligned recovery for coding stays answer-shaped instead of generic scoped fallback", () => {
+  const prompt = [
+    "Given an array of integers, find the length of the longest subarray with at most k distinct elements.",
+    "",
+    "Constraints:",
+    "- 1 <= n <= 10^5",
+    "- Optimize for O(n) time",
+    "",
+    "Explain your approach and provide code.",
+  ].join("\n");
+
+  const reply = buildIntentAlignedRecoveryReplyForTest(prompt, "coding");
+
+  assert.doesNotMatch(reply, /exact topic, name, item, or number/i);
+  assert.doesNotMatch(reply, /exact problem statement, language, or constraints/i);
+  assert.match(reply, /sliding window|two pointers|time complexity|space complexity|```/i);
+});
+
+test("unified answer assessment prioritizes live grounding defects for freshness-sensitive questions", () => {
+  const assessment = assessClawCloudAnswerDraftForTest({
+    question: "Who is the richest person in the world right now?",
+    intent: "research",
+    category: "research",
+    answer: "The richest person in the world is Elon Musk.",
+  });
+
+  assert.equal(assessment.primaryIssue, "live_grounding_missing");
+  assert.ok(assessment.issues.includes("live_grounding_missing"));
+});
+
+test("unified answer assessment flags wrong-mode story replies before generic mismatch handling", () => {
+  const assessment = assessClawCloudAnswerDraftForTest({
+    question: "story of Harry potter in japanese",
+    intent: "culture",
+    category: "culture",
+    answer: "The provided text is already in English and requires no translation.",
+  });
+
+  assert.equal(assessment.primaryIssue, "wrong_mode");
+  assert.ok(assessment.issues.includes("wrong_mode"));
+});
+
+test("unified answer assessment flags incomplete technical answers with an explicit issue code", () => {
+  const assessment = assessClawCloudAnswerDraftForTest({
+    question: [
+      "Given an array of integers, find the length of the longest subarray with at most k distinct elements.",
+      "Optimize for O(n) time.",
+      "Explain your approach and provide code.",
+    ].join(" "),
+    intent: "coding",
+    category: "coding",
+    answer: "Use a sliding window.",
+  });
+
+  assert.equal(assessment.primaryIssue, "missing_code");
+  assert.ok(assessment.issues.includes("missing_code"));
+});
+
+test("domain validators flag coding answers that omit code after an explicit code request", () => {
+  const assessment = assessClawCloudAnswerDraftForTest({
+    question: [
+      "Given an array of integers, find the length of the longest subarray with at most k distinct elements.",
+      "Optimize for O(n) time.",
+      "Explain your approach and provide code.",
+    ].join(" "),
+    intent: "coding",
+    category: "coding",
+    answer: "Use a sliding window with a frequency map. Keep the window valid and track the best length. Time complexity is O(n) and space complexity is O(k).",
+  });
+
+  assert.equal(assessment.primaryIssue, "missing_code");
+  assert.ok(assessment.issues.includes("missing_code"));
+});
+
+test("domain validators flag math answers that do not show the solved result", () => {
+  const assessment = assessClawCloudAnswerDraftForTest({
+    question: "Calculate the EMI for a loan of 10,00,000 at 10% annual interest for 5 years, and show the steps.",
+    intent: "math",
+    category: "math",
+    answer: "Use the standard EMI formula with principal, monthly rate, and tenure.",
+  });
+
+  assert.equal(assessment.primaryIssue, "math_incomplete");
+  assert.ok(assessment.issues.includes("math_incomplete"));
+});
+
+test("domain validators flag replies that ignore the requested output language", () => {
+  const assessment = assessClawCloudAnswerDraftForTest({
+    question: "Explain recursion in Hindi.",
+    intent: "language",
+    category: "language",
+    answer: "Recursion is a technique where a function calls itself to solve smaller instances of the same problem.",
+  });
+
+  assert.equal(assessment.primaryIssue, "wrong_language");
+  assert.ok(assessment.issues.includes("wrong_language"));
+});
+
+test("domain validators reject contact completions that still carry ambiguity", () => {
+  const assessment = assessClawCloudAnswerDraftForTest({
+    question: "Send hello to Papa on WhatsApp.",
+    intent: "general",
+    category: "send_message",
+    answer: "Message sent to Papa. I found multiple WhatsApp contacts matching \"Papa\". Reply with the exact contact name or full number and I will check the right chat.",
+  });
+
+  assert.equal(assessment.primaryIssue, "contact_verification_missing");
+  assert.ok(assessment.issues.includes("contact_verification_missing"));
 });
 
 test("privacy export audit trail derives explicit live-answer evidence entries", () => {
@@ -3176,6 +3369,33 @@ test("conversation continuity keeps short fresh questions standalone when no rea
   assert.equal(continuity.resolvedQuestion, "weather delhi");
 });
 
+test("conversation continuity keeps volatile latest/current questions standalone even after an unrelated thread", () => {
+  const continuity = analyzeConversationContinuityForTest({
+    currentMessage: "who is the current founder of openai",
+    recentTurns: [
+      { role: "user", content: "Compare Claude and GPT for product strategy work" },
+      { role: "assistant", content: "GPT is broader while Claude often feels more natural in writing." },
+    ],
+  });
+
+  assert.equal(continuity.isFollowUp, false);
+  assert.equal(continuity.resolvedQuestion, "who is the current founder of openai");
+});
+
+test("conversation continuity keeps fresh hard technical prompts standalone instead of blending old context", () => {
+  const continuity = analyzeConversationContinuityForTest({
+    currentMessage: "Given an array of integers, find the length of the longest subarray with at most k distinct elements. Optimize for O(n) time and provide code.",
+    recentTurns: [
+      { role: "user", content: "Compare Gmail and Outlook for startup ops" },
+      { role: "assistant", content: "Gmail is simpler while Outlook is stronger in Microsoft-heavy teams." },
+    ],
+  });
+
+  assert.equal(continuity.isFollowUp, false);
+  assert.match(continuity.resolvedQuestion, /longest subarray with at most k distinct elements/i);
+  assert.doesNotMatch(continuity.resolvedQuestion, /Gmail|Outlook/i);
+});
+
 test("phase 4 profile formatting separates confirmed profile facts from pending suggestions", () => {
   const facts = [
     {
@@ -3551,6 +3771,7 @@ test("phase 7 answer observability classifies refusals and summarizes grounded a
     judgeUsed: true,
     materialDisagreement: false,
     needsClarification: false,
+    qualityFlags: [],
   });
 
   const summary = summarizeClawCloudAnswerObservabilityRecords([
@@ -3611,6 +3832,53 @@ test("phase 7 answer observability classifies refusals and summarizes grounded a
   assert.equal(summary.topIntents[0]?.intent, "research");
   assert.equal(summary.topIntents[0]?.count, 2);
   assert.equal(summary.topIntents[0]?.fallbackRate, 50);
+});
+
+test("phase 11 answer observability tracks blocked-good-answer and ambiguous contact quality flags", () => {
+  const summary = summarizeClawCloudAnswerObservabilityRecords([
+    {
+      intent: "coding",
+      response_state: "answered",
+      latency_ms: 4200,
+      had_visible_fallback: false,
+      live_answer: false,
+      live_evidence_count: 0,
+      model_audited: true,
+      material_disagreement: true,
+      metadata: {
+        quality_flags: ["blocked_good_answer"],
+      },
+    },
+    {
+      intent: "send_message",
+      response_state: "refused",
+      latency_ms: 820,
+      had_visible_fallback: false,
+      live_answer: false,
+      live_evidence_count: 0,
+      model_audited: false,
+      material_disagreement: false,
+      metadata: {
+        quality_flags: ["ambiguous_contact"],
+      },
+    },
+  ], 7);
+
+  assert.equal(summary.blockedGoodAnswerCount, 1);
+  assert.equal(summary.ambiguousContactCount, 1);
+  assert.equal(summary.blockedGoodAnswerRate, 50);
+  assert.equal(summary.ambiguousContactRate, 50);
+});
+
+test("phase 11 quality metrics recorder counts known answer-quality signals", () => {
+  resetAnswerQualityMetricsForTest();
+  recordAnswerQualitySignals(["blocked_good_answer", "ambiguous_contact", "ignored_flag"]);
+  const snapshot = getAnswerQualityMetricsSnapshot();
+
+  assert.equal(snapshot.totalSignals, 2);
+  assert.equal(snapshot.counts.blocked_good_answer, 1);
+  assert.equal(snapshot.counts.ambiguous_contact, 1);
+  assert.equal(snapshot.counts.visible_fallback, 0);
 });
 
 test("deterministic explain replies cover AI, ML, and deep learning comparisons directly", () => {
@@ -4056,6 +4324,10 @@ test("query understanding normalizes common typos and telegraphic prompts", () =
   assert.equal(
     normalizeClawCloudUnderstandingMessage("telll me stroy of the movi boy next door in koreean"),
     "tell me the story of the movie boy next door in korean",
+  );
+  assert.equal(
+    normalizeClawCloudUnderstandingMessage("Ok tell mw story of Harry potter in japanese"),
+    "Ok tell me the story of Harry potter in japanese",
   );
   assert.equal(
     normalizeClawCloudUnderstandingMessage("wrtie fibonaci cdoe in pythn"),
@@ -5489,6 +5761,28 @@ test("pending contact selection keeps literal family labels distinct after ambig
   }
 });
 
+test("verified WhatsApp history selections rewrite short follow-ups to the exact contact", () => {
+  assert.equal(
+    looksLikeWhatsAppHistoryContinuationWithoutExplicitContactForTest("ok summarize"),
+    true,
+  );
+
+  const resumePrompt = buildWhatsAppHistoryFollowUpResumePromptForTest(
+    "ok summarize",
+    {
+      kind: "whatsapp_history",
+      requestedName: "papa ji",
+      contactName: "Papa",
+      phone: "919898163144",
+      jid: "919898163144@s.whatsapp.net",
+      resumePrompt: "Show WhatsApp history with Papa",
+      verifiedAt: new Date().toISOString(),
+    },
+  );
+
+  assert.equal(resumePrompt, "Summarize the WhatsApp chat with +919898163144");
+});
+
 test("pending WhatsApp draft review understands send improve and replacement follow-ups", () => {
   const pending = {
     kind: "send_message" as const,
@@ -5519,6 +5813,39 @@ test("pending WhatsApp draft review understands send improve and replacement fol
       pending,
     }),
     { type: "replace", message: "Aapka din shubh ho maa" },
+  );
+});
+
+test("pending WhatsApp draft review keeps general ClawCloud questions out of the send lane", () => {
+  const pending = {
+    kind: "send_message" as const,
+    requestedName: "Maa",
+    resumePrompt: "send a very beautiful prompt in detail of good morning in hindi to maa",
+    draftMessage: "Suprabhat Maa, aapka din bahut sundar aur shaantipurn rahe.",
+    options: [{ name: "Maa", phone: "919800000002", jid: null }],
+    createdAt: new Date().toISOString(),
+  };
+
+  assert.deepEqual(
+    resolveWhatsAppPendingDraftReviewActionForTest({
+      message: "Movie story of Harry Potter in Tamil",
+      pending,
+    }),
+    { type: "none" },
+  );
+  assert.deepEqual(
+    resolveWhatsAppPendingDraftReviewActionForTest({
+      message: "Given an array of integers, find the length of the longest subarray with at most k distinct elements.",
+      pending,
+    }),
+    { type: "none" },
+  );
+  assert.deepEqual(
+    resolveWhatsAppPendingDraftReviewActionForTest({
+      message: "tell me the latest OpenAI model",
+      pending,
+    }),
+    { type: "none" },
   );
 });
 
@@ -6157,6 +6484,35 @@ test("pending WhatsApp contact selection does not auto-pick when the follow-up s
   );
 });
 
+test("pending WhatsApp contact selection does not revive the contact lane for longer assistant-directed follow-ups", () => {
+  const pending = {
+    kind: "send_message" as const,
+    requestedName: "Aman",
+    resumePrompt: "Send a professional thank-you greeting to Aman in Thai on WhatsApp",
+    createdAt: new Date().toISOString(),
+    options: [
+      {
+        name: "Aman Rajput",
+        phone: "919111111111",
+        jid: "919111111111@s.whatsapp.net",
+      },
+      {
+        name: "Aman Classmate",
+        phone: "919222222222",
+        jid: "919222222222@s.whatsapp.net",
+      },
+    ],
+  };
+
+  assert.deepEqual(
+    resolveWhatsAppPendingContactSelectionForTest({
+      message: "Aman Rajput ko choose karke ab Harry Potter ki story batao",
+      pending,
+    }),
+    { type: "none" },
+  );
+});
+
 test("recipient confidence rejects partial multi-token word matches that could hit the wrong contact", () => {
   assert.equal(isConfidentRecipientNameMatchForTest({
     requestedName: "Aman Rajput",
@@ -6425,6 +6781,21 @@ test("final reply pipeline skips verified already-translated replies but still r
       alreadyTranslated: true,
       candidateReply: "Use BFS over states (row, column, remaining_k) and prune dominated states with best_remaining.",
       languageResolution: englishResolution,
+    }),
+    true,
+  );
+
+  const japaneseResolution = resolveClawCloudReplyLanguage({
+    message: "Tell me the story of Harry Potter in Japanese.",
+    preferredLocale: "en",
+  });
+  assert.equal(
+    shouldSkipFinalReplyLanguageRewriteForTest({
+      question: "Tell me the story of Harry Potter in Japanese.",
+      category: "culture",
+      alreadyTranslated: false,
+      candidateReply: "『ハリー・ポッター』は、孤児のハリーが自分が魔法使いだと知り、ホグワーツで仲間と共にヴォルデモートと戦う物語です。",
+      languageResolution: japaneseResolution,
     }),
     true,
   );
@@ -7220,6 +7591,20 @@ test("strict intent routing keeps typoed contact-conversation prompts in the Wha
   assert.equal(route?.clarificationReply, null);
 });
 
+test("strict intent routing uses typo normalization to keep contact-history lookups locked early", () => {
+  const route = detectStrictIntentRouteForTest("shwo the converstion of me with papa ji");
+  assert.ok(route);
+  assert.equal(route?.intent.category, "whatsapp_history");
+  assert.equal(route?.locked, true);
+});
+
+test("strict intent routing locks freshness-sensitive current questions to the live web lane early", () => {
+  const route = detectStrictIntentRouteForTest("who is the current founder of openai");
+  assert.ok(route);
+  assert.equal(route?.intent.category, "web_search");
+  assert.equal(route?.locked, true);
+});
+
 test("strict intent routing locks Korean story requests into the culture_story path", () => {
   const route = detectStrictIntentRouteForTest("도깨비 줄거리를 한국어로 자세히 설명해줘");
   assert.ok(route);
@@ -7305,6 +7690,35 @@ test("localized deterministic known-story replies can answer My Demon directly i
   ) ?? "";
   assert.match(answer, /도도희/u);
   assert.match(answer, /정구원/u);
+});
+
+test("deterministic known-story replies handle typoed Harry Potter prompts with language targets", () => {
+  const answer = resolveDeterministicKnownStoryReplyForTest(
+    "Ok tell mw story of Harry potter in japanese",
+  ) ?? "";
+  assert.match(answer, /Harry Potter/i);
+  assert.match(answer, /Hogwarts/i);
+  assert.match(answer, /Voldemort/i);
+});
+
+test("localized deterministic known-story replies can answer Harry Potter directly in Japanese", () => {
+  const answer = buildLocalizedDeterministicKnownStoryReplyForTest(
+    "Ok tell mw story of Harry potter in japanese",
+    "ja",
+  ) ?? "";
+  assert.match(answer, /ハリー・ポッター/u);
+  assert.match(answer, /ホグワーツ/u);
+  assert.match(answer, /ヴォルデモート/u);
+});
+
+test("inbound agent story replies avoid generic clarification for typoed Harry Potter requests in Japanese", async () => {
+  const result = await routeInboundAgentMessageResult(
+    "test-user",
+    "Ok tell mw story of Harry potter in japanese",
+  );
+
+  assert.doesNotMatch(result.response ?? "", /正確な回答をするために|exact topic|precise reply/u);
+  assert.match(result.response ?? "", /ハリー・ポッター|ホグワーツ|ヴォルデモート/u);
 });
 
 test("inbound agent story replies stay non-empty for multi-language Infinity War prompts", async () => {
@@ -8454,6 +8868,9 @@ test("outbound review parser understands approve, cancel, and rewrite replies", 
   assert.deepEqual(parseOutboundReviewDecisionForTest("Yes, send it"), { kind: "approve" });
   assert.deepEqual(parseOutboundReviewDecisionForTest("No, cancel it"), { kind: "cancel" });
   assert.deepEqual(parseOutboundReviewDecisionForTest("send now please"), { kind: "approve" });
+  assert.deepEqual(parseOutboundReviewDecisionForTest("ok"), { kind: "none" });
+  assert.deepEqual(parseOutboundReviewDecisionForTest("sure"), { kind: "none" });
+  assert.deepEqual(parseOutboundReviewDecisionForTest("yes"), { kind: "none" });
   assert.deepEqual(parseOutboundReviewDecisionForTest("ok summarize"), { kind: "none" });
   assert.deepEqual(parseOutboundReviewDecisionForTest("do it professionally"), { kind: "none" });
   assert.deepEqual(parseOutboundReviewDecisionForTest("Rewrite it more professional and shorter"), {
@@ -9018,6 +9435,13 @@ test("algorithmic coding prompts force deep mode and stay out of the fast direct
   assert.equal(resolveResponseModeForTest("coding", subarrayPrompt, "fast"), "deep");
 });
 
+test("freshness-sensitive latest/current prompts force deep mode even when fast is requested", () => {
+  const prompt = "what is the latest Samsung model right now";
+
+  assert.equal(resolveResponseModeForTest("research", prompt), "deep");
+  assert.equal(resolveResponseModeForTest("research", prompt, "fast"), "deep");
+});
+
 test("hard algorithmic coding prompts get the extended deep timeout budget", () => {
   const prompt = "Given a large grid (up to 10^5 x 10^5) with obstacles, find the shortest path from source to destination where you can remove at most k obstacles. Optimize for both time and space. Explain your approach and provide code.";
   const timeout = getInboundRouteTimeoutPolicyForTest(prompt);
@@ -9564,18 +9988,83 @@ test("video prompts keep transcript and frame evidence together", () => {
   assert.equal(looksLikeGroundedMediaPrompt(prompt ?? ""), true);
 });
 
+test("document-bound quality profiles require grounded evidence", () => {
+  const prompt = buildVoiceNoteQuestionPrompt(
+    "Kal sham tak final payment bhej dena.",
+    "What does this voice note ask me to do?",
+  );
+  const profile = buildClawCloudAnswerQualityProfile({
+    question: prompt,
+    intent: "research",
+    category: "research",
+    isDocumentBound: true,
+  });
+
+  assert.equal(profile.domain, "document");
+  assert.equal(profile.requiresEvidence, true);
+});
+
+test("attachment-bound assessment rejects generic non-grounded answers", () => {
+  const prompt = buildVideoQuestionPrompt({
+    mimeType: "video/mp4",
+    transcript: "Payment request expires in 5 minutes.",
+    frameAnalysis: "Visible text: Scan the one-time QR code to pay. Paytm. PhonePe. Transfer Rs 1499.97.",
+    userQuestion: "What does this video ask me to do?",
+  });
+
+  const assessment = assessClawCloudAnswerDraftForTest({
+    question: prompt ?? "",
+    intent: "research",
+    category: "research",
+    answer: "This is probably some kind of payment reminder, but I cannot be sure.",
+    isDocumentBound: true,
+  });
+
+  assert.equal(assessment.primaryIssue, "evidence_missing");
+});
+
+test("attachment-bound assessment accepts grounded evidence-based answers", () => {
+  const prompt = buildVideoQuestionPrompt({
+    mimeType: "video/mp4",
+    transcript: "Payment request expires in 5 minutes.",
+    frameAnalysis: "Visible text: Scan the one-time QR code to pay. Paytm. PhonePe. Transfer Rs 1499.97.",
+    userQuestion: "What does this video ask me to do?",
+  });
+
+  const assessment = assessClawCloudAnswerDraftForTest({
+    question: prompt ?? "",
+    intent: "research",
+    category: "research",
+    answer: "The video asks you to scan a one-time QR code and pay Rs 1499.97. It shows Paytm and PhonePe, and the payment request expires in 5 minutes.",
+    isDocumentBound: true,
+  });
+
+  assert.equal(assessment.primaryIssue, null);
+});
+
 test("media failure replies refuse caption-only guessing", () => {
   const imageReply = buildImageGroundingFailureReply({
     userQuestion: "How much do I have to pay in this screenshot?",
+    reason: "analysis_failed",
+  });
+  const voiceReply = buildVoiceNoteGroundingFailureReply({
+    userQuestion: "What exactly did he say in the voice note?",
     reason: "analysis_failed",
   });
   const videoReply = buildVideoGroundingFailureReply({
     userQuestion: "Tell me what happens in this video.",
     reason: "provider_unavailable",
   });
+  const documentReply = buildDocumentGroundingFailureReply({
+    fileName: "invoice.pdf",
+    userQuestion: "What amount is due in this document?",
+    reason: "analysis_failed",
+  });
 
   assert.match(imageReply, /not going to guess from the caption alone/i);
+  assert.match(voiceReply, /not going to guess from unclear audio/i);
   assert.match(videoReply, /will not answer from the caption alone/i);
+  assert.match(documentReply, /not going to guess from partial document content/i);
 });
 
 test("vision placeholder replies are rejected before they reach WhatsApp users", () => {
@@ -10073,7 +10562,7 @@ test("reply display normalization rewrites the legacy timeout fallback into a pr
     "Reason: The answer path took too long to complete reliably.",
   ].join("\n"));
 
-  assert.match(normalized, /exact topic|precise reply/i);
+  assert.match(normalized, /exact question or task|exact topic|precise reply/i);
 });
 
 test("timeboxed reply fails closed with a precise clarification instead of inventing a generic answer", () => {

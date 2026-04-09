@@ -364,8 +364,8 @@ const ROMAN_PUNJABI_TOKEN_RE =
 const ENGLISH_COMMAND_SIGNAL_RE =
   /(?:\b(?:talk|speak|chat|message|reply)\s+(?:to|with)\b|\b(?:start|begin)\s+(?:talking|replying|messaging|chatting)\s+(?:to|with)\b|\bstop\s+(?:talking|replying|messaging|chatting)\s+(?:to|with)\b|\bon\s+my\s+behalf\b|\bfor\s+me\b|\bwho\s+are\s+you\s+(?:talking|replying)\s+to\b|\bwhich\s+contact\s+is\s+active\b|\bactive\s+contact\b)/i;
 const ENGLISH_SIGNAL_RE =
-  /\b(?:the|and|what|why|how|please|can you|could you|would you|should i|help me|explain|tell me|show me|today|price|news|weather)\b/i;
-const LATIN_SCRIPT_MESSAGE_RE = /^[\p{Script=Latin}\p{N}\p{P}\p{Zs}]+$/u;
+  /\b(?:the|and|what|why|how|please|can you|could you|would you|should i|help me|explain|tell me|show me|today|price|news|weather|this|that|these|those|general information|source note|data fetched|official source|verify|consult|current|as of)\b/i;
+const LATIN_SCRIPT_MESSAGE_RE = /^[\p{Script=Latin}\p{N}\p{P}\p{Sc}\p{Sm}\p{Zs}]+$/u;
 const SHORT_AMBIGUOUS_TOKENS = new Set([
   "h",
   "hi",
@@ -401,6 +401,7 @@ const ENGLISH_FALLBACK_WORDS = new Set([
   "explain",
   "for",
   "from",
+  "general",
   "give",
   "help",
   "hello",
@@ -416,7 +417,12 @@ const ENGLISH_FALLBACK_WORDS = new Set([
   "message",
   "messages",
   "my",
+  "note",
   "of",
+  "official",
+  "please",
+  "source",
+  "sources",
   "replying",
   "reply",
   "send",
@@ -426,13 +432,33 @@ const ENGLISH_FALLBACK_WORDS = new Set([
   "stop",
   "talk",
   "talking",
+  "that",
   "tell",
   "the",
+  "these",
+  "this",
   "to",
+  "today",
   "yes",
   "no",
   "behalf",
   "branch",
+  "consult",
+  "current",
+  "data",
+  "fetched",
+  "financial",
+  "general",
+  "information",
+  "market",
+  "note",
+  "official",
+  "personal",
+  "qualified",
+  "source",
+  "sources",
+  "trading",
+  "verify",
   "war",
   "what",
   "when",
@@ -989,7 +1015,7 @@ export function verifyReplyLanguageMatch(input: {
   }
 
   if (expectedLocale === "en") {
-    const replyIsEnglish = !replyLocale || replyLocale === "en";
+    const replyIsEnglish = !replyLocale || replyLocale === "en" || looksLikeLikelyEnglishReply(normalizedReply);
     return { verified: replyIsEnglish, expected: "en", detected: replyLocale };
   }
 

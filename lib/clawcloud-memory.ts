@@ -102,6 +102,10 @@ const CONTINUATION_OPENER =
   /^(?:and|also|so|then|but|or|aur|ab|ab se|phir|same|continue|go on|tell me more|what about|how about|which one|that one|this one|those|them|it)\b/i;
 const LANGUAGE_OR_STYLE_ONLY_FOLLOW_UP =
   /^(?:(?:in|into)\s+(?:english|hindi|hinglish|urdu|punjabi|thai|chinese|japanese|korean|tamil|telugu|bengali|marathi|french|spanish|arabic|german|italian|russian)|(?:make|keep|write|say|reply|send|translate|explain)\s+(?:it\s+)?(?:in|into)\s+(?:english|hindi|hinglish|urdu|punjabi|thai|chinese|japanese|korean|tamil|telugu|bengali|marathi|french|spanish|arabic|german|italian|russian)|(?:short(?:er)?|brief(?:ly)?|simple(?:r)?|professional(?:ly)?|formal(?:ly)?|polite(?:ly)?|more detailed|detailed))\b/i;
+const VOLATILE_FRESH_QUERY_START =
+  /^(?:latest|current|today|right now|currently|weather|temperature|forecast|price|pricing|stock|news|headline|score|schedule|who is the current|what is the current|what is the latest|show whatsapp history|read and tell me the message of|tell me the message of)\b/i;
+const HARD_TECHNICAL_FRESH_QUERY_SIGNAL =
+  /\b(?:algorithm|approach|time complexity|space complexity|provide code|write code|constraints?|distributed system|system design|fault tolerance|federated learning|causal inference|queueing|black-?scholes|kaplan[- ]meier|o\([^)]+\)|10\^?\d+)\b/i;
 const DOCUMENT_FOLLOW_UP_SIGNAL =
   /\b(document|file|pdf|sheet|page|row|table|section|clause|invoice|statement|receipt|contract|resume|cv)\b/i;
 const DOCUMENT_DECISION_SIGNAL =
@@ -159,6 +163,14 @@ function normalizeWhitespace(value: string) {
 function looksLikeStandaloneQuestion(msg: string, wordCount: number) {
   if (!msg) {
     return false;
+  }
+
+  if (VOLATILE_FRESH_QUERY_START.test(msg)) {
+    return true;
+  }
+
+  if (HARD_TECHNICAL_FRESH_QUERY_SIGNAL.test(msg) && wordCount >= 6 && !PRONOUN_START.test(msg)) {
+    return true;
   }
 
   if (DIRECT_STANDALONE_QUESTION_START.test(msg)) {
@@ -346,6 +358,10 @@ function looksLikeStandaloneTopicShift(
 
   if (PRONOUN_START.test(msg) || CONTEXTUAL_REFERENCE.test(msg) || CONTINUATION_OPENER.test(msg)) {
     return false;
+  }
+
+  if (VOLATILE_FRESH_QUERY_START.test(msg) || HARD_TECHNICAL_FRESH_QUERY_SIGNAL.test(msg)) {
+    return true;
   }
 
   const wordCount = msg.split(/\s+/).filter(Boolean).length;

@@ -27,6 +27,36 @@ export type DocExtractResult = {
   truncated: boolean;
 };
 
+type DocumentFailureReason =
+  | "analysis_failed"
+  | "download_failed"
+  | "unsupported_type";
+
+export function buildDocumentGroundingFailureReply(input: {
+  fileName: string;
+  userQuestion?: string | null;
+  reason: DocumentFailureReason;
+}) {
+  const hadQuestion = Boolean(String(input.userQuestion ?? "").trim());
+  const fileLabel = input.fileName?.trim() || "this document";
+
+  if (input.reason === "download_failed") {
+    return hadQuestion
+      ? `I received *${fileLabel}* and your question, but I could not download the document content reliably. I will not guess from the filename or caption alone. Please resend the file or send a clearer copy.`
+      : `I received *${fileLabel}*, but I could not download the document content reliably. Please resend the file or send a clearer copy.`;
+  }
+
+  if (input.reason === "unsupported_type") {
+    return hadQuestion
+      ? `I received *${fileLabel}* and your question, but that file type is not supported for grounded document analysis yet. I will not guess from the caption alone. Please resend it as PDF, DOCX, XLSX, TXT, CSV, Markdown, or JSON.`
+      : `I received *${fileLabel}*, but that file type is not supported for grounded document analysis yet. Please resend it as PDF, DOCX, XLSX, TXT, CSV, Markdown, or JSON.`;
+  }
+
+  return hadQuestion
+    ? `I received *${fileLabel}* and your question, but I could not extract reliable enough text to answer accurately. I am not going to guess from partial document content. Please resend a clearer file or ask about a specific visible section.`
+    : `I received *${fileLabel}*, but I could not extract reliable enough text to answer accurately. Please resend a clearer file or ask about a specific visible section.`;
+}
+
 async function extractPdfWithOcr(
   buffer: Buffer,
   mimeType: string,

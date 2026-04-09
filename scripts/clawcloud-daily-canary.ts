@@ -47,6 +47,16 @@ const cases: CanaryCase[] = [
     prompt: "Explain the difference between AI, ML, and deep learning in simple terms.",
     mustMatch: [/(artificial intelligence|machine learning|deep learning)/i],
   },
+  {
+    id: "coding_sliding_window",
+    prompt: "Given an array of integers, find the length of the longest subarray with at most k distinct elements. Explain your approach and provide code.",
+    mustMatch: [/(sliding window|two pointers|frequency map)/i, /```/i],
+  },
+  {
+    id: "japanese_story_lock",
+    prompt: "Tell me the story of Harry Potter in Japanese.",
+    mustMatch: [/[\u3040-\u30ff\u4e00-\u9faf]/u, /ハリー|ポッター/u],
+  },
 ];
 
 const bannedPatterns = [

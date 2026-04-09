@@ -39,7 +39,12 @@ import {
   looksLikeAmbiguousCurrentWarQuestion,
   looksLikeCurrentAffairsPowerCrisisQuestion,
 } from "@/lib/clawcloud-current-affairs";
-import { looksLikeGroundedMediaPrompt } from "@/lib/clawcloud-media-context";
+import {
+  buildVideoGroundingFailureReply,
+  buildVoiceNoteGroundingFailureReply,
+  looksLikeGroundedMediaPrompt,
+} from "@/lib/clawcloud-media-context";
+import { buildDocumentGroundingFailureReply } from "@/lib/clawcloud-docs";
 import {
   buildHistoricalPowerRankingReply,
   looksLikeHistoricalPowerRankingQuestion,
@@ -94,6 +99,8 @@ import {
   buildClawCloudLowConfidenceReply,
   clawCloudAnswerHasEvidenceSignals,
   clawCloudConfidenceBelowFloor,
+  detectClawCloudDomainValidationIssues,
+  isClawCloudGroundedAttachmentAnswer,
   isClawCloudGroundedLiveAnswer,
   looksLikeQuestionTopicMismatch,
   looksLikeWrongModeAnswer,
@@ -101,6 +108,9 @@ import {
   repairAnswerTopicMismatch,
   scoreClawCloudAnswerConfidence,
   shouldAttemptDirectAnswerRecovery,
+  type ClawCloudDomainValidationIssue,
+  type ClawCloudAnswerQualityProfile,
+  type ClawCloudAnswerVerification,
   verifyClawCloudAnswer,
 } from "@/lib/clawcloud-answer-quality";
 import {
@@ -168,9 +178,11 @@ import {
 import {
   clearWhatsAppActiveContactSession,
   clearWhatsAppPendingContactResolution,
+  clearWhatsAppRecentVerifiedContactSelection,
   getWhatsAppSettings,
   setWhatsAppActiveContactSession,
   setWhatsAppPendingContactResolution,
+  setWhatsAppRecentVerifiedContactSelection,
   writeWhatsAppAuditLog,
 } from "@/lib/clawcloud-whatsapp-control";
 import {
@@ -332,6 +344,7 @@ import type {
   WhatsAppActiveContactSession,
   WhatsAppPendingContactOption,
   WhatsAppPendingContactResolution,
+  WhatsAppVerifiedContactSelection,
 } from "@/lib/clawcloud-whatsapp-workspace-types";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -2621,9 +2634,14 @@ async function finalizeAgentReply(input: {
     message: input.question,
     preferredLocale: input.locale,
   });
+  const preTranslationLanguageCheck = verifyReplyLanguageMatch({
+    userMessage: input.question,
+    aiReply: replyWithDisclaimer,
+    resolution: finalReplyLanguageResolution,
+  });
 
-  let translatedReply = input.alreadyTranslated
-    ? replyWithSuggestion
+  let translatedReply = (input.alreadyTranslated || preTranslationLanguageCheck.verified)
+    ? replyWithDisclaimer
     : await translateMessage(replyWithDisclaimer, finalReplyLanguageResolution.locale, {
       preserveRomanScript: finalReplyLanguageResolution.preserveRomanScript,
       targetLanguageName: specialReplyLanguage?.targetLanguageName,
@@ -2710,8 +2728,10 @@ async function finalizeAgentReply(input: {
       latencyMs: Date.now() - input.startedAt,
       charCount: normalizedFinalReply.length,
       hadVisibleFallback: isVisibleFallbackReply(cleanedReply),
+      responseText: normalizedFinalReply,
       liveAnswerBundle: input.liveAnswerBundle ?? null,
       modelAuditTrail: input.modelAuditTrail ?? null,
+      qualityFlags: finalReplyLanguageCheck.verified ? [] : ["wrong_language"],
     }),
   };
 }
@@ -2887,8 +2907,157 @@ function isDeprecatedInternalFallbackLeak(value: string) {
   );
 }
 
-function buildGenericScopedRecoveryReply() {
-  return "I need the exact topic, name, item, or number you want answered to give a precise reply.";
+const KNOWN_CLAWCLOUD_INTENTS = new Set<IntentType>([
+  "greeting",
+  "help",
+  "memory",
+  "reminder",
+  "send_message",
+  "save_contact",
+  "calendar",
+  "general",
+  "email",
+  "spending",
+  "finance",
+  "web_search",
+  "creative",
+  "coding",
+  "math",
+  "research",
+  "science",
+  "history",
+  "geography",
+  "health",
+  "law",
+  "economics",
+  "culture",
+  "sports",
+  "technology",
+  "language",
+  "explain",
+]);
+
+function resolveRecoveryIntent(question: string, intent?: string): IntentType {
+  if (intent && KNOWN_CLAWCLOUD_INTENTS.has(intent as IntentType)) {
+    return intent as IntentType;
+  }
+
+  return detectIntent(question).type;
+}
+
+function buildIntentAlignedRecoveryReply(question?: string, intent?: string) {
+  const safeQuestion = question?.trim() ?? "";
+  if (!safeQuestion) {
+    return "Reply with the exact question or task and I will answer that directly.";
+  }
+
+  const resolvedIntent = resolveRecoveryIntent(safeQuestion, intent);
+
+  if (hasWeatherIntent(safeQuestion)) {
+    return "I need the exact city or location you want checked to answer the weather accurately.";
+  }
+
+  if (shouldUseLiveSearch(safeQuestion) || /\b(news|latest|today|current|update|updates|happening)\b/i.test(safeQuestion)) {
+    return buildNewsCoverageRecoveryReply(safeQuestion);
+  }
+
+  const deterministic =
+    resolveDeterministicKnownStoryReply(safeQuestion)
+    || (resolvedIntent === "coding" ? buildDeterministicCodingReply(safeQuestion) : null)
+    || (resolvedIntent === "math" ? buildDeterministicMathReply(safeQuestion) : null)
+    || (resolvedIntent === "explain" ? buildDeterministicExplainReply(safeQuestion) : null)
+    || (resolvedIntent === "science" ? solveHardScienceQuestion(safeQuestion) : null);
+
+  if (deterministic?.trim() && !isVisibleFallbackReply(deterministic) && !isLowQualityTemplateReply(deterministic)) {
+    return deterministic.trim();
+  }
+
+  const timeboxedProfessional = buildTimeboxedProfessionalReply(safeQuestion, resolvedIntent).trim();
+  if (timeboxedProfessional && !isVisibleFallbackReply(timeboxedProfessional) && !isLowQualityTemplateReply(timeboxedProfessional)) {
+    return timeboxedProfessional;
+  }
+
+  const deterministicChat = buildDeterministicChatFallback(safeQuestion, resolvedIntent);
+  if (deterministicChat?.trim() && !isVisibleFallbackReply(deterministicChat) && !isLowQualityTemplateReply(deterministicChat)) {
+    return deterministicChat.trim();
+  }
+
+  const bestEffort = bestEffortProfessionalTemplateV2(resolvedIntent, safeQuestion);
+  if (bestEffort.trim() && !isVisibleFallbackReply(bestEffort) && !isLowQualityTemplateReply(bestEffort)) {
+    return bestEffort.trim();
+  }
+
+  const universal = buildUniversalDomainFallback(resolvedIntent, safeQuestion);
+  if (universal.trim() && !isVisibleFallbackReply(universal) && !isLowQualityTemplateReply(universal)) {
+    return universal.trim();
+  }
+
+  return buildClawCloudLowConfidenceReply(
+    safeQuestion,
+    buildClawCloudAnswerQualityProfile({
+      question: safeQuestion,
+      intent: resolvedIntent,
+      category: resolvedIntent,
+    }),
+    "The available answer paths were not specific enough to trust as a final answer.",
+  );
+}
+
+function extractGroundedAttachmentUserQuestion(prompt: string) {
+  const trimmed = prompt.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const patterns = [
+    /\buser request about this voice note:\s*([\s\S]+)$/i,
+    /\buser question about this video:\s*([\s\S]+)$/i,
+    /\buser question about this document:\s*([\s\S]+)$/i,
+    /\bfollow-up question about this document:\s*([\s\S]+)$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = trimmed.match(pattern);
+    const candidate = match?.[1]?.trim();
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  return "";
+}
+
+function extractGroundedDocumentFileName(prompt: string) {
+  const match = prompt.match(/\*user sent a document:\s*"([^"\n]+)"/i);
+  return match?.[1]?.trim() || "this document";
+}
+
+function buildGroundedAttachmentRecoveryReply(prompt: string) {
+  const userQuestion = extractGroundedAttachmentUserQuestion(prompt);
+
+  if (/\buser sent a voice note\./i.test(prompt)) {
+    return buildVoiceNoteGroundingFailureReply({
+      userQuestion,
+      reason: "analysis_failed",
+    });
+  }
+
+  if (/\buser sent a video\./i.test(prompt)) {
+    return buildVideoGroundingFailureReply({
+      userQuestion,
+      reason: "analysis_failed",
+    });
+  }
+
+  if (/\buser sent a document:/i.test(prompt)) {
+    return buildDocumentGroundingFailureReply({
+      fileName: extractGroundedDocumentFileName(prompt),
+      userQuestion,
+      reason: "analysis_failed",
+    });
+  }
+
+  return "I could not keep this answer grounded strongly enough to the attachment evidence. Please resend a clearer attachment or ask about the exact visible or transcribed part you want me to check.";
 }
 
 function sanitizeDeprecatedFallbackLeakWithContext(
@@ -2902,7 +3071,7 @@ function sanitizeDeprecatedFallbackLeakWithContext(
 
   const safeQuestion = question?.trim() ?? "";
   if (!safeQuestion) {
-    return buildGenericScopedRecoveryReply();
+    return buildIntentAlignedRecoveryReply();
   }
 
   if (hasWeatherIntent(safeQuestion)) {
@@ -2914,15 +3083,7 @@ function sanitizeDeprecatedFallbackLeakWithContext(
     return buildNewsCoverageRecoveryReply(safeQuestion);
   }
 
-  return buildClawCloudLowConfidenceReply(
-    safeQuestion,
-    buildClawCloudAnswerQualityProfile({
-      question: safeQuestion,
-      intent: intent ?? "general",
-      category: intent ?? "general",
-    }),
-    "One key detail or a tighter scope is still needed for a precise answer.",
-  );
+  return buildIntentAlignedRecoveryReply(safeQuestion, intent);
 }
 
 function normalizeInlineReplyFormatting(value: string) {
@@ -3214,10 +3375,6 @@ function shouldSkipFinalReplyLanguageRewrite(input: {
   candidateReply: string;
   languageResolution: ClawCloudReplyLanguageResolution;
 }) {
-  if (!input.alreadyTranslated) {
-    return false;
-  }
-
   return verifyReplyLanguageMatch({
     userMessage: input.question,
     aiReply: input.candidateReply,
@@ -5993,6 +6150,70 @@ function buildObstacleRemovalShortestPathReply(message: string) {
   ].join("\n");
 }
 
+function buildKDistinctSlidingWindowReply(message: string) {
+  const normalized = normalizeClawCloudUnderstandingMessage(message)
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const isKDistinctSlidingWindowPrompt =
+    /\barray\b/.test(normalized)
+    && /\blongest\s+subarray\b/.test(normalized)
+    && /\bat most\s+k\s+distinct\b/.test(normalized)
+    && /\b(optimi[sz]e|o\(n\)|time complexity|approach|provide code|write code|implementation)\b/.test(normalized);
+  if (!isKDistinctSlidingWindowPrompt) {
+    return null;
+  }
+
+  return [
+    "*Longest Subarray With At Most k Distinct Elements*",
+    "",
+    "Use a *sliding window* with a frequency map. Expand the right pointer, count each value, and while the window has more than `k` distinct numbers, move the left pointer forward and decrement counts until the window is valid again.",
+    "",
+    "At every step, the current valid window length is `right - left + 1`, so keep the maximum over the scan.",
+    "",
+    "*Why this is O(n)*",
+    "Each element is added to the window once and removed at most once, so the two pointers move forward only. The hash map stores counts for at most `k + 1` values at a time.",
+    "",
+    "*Complexity*",
+    "Time: *O(n)*",
+    "Space: *O(k)* in the usual bounded-distinct interpretation, and *O(min(n, number of distinct values in the active window))* in general.",
+    "",
+    "*Python code*",
+    "```python",
+    "from collections import defaultdict",
+    "",
+    "def longest_subarray_at_most_k_distinct(nums, k):",
+    "    if k <= 0 or not nums:",
+    "        return 0",
+    "",
+    "    freq = defaultdict(int)",
+    "    left = 0",
+    "    best = 0",
+    "",
+    "    for right, value in enumerate(nums):",
+    "        freq[value] += 1",
+    "",
+    "        while len(freq) > k:",
+    "            left_value = nums[left]",
+    "            freq[left_value] -= 1",
+    "            if freq[left_value] == 0:",
+    "                del freq[left_value]",
+    "            left += 1",
+    "",
+    "        best = max(best, right - left + 1)",
+    "",
+    "    return best",
+    "```",
+    "",
+    "*Example*",
+    "For `nums = [1, 2, 1, 2, 3]` and `k = 2`, the answer is `4`, from subarray `[1, 2, 1, 2]`.",
+  ].join("\n");
+}
+
 function buildDeterministicCodingPromptReply(message: string) {
   const understoodMessage = normalizeClawCloudUnderstandingMessage(message);
   if (!KNOWN_SIMPLE_CODING_PROMPT_RE.test(understoodMessage)) {
@@ -6212,6 +6433,7 @@ function buildDeterministicMathReply(message: string) {
 function buildDeterministicCodingReply(message: string) {
   return (
     buildDeterministicCodingPromptReply(message)
+    || buildKDistinctSlidingWindowReply(message)
     || buildObstacleRemovalShortestPathReply(message)
     || solveCodingArchitectureQuestion(message)
   );
@@ -7748,6 +7970,10 @@ export function buildTimeboxedProfessionalReplyForTest(message: string, intent: 
   return buildTimeboxedProfessionalReply(message, intent);
 }
 
+export function buildIntentAlignedRecoveryReplyForTest(message: string, intent?: IntentType) {
+  return buildIntentAlignedRecoveryReply(message, intent);
+}
+
 export function isVisibleFallbackReplyForTest(reply: string) {
   return isVisibleFallbackReply(reply);
 }
@@ -8491,8 +8717,16 @@ function buildLengthCalibrationInstruction(
 function resolveResponseMode(intent: IntentType, text: string, override?: ResponseMode): ResponseMode {
   const lengthProfile = inferAnswerLengthProfile(text);
   const deepByComplexity = shouldForceDeepResponseMode(intent, text);
+  const normalizedText = normalizeClawCloudUnderstandingMessage(text).trim();
 
   if (override === "deep") {
+    return "deep";
+  }
+
+  if (
+    looksLikeHardTechnicalDeepRoutePrompt(normalizedText)
+    || looksLikeVolatileLiveQuery(normalizedText)
+  ) {
     return "deep";
   }
 
@@ -9411,6 +9645,17 @@ const KNOWN_STORY_ANCHOR_RULES: Array<{
     ],
   },
   {
+    title: /\bharry\s*potter\b|\u30cf\u30ea\u30fc\u30fb\u30dd\u30c3\u30bf\u30fc/iu,
+    anchors: [
+      /\bharry\b|\u30cf\u30ea\u30fc/u,
+      /\bron\b|\u30ed\u30f3/u,
+      /\bhermione\b|\u30cf\u30fc\u30de\u30a4\u30aa\u30cb\u30fc/u,
+      /\bhogwarts\b|\u30db\u30b0\u30ef\u30fc\u30c4/u,
+      /\bvoldemort\b|\u30f4\u30a9\u30eb\u30c7\u30e2\u30fc\u30c8/u,
+      /\bdumbledore\b|\u30c0\u30f3\u30d6\u30eb\u30c9\u30a2/u,
+    ],
+  },
+  {
     title: /\bkalki(?:\s*2898\s*ad)?\b/i,
     anchors: [
       /\bbhairava\b/i,
@@ -9463,6 +9708,82 @@ function looksLikeStructuredTechnicalChallengePrompt(text: string): boolean {
   return score >= 4;
 }
 
+function looksLikeHardTechnicalDeepRoutePrompt(text: string): boolean {
+  const normalized = normalizeClawCloudUnderstandingMessage(text).toLowerCase().replace(/\s+/g, " ").trim();
+  if (!normalized || normalized.length < 60) {
+    return false;
+  }
+
+  if (looksLikeAbstractScienceComputabilityPrompt(normalized)) {
+    return false;
+  }
+
+  if (
+    looksLikeStructuredTechnicalChallengePrompt(normalized)
+    && !looksLikeAlgorithmicCodingQuestion(normalized)
+    && !isArchitectureOrDesignQuestion(normalized)
+    && !isMathOrStatisticsQuestion(normalized)
+  ) {
+    return false;
+  }
+
+  let score = 0;
+
+  if (looksLikeAlgorithmicCodingQuestion(normalized)) score += 3;
+  if (isArchitectureOrDesignQuestion(normalized)) score += 3;
+  if (looksLikeMultilingualTechnicalArchitecturePrompt(normalized)) score += 3;
+  if (isMathOrStatisticsQuestion(normalized)) score += 2;
+
+  if (/\b(explain your approach|provide code|write code|implementation|time complexity|space complexity|optimi[sz]e|constraints?)\b/.test(normalized)) score += 2;
+  if (/\b(distributed system|system design|fault tolerance|latency|throughput|consensus|queueing|federated learning|causal inference|kaplan[- ]meier|black-?scholes|hazard ratio|stream processing)\b/.test(normalized)) score += 2;
+  if (/\b(up to|10\^?\d+|n <=|m <=|o\([^)]+\)|prove or disprove)\b/.test(normalized)) score += 1;
+
+  return score >= 4;
+}
+
+function looksLikeVolatileLiveQuery(text: string): boolean {
+  const normalized = normalizeClawCloudUnderstandingMessage(text).toLowerCase().trim();
+  if (!normalized || hasPastYearScope(text)) {
+    return false;
+  }
+
+  if (
+    looksLikeHardTechnicalDeepRoutePrompt(normalized)
+    || looksLikeAbstractScienceComputabilityPrompt(normalized)
+    || detectNewsQuestion(normalized)
+    || hasWeatherIntent(normalized)
+  ) {
+    return false;
+  }
+
+  const freshnessSignals = /\b(latest|current|today|right now|currently|newest|recent|as of now|update|updates|live)\b/.test(normalized);
+  const volatileSurface =
+    shouldUseLiveSearch(normalized)
+    || /\b(news|headline|headlines|price|pricing|ceo|founder|president|prime minister|ranking|rankings|richest|net worth|worth|version|release|model|weather|score|schedule|election|war|outage|inflation|gdp|population|api pricing)\b/.test(normalized);
+
+  return freshnessSignals && volatileSurface;
+}
+
+function looksLikeLockedWhatsAppHistoryRoute(text: string): boolean {
+  const normalized = normalizeClawCloudUnderstandingMessage(text).trim();
+  if (!normalized) {
+    return false;
+  }
+
+  if (analyzeSendMessageCommandSafety(normalized)?.allowed) {
+    return false;
+  }
+
+  return (
+    looksLikeWhatsAppHistoryQuestion(normalized)
+    || (
+      /\b(?:chat|conversation|history|messages?|texts?)\b/i.test(normalized)
+      && Boolean(resolveWhatsAppHistoryContactHint(normalized))
+    )
+    || /\b(?:show|read|check|summari[sz]e|review|tell me)\s+(?:my\s+)?(?:chat|conversation|history|messages?|texts?)\s+(?:with|from|of)\b/i.test(normalized)
+  );
+}
+
 function looksLikeMultilingualTechnicalArchitecturePrompt(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed || trimmed.length < 60) {
@@ -9501,6 +9822,15 @@ function detectStrictIntentRoute(text: string): StrictIntentRoute | null {
     };
   }
 
+  if (looksLikeVolatileLiveQuery(trimmed)) {
+    return {
+      intent: { type: "web_search", category: "web_search" },
+      confidence: "high",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
   if (looksLikeAlgorithmicCodingQuestion(trimmed)) {
     return {
       intent: { type: "coding", category: "coding" },
@@ -9510,9 +9840,28 @@ function detectStrictIntentRoute(text: string): StrictIntentRoute | null {
     };
   }
 
+  if (looksLikeAbstractScienceComputabilityPrompt(trimmed)) {
+    return {
+      intent: { type: "science", category: "science" },
+      confidence: "high",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
   if (looksLikeStructuredTechnicalChallengePrompt(trimmed)) {
     return {
       intent: { type: "research", category: "research" },
+      confidence: "high",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
+  if (looksLikeHardTechnicalDeepRoutePrompt(trimmed)) {
+    const mathRoute = isMathOrStatisticsQuestion(trimmed);
+    return {
+      intent: { type: mathRoute ? "math" : "coding", category: mathRoute ? "math" : "coding" },
       confidence: "high",
       locked: true,
       clarificationReply: null,
@@ -9585,7 +9934,7 @@ function detectStrictIntentRoute(text: string): StrictIntentRoute | null {
     };
   }
 
-  if (looksLikeWhatsAppHistoryQuestion(trimmed)) {
+  if (looksLikeLockedWhatsAppHistoryRoute(trimmed)) {
     return {
       intent: { type: "send_message", category: "whatsapp_history" },
       confidence: detectExplicitPersonalSurfaces(trimmed).includes("whatsapp") ? "high" : "medium",
@@ -11137,6 +11486,7 @@ async function buildWhatsAppHistoryReply(
   const inlinePhone = extractPhoneDigitsForLookup(promptText);
   const historyLimit = wantsFullConversation ? 240 : Math.max(20, requestedCount * 4);
   const timezone = "Asia/Kolkata";
+  const whatsAppSettings = await getWhatsAppSettings(userId).catch(() => null);
 
   let resolvedContactName = contactHint;
   let contactSearchValue: string | null = null;
@@ -11159,6 +11509,21 @@ async function buildWhatsAppHistoryReply(
       phone: resolvedPhone,
       jid: `${resolvedPhone}@s.whatsapp.net`,
       aliases: [resolvedPhone],
+    };
+  } else if (
+    !contactHint
+    && whatsAppSettings?.recentVerifiedContactSelection
+    && isFreshWhatsAppVerifiedContactSelection(whatsAppSettings.recentVerifiedContactSelection)
+    && whatsAppSettings.recentVerifiedContactSelection.kind === "whatsapp_history"
+    && looksLikeWhatsAppHistoryContinuationWithoutExplicitContact(promptText)
+  ) {
+    const recentSelection = whatsAppSettings.recentVerifiedContactSelection;
+    resolvedContactName = recentSelection.contactName;
+    contactSearchValue = recentSelection.phone ?? null;
+    resolvedContactScope = {
+      phone: recentSelection.phone,
+      jid: recentSelection.jid,
+      aliases: [recentSelection.contactName, recentSelection.requestedName].filter(Boolean),
     };
   } else if (relativeContactHint) {
     const recentTarget = await resolveRecentWhatsAppOutboundTarget(userId);
@@ -11317,6 +11682,15 @@ async function buildWhatsAppHistoryReply(
     timezone,
   });
 
+  await rememberWhatsAppVerifiedContactSelection({
+    userId,
+    kind: "whatsapp_history",
+    requestedName: contactHint || resolvedContactName || resolvedContactScope?.phone || "that contact",
+    contactName: resolvedContactName || resolvedContactScope?.aliases?.[0] || contactHint || "that contact",
+    phone: resolvedContactScope?.phone ?? rows[0]?.remote_phone ?? null,
+    jid: resolvedContactScope?.jid ?? null,
+    resumePrompt: promptText,
+  }).catch(() => null);
   await clearWhatsAppPendingContactResolution(userId).catch(() => null);
   return translateHistoryReply(summary);
 }
@@ -12427,6 +12801,10 @@ async function buildEvidenceFirstReply(input: {
     category: input.category,
     isDocumentBound: input.isDocumentBound,
   });
+  const groundedMemorySnippet = input.isDocumentBound ? undefined : input.memorySnippet;
+  const groundedHistory = input.isDocumentBound
+    ? []
+    : await buildSmartHistory(input.userId, input.question, "deep", input.intent);
 
   const answer = await completeClawCloudPrompt({
     system: [
@@ -12438,12 +12816,12 @@ async function buildEvidenceFirstReply(input: {
           input.extraInstruction,
           buildClawCloudEvidenceInstruction(profile),
         ].filter(Boolean).join("\n\n") || undefined,
-        input.memorySnippet,
+        groundedMemorySnippet,
       ),
       "Return only the final answer.",
     ].join("\n\n"),
     user: input.question,
-    history: await buildSmartHistory(input.userId, input.question, "deep", input.intent),
+    history: groundedHistory,
     intent: input.intent,
     responseMode: "deep",
     maxTokens: 1_200,
@@ -12453,6 +12831,175 @@ async function buildEvidenceFirstReply(input: {
   }).catch(() => "");
 
   return answer.trim();
+}
+
+type ClawCloudAnswerIssueCode =
+  | "empty_answer"
+  | "visible_fallback"
+  | "live_grounding_missing"
+  | "evidence_missing"
+  | ClawCloudDomainValidationIssue
+  | "wrong_mode"
+  | "topic_mismatch"
+  | "thin_definition"
+  | "incomplete_technical"
+  | "verifier_reject";
+
+type ClawCloudAnswerAssessment = {
+  issues: ClawCloudAnswerIssueCode[];
+  primaryIssue: ClawCloudAnswerIssueCode | null;
+  rationale: string;
+};
+
+const CLAWCLOUD_ANSWER_ISSUE_PRIORITY: ClawCloudAnswerIssueCode[] = [
+  "empty_answer",
+  "visible_fallback",
+  "live_grounding_missing",
+  "evidence_missing",
+  "missing_code",
+  "math_incomplete",
+  "wrong_mode",
+  "wrong_language",
+  "contact_verification_missing",
+  "topic_mismatch",
+  "incomplete_technical",
+  "thin_definition",
+  "verifier_reject",
+];
+
+function buildClawCloudAnswerIssueRationale(
+  issue: ClawCloudAnswerIssueCode | null,
+  verification?: ClawCloudAnswerVerification | null,
+): string {
+  switch (issue) {
+    case "empty_answer":
+      return "The initial answer draft was empty.";
+    case "visible_fallback":
+      return "The draft answer collapsed into a visible fallback instead of answering the user's request.";
+    case "live_grounding_missing":
+      return "The draft answer was not grounded strongly enough for a freshness-sensitive question.";
+    case "evidence_missing":
+      return "The draft answer lacked enough grounded support for this domain.";
+    case "missing_code":
+      return "The draft answer described the coding approach, but the user explicitly asked for code and the answer still does not contain complete code.";
+    case "math_incomplete":
+      return "The draft answer did not actually work through the math or state the solved result clearly enough.";
+    case "wrong_language":
+      return "The draft answer did not stay in the user's language or the explicitly requested target language.";
+    case "contact_verification_missing":
+      return "The draft answer tried to complete a contact action or history reply while recipient verification was still ambiguous.";
+    case "wrong_mode":
+      return "The draft answer matched the wrong mode instead of answering the requested content directly.";
+    case "topic_mismatch":
+      return "The draft answer drifted away from the user's actual question.";
+    case "thin_definition":
+      return "The draft answer was technically correct but too thin. Rewrite it into 2 to 3 crisp sentences: what it is, the core context, and one useful anchor fact.";
+    case "incomplete_technical":
+      return "The draft answer was incomplete for a technical question. Provide the real approach, complexity, and code when the user asked for implementation.";
+    case "verifier_reject":
+      return verification?.rationale?.trim() || "The final answer verifier rejected the candidate answer.";
+    default:
+      return "The available answer paths were not specific enough to trust as a final answer.";
+  }
+}
+
+function assessClawCloudAnswerDraft(input: {
+  question: string;
+  intent: IntentType;
+  answer: string;
+  profile: ClawCloudAnswerQualityProfile;
+  verification?: ClawCloudAnswerVerification | null;
+}): ClawCloudAnswerAssessment {
+  const answer = input.answer.trim();
+  const issues = new Set<ClawCloudAnswerIssueCode>();
+  const domainValidationIssues = detectClawCloudDomainValidationIssues({
+    question: input.question,
+    answer,
+    profile: input.profile,
+  });
+
+  if (!answer) {
+    issues.add("empty_answer");
+  } else {
+    if (
+      isVisibleFallbackReply(answer)
+      || isLowQualityTemplateReply(answer)
+      || isInternalRecoverySignalReply(answer)
+    ) {
+      issues.add("visible_fallback");
+    }
+
+    if (input.profile.requiresLiveGrounding && !isAcceptableLiveAnswer(answer, input.question)) {
+      issues.add("live_grounding_missing");
+    }
+
+    if (
+      input.profile.requiresEvidence
+      && !input.profile.requiresLiveGrounding
+      && !(
+        input.profile.isDocumentBound
+          ? isClawCloudGroundedAttachmentAnswer(input.question, answer)
+          : clawCloudAnswerHasEvidenceSignals(answer, input.profile)
+      )
+    ) {
+      issues.add("evidence_missing");
+    }
+
+    for (const issue of domainValidationIssues) {
+      issues.add(issue);
+    }
+
+    if (looksLikeWrongModeAnswer(input.question, answer)) {
+      issues.add("wrong_mode");
+    }
+
+    if (looksLikeQuestionTopicMismatch(input.question, answer)) {
+      issues.add("topic_mismatch");
+    }
+
+    if (looksSeverelyIncompleteTechnicalAnswer(input.question, input.intent, answer)) {
+      issues.add("incomplete_technical");
+    }
+
+    if (looksOverlyThinDirectDefinitionReply(input.question, answer)) {
+      issues.add("thin_definition");
+    }
+  }
+
+  if (input.verification?.verdict === "reject") {
+    issues.add("verifier_reject");
+  }
+
+  const orderedIssues = CLAWCLOUD_ANSWER_ISSUE_PRIORITY.filter((issue) => issues.has(issue));
+  const primaryIssue = orderedIssues[0] ?? null;
+
+  return {
+    issues: orderedIssues,
+    primaryIssue,
+    rationale: buildClawCloudAnswerIssueRationale(primaryIssue, input.verification),
+  };
+}
+
+export function assessClawCloudAnswerDraftForTest(input: {
+  question: string;
+  intent: IntentType;
+  category: string;
+  answer: string;
+  isDocumentBound?: boolean;
+}) {
+  const profile = buildClawCloudAnswerQualityProfile({
+    question: input.question,
+    intent: input.intent,
+    category: input.category,
+    isDocumentBound: input.isDocumentBound,
+  });
+
+  return assessClawCloudAnswerDraft({
+    question: input.question,
+    intent: input.intent,
+    answer: input.answer,
+    profile,
+  });
 }
 
 async function enforceAnswerQuality(input: {
@@ -12493,126 +13040,108 @@ async function enforceAnswerQuality(input: {
 
     return recovered.trim();
   };
-
-  if (!answer) {
-    const recovered = await tryDirectRecovery("The initial answer draft was empty.");
-    if (recovered) {
-      answer = recovered;
-    } else {
-      return buildClawCloudLowConfidenceReply(input.question, profile);
+  const buildValidationRecovery = () => {
+    if (profile.isDocumentBound) {
+      return buildGroundedAttachmentRecoveryReply(input.question);
     }
-  }
 
-  if (profile.requiresLiveGrounding && !isAcceptableLiveAnswer(answer, input.question)) {
-    const history = input.history?.length
-      ? input.history
-      : await buildSmartHistory(input.userId, input.question, "deep", input.intent);
-    const grounded = await runGroundedResearchReply({
-      userId: input.userId,
-      question: input.question,
-      history,
-    }).catch(() => "");
-    const normalizedGrounded = normalizeResearchMarkdownForWhatsApp((grounded ?? "").trim());
-    if (isAcceptableLiveAnswer(normalizedGrounded, input.question)) {
-      answer = normalizedGrounded;
-    } else {
-      console.warn(`[quality] REJECTED: liveGrounding check failed for "${input.question.slice(0, 60)}"`);
-      return buildClawCloudLowConfidenceReply(input.question, profile);
+    if (/^(?:send_message|whatsapp_history|whatsapp_contacts_sync)$/i.test(input.category)) {
+      return "Tell me the exact contact name or the full number and I will use only that verified chat.";
     }
-  }
 
-  if (
-    profile.requiresEvidence
-    && !profile.requiresLiveGrounding
-    && !clawCloudAnswerHasEvidenceSignals(answer, profile)
-  ) {
-    const evidenceFirstAnswer = await buildEvidenceFirstReply({
-      userId: input.userId,
+    return buildIntentAlignedRecoveryReply(input.question, input.intent);
+  };
+  const runAssessment = (
+    candidateAnswer: string,
+    verification?: ClawCloudAnswerVerification | null,
+  ) =>
+    assessClawCloudAnswerDraft({
       question: input.question,
       intent: input.intent,
-      category: input.category,
-      memorySnippet: input.memorySnippet,
-      extraInstruction: input.extraInstruction,
-      isDocumentBound: input.isDocumentBound,
-    }).catch(() => "");
+      answer: candidateAnswer,
+      profile,
+      verification,
+    });
 
-    if (evidenceFirstAnswer.trim()) {
-      answer = evidenceFirstAnswer.trim();
+  for (let pass = 0; pass < 6; pass += 1) {
+    const assessment = runAssessment(answer);
+    if (!assessment.primaryIssue) {
+      break;
     }
-  }
 
-  if (looksLikeQuestionTopicMismatch(input.question, answer)) {
-    const repairedAnswer = await repairAnswerTopicMismatch({
-      question: input.question,
-      answer,
-      intent: input.intent,
-    }).catch(() => "");
+    let nextAnswer = "";
 
-    if (repairedAnswer.trim() && !looksLikeQuestionTopicMismatch(input.question, repairedAnswer.trim())) {
-      answer = repairedAnswer.trim();
-    } else {
-      return buildClawCloudLowConfidenceReply(
-        input.question,
-        profile,
-        "The draft answer drifted away from the user's actual question.",
+    switch (assessment.primaryIssue) {
+      case "empty_answer":
+      case "visible_fallback":
+      case "missing_code":
+      case "math_incomplete":
+      case "wrong_language":
+      case "wrong_mode":
+      case "thin_definition":
+      case "incomplete_technical": {
+        nextAnswer = await tryDirectRecovery(assessment.rationale);
+        break;
+      }
+      case "topic_mismatch": {
+        nextAnswer = await repairAnswerTopicMismatch({
+          question: input.question,
+          answer,
+          intent: input.intent,
+        }).catch(() => "");
+        break;
+      }
+      case "live_grounding_missing": {
+        const history = input.history?.length
+          ? input.history
+          : await buildSmartHistory(input.userId, input.question, "deep", input.intent);
+        const grounded = await runGroundedResearchReply({
+          userId: input.userId,
+          question: input.question,
+          history,
+        }).catch(() => "");
+        const normalizedGrounded = normalizeResearchMarkdownForWhatsApp((grounded ?? "").trim());
+        if (isAcceptableLiveAnswer(normalizedGrounded, input.question)) {
+          nextAnswer = normalizedGrounded;
+        }
+        break;
+      }
+      case "evidence_missing": {
+        nextAnswer = await buildEvidenceFirstReply({
+          userId: input.userId,
+          question: input.question,
+          intent: input.intent,
+          category: input.category,
+          memorySnippet: input.memorySnippet,
+          extraInstruction: input.extraInstruction,
+          isDocumentBound: input.isDocumentBound,
+        }).catch(() => "");
+        break;
+      }
+      case "contact_verification_missing": {
+        return buildValidationRecovery();
+      }
+      case "verifier_reject":
+      default:
+        return buildValidationRecovery();
+    }
+
+    if (!nextAnswer.trim() || nextAnswer.trim() === answer) {
+      console.warn(
+        `[quality] REJECTED: ${assessment.primaryIssue} for "${input.question.slice(0, 60)}"`,
       );
+      return buildValidationRecovery();
     }
+
+    answer = nextAnswer.trim();
   }
 
-  if (looksLikeWrongModeAnswer(input.question, answer)) {
-    const repairedAnswer = await tryDirectRecovery(
-      "The draft answer matched the wrong mode instead of answering the requested content directly.",
+  const postRepairAssessment = runAssessment(answer);
+  if (postRepairAssessment.primaryIssue) {
+    console.warn(
+      `[quality] REJECTED: ${postRepairAssessment.primaryIssue} for "${input.question.slice(0, 60)}" after structured repair`,
     );
-
-    if (
-      repairedAnswer
-      && !looksLikeWrongModeAnswer(input.question, repairedAnswer)
-      && !looksLikeQuestionTopicMismatch(input.question, repairedAnswer)
-    ) {
-      answer = repairedAnswer;
-    } else {
-      return buildClawCloudLowConfidenceReply(
-        input.question,
-        profile,
-        "The draft answer matched the wrong mode instead of answering the requested content directly.",
-      );
-    }
-  }
-
-  if (looksOverlyThinDirectDefinitionReply(input.question, answer)) {
-    const repairedAnswer = await tryDirectRecovery(
-      "The draft answer was technically correct but too thin. Rewrite it into 2 to 3 crisp sentences: what it is, the core context, and one useful anchor fact.",
-    );
-
-    if (
-      repairedAnswer
-      && !looksOverlyThinDirectDefinitionReply(input.question, repairedAnswer)
-      && !looksLikeQuestionTopicMismatch(input.question, repairedAnswer)
-      && !looksLikeWrongModeAnswer(input.question, repairedAnswer)
-    ) {
-      answer = repairedAnswer;
-    }
-  }
-
-  if (looksSeverelyIncompleteTechnicalAnswer(input.question, input.intent, answer)) {
-    const repairedAnswer = await tryDirectRecovery(
-      "The draft answer was incomplete for a technical question. Provide the real approach, complexity, and code when the user asked for implementation.",
-    );
-
-    if (
-      repairedAnswer
-      && !looksSeverelyIncompleteTechnicalAnswer(input.question, input.intent, repairedAnswer)
-      && !looksLikeQuestionTopicMismatch(input.question, repairedAnswer)
-      && !looksLikeWrongModeAnswer(input.question, repairedAnswer)
-    ) {
-      answer = repairedAnswer;
-    } else {
-      return buildClawCloudLowConfidenceReply(
-        input.question,
-        profile,
-        "The draft answer was incomplete for the requested technical scope.",
-      );
-    }
+    return buildValidationRecovery();
   }
 
   const verification = await verifyClawCloudAnswer({
@@ -12629,12 +13158,20 @@ async function enforceAnswerQuality(input: {
     return answer;
   }
 
-  if (verification?.verdict === "reject") {
-    return buildClawCloudLowConfidenceReply(input.question, profile, verification.rationale);
+  const postVerificationAssessment = runAssessment(answer, verification);
+  if (postVerificationAssessment.primaryIssue === "verifier_reject") {
+    return buildValidationRecovery();
   }
 
   if (verification?.verdict === "revise" && verification.revisedAnswer?.trim()) {
     answer = verification.revisedAnswer.trim();
+    const revisedAssessment = runAssessment(answer);
+    if (revisedAssessment.primaryIssue) {
+      console.warn(
+        `[quality] REJECTED: revised answer still failed with ${revisedAssessment.primaryIssue} for "${input.question.slice(0, 60)}"`,
+      );
+      return buildValidationRecovery();
+    }
   }
 
   const confidence = verification?.confidence ?? scoreClawCloudAnswerConfidence({
@@ -12644,18 +13181,8 @@ async function enforceAnswerQuality(input: {
   });
 
   if (clawCloudConfidenceBelowFloor(confidence, profile.confidenceFloor)) {
-    return buildClawCloudLowConfidenceReply(input.question, profile, verification?.rationale);
-  }
-
-  if (
-    profile.requiresEvidence
-    && !profile.requiresLiveGrounding
-    && !clawCloudAnswerHasEvidenceSignals(answer, profile)
-  ) {
-    return buildClawCloudLowConfidenceReply(
-      input.question,
-      profile,
-      verification?.rationale || "The answer still lacks enough grounded support.",
+    console.warn(
+      `[quality] SOFT-ACCEPT: confidence below floor for "${input.question.slice(0, 60)}" intent=${input.intent} confidence=${confidence} floor=${profile.confidenceFloor}`,
     );
   }
 
@@ -13254,6 +13781,15 @@ async function routeInboundAgentMessageResultCore(
       modelAuditTrail: null,
     };
   } else if (pendingContactSelection.type === "selected") {
+    await rememberWhatsAppVerifiedContactSelection({
+      userId,
+      kind: preflightWhatsAppSettings?.pendingContactResolution?.kind ?? "whatsapp_history",
+      requestedName: preflightWhatsAppSettings?.pendingContactResolution?.requestedName ?? pendingContactSelection.option.name,
+      contactName: pendingContactSelection.option.name,
+      phone: pendingContactSelection.option.phone,
+      jid: pendingContactSelection.option.jid,
+      resumePrompt: pendingContactSelection.resumePrompt,
+    }).catch(() => null);
     await clearWhatsAppPendingContactResolution(userId).catch(() => null);
     return routeInboundAgentMessageResultCore(userId, pendingContactSelection.resumePrompt, {
       ...options,
@@ -13277,6 +13813,24 @@ async function routeInboundAgentMessageResultCore(
       liveAnswerBundle: null,
       modelAuditTrail: null,
     };
+  }
+
+  const recentVerifiedContactSelection = preflightWhatsAppSettings?.recentVerifiedContactSelection ?? null;
+  if (
+    recentVerifiedContactSelection
+    && isFreshWhatsAppVerifiedContactSelection(recentVerifiedContactSelection)
+    && recentVerifiedContactSelection.kind === "whatsapp_history"
+    && looksLikeWhatsAppHistoryContinuationWithoutExplicitContact(normalizedMessage)
+  ) {
+    return routeInboundAgentMessageResultCore(
+      userId,
+      buildWhatsAppHistoryFollowUpResumePrompt(normalizedMessage, recentVerifiedContactSelection),
+      {
+        ...options,
+        skipConversationStyleChoice: true,
+        conversationStyle: baselineConversationStyle,
+      },
+    );
   }
 
   // Resolve app-access approval decisions before any fast-lane routing so
@@ -13758,7 +14312,7 @@ async function applyEndToEndReplyLanguageLock(input: {
         responseForLanguageLock =
           buildDeterministicExplainReply(normalizedMessage)
           || buildDeterministicChatFallback(normalizedMessage, detectIntent(normalizedMessage).type)
-          || buildGenericScopedRecoveryReply();
+          || buildIntentAlignedRecoveryReply(normalizedMessage);
       }
     }
   }
@@ -13864,7 +14418,7 @@ async function applyEndToEndReplyLanguageLockWithinBudget(input: {
     ? normalizeReplyForClawCloudDisplay(
       buildDeterministicExplainReply(input.message)
       || buildDeterministicChatFallback(input.message, detectIntent(input.message).type)
-      || buildGenericScopedRecoveryReply(),
+      || buildIntentAlignedRecoveryReply(input.message),
     )
     : rawResponse;
   const safeFallbackResult = invalidResponse
@@ -14536,6 +15090,15 @@ async function routeInboundAgentMessageCore(
       sourceMessage: trimmed,
     };
     await setWhatsAppActiveContactSession(userId, nextActiveContactSession).catch(() => null);
+    await rememberWhatsAppVerifiedContactSelection({
+      userId,
+      kind: "active_contact_start",
+      requestedName: activeContactSessionCommand.contactName,
+      contactName: resolved.contact.name,
+      phone: resolved.contact.phone,
+      jid: resolved.contact.jid ?? null,
+      resumePrompt: trimmed,
+    }).catch(() => null);
     await clearWhatsAppPendingContactResolution(userId).catch(() => null);
     await writeWhatsAppAuditLog(userId, {
       eventType: "active_contact_session_started",
@@ -15597,6 +16160,7 @@ async function routeInboundAgentMessageCore(
     },
   ) => {
     const preparedReply = options?.prepareReply ? options.prepareReply(reply) : reply;
+    const isGroundedAttachmentBound = options?.isDocumentBound ?? hasDocumentContext;
     let guardedReply = await guardReply(preparedReply, intent, category, {
       extraInstruction: options?.extraInstruction,
       history: options?.history,
@@ -15605,7 +16169,10 @@ async function routeInboundAgentMessageCore(
 
     // Intercept visible fallback replies and replace them with one emergency
     // recovery attempt followed by a deterministic last-resort answer.
-    if (isVisibleFallbackReply(guardedReply)) {
+    if (isVisibleFallbackReply(guardedReply) && isGroundedAttachmentBound) {
+      console.log("[finalizeGuarded] Attachment reply rejected, using grounded fail-closed recovery");
+      guardedReply = buildGroundedAttachmentRecoveryReply(finalMessage);
+    } else if (isVisibleFallbackReply(guardedReply)) {
       console.log("[finalizeGuarded] Primary reply rejected, attempting ONE emergency recovery");
       const emergencyReply = await emergencyDirectAnswer(
         finalMessage,
@@ -15621,7 +16188,7 @@ async function routeInboundAgentMessageCore(
         } else {
           // Deterministic fallback — NO further AI calls to prevent cascade
           console.log("[finalizeGuarded] Emergency recovery failed, using deterministic last-resort answer");
-          guardedReply = buildTimeboxedProfessionalReply(finalMessage, intent as IntentType).trim() || buildGenericScopedRecoveryReply();
+          guardedReply = buildTimeboxedProfessionalReply(finalMessage, intent as IntentType).trim() || buildIntentAlignedRecoveryReply(finalMessage, intent);
         }
       }
     }
@@ -16664,21 +17231,39 @@ async function routeInboundAgentMessageCore(
           || looksLikeWrongModeAnswer(reasoningQuestion || finalMessage, guardedStory)
           || violatesKnownStoryAnchors(reasoningQuestion || finalMessage, guardedStory)
         ) {
-          return finalizeRaw(
-            buildClawCloudLowConfidenceReply(
-              finalMessage,
-              buildClawCloudAnswerQualityProfile({
-                question: finalMessage,
-                intent: "culture",
-                category: "culture_story",
-              }),
-              "The story draft did not stay reliable enough to return as a final answer.",
-            ),
-            "culture",
-            "culture_story",
-          );
+          const recoveredStory = await recoverDirectAnswer({
+            question: finalMessage,
+            answer: guardedStory,
+            intent: "culture",
+            extraInstruction: storyInstruction,
+          }).catch(() => "");
+          const cleanedRecoveredStory = recoveredStory.trim();
+
+          if (
+            cleanedRecoveredStory
+            && !looksLikeQuestionTopicMismatch(reasoningQuestion || finalMessage, cleanedRecoveredStory)
+            && !looksLikeWrongModeAnswer(reasoningQuestion || finalMessage, cleanedRecoveredStory)
+            && !violatesKnownStoryAnchors(reasoningQuestion || finalMessage, cleanedRecoveredStory)
+          ) {
+            storyText = cleanedRecoveredStory;
+          } else {
+            return finalizeRaw(
+              buildClawCloudLowConfidenceReply(
+                finalMessage,
+                buildClawCloudAnswerQualityProfile({
+                  question: finalMessage,
+                  intent: "culture",
+                  category: "culture_story",
+                }),
+                "The story draft did not stay reliable enough to return as a final answer.",
+              ),
+              "culture",
+              "culture_story",
+            );
+          }
+        } else {
+          storyText = guardedStory;
         }
-        storyText = guardedStory;
         storyModelAudit = storyReply.modelAuditTrail;
         }
       }
@@ -17449,7 +18034,21 @@ function buildDeterministicResearchComparisonReply(question: string): string | n
 }
 
 function buildDeterministicKnownStoryReply(question: string): string | null {
-  const normalized = question.toLowerCase();
+  if (/\bharry\s*potter\b/i.test(question) && /\b(story|plot|summary|synopsis|ending|series|book|novel)\b/i.test(question)) {
+    return [
+      "Harry Potter is a fantasy series about an orphaned boy who grows up with the cruel Dursley family and then learns on his eleventh birthday that he is a wizard.",
+      "He enters Hogwarts School of Witchcraft and Wizardry, where he becomes best friends with Ron Weasley and Hermione Granger and discovers that the dark wizard Lord Voldemort murdered his parents but failed to kill him as a baby.",
+      "Across his school years, Harry repeatedly faces major mysteries and dangers, including the Philosopher's Stone, the Chamber of Secrets, the truth about Sirius Black, the Triwizard Tournament, and Voldemort's full return.",
+      "As the series expands, Harry sees that the wizarding world is divided by fear, prejudice, and political denial, while Dumbledore quietly prepares him for a larger war.",
+      "The central revelation is that Voldemort split his soul into Horcruxes, so Harry, Ron, and Hermione eventually leave Hogwarts to hunt and destroy those objects before Voldemort can truly be defeated.",
+      "During that journey, they uncover the history of Voldemort, the sacrifices made by Dumbledore and Snape, and the lasting protection created by Harry's mother when she died saving him.",
+      "In the final stage, the three friends return for the Battle of Hogwarts, where many allies die, Snape's true loyalty is revealed, and Harry learns that a fragment of Voldemort's soul lives inside him.",
+      "Harry willingly faces Voldemort and allows himself to be struck down, which destroys the soul fragment inside him while leaving Harry himself able to return.",
+      "After that, Voldemort's remaining protections collapse, the last Horcrux is destroyed, and Harry defeats Voldemort in the final duel.",
+      "The series ends as a story about friendship, courage, sacrifice, choice, and love, with Harry and his friends surviving the war and restoring peace to the wizarding world.",
+    ].join("\n\n");
+  }
+
 
   if (/\b(goblin|guardian:\s*the lonely and great god)\b|도깨비/u.test(question)) {
     return [
@@ -17597,6 +18196,20 @@ function buildLocalizedDeterministicKnownStoryReply(
   question: string,
   locale: SupportedLocale,
 ): string | null {
+  if (locale === "ja" && /\bharry\s*potter\b|\u30cf\u30ea\u30fc\u30fb\u30dd\u30c3\u30bf\u30fc/iu.test(question)) {
+    return [
+      "『ハリー・ポッター』は、孤児のハリーが意地悪なダーズリー家で育ったあと、11歳の誕生日に自分が魔法使いだと知るところから始まるシリーズです。",
+      "ハリーはホグワーツ魔法魔術学校に入学し、ロン・ウィーズリーとハーマイオニー・グレンジャーと親友になります。同時に、自分の両親を殺した闇の魔法使いヴォルデモートが赤ん坊の自分だけは倒せなかったという事実を知ります。",
+      "学校生活の中で、ハリーは賢者の石、秘密の部屋、シリウス・ブラックの真実、三大魔法学校対抗試合、そしてヴォルデモート復活など、年ごとに大きな事件へ巻き込まれていきます。",
+      "物語が進むにつれて、魔法界には偏見や恐怖、政治的な隠蔽が広がっていることが明らかになり、ダンブルドアはハリーをヴォルデモートとの本当の戦いに備えさせます。",
+      "やがてヴォルデモートが自分の魂を分けてホークラックスにしていることが分かり、ハリー、ロン、ハーマイオニーはホグワーツを離れてそれらを探し、破壊する旅に出ます。",
+      "その過程で、3人はヴォルデモートの過去、ダンブルドアとスネイプの犠牲、そしてハリーを守り続けていた母リリーの愛の力を深く理解していきます。",
+      "最後にはホグワーツの戦いが起こり、多くの仲間が命を落とす中で、ハリーは自分の中にもヴォルデモートの魂の欠片があると知ります。",
+      "ハリーは自ら犠牲になる覚悟でヴォルデモートの前に立ち、その一撃で自分の中の魂の欠片だけを滅ぼします。その後、最後のホークラックスも破壊され、ヴォルデモートは最終決戦で敗れます。",
+      "シリーズ全体は、友情、勇気、選択、犠牲、そして愛の力が悪を打ち破るまでを描いた物語です。",
+    ].join("\n\n");
+  }
+
   if (locale === "ko" && /\b(my demon)\b|\ub9c8\uc774\s*\ub370\ubaac/u.test(question)) {
     return [
       "《마이 데몬》은 미래그룹 계열사를 이끄는 날카롭고 방어적인 상속녀 도도희의 이야기다. 그녀는 가문의 권력 다툼과 암살 위협 속에서 살아남아야 한다.",
@@ -19872,6 +20485,7 @@ export function buildWhatsAppActiveContactStatusRecoveryPlanForTest(input: {
 }
 
 const WHATSAPP_PENDING_CONTACT_RESOLUTION_TTL_MS = 15 * 60 * 1_000;
+const WHATSAPP_VERIFIED_CONTACT_SELECTION_TTL_MS = 30 * 60 * 1_000;
 
 function escapeClawCloudRegex(value: string) {
   return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -20023,6 +20637,45 @@ export function buildWhatsAppPendingDraftReviewReplyForTest(
   return buildWhatsAppPendingDraftReviewReply(pending);
 }
 
+function looksLikeClawCloudDirectedRequestDuringPendingWhatsAppAction(message: string) {
+  const normalized = normalizeWhatsAppPendingContactSelectionText(message);
+  if (!normalized) {
+    return false;
+  }
+
+  if (/[?？]$/.test(String(message ?? "").trim())) {
+    return true;
+  }
+
+  if (
+    parseSendMessageCommand(normalized) !== null
+    || parseSaveContactCommand(normalized) !== null
+    || parseWhatsAppActiveContactSessionCommand(normalized).type !== "none"
+    || looksLikeWhatsAppHistoryQuestion(normalized)
+    || detectWhatsAppSettingsCommandIntent(normalized) !== null
+    || detectLocalePreferenceCommand(normalized).type !== "none"
+    || detectMemoryCommand(normalized).type !== "none"
+    || looksLikeClawCloudCapabilityQuestion(normalized)
+    || looksLikeAssistantNameQuestion(normalized)
+    || looksLikeCultureStoryQuestion(normalized)
+    || looksLikeHardTechnicalDeepRoutePrompt(normalized)
+    || looksLikeVolatileLiveQuery(normalized)
+    || parseDirectTranslationRequest(normalized) !== null
+    || looksLikeInChatClawCloudRequestDuringActiveContact(normalized)
+  ) {
+    return true;
+  }
+
+  if (
+    /^(?:what|why|how|when|where|who|which|tell me|give me|show me|explain|compare|translate|summari[sz]e|analy[sz]e|research|search|find|look up|lookup)\b/i.test(normalized)
+    || /\b(?:story|plot|summary|synopsis)\b/i.test(normalized)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 type WhatsAppPendingDraftReviewAction =
   | { type: "none" }
   | { type: "review" }
@@ -20070,9 +20723,12 @@ function resolveWhatsAppPendingDraftReviewAction(input: {
     };
   }
 
+  if (looksLikeClawCloudDirectedRequestDuringPendingWhatsAppAction(trimmed)) {
+    return { type: "none" };
+  }
+
   if (
-    !/^(?:what|why|how|when|where|who|which|can\s+you|could\s+you|would\s+you|help|explain|summari[sz]e|compare|show)\b/i.test(trimmed)
-    && trimmed.length >= 2
+    trimmed.length >= 2
   ) {
     return {
       type: "replace",
@@ -20446,6 +21102,7 @@ function resolveWhatsAppPendingContactSelection(input: {
   const normalizedSelection = normalizeContactName(
     stripWhatsAppPendingContactSelectionTrailingNoise(trimmed),
   );
+  const selectionWordCount = stripped.split(/\s+/).filter(Boolean).length;
   const looksLikeCandidateMention = pending.options.some((pendingOption) => {
     const optionTokens = normalizeContactName(pendingOption.name)
       .split(/\s+/)
@@ -20454,7 +21111,11 @@ function resolveWhatsAppPendingContactSelection(input: {
   });
   if (
     /^(?:go\s+for|go\s+with|choose|pick|select|use|take|option\s*\d+|the\s+(?:first|second|third|fourth)\s+one)\b/i.test(trimmed)
-    || looksLikeCandidateMention
+    || (
+      looksLikeCandidateMention
+      && selectionWordCount <= 6
+      && !looksLikeClawCloudDirectedRequestDuringPendingWhatsAppAction(trimmed)
+    )
   ) {
     return { type: "remind" };
   }
@@ -20483,6 +21144,111 @@ function buildWhatsAppPendingContactOptions(
         : null,
     }))
     .filter((option) => option.name);
+}
+
+function isFreshWhatsAppVerifiedContactSelection(
+  selection: WhatsAppVerifiedContactSelection | null | undefined,
+) {
+  if (!selection?.verifiedAt) {
+    return false;
+  }
+
+  const createdAt = Date.parse(selection.verifiedAt);
+  if (!Number.isFinite(createdAt)) {
+    return false;
+  }
+
+  return (Date.now() - createdAt) <= WHATSAPP_VERIFIED_CONTACT_SELECTION_TTL_MS;
+}
+
+function buildWhatsAppVerifiedContactSelection(input: {
+  kind: WhatsAppVerifiedContactSelection["kind"];
+  requestedName: string;
+  contactName: string;
+  phone?: string | null;
+  jid?: string | null;
+  resumePrompt: string;
+}): WhatsAppVerifiedContactSelection | null {
+  const phone = normalizeWhatsAppPhoneDigits(input.phone ?? null);
+  const jid = typeof input.jid === "string" && input.jid.trim()
+    ? input.jid.trim()
+    : (phone ? `${phone}@s.whatsapp.net` : null);
+
+  if (!phone && !jid) {
+    return null;
+  }
+
+  return {
+    kind: input.kind,
+    requestedName: String(input.requestedName ?? "").trim() || String(input.contactName ?? "").trim(),
+    contactName: String(input.contactName ?? "").trim() || String(input.requestedName ?? "").trim(),
+    phone,
+    jid,
+    resumePrompt: String(input.resumePrompt ?? "").trim(),
+    verifiedAt: new Date().toISOString(),
+  };
+}
+
+async function rememberWhatsAppVerifiedContactSelection(input: {
+  userId: string;
+  kind: WhatsAppVerifiedContactSelection["kind"];
+  requestedName: string;
+  contactName: string;
+  phone?: string | null;
+  jid?: string | null;
+  resumePrompt: string;
+}) {
+  const selection = buildWhatsAppVerifiedContactSelection(input);
+  if (!selection) {
+    await clearWhatsAppRecentVerifiedContactSelection(input.userId).catch(() => null);
+    return null;
+  }
+
+  return setWhatsAppRecentVerifiedContactSelection(input.userId, selection).catch(() => null);
+}
+
+function looksLikeWhatsAppHistoryContinuationWithoutExplicitContact(message: string) {
+  const normalized = normalizeWhatsAppPendingContactSelectionText(message);
+  if (!normalized) {
+    return false;
+  }
+
+  if (
+    parseSendMessageCommand(normalized) !== null
+    || parseSaveContactCommand(normalized) !== null
+    || parseWhatsAppActiveContactSessionCommand(normalized).type !== "none"
+    || looksLikeWhatsAppHistoryQuestion(normalized)
+    || /\b(?:contact|chat with|message to|send to|reply to|\+\d{7,})\b/i.test(normalized)
+  ) {
+    return false;
+  }
+
+  return (
+    /^(?:ok|okay|haan|han|yes|yep|hmm|hm)\s+(?:summarize|summary|show|tell|check|continue|more|latest)\b/i.test(normalized)
+    || /\b(?:summarize|summary|show more|more messages|latest message|last message|last few messages|latest visible message|continue the chat summary|chat summary|conversation summary)\b/i.test(normalized)
+  );
+}
+
+function buildWhatsAppHistoryFollowUpResumePrompt(
+  message: string,
+  selection: WhatsAppVerifiedContactSelection,
+) {
+  const normalized = normalizeWhatsAppPendingContactSelectionText(message);
+  const selectedReference = selection.phone ? `+${selection.phone}` : selection.contactName;
+
+  if (/\b(?:latest visible message|latest message|last message)\b/i.test(normalized)) {
+    return `Show the latest visible WhatsApp message with ${selectedReference}`;
+  }
+
+  if (/\b(?:summarize|summary|chat summary|conversation summary)\b/i.test(normalized)) {
+    return `Summarize the WhatsApp chat with ${selectedReference}`;
+  }
+
+  if (/\b(?:show more|more messages|continue)\b/i.test(normalized)) {
+    return `Show WhatsApp history with ${selectedReference}`;
+  }
+
+  return `Summarize the WhatsApp chat with ${selectedReference}`;
 }
 
 async function rememberWhatsAppPendingContactResolution(input: {
@@ -20901,6 +21667,17 @@ export function inferRecentWhatsAppContactFollowUpIntentForTest(
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>,
 ) {
   return inferRecentWhatsAppContactFollowUpIntent(recentTurns);
+}
+
+export function looksLikeWhatsAppHistoryContinuationWithoutExplicitContactForTest(message: string) {
+  return looksLikeWhatsAppHistoryContinuationWithoutExplicitContact(message);
+}
+
+export function buildWhatsAppHistoryFollowUpResumePromptForTest(
+  message: string,
+  selection: WhatsAppVerifiedContactSelection,
+) {
+  return buildWhatsAppHistoryFollowUpResumePrompt(message, selection);
 }
 
 export function buildWhatsAppDeliveryFollowUpReplyForTest(
@@ -22280,6 +23057,15 @@ async function handleSendMessageToContactProfessional(
   const shouldPreviewFirst = shouldPreviewRecipientTargetedWhatsAppDraft(text);
 
   if (parsed.kind === "phone" && parsed.phone) {
+    await rememberWhatsAppVerifiedContactSelection({
+      userId,
+      kind: "send_message",
+      requestedName: parsed.contactName || `+${parsed.phone}`,
+      contactName: parsed.contactName || `+${parsed.phone}`,
+      phone: parsed.phone,
+      jid: `${parsed.phone}@s.whatsapp.net`,
+      resumePrompt: text,
+    }).catch(() => null);
     const professionalDraft = await generateStyledWhatsAppDraft({
       originalRequest: text,
       requestedMessage: rawMessage,
@@ -22539,6 +23325,15 @@ async function handleSendMessageToContactProfessional(
   );
 
   if (canAutoSendSingleRecipient && singleRecipient) {
+    await rememberWhatsAppVerifiedContactSelection({
+      userId,
+      kind: "send_message",
+      requestedName: singleRecipient.name,
+      contactName: singleRecipient.name,
+      phone: singleRecipient.phone ?? null,
+      jid: singleRecipient.jid ?? null,
+      resumePrompt: text,
+    }).catch(() => null);
     if (shouldPreviewFirst) {
       // Show draft and ask for confirmation before sending
       await rememberWhatsAppPendingContactResolution({
