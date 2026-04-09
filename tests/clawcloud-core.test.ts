@@ -326,8 +326,10 @@ import {
   buildCountryDefinitionAnswerForTest,
   buildDefinitionLookupQueriesForTest,
   buildNamedEntityIdentityAnswerForTest,
+  buildShortDefinitionClarificationSuggestionForTest,
   buildClawCloudLiveAnswerBundle,
   classifyClawCloudLiveSearchTier,
+  detectWorldBankCountryMetricComparisonQuestion,
   detectShortDefinitionLookup,
   extractRichestRankingScope,
   detectWorldBankCountryMetricQuestion,
@@ -7084,6 +7086,12 @@ test("contact ranking resolves family aliases from synced WhatsApp names and rec
       aliases: ["Papa Ji", "Papa", "Pitaji"],
     },
     {
+      name: "deepak rishu pai prateek cousin",
+      phone: "918580951765",
+      jid: "918580951765@s.whatsapp.net",
+      aliases: ["deepak rishu pai prateek cousin"],
+    },
+    {
       name: "Raj Kumar",
       phone: "919111111111",
       jid: "919111111111@s.whatsapp.net",
@@ -7111,6 +7119,30 @@ test("contact ranking resolves family aliases from synced WhatsApp names and rec
   if (fromHistory.type === "found") {
     assert.equal(fromHistory.contact.phone, "919876543210");
   }
+});
+
+test("strict family alias lookups do not surface unrelated transliteration tokens as closest contacts", () => {
+  const result = rankContactCandidates("papa ji", [
+    {
+      name: "deepak rishu pai prateek cousin",
+      phone: "918580951765",
+      jid: "918580951765@s.whatsapp.net",
+      aliases: ["deepak rishu pai prateek cousin"],
+    },
+  ]);
+
+  assert.equal(result.type, "not_found");
+
+  const compactResult = rankContactCandidates("papaji", [
+    {
+      name: "deepak rishu pai prateek cousin",
+      phone: "918580951765",
+      jid: "918580951765@s.whatsapp.net",
+      aliases: ["deepak rishu pai prateek cousin"],
+    },
+  ]);
+
+  assert.equal(compactResult.type, "not_found");
 });
 
 test("contact ranking can resolve an exact WhatsApp phone number directly", () => {
@@ -10995,11 +11027,11 @@ test("country metric live answers use World Bank data instead of generic search 
   try {
     const answer = await fetchLiveDataAndSynthesize("what is the gdp of china");
     assert.match(answer, /\*Fresh answer\*/i);
-    assert.match(answer, /\*Freshness check\*/i);
-    assert.match(answer, /won't present past-year or stale dated data as if it were current/i);
+    assert.match(answer, /China's latest official annual GDP estimate is \$18\.74 trillion for 2024\./i);
+    assert.match(answer, /This is the latest finalized annual figure currently available from the World Bank\./i);
     assert.equal(
       isCompleteCountryMetricAnswer("what is the gdp of china", answer),
-      false,
+      true,
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -11113,6 +11145,22 @@ test("country metric quality check rejects generic memo-style non-answers", () =
   );
 });
 
+test("country metric quality check rejects current-year projections backed only by stale source years", () => {
+  assert.equal(
+    isClawCloudGroundedLiveAnswer({
+      question: "What is the gdp per capita of japan and south korea in 2026",
+      answer: [
+        "The GDP per capita of Japan in 2026 is estimated to be around $43,000, while the GDP per capita of South Korea in 2026 is projected to be approximately $35,000.",
+        "",
+        "Sources:",
+        "1. International Monetary Fund (IMF) World Economic Outlook Database, October 2021",
+        "2. World Bank National Accounts Data, and OECD National Accounts Data Files.",
+      ].join("\n"),
+    }),
+    false,
+  );
+});
+
 test("web search results expose live evidence bundles for deterministic country metrics", async () => {
   const originalFetch = globalThis.fetch;
 
@@ -11154,12 +11202,13 @@ test("web search results expose live evidence bundles for deterministic country 
 
   try {
     const result = await answerWebSearchResult("what is the gdp of china");
-    assert.match(result.answer, /\*Freshness check\*/i);
+    assert.match(result.answer, /China's latest official annual GDP estimate is \$18\.74 trillion for 2024\./i);
+    assert.match(result.answer, /This is the latest finalized annual figure currently available from the World Bank\./i);
     assert.ok(result.liveAnswerBundle);
     assert.equal(result.liveAnswerBundle?.channel, "live");
     assert.equal(result.liveAnswerBundle?.sourceSummary.includes("worldbank.org"), true);
     assert.equal(result.liveAnswerBundle?.metadata.strategy, "deterministic");
-    assert.equal(result.liveAnswerBundle?.metadata.freshness_guarded, true);
+    assert.equal(result.liveAnswerBundle?.metadata.freshness_guarded, false);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -11207,8 +11256,75 @@ test("full inbound route keeps country GDP prompts on the country-metric live pa
 
   try {
     const result = await routeInboundAgentMessageResult("test-user", "what is gdp of china right now");
-    assert.match(result.response ?? "", /Freshness-safe reply/i);
+    assert.match(result.response ?? "", /China's latest official annual GDP estimate is/i);
+    assert.match(result.response ?? "", /\b2024\b/i);
+    assert.match(result.response ?? "", /Source: World Bank/i);
     assert.doesNotMatch(result.response ?? "", /cold-chain|GDP\/GxP|excursion|shipment|sensor/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("full inbound route keeps GDP per capita comparison prompts on the official metric path and does not relabel old actuals as 2026 values", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+    if (url.includes("api.worldbank.org/v2/country?format=json&per_page=400")) {
+      return new Response(JSON.stringify([
+        { page: 1, pages: 1, per_page: "400", total: 2 },
+        [
+          { id: "JPN", iso2Code: "JP", name: "Japan" },
+          { id: "KOR", iso2Code: "KR", name: "Korea, Rep." },
+        ],
+      ]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (url.includes("/country/JPN/indicator/NY.GDP.PCAP.CD")) {
+      return new Response(JSON.stringify([
+        { page: 1, pages: 1, per_page: "10", total: 2, sourceid: "2", lastupdated: "2026-02-24" },
+        [
+          { country: { value: "Japan" }, date: "2025", value: null },
+          { country: { value: "Japan" }, date: "2024", value: 32_500 },
+        ],
+      ]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (url.includes("/country/KOR/indicator/NY.GDP.PCAP.CD")) {
+      return new Response(JSON.stringify([
+        { page: 1, pages: 1, per_page: "10", total: 2, sourceid: "2", lastupdated: "2026-02-24" },
+        [
+          { country: { value: "Korea, Rep." }, date: "2025", value: null },
+          { country: { value: "Korea, Rep." }, date: "2024", value: 36_100 },
+        ],
+      ]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    throw new Error(`Unexpected fetch during test: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const result = await routeInboundAgentMessageResult("test-user", "What is the gdp per capita of japan and south korea in 2026");
+    assert.match(result.response ?? "", /Latest official annual GDP per capita estimates currently available:/i);
+    assert.match(result.response ?? "", /Japan: \$32,500 for 2024/i);
+    assert.match(result.response ?? "", /South Korea: \$36,100 for 2024/i);
+    assert.match(result.response ?? "", /I am not labeling these as 2026 values/i);
+    assert.match(result.response ?? "", /Source: World Bank - GDP per capita \(current US\$\) \(NY\.GDP\.PCAP\.CD\)/i);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -11652,6 +11768,14 @@ test("public affairs meetings and prefixed country metrics avoid old routing mis
     detectWorldBankCountryMetricQuestion("Search the web and tell me Japan's current population using the latest reliable estimate, with source context."),
     { kind: "population", countryCandidate: "japan" },
   );
+  assert.deepEqual(
+    detectWorldBankCountryMetricQuestion("what is the gdp per capita of japan in 2026"),
+    { kind: "gdp_per_capita", countryCandidate: "japan" },
+  );
+  assert.deepEqual(
+    detectWorldBankCountryMetricComparisonQuestion("What is the gdp per capita of japan and south korea in 2026"),
+    { kind: "gdp_per_capita", countryCandidates: ["japan", "south korea"] },
+  );
   assert.equal(detectWorldBankCountryMetricQuestion("what is the gdp of tokyo"), null);
   assert.equal(detectWorldBankCountryMetricQuestion("what is the population of tokyo"), null);
   assert.deepEqual(detectShortDefinitionLookup("what is semparo"), { term: "semparo" });
@@ -11665,6 +11789,13 @@ test("curated short definition fallbacks answer obscure lexical terms determinis
   const answer = await answerShortDefinitionLookup("what is semparo");
   assert.match(answer ?? "", /Quenya/i);
   assert.match(answer ?? "", /for a few reasons/i);
+});
+
+test("short definition lookup softly repairs high-confidence noisy geography terms", async () => {
+  const answer = await answerShortDefinitionLookup("What is start of harmoz");
+  assert.match(answer ?? "", /You likely mean the Strait of Hormuz\./i);
+  assert.match(answer ?? "", /between Iran and Oman/i);
+  assert.match(answer ?? "", /Persian Gulf to the Gulf of Oman/i);
 });
 
 test("curated short definition fallbacks answer common mythology terms directly", async () => {
@@ -11740,6 +11871,32 @@ test("named entity identity extraction does not hijack lexical term lookups", ()
   assert.equal(answer, "");
 });
 
+test("short definition fallback suggests a likely corrected term instead of guessing wildly", () => {
+  const answer = buildShortDefinitionClarificationSuggestionForTest("start of harmoz", [
+    {
+      id: "hormuz-1",
+      title: "Strait of Hormuz - Britannica",
+      url: "https://www.britannica.com/place/Strait-of-Hormuz",
+      snippet: "Strait of Hormuz is a narrow waterway between Iran and Oman.",
+      provider: "jina",
+      domain: "britannica.com",
+      score: 0.93,
+    },
+    {
+      id: "hormuz-2",
+      title: "Strait of Hormuz | Location, Importance, Map",
+      url: "https://www.example.com/strait-of-hormuz",
+      snippet: "The Strait of Hormuz links the Persian Gulf with the Gulf of Oman.",
+      provider: "serpapi",
+      domain: "example.com",
+      score: 0.88,
+    },
+  ]);
+
+  assert.match(answer, /Did you mean \*Strait of Hormuz\*\?/i);
+  assert.match(answer, /exact term/i);
+});
+
 test("direct definition answer polishing removes awkward hedging and keeps the real answer first", () => {
   const polished = polishClawCloudAnswerStyleForTest(
     "what is narsimha",
@@ -11805,6 +11962,30 @@ test("final reply polishing trims unrelated richest-people sections from city-on
   assert.match(polished, /Top wealthiest cities by resident millionaires/i);
   assert.doesNotMatch(polished, /Top richest people by live net worth/i);
   assert.doesNotMatch(polished, /Elon Musk/i);
+});
+
+test("final reply polishing normalizes generic answer scaffolding into a cleaner professional format", () => {
+  const polished = polishClawCloudAnswerStyleForTest(
+    "what is the gdp of japan",
+    "web_search",
+    "web_search",
+    [
+      "Quick answer",
+      "",
+      "Japan's latest official annual GDP estimate is $4.03 trillion for 2024.",
+      "",
+      "What to know",
+      "This is the latest finalized annual figure currently available from the World Bank.",
+      "",
+      "Source",
+      "World Bank - GDP, current US$ (NY.GDP.MKTP.CD)",
+    ].join("\n"),
+  );
+
+  assert.doesNotMatch(polished, /^Quick answer$/im);
+  assert.match(polished, /^Japan's latest official annual GDP estimate is \$4\.03 trillion for 2024\./i);
+  assert.match(polished, /\*Notes\*/i);
+  assert.match(polished, /\*Source\*/i);
 });
 
 test("historical power rankings route to history and use a cautious 400 AD fallback", () => {

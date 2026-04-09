@@ -221,6 +221,51 @@ function getSingleCanonicalRelationshipAlias(value: string) {
   return STRICT_RELATIONSHIP_CONTACT_CANONICALS.has(token) ? token : null;
 }
 
+function isAnchoredStrictRelationshipAliasVariant(input: {
+  rawRequestedName: string;
+  primaryQuery: string;
+  queryVariant: string;
+  storedName: string;
+}) {
+  const requestedRelationshipAlias =
+    getSingleCanonicalRelationshipAlias(input.rawRequestedName)
+    ?? getSingleCanonicalRelationshipAlias(input.primaryQuery);
+  if (!requestedRelationshipAlias) {
+    return true;
+  }
+
+  const variantRelationshipAlias = getSingleCanonicalRelationshipAlias(input.queryVariant);
+  if (variantRelationshipAlias !== requestedRelationshipAlias) {
+    return true;
+  }
+
+  const normalizedVariant = normalizeRelationshipSafeContactName(input.queryVariant);
+  const normalizedPrimaryQuery = normalizeRelationshipSafeContactName(input.primaryQuery);
+  const normalizedRequestedName = normalizeRelationshipSafeContactName(input.rawRequestedName);
+  const compactRequestedName = normalizedRequestedName.replace(/\s+/g, "");
+  const compactVariant = normalizedVariant.replace(/\s+/g, "");
+
+  if (
+    !normalizedVariant
+    || normalizedVariant === normalizedPrimaryQuery
+    || normalizedVariant === normalizedRequestedName
+    || (compactRequestedName && compactVariant === compactRequestedName)
+  ) {
+    return true;
+  }
+
+  const normalizedStoredCanonical = normalizeContactName(input.storedName);
+  if (!normalizedStoredCanonical) {
+    return false;
+  }
+
+  return (
+    normalizedStoredCanonical === requestedRelationshipAlias
+    || normalizedStoredCanonical.startsWith(`${requestedRelationshipAlias} `)
+    || normalizedStoredCanonical.endsWith(` ${requestedRelationshipAlias}`)
+  );
+}
+
 function hasLiteralRelationshipTokenOverlap(requestedName: string, resolvedName: string) {
   const requestedTokens = normalizeRelationshipSafeContactName(requestedName)
     .split(/\s+/)
@@ -476,7 +521,12 @@ function namesShareTokenLoosely(left: string, right: string) {
   return left === right || left.startsWith(right) || right.startsWith(left);
 }
 
-function scoreContact(queryVariants: string[], storedName: string, primaryQuery: string): ContactScoreDetail {
+function scoreContact(
+  queryVariants: string[],
+  storedName: string,
+  primaryQuery: string,
+  rawRequestedName: string,
+): ContactScoreDetail {
   const normalizedStored = normalizeName(storedName);
   const storedWords = normalizedStored.split(/\s+/).filter(Boolean);
   const primaryQueryWords = primaryQuery.split(/\s+/).filter(Boolean);
@@ -504,6 +554,15 @@ function scoreContact(queryVariants: string[], storedName: string, primaryQuery:
 
   for (const query of queryVariants) {
     if (!query) continue;
+    if (!isAnchoredStrictRelationshipAliasVariant({
+      rawRequestedName,
+      primaryQuery,
+      queryVariant: query,
+      storedName,
+    })) {
+      continue;
+    }
+
     const queryWords = query.split(/\s+/).filter(Boolean);
     const compactQuery = query.replace(/\s+/g, "");
     const isFullQueryExact =
@@ -972,7 +1031,7 @@ export function rankContactCandidates(
 
   for (const candidate of candidates) {
     const bestMatch = candidate.aliases.reduce<ContactScoreDetail | null>((best, alias) => {
-      const detail = scoreContact(queryVariants, alias, primaryQuery);
+      const detail = scoreContact(queryVariants, alias, primaryQuery, rawName);
       if (detail.score > (best?.score ?? 0)) {
         return detail;
       }

@@ -305,7 +305,9 @@ import {
 } from "@/lib/clawcloud-user-memory";
 import {
   answerShortDefinitionLookup,
+  detectWorldBankCountryMetricComparisonQuestion,
   detectWorldBankCountryMetricQuestion,
+  fetchWorldBankCountryMetricComparisonAnswer,
   fetchWorldBankCountryMetricAnswer,
   detectShortDefinitionLookup,
   extractRichestRankingScope,
@@ -3481,28 +3483,29 @@ function enhanceProfessionalFormatting(reply: string, intent: string): string {
   let enhanced = reply.trim();
   if (!enhanced || enhanced.length < 60) return enhanced;
 
-  // Skip if already has emoji headers or code blocks
-  if (/```/.test(enhanced) || /^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/mu.test(enhanced)) {
+  // Skip code blocks
+  if (/```/.test(enhanced)) {
     return enhanced;
   }
 
-  // Convert ## headers to emoji-styled WhatsApp headers
+  // Convert ## headers to simple section labels
   enhanced = enhanced.replace(/^#{1,3}\s+(.+)$/gm, (_match, content) => {
     const header = String(content).trim();
-    return `${pickSectionEmoji(header, intent)} *${header}*`;
+    return `*${header}*`;
   });
 
-  // Convert standalone **bold headers** to emoji headers
+  // Convert standalone **bold headers** to simple section labels
   enhanced = enhanced.replace(/^\*\*([^*\n]{3,60})\*\*\s*$/gm, (_match, content) => {
     const header = String(content).trim();
-    if (/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(header)) return `*${header}*`;
-    return `${pickSectionEmoji(header, intent)} *${header}*`;
+    return `*${header}*`;
   });
 
   // Convert - bullets to • bullets
   enhanced = enhanced.replace(/^- /gm, "• ");
 
-  return enhanced;
+  enhanced = enhanced.replace(/\n{3,}/g, "\n\n");
+
+  return enhanced.trim();
 }
 
 /** Picks a contextual emoji for a section header based on content and intent */
@@ -3534,6 +3537,30 @@ function pickSectionEmoji(header: string, intent: string): string {
   return "📌";
 }
 
+function applyProfessionalDefaultAnswerFormat(reply: string) {
+  let cleaned = reply.trim();
+  if (!cleaned || /```/.test(cleaned)) {
+    return cleaned;
+  }
+
+  cleaned = cleaned.replace(/^#{1,3}\s+(.+)$/gm, (_match, content) => `*${String(content).trim()}*`);
+  cleaned = cleaned.replace(/^\*\*([^*\n]{3,60})\*\*\s*$/gm, (_match, content) => `*${String(content).trim()}*`);
+
+  cleaned = cleaned
+    .replace(/^\*?(?:quick answer|fresh answer|freshness-safe reply)\*?\s*$/gmi, "")
+    .replace(/^\*?more detail\*?\s*$/gmi, "")
+    .replace(/^\*?quick context\*?\s*$/gmi, "*Context*")
+    .replace(/^\*?what to know\*?\s*$/gmi, "*Notes*")
+    .replace(/^\*?key developments\*?\s*$/gmi, "*Key Points*")
+    .replace(/^\*?source\*?\s*$/gmi, "*Source*")
+    .replace(/^\*?sources\*?\s*$/gmi, "*Sources*")
+    .replace(/^\*?freshness check\*?\s*$/gmi, "*Freshness Check*")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return cleaned;
+}
+
 function polishClawCloudAnswerStyle(
   question: string,
   intent: IntentType,
@@ -3551,8 +3578,8 @@ function polishClawCloudAnswerStyle(
 
   cleaned = trimRichestRankingReplyToRequestedScope(question, cleaned);
 
-  // Apply professional formatting enhancement (emoji headers, bullet styling)
-  cleaned = enhanceProfessionalFormatting(cleaned, intent);
+  // Apply a clean professional default format before domain-specific polishing.
+  cleaned = applyProfessionalDefaultAnswerFormat(enhanceProfessionalFormatting(cleaned, intent));
 
   if (
     looksLikeDirectDefinitionQuestion(question)
@@ -7738,6 +7765,7 @@ function resolveInboundRouteTimeoutPolicy(message: string): InboundRouteTimeoutP
     || detectAiModelRoutingDecision(trimmed) !== null
     || shouldUseLiveSearch(trimmed)
     || detectWorldBankCountryMetricQuestion(trimmed) !== null
+    || detectWorldBankCountryMetricComparisonQuestion(trimmed) !== null
   ) {
     return { kind: "live_research", timeoutMs: INBOUND_AGENT_ROUTE_LIVE_TIMEOUT_MS };
   }
@@ -15228,7 +15256,10 @@ async function routeInboundAgentMessageCore(
     }
   }
 
-  if (detectWorldBankCountryMetricQuestion(trimmed) !== null) {
+  if (
+    detectWorldBankCountryMetricQuestion(trimmed) !== null
+    || detectWorldBankCountryMetricComparisonQuestion(trimmed) !== null
+  ) {
     const metricSearchResult = await answerWebSearchResult(trimmed).catch(() => ({
       answer: "",
       liveAnswerBundle: null,
@@ -15238,10 +15269,12 @@ async function routeInboundAgentMessageCore(
     const freshnessGuardedMetricBundle = metricBundle?.metadata?.freshness_guarded === true;
     if (freshnessGuardedMetricBundle) {
       const renderedMetricBundle = renderClawCloudAnswerBundle(metricBundle).trim();
-      const latestOfficialMetric = await fetchWorldBankCountryMetricAnswer(trimmed).catch(() => "");
+      const latestOfficialMetric = (
+        await fetchWorldBankCountryMetricComparisonAnswer(trimmed).catch(() => "")
+      ) || await fetchWorldBankCountryMetricAnswer(trimmed).catch(() => "");
       const freshnessSafeMetricReply = latestOfficialMetric
-        ? `*Freshness-safe reply*\n\n${latestOfficialMetric}`
-        : renderedMetricBundle.replace(/^\s*(?:⚡\s*)?\*?live answer\*?/i, "*Freshness-safe reply*");
+        ? latestOfficialMetric
+        : renderedMetricBundle.replace(/^\s*(?:⚡\s*)?\*?live answer\*?/i, "*Latest official snapshot*");
       return finalizeEarlyRaw(
         normalizeResearchMarkdownForWhatsApp(freshnessSafeMetricReply || renderedMetricBundle || normalizedMetricAnswer),
         "web_search",
@@ -15957,7 +15990,15 @@ async function routeInboundAgentMessageCore(
   const aiModelRoutingPreview = aiModelRoutingFromFinal ?? aiModelRoutingFromTrimmed;
   const countryMetricFromFinal = hasDocumentContext ? null : detectWorldBankCountryMetricQuestion(finalMessage);
   const countryMetricFromTrimmed = hasDocumentContext ? null : detectWorldBankCountryMetricQuestion(trimmed);
-  const countryMetricQuery = countryMetricFromFinal ?? countryMetricFromTrimmed;
+  const countryMetricComparisonFromFinal =
+    hasDocumentContext ? null : detectWorldBankCountryMetricComparisonQuestion(finalMessage);
+  const countryMetricComparisonFromTrimmed =
+    hasDocumentContext ? null : detectWorldBankCountryMetricComparisonQuestion(trimmed);
+  const countryMetricQuery =
+    countryMetricFromFinal
+    ?? countryMetricFromTrimmed
+    ?? countryMetricComparisonFromFinal
+    ?? countryMetricComparisonFromTrimmed;
   let preferPrimaryConversationLane = shouldUsePrimaryConversationLane({
     message: trimmed,
     finalMessage,
@@ -15981,7 +16022,11 @@ async function routeInboundAgentMessageCore(
   const aiModelRouting = hasDocumentContext ? null : aiModelRoutingPreview;
   const shouldUseOriginalQuestionForLiveRouting =
     !hasDocumentContext
-    && (aiModelRoutingFromTrimmed !== null || countryMetricFromTrimmed !== null);
+    && (
+      aiModelRoutingFromTrimmed !== null
+      || countryMetricFromTrimmed !== null
+      || countryMetricComparisonFromTrimmed !== null
+    );
   const liveRoutingQuestion = shouldUseOriginalQuestionForLiveRouting ? trimmed : finalMessage;
 
   if (resolvedType !== "email" && aiModelRouting?.mode === "clarify" && aiModelRouting.clarificationReply) {
@@ -16738,16 +16783,23 @@ async function routeInboundAgentMessageCore(
       }));
       const normalizedSearch = searchResult.answer.trim();
       const freshnessGuardedBundle = searchResult.liveAnswerBundle?.metadata?.freshness_guarded === true;
-      const countryMetricFallbackReply = freshnessGuardedBundle && detectWorldBankCountryMetricQuestion(webSearchQuestion) !== null
-        ? await fetchWorldBankCountryMetricAnswer(webSearchQuestion).catch(() => "")
-        : "";
+      const countryMetricFallbackReply =
+        freshnessGuardedBundle
+        && (
+          detectWorldBankCountryMetricQuestion(webSearchQuestion) !== null
+          || detectWorldBankCountryMetricComparisonQuestion(webSearchQuestion) !== null
+        )
+          ? (
+            await fetchWorldBankCountryMetricComparisonAnswer(webSearchQuestion).catch(() => "")
+          ) || await fetchWorldBankCountryMetricAnswer(webSearchQuestion).catch(() => "")
+          : "";
       const webSearchReply = freshnessGuardedBundle && searchResult.liveAnswerBundle
         ? (
           countryMetricFallbackReply
-            ? `*Freshness-safe reply*\n\n${countryMetricFallbackReply}`
+            ? countryMetricFallbackReply
             : renderClawCloudAnswerBundle(searchResult.liveAnswerBundle).trim().replace(
               /^\s*(?:⚡\s*)?\*?live answer\*?/i,
-              "*Freshness-safe reply*",
+              "*Latest official snapshot*",
             ) || normalizedSearch
         )
         : normalizedSearch;

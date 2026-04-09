@@ -12,6 +12,7 @@ import {
   isCompleteRetailFuelAnswer,
 } from "@/lib/clawcloud-retail-prices";
 import {
+  detectWorldBankCountryMetricComparisonQuestion,
   detectWorldBankCountryMetricQuestion,
   extractRichestRankingScope,
   isCompleteCountryMetricAnswer,
@@ -361,6 +362,7 @@ function requiresFreshLiveGroundingQuestion(question: string, category: string) 
   return category === "news"
     || category === "web_search"
     || shouldUseLiveSearch(question)
+    || detectWorldBankCountryMetricComparisonQuestion(question) !== null
     || looksLikeFreshnessSensitiveTechQuestion(question);
 }
 
@@ -1062,8 +1064,82 @@ function looksPastYearFreshnessLeak(question: string | undefined, answer: string
     return false;
   }
 
+  if (answerFramesLatestOfficialAnnualActual(answer)) {
+    return false;
+  }
+
   return [...answer.matchAll(/\b(20\d{2}|19\d{2})\b/g)]
     .some((match) => Number.parseInt(match[1] ?? "", 10) < currentYear);
+}
+
+function extractLiveSourceCitationYears(answer: string) {
+  const lines = answer
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const citationLines: string[] = [];
+  let inSourcesSection = false;
+
+  for (const line of lines) {
+    if (/^sources?\s*:/i.test(line)) {
+      inSourcesSection = true;
+      citationLines.push(line);
+      continue;
+    }
+
+    if (/^(?:source|published)\s*:/i.test(line)) {
+      citationLines.push(line);
+      continue;
+    }
+
+    if (inSourcesSection) {
+      citationLines.push(line);
+    }
+  }
+
+  return citationLines
+    .flatMap((line) => [...line.matchAll(/\b(19|20)\d{2}\b/g)].map((match) => Number.parseInt(match[0], 10)))
+    .filter((year) => Number.isFinite(year));
+}
+
+function answerFramesLatestOfficialAnnualActual(answer: string) {
+  const normalized = answer.toLowerCase();
+  return normalized.includes("latest official annual") && normalized.includes("latest finalized annual figure");
+}
+
+function looksStaleCurrentSourceCitation(question: string | undefined, answer: string) {
+  if (!question || !requiresFreshLiveGroundingQuestion(question, "")) {
+    return false;
+  }
+
+  const explicitYear = extractExplicitQuestionYear(question);
+  const currentYear = new Date().getUTCFullYear();
+  if ((explicitYear !== null && explicitYear < currentYear) || hasPastYearScope(question)) {
+    return false;
+  }
+
+  if (answerFramesLatestOfficialAnnualActual(answer)) {
+    return false;
+  }
+
+  const citationYears = extractLiveSourceCitationYears(answer);
+  if (!citationYears.length) {
+    return false;
+  }
+
+  const freshestCitationYear = Math.max(...citationYears);
+  const answerMentionsTargetYear =
+    explicitYear !== null
+      && new RegExp(`\\b${explicitYear}\\b`).test(answer);
+  const looksProjectionLike = /\b(estimate|estimated|projected|projection|forecast)\b/i.test(answer);
+  const questionNeedsCurrentOrForwardSource =
+    explicitYear !== null
+      ? explicitYear >= currentYear
+      : /\b(latest|current|currently|today|right now|as of now|newest|recent)\b/i.test(question);
+
+  return questionNeedsCurrentOrForwardSource
+    && (answerMentionsTargetYear || looksProjectionLike)
+    && freshestCitationYear < currentYear;
 }
 
 export function isClawCloudGroundedLiveAnswer(input: {
@@ -1085,6 +1161,9 @@ export function isClawCloudGroundedLiveAnswer(input: {
     return false;
   }
   if (looksPastYearFreshnessLeak(input.question, answer)) {
+    return false;
+  }
+  if (looksStaleCurrentSourceCitation(input.question, answer)) {
     return false;
   }
   if (input.question) {

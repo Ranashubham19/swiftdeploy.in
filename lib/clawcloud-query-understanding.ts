@@ -178,7 +178,7 @@ function applyCasePattern(source: string, replacement: string) {
   return replacement;
 }
 
-function damerauLevenshteinDistance(a: string, b: string, maxDistance: number) {
+export function damerauLevenshteinDistance(a: string, b: string, maxDistance: number) {
   const source = a.toLowerCase();
   const target = b.toLowerCase();
   if (source === target) {

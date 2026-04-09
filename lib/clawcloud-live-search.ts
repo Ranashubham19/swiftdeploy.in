@@ -17,7 +17,10 @@ import {
   inferClawCloudRegionContext,
   normalizeRegionalQuestion,
 } from "@/lib/clawcloud-region-context";
-import { stripClawCloudConversationalLeadIn } from "@/lib/clawcloud-query-understanding";
+import {
+  damerauLevenshteinDistance,
+  stripClawCloudConversationalLeadIn,
+} from "@/lib/clawcloud-query-understanding";
 import { extractExplicitQuestionYear, hasPastYearScope } from "@/lib/clawcloud-time-scope";
 import { getWeather, looksLikeDirectWeatherQuestion, parseWeatherCity } from "@/lib/clawcloud-weather";
 import { searchInternetWithDiagnostics } from "@/lib/search";
@@ -36,6 +39,7 @@ export type ClawCloudLiveBundleStrategy = "deterministic" | "search_synthesis";
 
 export type ClawCloudCountryMetricKind =
   | "gdp_nominal"
+  | "gdp_per_capita"
   | "gdp_growth"
   | "population"
   | "inflation"
@@ -46,8 +50,17 @@ export type ClawCloudCountryMetricQuery = {
   countryCandidate: string;
 };
 
+export type ClawCloudCountryMetricComparisonQuery = {
+  kind: ClawCloudCountryMetricKind;
+  countryCandidates: string[];
+};
+
 export type ClawCloudShortDefinitionLookup = {
   term: string;
+};
+
+type ClawCloudShortDefinitionLookupDetails = ClawCloudShortDefinitionLookup & {
+  rawTerm: string;
 };
 
 export type ClawCloudRichestRankingScope = "people" | "cities" | "mixed" | null;
@@ -217,11 +230,11 @@ const LOW_QUALITY_PUBLIC_LOOKUP_CUE =
 const HENLEY_WEALTHIEST_CITIES_REPORT_URL = "https://www.henleyglobal.com/newsroom/press-releases/wealthiest-cities-report-2025";
 const WORLD_BANK_COUNTRIES_URL = "https://api.worldbank.org/v2/country?format=json&per_page=400";
 const COUNTRY_METRIC_EXTRACTION_PATTERNS = [
-  /\b(?:what(?:'s| is)|tell me|show me|give me|share|find)?\s*(?:the\s+)?(?:latest\s+|current\s+|official\s+|nominal\s+|real\s+|annual\s+)?(?:gdp|gross domestic product|population|inflation|unemployment(?: rate)?|jobless rate|gdp growth|economic growth(?: rate)?)\s+(?:of|in|for)\s+(.+?)(?:\?|$)/i,
-  /\b(?:what(?:'s| is)|tell me|show me|give me|share|find)?\s*(.+?)'?s\s+(?:latest\s+|current\s+|official\s+|nominal\s+|real\s+|annual\s+)?(?:gdp|gross domestic product|population|inflation|unemployment(?: rate)?|jobless rate|gdp growth|economic growth(?: rate)?)(?:\b|$)/i,
-  /^(.+?)\s+(?:latest\s+|current\s+|official\s+|nominal\s+|real\s+|annual\s+)?(?:gdp|gross domestic product|population|inflation|unemployment(?: rate)?|jobless rate|gdp growth|economic growth(?: rate)?)(?:\b|$)/i,
+  /\b(?:what(?:'s| is)|tell me|show me|give me|share|find)?\s*(?:the\s+)?(?:latest\s+|current\s+|official\s+|nominal\s+|real\s+|annual\s+)?(?:gdp per capita|gross domestic product per capita|per capita gdp|gdp\/capita|gdp|gross domestic product|population|inflation|unemployment(?: rate)?|jobless rate|gdp growth|economic growth(?: rate)?)\s+(?:of|in|for)\s+(.+?)(?:\?|$)/i,
+  /\b(?:what(?:'s| is)|tell me|show me|give me|share|find)?\s*(.+?)'?s\s+(?:latest\s+|current\s+|official\s+|nominal\s+|real\s+|annual\s+)?(?:gdp per capita|gross domestic product per capita|per capita gdp|gdp\/capita|gdp|gross domestic product|population|inflation|unemployment(?: rate)?|jobless rate|gdp growth|economic growth(?: rate)?)(?:\b|$)/i,
+  /^(.+?)\s+(?:latest\s+|current\s+|official\s+|nominal\s+|real\s+|annual\s+)?(?:gdp per capita|gross domestic product per capita|per capita gdp|gdp\/capita|gdp|gross domestic product|population|inflation|unemployment(?: rate)?|jobless rate|gdp growth|economic growth(?: rate)?)(?:\b|$)/i,
 ];
-const COUNTRY_METRIC_NOISE = /\b(?:the|latest|current|official|nominal|real|annual|yearly|estimated|estimate|reliable|world bank|imf|wb|today|right now|currently|as of today|as of now|in usd|usd|us dollars?|dollars?|percent|percentage|rate)\b/gi;
+const COUNTRY_METRIC_NOISE = /\b(?:the|latest|current|official|nominal|real|annual|yearly|estimated|estimate|reliable|world bank|imf|wb|today|right now|currently|as of today|as of now|in usd|usd|us dollars?|dollars?|percent|percentage|rate|gdp per capita|gross domestic product per capita|per capita gdp|gdp\/capita)\b/gi;
 const COUNTRY_METRIC_ALIAS_TO_CODE = new Map<string, string>([
   ["america", "USA"],
   ["u s", "USA"],
@@ -329,6 +342,13 @@ const WORLD_BANK_METRIC_CONFIG: Record<ClawCloudCountryMetricKind, WorldBankMetr
     formatValue: (value) => formatUsdValue(value),
     answerPatterns: [/\bgdp\b/i, /\bgross domestic product\b/i, /(\$|usd|trillion|billion)/i],
   },
+  gdp_per_capita: {
+    indicator: "NY.GDP.PCAP.CD",
+    label: "GDP per capita",
+    sourceLabel: "GDP per capita (current US$)",
+    formatValue: (value) => formatUsdPerCapita(value),
+    answerPatterns: [/\bgdp per capita\b/i, /\bper capita\b/i, /(\$|usd)/i],
+  },
   gdp_growth: {
     indicator: "NY.GDP.MKTP.KD.ZG",
     label: "GDP growth",
@@ -374,6 +394,37 @@ function looksLikeAdvancedStableKnowledgeQuestion(normalizedQuestion: string) {
     && ADVANCED_STABLE_KNOWLEDGE_DIRECTIVE_PATTERN.test(normalizedQuestion);
 }
 
+const HIGH_CONFIDENCE_SHORT_DEFINITION_REPAIRS: Record<string, string> = {
+  "start of harmoz": [
+    'You likely mean the Strait of Hormuz.',
+    "",
+    "The Strait of Hormuz is the narrow waterway between Iran and Oman that connects the Persian Gulf to the Gulf of Oman.",
+    "",
+    'If you meant something else by "harmoz", tell me the exact term and I will define that instead.',
+  ].join("\n"),
+  "start of hormoz": [
+    'You likely mean the Strait of Hormuz.',
+    "",
+    "The Strait of Hormuz is the narrow waterway between Iran and Oman that connects the Persian Gulf to the Gulf of Oman.",
+    "",
+    'If you meant something else by "hormoz", tell me the exact term and I will define that instead.',
+  ].join("\n"),
+  "strait of harmoz": [
+    'You likely mean the Strait of Hormuz.',
+    "",
+    "The Strait of Hormuz is the narrow waterway between Iran and Oman that connects the Persian Gulf to the Gulf of Oman.",
+    "",
+    'If you meant something else by "harmoz", tell me the exact term and I will define that instead.',
+  ].join("\n"),
+  "strait of hormoz": [
+    'You likely mean the Strait of Hormuz.',
+    "",
+    "The Strait of Hormuz is the narrow waterway between Iran and Oman that connects the Persian Gulf to the Gulf of Oman.",
+    "",
+    'If you meant something else by "hormoz", tell me the exact term and I will define that instead.',
+  ].join("\n"),
+};
+
 function cleanShortDefinitionTerm(raw: string) {
   return raw
     .trim()
@@ -384,7 +435,7 @@ function cleanShortDefinitionTerm(raw: string) {
     .trim();
 }
 
-export function detectShortDefinitionLookup(question: string): ClawCloudShortDefinitionLookup | null {
+function detectShortDefinitionLookupDetails(question: string): ClawCloudShortDefinitionLookupDetails | null {
   const normalized = stripClawCloudConversationalLeadIn(question).trim().replace(/\s+/g, " ");
   if (!normalized) {
     return null;
@@ -411,10 +462,18 @@ export function detectShortDefinitionLookup(question: string): ClawCloudShortDef
       return null;
     }
 
-    return { term };
+    return {
+      rawTerm: rawTerm.trim(),
+      term,
+    };
   }
 
   return null;
+}
+
+export function detectShortDefinitionLookup(question: string): ClawCloudShortDefinitionLookup | null {
+  const details = detectShortDefinitionLookupDetails(question);
+  return details ? { term: details.term } : null;
 }
 
 function normalizeLookupKey(value: string) {
@@ -513,6 +572,7 @@ function formatUsdPerCapita(value: number) {
 function metricEmoji(kind: ClawCloudCountryMetricKind) {
   switch (kind) {
     case "gdp_nominal":
+    case "gdp_per_capita":
     case "gdp_growth":
       return "ðŸ“Š";
     case "population":
@@ -589,42 +649,52 @@ function buildWorldBankMetricAnswer(options: {
   countryName: string;
   primary: WorldBankMetricSnapshot;
   quickContext: string[];
+  requestedYear?: number | null;
 }) {
   const metricConfig = WORLD_BANK_METRIC_CONFIG[options.primary.kind];
   const currentYear = new Date().getFullYear();
   const metricYear = Number.parseInt(options.primary.year, 10);
   const isLaggingAnnualActual = Number.isFinite(metricYear) && metricYear < currentYear;
-
   const lines = [
-    `${metricEmoji(options.primary.kind)} *${options.countryName} ${metricConfig.label}*`,
-    `*Latest official annual estimate:* *${metricConfig.formatValue(options.primary.value)}* (*${options.primary.year}*)`,
+    `${options.countryName}'s latest official annual ${metricConfig.label} estimate is ${metricConfig.formatValue(options.primary.value)} for ${options.primary.year}.`,
+    "",
+    "This is the latest finalized annual figure currently available from the World Bank.",
   ];
+
+  if (isLaggingAnnualActual) {
+    lines.push("Newer calendar-year numbers are usually forecasts or provisional estimates, not finalized annual actuals yet.");
+  }
+
+  if (
+    typeof options.requestedYear === "number"
+    && Number.isFinite(options.requestedYear)
+    && Number.isFinite(metricYear)
+    && options.requestedYear > metricYear
+  ) {
+    lines.push(
+      `I am not labeling this as ${options.requestedYear}, because the latest finalized World Bank annual actual currently available is still ${options.primary.year}.`,
+    );
+    lines.push(`If you need a ${options.requestedYear} projection, ask for the latest IMF or OECD projection for ${options.countryName}.`);
+  }
 
   if (options.quickContext.length) {
     lines.push("");
-    lines.push("*Quick context*");
+    lines.push("Context");
     lines.push(...options.quickContext);
   }
 
   lines.push("");
-  lines.push("*What to know*");
-  lines.push("â€¢ This is the latest finalized annual figure available from the World Bank.");
-  if (isLaggingAnnualActual) {
-    lines.push("â€¢ Newer calendar-year figures are usually forecasts or provisional estimates, not finalized annual actuals yet.");
-  }
-
-  lines.push("");
-  lines.push("*Source*");
-  lines.push("â€¢ World Bank");
-  lines.push(`â€¢ Metric: *${metricConfig.sourceLabel}*`);
-  lines.push(`â€¢ Indicator: *${metricConfig.indicator}*`);
-  lines.push(`â€¢ Searched: *${new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}*`);
+  lines.push(`Source: World Bank - ${metricConfig.sourceLabel} (${metricConfig.indicator})`);
+  lines.push(`Checked: ${new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}`);
 
   return lines.join("\n");
 }
 
 function detectCountryMetricKind(question: string): ClawCloudCountryMetricKind | null {
   const normalizedQuestion = normalizeQuestion(question);
+  if (/\b(gdp per capita|per capita gdp|gdp\/capita)\b/i.test(normalizedQuestion)) {
+    return "gdp_per_capita";
+  }
   if (
     /\b(gdp growth|economic growth(?: rate)?)\b/i.test(normalizedQuestion)
     || (/\bgrowth rate\b/i.test(normalizedQuestion) && /\b(gdp|economy|economic)\b/i.test(normalizedQuestion))
@@ -652,6 +722,9 @@ function cleanCountryMetricCandidate(value: string) {
     .replace(/^(?:tell me|show me|give me|share|find)\s+/i, "")
     .replace(/^(?:according to|using)\s+/i, "")
     .replace(/^(?:the|for|in|of)\s+/i, "")
+    .replace(/\b(?:in|for|during|around|as of)\s+(?:19|20)\d{2}\b/gi, " ")
+    .replace(/\b(?:19|20)\d{2}\b/g, " ")
+    .replace(/\b(?:right now|currently|today|as of now|current|latest)\b/gi, " ")
     .replace(COUNTRY_METRIC_NOISE, " ")
     .replace(/[?.,;:()]/g, " ")
     .replace(/\s+/g, " ")
@@ -659,7 +732,28 @@ function cleanCountryMetricCandidate(value: string) {
   return cleaned.replace(/^the\s+/i, "").trim();
 }
 
-export function detectWorldBankCountryMetricQuestion(question: string): ClawCloudCountryMetricQuery | null {
+function formatCountryMetricDisplayName(candidate: string, fallbackName: string) {
+  const normalizedCandidate = candidate.trim();
+  if (!normalizedCandidate) {
+    return fallbackName;
+  }
+
+  return normalizedCandidate
+    .split(/\s+/)
+    .map((part) => {
+      const lower = part.toLowerCase();
+      if (lower === "usa" || lower === "uae" || /^[A-Z]{2,}$/.test(part)) {
+        return part.toUpperCase();
+      }
+      return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
+    })
+    .join(" ");
+}
+
+function extractWorldBankCountryMetricCandidates(question: string): {
+  kind: ClawCloudCountryMetricKind;
+  countryCandidates: string[];
+} | null {
   const normalizedQuestion = normalizeRegionalQuestion(question);
   const kind = detectCountryMetricKind(normalizedQuestion);
   if (!kind) {
@@ -685,13 +779,46 @@ export function detectWorldBankCountryMetricQuestion(question: string): ClawClou
       return null;
     }
 
+    const countryCandidates = [...new Set(
+      countryCandidate
+        .split(/\s+(?:and|vs\.?|versus)\s+|,\s*/i)
+        .map((candidate) => candidate.trim())
+        .filter(Boolean),
+    )];
+    if (!countryCandidates.length || countryCandidates.length > 3) {
+      continue;
+    }
+
     return {
       kind,
-      countryCandidate,
+      countryCandidates,
     };
   }
 
   return null;
+}
+
+export function detectWorldBankCountryMetricQuestion(question: string): ClawCloudCountryMetricQuery | null {
+  const extracted = extractWorldBankCountryMetricCandidates(question);
+  if (!extracted || extracted.countryCandidates.length !== 1) {
+    return null;
+  }
+
+  return {
+    kind: extracted.kind,
+    countryCandidate: extracted.countryCandidates[0]!,
+  };
+}
+
+export function detectWorldBankCountryMetricComparisonQuestion(
+  question: string,
+): ClawCloudCountryMetricComparisonQuery | null {
+  const extracted = extractWorldBankCountryMetricCandidates(question);
+  if (!extracted || extracted.countryCandidates.length < 2) {
+    return null;
+  }
+
+  return extracted;
 }
 
 function isAggregateWorldBankRecord(record: WorldBankCountryRecord) {
@@ -716,7 +843,10 @@ async function fetchWorldBankCountryRecords() {
       .filter((record) => !isAggregateWorldBankRecord(record))
     : [];
 
-  if (records.length) {
+  // Cache only a realistically complete World Bank country list. This keeps
+  // production fast without letting tiny mocked or partial responses poison
+  // later resolutions.
+  if (records.length >= 150) {
     worldBankCountryCache = {
       expiresAt: Date.now() + 12 * 60 * 60 * 1000,
       records,
@@ -819,10 +949,71 @@ export async function fetchWorldBankCountryMetricAnswer(question: string) {
     .catch(() => []);
 
   return buildWorldBankMetricAnswer({
-    countryName: country.name,
+    countryName: formatCountryMetricDisplayName(metricQuery.countryCandidate, country.name),
     primary,
     quickContext,
+    requestedYear: extractExplicitQuestionYear(question),
   });
+}
+
+export async function fetchWorldBankCountryMetricComparisonAnswer(question: string) {
+  const metricQuery = detectWorldBankCountryMetricComparisonQuestion(question);
+  if (!metricQuery) {
+    return "";
+  }
+
+  const countries = await Promise.all(
+    metricQuery.countryCandidates.map((candidate) => resolveWorldBankCountry(candidate)),
+  );
+  if (countries.some((country) => !country?.id || !country.name)) {
+    return "";
+  }
+
+  const snapshots = await Promise.all(
+    countries.map((country, index) =>
+      fetchWorldBankMetricSnapshot(
+        country!.id!,
+        formatCountryMetricDisplayName(metricQuery.countryCandidates[index] ?? country!.name ?? "", country!.name!),
+        metricQuery.kind,
+      )),
+  );
+  if (snapshots.some((snapshot) => !snapshot)) {
+    return "";
+  }
+
+  const metricConfig = WORLD_BANK_METRIC_CONFIG[metricQuery.kind];
+  const explicitYear = extractExplicitQuestionYear(question);
+  const metricYears = snapshots
+    .map((snapshot) => Number.parseInt(snapshot!.year, 10))
+    .filter((year) => Number.isFinite(year));
+  const latestActualYear = metricYears.length ? Math.max(...metricYears) : null;
+  const lines = [
+    `Latest official annual ${metricConfig.label} estimates currently available:`,
+    "",
+    "These are the latest finalized annual figures currently available from the World Bank.",
+    "",
+    ...snapshots.map((snapshot) =>
+      `â€¢ ${snapshot!.countryName}: ${metricConfig.formatValue(snapshot!.value)} for ${snapshot!.year}`),
+  ];
+
+  if (
+    typeof explicitYear === "number"
+    && Number.isFinite(explicitYear)
+    && latestActualYear !== null
+    && explicitYear > latestActualYear
+  ) {
+    lines.push("");
+    lines.push(
+      `I am not labeling these as ${explicitYear} values, because the latest finalized World Bank annual actuals currently available are still for ${latestActualYear}.`,
+    );
+    lines.push(`If you need ${explicitYear} projections, ask for the latest IMF or OECD projections for those countries.`);
+  }
+
+  lines.push("");
+  lines.push(`Source: World Bank - ${metricConfig.sourceLabel} (${metricConfig.indicator})`);
+  lines.push(`Checked: ${new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}`);
+
+  return lines.join("\n");
 }
 
 function isRealtimeQuestion(normalizedQuestion: string) {
@@ -849,6 +1040,7 @@ function isVolatileQuestion(normalizedQuestion: string) {
   return (
     matchesAny(normalizedQuestion, VOLATILE_PATTERNS)
     || detectWorldBankCountryMetricQuestion(normalizedQuestion) !== null
+    || detectWorldBankCountryMetricComparisonQuestion(normalizedQuestion) !== null
     || looksLikeBroadFreshnessSensitiveQuestion(normalizedQuestion)
     || (VOLATILE_RANKING_CUE.test(normalizedQuestion) && VOLATILE_ENTITY_CUE.test(normalizedQuestion))
   );
@@ -868,6 +1060,7 @@ function isFreshDataQuestionThatShouldBypassKnowledgeGate(normalizedQuestion: st
     looksLikeBroadFreshnessSensitiveQuestion(normalizedQuestion)
     || looksLikeCurrentAffairsQuestion(normalizedQuestion)
     || detectWorldBankCountryMetricQuestion(normalizedQuestion) !== null
+    || detectWorldBankCountryMetricComparisonQuestion(normalizedQuestion) !== null
     || detectRetailFuelPriceQuestion(normalizedQuestion) !== null
     || looksLikeConsumerStaplePriceQuestion(normalizedQuestion)
     || detectOfficialPricingQuery(normalizedQuestion) !== null
@@ -1105,6 +1298,28 @@ function strictCurrentTimelineMaxAgeDays(question: string, route: ClawCloudLiveS
   return route.tier === "realtime" ? 90 : 180;
 }
 
+function answerFramesLatestOfficialAnnualActual(answer: string) {
+  const normalized = answer.toLowerCase();
+  return (
+    normalized.includes("latest official annual")
+    && (
+      normalized.includes("latest finalized annual figure")
+      || normalized.includes("latest finalized annual figures")
+    )
+  );
+}
+
+function isFreshOfficialAnnualMetricAnswer(question: string, answer: string) {
+  if (
+    detectWorldBankCountryMetricQuestion(question) === null
+    && detectWorldBankCountryMetricComparisonQuestion(question) === null
+  ) {
+    return false;
+  }
+
+  return answerFramesLatestOfficialAnnualActual(answer);
+}
+
 function extractReferencedYears(text: string) {
   return [...text.matchAll(/\b(20\d{2}|19\d{2})\b/g)]
     .map((match) => Number.parseInt(match[1] ?? "", 10))
@@ -1167,6 +1382,13 @@ function guardStrictCurrentTimelineAnswer(input: {
   }
 
   const answer = input.answer.trim();
+  if (isFreshOfficialAnnualMetricAnswer(input.question, answer)) {
+    return {
+      answer,
+      freshnessGuarded: false,
+    };
+  }
+
   const answerYears = extractReferencedYears(answer);
   const answerDates = extractReferencedDates(answer);
   const evidenceDates = (input.evidence ?? [])
@@ -1840,6 +2062,10 @@ function buildLiveSearchQueries(question: string, route: ClawCloudLiveSearchRout
       queries.add(`${countryMetric.countryCandidate} ${metricLabel} world bank`);
       queries.add(`site:worldbank.org ${countryMetric.countryCandidate} ${metricLabel}`);
       queries.add(`${countryMetric.countryCandidate} ${metricLabel} latest annual estimate`);
+      if (explicitYear !== null && explicitYear >= year) {
+        queries.add(`site:imf.org ${countryMetric.countryCandidate} ${metricLabel} ${explicitYear} IMF`);
+        queries.add(`site:oecd.org ${countryMetric.countryCandidate} ${metricLabel} ${explicitYear}`);
+      }
     } else if (localityScopedMetric) {
       queries.add(`${q} latest estimate`);
       queries.add(`${q} metropolitan area latest estimate`);
@@ -2198,6 +2424,10 @@ export function buildCountryDefinitionAnswerForTest(country: RestCountryDefiniti
   return buildCountryDefinitionAnswer(country);
 }
 
+export function buildShortDefinitionClarificationSuggestionForTest(term: string, sources: ResearchSource[]) {
+  return buildShortDefinitionClarificationSuggestion(term, sources);
+}
+
 const CURATED_SHORT_DEFINITION_FALLBACKS: Record<string, string> = {
   semparo: 'Semparo appears to be a Quenya term that means "for a few reasons."',
   narasimha: "Narasimha is the half-man, half-lion avatar of Vishnu in Hindu tradition. He is known for protecting Prahlada and defeating Hiranyakashipu, symbolizing the victory of dharma over tyranny.",
@@ -2205,7 +2435,127 @@ const CURATED_SHORT_DEFINITION_FALLBACKS: Record<string, string> = {
   shali: "Shali most commonly refers to a type of cultivated rice or paddy in Sanskrit and several South Asian language contexts. If you meant a different context such as a title, name, or regional usage, tell me that exact context and I will define that one precisely.",
 };
 
+function buildHighConfidenceShortDefinitionRepair(term: string) {
+  return HIGH_CONFIDENCE_SHORT_DEFINITION_REPAIRS[normalizeLookupKey(term)] ?? "";
+}
+
+function extractShortDefinitionSuggestionCandidate(source: ResearchSource) {
+  const titleLead = source.title
+    .split(/\s+[|:-]\s+/)
+    .map((part) => part.trim())
+    .find(Boolean)
+    ?? "";
+  const cleaned = titleLead
+    .replace(/\s*\((?:disambiguation|definition|meaning|term)\)\s*$/i, "")
+    .replace(/^the\s+/i, "The ")
+    .trim();
+
+  if (!cleaned || cleaned.length > 64 || !/[a-z]/i.test(cleaned)) {
+    return "";
+  }
+
+  if (LOW_QUALITY_PUBLIC_LOOKUP_CUE.test(`${source.title} ${source.snippet}`)) {
+    return "";
+  }
+
+  return cleaned;
+}
+
+function scoreShortDefinitionSuggestion(term: string, candidate: string) {
+  const normalizedTerm = normalizeLookupKey(term);
+  const normalizedCandidate = normalizeLookupKey(candidate);
+  if (!normalizedTerm || !normalizedCandidate || normalizedTerm === normalizedCandidate) {
+    return 0;
+  }
+
+  const compactTerm = normalizedTerm.replace(/\s+/g, "");
+  const compactCandidate = normalizedCandidate.replace(/\s+/g, "");
+  const maxDistance =
+    compactTerm.length >= 14 ? 5
+      : compactTerm.length >= 10 ? 4
+        : compactTerm.length >= 7 ? 3
+          : 2;
+  const compactDistance = damerauLevenshteinDistance(compactTerm, compactCandidate, maxDistance);
+  if (compactDistance === Number.POSITIVE_INFINITY) {
+    return 0;
+  }
+
+  const termTokens = normalizedTerm.split(" ").filter(Boolean);
+  const candidateTokens = normalizedCandidate.split(" ").filter(Boolean);
+  const sharedTokens = termTokens.filter((token) => candidateTokens.includes(token)).length;
+  if (!sharedTokens && termTokens.length > 1 && candidateTokens.length > 1) {
+    return 0;
+  }
+
+  return Number((1.65 - compactDistance * 0.22 + sharedTokens * 0.28).toFixed(3));
+}
+
+function buildShortDefinitionClarificationSuggestion(term: string, sources: ResearchSource[]) {
+  const suggestions = new Map<string, {
+    label: string;
+    count: number;
+    bestSourceScore: number;
+    bestSimilarity: number;
+  }>();
+
+  for (const source of sources.slice(0, 6)) {
+    const candidate = extractShortDefinitionSuggestionCandidate(source);
+    if (!candidate) {
+      continue;
+    }
+
+    const similarity = scoreShortDefinitionSuggestion(term, candidate);
+    if (similarity < 0.9) {
+      continue;
+    }
+
+    const key = normalizeLookupKey(candidate);
+    const existing = suggestions.get(key);
+    if (existing) {
+      existing.count += 1;
+      existing.bestSourceScore = Math.max(existing.bestSourceScore, Number(source.score || 0));
+      existing.bestSimilarity = Math.max(existing.bestSimilarity, similarity);
+      continue;
+    }
+
+    suggestions.set(key, {
+      label: candidate,
+      count: 1,
+      bestSourceScore: Number(source.score || 0),
+      bestSimilarity: similarity,
+    });
+  }
+
+  const best = [...suggestions.values()]
+    .filter((candidate) =>
+      candidate.count >= 2
+      || (candidate.bestSourceScore >= 0.85 && candidate.bestSimilarity >= 1.05),
+    )
+    .sort((left, right) =>
+      right.count - left.count
+      || right.bestSimilarity - left.bestSimilarity
+      || right.bestSourceScore - left.bestSourceScore,
+    )[0];
+
+  if (!best) {
+    return "";
+  }
+
+  return [
+    `I am not fully sure "${term}" is the exact term you meant.`,
+    "",
+    `Did you mean *${best.label}*?`,
+    "",
+    `If yes, I can define ${best.label} directly. If not, reply with the exact term and I will define that one instead.`,
+  ].join("\n");
+}
+
 function buildShortDefinitionFallback(term: string, sources: ResearchSource[]) {
+  const clarificationSuggestion = buildShortDefinitionClarificationSuggestion(term, sources);
+  if (clarificationSuggestion.trim()) {
+    return clarificationSuggestion;
+  }
+
   const topSources = selectDefinitionSources(term, sources);
   const domains = [...new Set(topSources.map((source) => source.domain).filter(Boolean))].slice(0, 3);
   const snippets = topSources
@@ -2552,9 +2902,14 @@ async function hydrateDefinitionSources(term: string, sources: ResearchSource[])
 }
 
 export async function answerShortDefinitionLookup(question: string): Promise<string | null> {
-  const lookup = detectShortDefinitionLookup(question);
+  const lookup = detectShortDefinitionLookupDetails(question);
   if (!lookup) {
     return null;
+  }
+
+  const highConfidenceRepair = buildHighConfidenceShortDefinitionRepair(lookup.term);
+  if (highConfidenceRepair.trim()) {
+    return highConfidenceRepair.trim();
   }
 
   const curated = CURATED_SHORT_DEFINITION_FALLBACKS[lookup.term.toLowerCase()];
@@ -2912,6 +3267,7 @@ export async function fetchLiveAnswerBundle(question: string): Promise<ClawCloud
       () => buildCurrentWeatherAnswer(question),
       () => fetchIndiaConsumerPriceAnswer(question),
       () => fetchRetailFuelPriceAnswer(question),
+      () => fetchWorldBankCountryMetricComparisonAnswer(question),
       () => fetchWorldBankCountryMetricAnswer(question),
       () => fetchOfficialPricingAnswer(question),
       () => buildRichestPeopleAndCitiesAnswer(question),

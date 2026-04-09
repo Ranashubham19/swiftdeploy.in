@@ -71,6 +71,7 @@ const CANONICAL_CONTACT_ALIASES: Record<string, string> = {
   father: "papa",
   daddy: "papa",
   pappa: "papa",
+  papaji: "papa",
   baba: "papa",
   pitaji: "papa",
   "\u7238\u7238": "papa",

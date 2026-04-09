@@ -13,6 +13,7 @@ import {
   type ClawCloudLiveSearchRoute,
   extractRichestRankingScope,
   fetchLiveAnswerBundle,
+  fetchWorldBankCountryMetricComparisonAnswer,
   fetchWorldBankCountryMetricAnswer,
   maybeBuildClawCloudLiveAnswerBundle,
   renderClawCloudAnswerBundle,
@@ -2979,6 +2980,20 @@ export async function answerWebSearchResult(question: string): Promise<ClawCloud
   const currentAffairsClarification = buildCurrentAffairsClarificationReply(question);
   if (currentAffairsClarification) {
     return buildWebSearchAnswerResult(currentAffairsClarification);
+  }
+
+  const countryMetricComparisonAnswer = await fetchWorldBankCountryMetricComparisonAnswer(question);
+  if (countryMetricComparisonAnswer) {
+    const liveAnswerBundle = maybeBuildClawCloudLiveAnswerBundle({
+      question,
+      answer: countryMetricComparisonAnswer,
+    });
+    return buildWebSearchAnswerResult(
+      liveAnswerBundle?.metadata?.freshness_guarded === true
+        ? renderClawCloudAnswerBundle(liveAnswerBundle)
+        : countryMetricComparisonAnswer,
+      liveAnswerBundle,
+    );
   }
 
   const countryMetricAnswer = await fetchWorldBankCountryMetricAnswer(question);
