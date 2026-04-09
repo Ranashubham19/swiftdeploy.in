@@ -193,6 +193,85 @@ const TRUSTED_LIVE_DOMAINS = [
   "coindesk.com",
   "binance.com",
 ];
+const OFFICIAL_LIVE_DOMAINS = [
+  "worldbank.org",
+  "api.worldbank.org",
+  "imf.org",
+  "oecd.org",
+  "bea.gov",
+  "bls.gov",
+  "census.gov",
+  "sec.gov",
+  "federalreserve.gov",
+  "treasury.gov",
+  "ecb.europa.eu",
+  "europa.eu",
+  "who.int",
+  "cdc.gov",
+  "fda.gov",
+  "openai.com",
+  "platform.openai.com",
+  "anthropic.com",
+  "docs.anthropic.com",
+  "ai.google.dev",
+  "blog.google",
+  "deepmind.google",
+  "apple.com",
+  "nvidia.com",
+  "meta.com",
+  "ai.meta.com",
+  "mistral.ai",
+  "docs.mistral.ai",
+  "deepseek.com",
+  "api-docs.deepseek.com",
+];
+const TIER_ONE_REPORT_DOMAINS = [
+  "reuters.com",
+  "apnews.com",
+  "bbc.com",
+  "bbc.co.uk",
+  "bloomberg.com",
+  "ft.com",
+  "wsj.com",
+  "nytimes.com",
+  "cnbc.com",
+  "nbcnews.com",
+  "npr.org",
+  "theguardian.com",
+  "aljazeera.com",
+  "cnn.com",
+  "abcnews.go.com",
+  "thehindu.com",
+  "indianexpress.com",
+];
+const WEAK_LIVE_DOMAINS = [
+  "news.google.com",
+  "msn.com",
+  "aol.com",
+  "news.yahoo.com",
+  "reddit.com",
+  "quora.com",
+  "youtube.com",
+  "facebook.com",
+  "instagram.com",
+  "tiktok.com",
+  "blogspot.com",
+  "wordpress.com",
+  "medium.com",
+];
+type ClawCloudLiveEvidenceQuality = "weak" | "mixed" | "strong";
+type ClawCloudLiveEvidenceQualitySummary = {
+  quality: ClawCloudLiveEvidenceQuality;
+  officialCount: number;
+  reportCount: number;
+  marketDataCount: number;
+  weatherProviderCount: number;
+  inferredCount: number;
+  weakCount: number;
+  strongCount: number;
+  uniqueStrongDomains: number;
+  uniqueDomains: number;
+};
 const DEFINITION_REFERENCE_DOMAINS = [
   "wikipedia.org",
   "wiktionary.org",
@@ -2125,8 +2204,134 @@ function buildLiveSearchQueries(question: string, route: ClawCloudLiveSearchRout
 
 function looksLikeTierOneLiveSource(source: ResearchSource) {
   const haystack = `${source.title} ${source.domain}`.toLowerCase();
-  return TRUSTED_LIVE_DOMAINS.some((domain) => source.domain.includes(domain))
+  return TIER_ONE_REPORT_DOMAINS.some((domain) => source.domain.includes(domain))
     || /\b(reuters|associated press|apnews|ap\b|bbc|bloomberg|financial times|ft|wall street journal|wsj)\b/i.test(haystack);
+}
+
+function domainMatchesCandidate(domain: string, candidate: string) {
+  const normalized = domain.trim().toLowerCase();
+  const normalizedCandidate = candidate.trim().toLowerCase();
+  return normalized === normalizedCandidate || normalized.endsWith(`.${normalizedCandidate}`);
+}
+
+function isOfficialLiveDomain(domain: string) {
+  return OFFICIAL_LIVE_DOMAINS.some((candidate) => domainMatchesCandidate(domain, candidate));
+}
+
+function isTierOneReportDomain(domain: string) {
+  return TIER_ONE_REPORT_DOMAINS.some((candidate) => domainMatchesCandidate(domain, candidate));
+}
+
+function isWeakLiveDomain(domain: string) {
+  return WEAK_LIVE_DOMAINS.some((candidate) => domainMatchesCandidate(domain, candidate));
+}
+
+function classifyLiveEvidenceKindFromSource(
+  source: Pick<ResearchSource, "domain" | "title" | "url" | "snippet">,
+): ClawCloudEvidenceItem["kind"] {
+  const domain = String(source.domain || "").trim().toLowerCase();
+  if (isOfficialLiveDomain(domain)) {
+    return "official_page";
+  }
+  if (isTierOneReportDomain(domain) || TRUSTED_LIVE_DOMAINS.some((candidate) => domainMatchesCandidate(domain, candidate))) {
+    return "report";
+  }
+  if (/\b(api|docs?|developer|pricing|indicator|statistics|dataset|report)\b/i.test(`${source.title} ${source.url} ${source.snippet}`)) {
+    return "official_page";
+  }
+  return "search_result";
+}
+
+function assessClawCloudLiveEvidenceQuality(
+  evidence: ClawCloudEvidenceItem[],
+): ClawCloudLiveEvidenceQualitySummary {
+  const normalized = evidence
+    .map((item) => ({
+      ...item,
+      domain: String(item.domain || "").trim().toLowerCase(),
+    }))
+    .filter((item) => item.domain);
+
+  const officialCount = normalized.filter(
+    (item) => item.kind === "official_api" || item.kind === "official_page" || isOfficialLiveDomain(item.domain),
+  ).length;
+  const reportCount = normalized.filter(
+    (item) => item.kind === "report" || isTierOneReportDomain(item.domain),
+  ).length;
+  const marketDataCount = normalized.filter((item) => item.kind === "market_data").length;
+  const weatherProviderCount = normalized.filter((item) => item.kind === "weather_provider").length;
+  const inferredCount = normalized.filter((item) => item.kind === "inferred").length;
+  const weakCount = normalized.filter(
+    (item) =>
+      (
+        item.kind === "inferred"
+        && !isOfficialLiveDomain(item.domain)
+        && !isTierOneReportDomain(item.domain)
+      )
+      || isWeakLiveDomain(item.domain)
+      || (item.kind === "search_result" && !isOfficialLiveDomain(item.domain) && !isTierOneReportDomain(item.domain)),
+  ).length;
+  const strongDomains = new Set(
+    normalized
+      .filter(
+        (item) =>
+          item.kind === "official_api"
+          || item.kind === "official_page"
+          || item.kind === "report"
+          || item.kind === "market_data"
+          || item.kind === "weather_provider"
+          || isOfficialLiveDomain(item.domain)
+          || isTierOneReportDomain(item.domain),
+      )
+      .map((item) => item.domain),
+  );
+  const strongCount = officialCount + reportCount + marketDataCount + weatherProviderCount;
+  const uniqueDomains = new Set(normalized.map((item) => item.domain)).size;
+
+  let quality: ClawCloudLiveEvidenceQuality = "weak";
+  if (officialCount >= 1 || marketDataCount >= 1 || weatherProviderCount >= 1 || reportCount >= 2) {
+    quality = "strong";
+  } else if (reportCount >= 1 || strongDomains.size >= 1 || normalized.length - weakCount >= 2) {
+    quality = "mixed";
+  }
+
+  return {
+    quality,
+    officialCount,
+    reportCount,
+    marketDataCount,
+    weatherProviderCount,
+    inferredCount,
+    weakCount,
+    strongCount,
+    uniqueStrongDomains: strongDomains.size,
+    uniqueDomains,
+  };
+}
+
+function hasSufficientClawCloudLiveEvidenceSupport(input: {
+  question: string;
+  route: ClawCloudLiveSearchRoute;
+  evidence: ClawCloudEvidenceItem[];
+}) {
+  const summary = assessClawCloudLiveEvidenceQuality(input.evidence);
+  if (!input.evidence.length || summary.quality === "weak") {
+    return false;
+  }
+
+  if (detectWorldBankCountryMetricQuestion(input.question) || detectOfficialPricingQuery(input.question)) {
+    return summary.officialCount >= 1 || summary.marketDataCount >= 1;
+  }
+
+  if (looksLikeCurrentAffairsQuestion(input.question)) {
+    return summary.reportCount >= 1 || summary.officialCount >= 1;
+  }
+
+  if (input.route.tier === "realtime") {
+    return summary.strongCount >= 1 || summary.uniqueStrongDomains >= 1;
+  }
+
+  return true;
 }
 
 function allowsSingleStrongLiveSource(question: string, route: ClawCloudLiveSearchRoute, sources: ResearchSource[]) {
@@ -2981,8 +3186,32 @@ function scoreLiveSource(
   const haystack = `${source.title} ${source.snippet} ${source.domain}`.toLowerCase();
   const overlap = questionTokens.filter((token) => haystack.includes(token)).length;
   const focusOverlap = focusTokens.filter((token) => haystack.includes(token)).length;
-  const trustedBoost = TRUSTED_LIVE_DOMAINS.some((domain) => source.domain.includes(domain)) ? 0.65 : 0;
-  return Number(source.score || 0) + overlap * 0.25 + focusOverlap * 0.5 + trustedBoost;
+  const domain = String(source.domain || "").trim().toLowerCase();
+  const authorityBoost =
+    isOfficialLiveDomain(domain)
+      ? 1.1
+      : isTierOneReportDomain(domain)
+        ? 0.8
+        : TRUSTED_LIVE_DOMAINS.some((candidate) => domainMatchesCandidate(domain, candidate))
+          ? 0.45
+          : 0;
+  const weakPenalty = isWeakLiveDomain(domain) ? 1.15 : 0;
+  const recencyBoost = (() => {
+    if (!source.publishedDate) {
+      return 0;
+    }
+    const published = new Date(source.publishedDate);
+    if (!Number.isFinite(published.getTime())) {
+      return 0;
+    }
+    const ageHours = (Date.now() - published.getTime()) / 3_600_000;
+    if (ageHours <= 24) return 0.3;
+    if (ageHours <= 24 * 7) return 0.18;
+    if (ageHours <= 24 * 30) return 0.08;
+    return 0;
+  })();
+
+  return Number(source.score || 0) + overlap * 0.25 + focusOverlap * 0.5 + authorityBoost + recencyBoost - weakPenalty;
 }
 
 function selectRelevantLiveSources(question: string, sources: ResearchSource[]) {
@@ -3097,14 +3326,43 @@ const KNOWN_DETERMINISTIC_EVIDENCE_PATTERNS: Array<{
 ];
 
 function buildLiveEvidenceSummary(evidence: ClawCloudEvidenceItem[]) {
-  return [...new Set(evidence.map((item) => item.domain).filter(Boolean))].slice(0, 5);
+  return [...evidence]
+    .sort((left, right) => {
+      const leftKindScore =
+        left.kind === "official_api" || left.kind === "official_page"
+          ? 3
+          : left.kind === "market_data" || left.kind === "weather_provider"
+            ? 2
+            : left.kind === "report"
+              ? 1
+              : 0;
+      const rightKindScore =
+        right.kind === "official_api" || right.kind === "official_page"
+          ? 3
+          : right.kind === "market_data" || right.kind === "weather_provider"
+            ? 2
+            : right.kind === "report"
+              ? 1
+              : 0;
+      if (rightKindScore !== leftKindScore) {
+        return rightKindScore - leftKindScore;
+      }
+      return String(left.domain || "").localeCompare(String(right.domain || ""));
+    })
+    .map((item) => item.domain)
+    .filter(Boolean)
+    .filter((domain, index, all) => all.indexOf(domain) === index)
+    .slice(0, 5);
 }
 
 function mapResearchSourceToEvidence(source: ResearchSource): ClawCloudEvidenceItem {
   const normalizedDomain = String(source.domain || "").trim() || new URL(source.url).hostname;
-  const inferredKind: ClawCloudEvidenceItem["kind"] = TRUSTED_LIVE_DOMAINS.some((domain) => normalizedDomain.includes(domain))
-    ? "official_page"
-    : "search_result";
+  const inferredKind = classifyLiveEvidenceKindFromSource({
+    title: source.title,
+    url: source.url,
+    snippet: source.snippet,
+    domain: normalizedDomain,
+  });
 
   return {
     title: source.title,
@@ -3179,6 +3437,7 @@ export function buildClawCloudLiveAnswerBundle(input: {
   strategy: ClawCloudLiveBundleStrategy;
 }): ClawCloudAnswerBundle {
   const evidence = (input.evidence?.length ? input.evidence : inferEvidenceFromRenderedAnswer(input.answer)).slice(0, 6);
+  const sourceQuality = assessClawCloudLiveEvidenceQuality(evidence);
   const freshness = guardStrictCurrentTimelineAnswer({
     question: input.question,
     answer: input.answer,
@@ -3200,6 +3459,12 @@ export function buildClawCloudLiveAnswerBundle(input: {
       route_tier: input.route.tier,
       requires_web_search: input.route.requiresWebSearch,
       evidence_count: evidence.length,
+      official_source_count: sourceQuality.officialCount,
+      report_source_count: sourceQuality.reportCount,
+      strong_source_count: sourceQuality.strongCount,
+      weak_source_count: sourceQuality.weakCount,
+      unique_source_count: sourceQuality.uniqueDomains,
+      source_quality: sourceQuality.quality,
       strategy: input.strategy,
       freshness_guarded: freshness.freshnessGuarded,
     },
@@ -3230,6 +3495,25 @@ export function maybeBuildClawCloudLiveAnswerBundle(input: {
     evidence: input.evidence,
     strategy: input.strategy ?? "deterministic",
   });
+}
+
+export function hasSufficientClawCloudLiveBundleSupport(input: {
+  question: string;
+  bundle: ClawCloudAnswerBundle | null | undefined;
+}) {
+  const bundle = input.bundle ?? null;
+  if (!bundle) {
+    return false;
+  }
+  return hasSufficientClawCloudLiveEvidenceSupport({
+    question: input.question,
+    route: classifyClawCloudLiveSearchRoute(input.question),
+    evidence: bundle.evidence ?? [],
+  });
+}
+
+export function assessClawCloudLiveEvidenceQualityForTest(evidence: ClawCloudEvidenceItem[]) {
+  return assessClawCloudLiveEvidenceQuality(evidence);
 }
 
 export function renderClawCloudAnswerBundle(bundle: ClawCloudAnswerBundle): string {
@@ -3306,7 +3590,11 @@ export async function fetchLiveAnswerBundle(question: string): Promise<ClawCloud
   }
 
   const sources = selectRelevantLiveSources(question, search.sources);
-  if (sources.length < 2 && !allowsSingleStrongLiveSource(question, route, sources)) {
+  const evidence = sources.map((source) => mapResearchSourceToEvidence(source));
+  if (
+    (!hasSufficientClawCloudLiveEvidenceSupport({ question, route, evidence }))
+    && !allowsSingleStrongLiveSource(question, route, sources)
+  ) {
     return null;
   }
 
@@ -3319,7 +3607,7 @@ export async function fetchLiveAnswerBundle(question: string): Promise<ClawCloud
     question,
     answer: synthesized,
     route,
-    evidence: sources.map((source) => mapResearchSourceToEvidence(source)),
+    evidence,
     strategy: "search_synthesis",
   });
 }

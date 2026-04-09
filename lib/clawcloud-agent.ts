@@ -311,6 +311,7 @@ import {
   fetchWorldBankCountryMetricAnswer,
   detectShortDefinitionLookup,
   extractRichestRankingScope,
+  hasSufficientClawCloudLiveBundleSupport,
   renderClawCloudAnswerBundle,
   shouldFailClosedWithoutFreshData,
   shouldUseLiveSearch,
@@ -12604,12 +12605,20 @@ function extractPromotableLiveBundleResponse(
   const hasBundleEvidence =
     (bundle.evidence?.length ?? 0) > 0
     || (bundle.sourceSummary?.length ?? 0) > 0;
+  const hasStrongBundleSupport = hasSufficientClawCloudLiveBundleSupport({
+    question: normalizedQuestion,
+    bundle,
+  });
+  if (hasBundleEvidence && !hasStrongBundleSupport) {
+    return "";
+  }
   const acceptableBundle =
     isAcceptableLiveAnswer(renderedBundleAnswer, normalizedQuestion)
     || isAcceptableNewsCoverageAnswer(renderedBundleAnswer, normalizedQuestion)
     || isAcceptableAiModelWebAnswer(renderedBundleAnswer, normalizedQuestion)
     || (
       hasBundleEvidence
+      && hasStrongBundleSupport
       && preferredDirectAnswer.length >= 40
       && !isVisibleFallbackReply(preferredDirectAnswer)
       && !isLowQualityTemplateReply(preferredDirectAnswer)

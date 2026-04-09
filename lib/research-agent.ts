@@ -68,6 +68,7 @@ type IndexedChunk = {
 const TRUSTED_SOURCE_PATTERNS = [
   /\.gov$/i,
   /\.edu$/i,
+  /\.int$/i,
   /reuters\.com$/i,
   /apnews\.com$/i,
   /bbc\.com$/i,
@@ -83,12 +84,30 @@ const TRUSTED_SOURCE_PATTERNS = [
   /theguardian\.com$/i,
   /apple\.com$/i,
   /openai\.com$/i,
+  /worldbank\.org$/i,
+  /api\.worldbank\.org$/i,
+  /imf\.org$/i,
+  /oecd\.org$/i,
+  /who\.int$/i,
+  /cdc\.gov$/i,
+  /fda\.gov$/i,
+  /sec\.gov$/i,
+  /federalreserve\.gov$/i,
+  /bea\.gov$/i,
+  /bls\.gov$/i,
+  /census\.gov$/i,
+  /europa\.eu$/i,
+  /ecb\.europa\.eu$/i,
   /github\.com$/i,
   /developer\./i,
   /docs\./i,
 ];
 
 const LOW_CONFIDENCE_SOURCE_PATTERNS = [
+  /news\.google\.com$/i,
+  /msn\.com$/i,
+  /aol\.com$/i,
+  /news\.yahoo\.com$/i,
   /reddit\.com$/i,
   /quora\.com$/i,
   /youtube\.com$/i,
@@ -1094,6 +1113,12 @@ function topicRelevanceAdjustment(question: string, source: ResearchSource) {
   return score;
 }
 
+function isExactFigureOrOfficialMetricQuestion(question: string) {
+  return /\b(price|pricing|cost|plan|plans|fees?|gdp|gdp per capita|population|inflation|unemployment|interest rate|exchange rate|forecast|revenue|market cap|valuation|net worth|tariff|subscription)\b/i.test(
+    question,
+  );
+}
+
 function questionSourceAdjustment(question: string, source: ResearchSource) {
   let score = 0;
   const broadRealtimeUpdate = isBroadRealtimeUpdateQuery(question);
@@ -1187,6 +1212,24 @@ function questionSourceAdjustment(question: string, source: ResearchSource) {
 
     if (isLowConfidenceSource(source)) {
       score -= 0.6;
+    }
+  }
+
+  if (isExactFigureOrOfficialMetricQuestion(question)) {
+    if (isTrustedSource(source)) {
+      score += 0.35;
+    }
+
+    if (
+      /\b(official|data|dataset|indicator|statistics|filing|report|press release|annual report|investor relations)\b/i.test(
+        `${source.title} ${source.snippet} ${source.url}`,
+      )
+    ) {
+      score += 0.28;
+    }
+
+    if (isLowConfidenceSource(source)) {
+      score -= 0.7;
     }
   }
 

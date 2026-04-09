@@ -15,6 +15,7 @@ import {
   fetchLiveAnswerBundle,
   fetchWorldBankCountryMetricComparisonAnswer,
   fetchWorldBankCountryMetricAnswer,
+  hasSufficientClawCloudLiveBundleSupport,
   maybeBuildClawCloudLiveAnswerBundle,
   renderClawCloudAnswerBundle,
   shouldFailClosedWithoutFreshData,
@@ -166,6 +167,31 @@ function buildForcedFreshWebRoute(question: string): ClawCloudLiveSearchRoute | 
   return null;
 }
 
+function looksAcceptableAiModelWebAnswer(answer: string | null | undefined, question?: string) {
+  const normalized = answer?.trim() ?? "";
+  const routing = question ? detectAiModelRoutingDecision(question) : null;
+  if (!normalized || routing?.mode !== "web_search") {
+    return false;
+  }
+
+  const hasComparisonSnapshot = /\bai model comparison snapshot\b/i.test(normalized);
+  const hasRankingSnapshot =
+    (
+      /\bai model frontier snapshot\b/i.test(normalized)
+      && /\bmodels explicitly named in this source batch\b/i.test(normalized)
+    )
+    || (
+      /\bai model ranking\b/i.test(normalized)
+      && /\btop models in this run\b/i.test(normalized)
+    );
+
+  if (routing.kind === "ranking") {
+    return hasRankingSnapshot;
+  }
+
+  return hasComparisonSnapshot || /\btargets extracted from your question\b/i.test(normalized);
+}
+
 function finalizeDirectLiveWebAnswer(
   question: string,
   answerOrBundle: string | ClawCloudAnswerBundle,
@@ -188,6 +214,28 @@ function finalizeDirectLiveWebAnswer(
 
   if (liveAnswerBundle?.metadata?.freshness_guarded === true) {
     return buildWebSearchAnswerResult(cleaned, liveAnswerBundle);
+  }
+
+  if (
+    liveAnswerBundle
+    && !looksAcceptableAiModelWebAnswer(cleaned, question)
+    && !hasSufficientClawCloudLiveBundleSupport({
+      question,
+      bundle: liveAnswerBundle,
+    })
+  ) {
+    return buildWebSearchAnswerResult(
+      buildClawCloudLowConfidenceReply(
+        question,
+        buildClawCloudAnswerQualityProfile({
+          question,
+          intent: "research",
+          category: "web_search",
+        }),
+        "The live source mix was too weak or indirect for a precise current answer.",
+      ),
+      liveAnswerBundle,
+    );
   }
 
   if (isClawCloudGroundedLiveAnswer({ question, answer: cleaned })) {
@@ -234,6 +282,28 @@ export function buildSourceBackedLiveAnswerResult(input: {
   if (liveAnswerBundle?.metadata?.freshness_guarded === true) {
     return buildWebSearchAnswerResult(
       renderClawCloudAnswerBundle(liveAnswerBundle),
+      liveAnswerBundle,
+    );
+  }
+
+  if (
+    liveAnswerBundle
+    && !looksAcceptableAiModelWebAnswer(answer, input.question)
+    && !hasSufficientClawCloudLiveBundleSupport({
+      question: input.question,
+      bundle: liveAnswerBundle,
+    })
+  ) {
+    return buildWebSearchAnswerResult(
+      buildClawCloudLowConfidenceReply(
+        input.question,
+        buildClawCloudAnswerQualityProfile({
+          question: input.question,
+          intent: "research",
+          category: "web_search",
+        }),
+        "The live source mix was too weak or indirect for a precise current answer.",
+      ),
       liveAnswerBundle,
     );
   }
@@ -1147,9 +1217,26 @@ const TRUSTED_DOMAINS = [
   "docs.mistral.ai",
   "ai.meta.com",
   "about.meta.com",
+  "worldbank.org",
+  "api.worldbank.org",
+  "imf.org",
+  "oecd.org",
+  "bea.gov",
+  "bls.gov",
+  "census.gov",
+  "sec.gov",
+  "federalreserve.gov",
+  "treasury.gov",
+  "who.int",
+  "cdc.gov",
+  "fda.gov",
 ];
 
 const LOW_QUALITY_DOMAINS = [
+  "news.google.com",
+  "msn.com",
+  "aol.com",
+  "news.yahoo.com",
   "reddit.com",
   "quora.com",
   "youtube.com",
@@ -1828,6 +1915,7 @@ function isHomepageLikeNewsSource(source: NewsSource) {
 
 function scoreSource(source: NewsSource) {
   let score = source.score;
+  const sourceText = `${source.title} ${source.snippet} ${source.url}`;
 
   if (TRUSTED_DOMAINS.some((domain) => source.domain.includes(domain))) {
     score += 0.25;
@@ -1839,6 +1927,10 @@ function scoreSource(source: NewsSource) {
 
   if (source.snippet.length > 120) {
     score += 0.05;
+  }
+
+  if (/\b(official|statistics|indicator|dataset|report|press release|annual report|investor relations)\b/i.test(sourceText)) {
+    score += 0.1;
   }
 
   if (source.publishedDate) {

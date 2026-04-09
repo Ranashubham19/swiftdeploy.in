@@ -324,6 +324,7 @@ import {
 } from "@/lib/clawcloud-casual-talk";
 import {
   answerShortDefinitionLookup,
+  assessClawCloudLiveEvidenceQualityForTest,
   buildCountryDefinitionAnswerForTest,
   buildDefinitionLookupQueriesForTest,
   buildNamedEntityIdentityAnswerForTest,
@@ -11629,6 +11630,92 @@ test("strong live answer bundles override generic time-sensitive fallback respon
   assert.match(promoted.response ?? "", /No active Iran-Israel war right now/i);
   assert.equal(promoted.liveAnswerBundle?.answer, promoted.response);
   assert.doesNotMatch(promoted.response ?? "", /Time-sensitive query/i);
+});
+
+test("weak live answer bundles do not override safer fallback responses", () => {
+  const promoted = maybePromoteVisibleResponseWithLiveBundleForTest(
+    "what is the situation of iran and israel war",
+    {
+      response: [
+        "*Current-affairs check*",
+        "",
+        "I could not verify a safe current snapshot for this question from sufficiently strong live coverage.",
+      ].join("\n"),
+      liveAnswerBundle: {
+        question: "what is the situation of iran and israel war",
+        answer: [
+          "Iran and Israel already agreed to a full peace deal.",
+          "",
+          "As of: April 10, 2026 at 12:30 AM IST",
+          "Sources: news.google.com, msn.com",
+        ].join("\n"),
+        channel: "live",
+        generatedAt: "2026-04-10T00:30:00.000Z",
+        badge: "*Live answer*",
+        sourceNote: "_Source note: checked against live web signals; figures can shift quickly._",
+        evidence: [
+          {
+            title: "Wrapped headline one",
+            domain: "news.google.com",
+            kind: "search_result",
+            url: "https://news.google.com/articles/one",
+            snippet: "Wrapped headline snippet",
+            publishedAt: "2026-04-09T18:00:00.000Z",
+            observedAt: "2026-04-10T00:30:00.000Z",
+          },
+          {
+            title: "Wrapped headline two",
+            domain: "msn.com",
+            kind: "search_result",
+            url: "https://www.msn.com/example",
+            snippet: "Republished article snippet",
+            publishedAt: "2026-04-09T16:00:00.000Z",
+            observedAt: "2026-04-10T00:30:00.000Z",
+          },
+        ],
+        sourceSummary: ["news.google.com", "msn.com"],
+        metadata: {
+          route_tier: "realtime",
+          requires_web_search: true,
+          evidence_count: 2,
+          source_quality: "weak",
+          freshness_guarded: false,
+        },
+      },
+      modelAuditTrail: null,
+    },
+  );
+
+  assert.match(promoted.response ?? "", /could not verify a safe current snapshot/i);
+  assert.doesNotMatch(promoted.response ?? "", /full peace deal/i);
+});
+
+test("live evidence quality prefers official and tier-one sources over wrapped weak sources", () => {
+  const summary = assessClawCloudLiveEvidenceQualityForTest([
+    {
+      title: "World Bank GDP data",
+      domain: "worldbank.org",
+      kind: "official_api",
+      url: "https://api.worldbank.org/v2/country/JPN/indicator/NY.GDP.PCAP.CD",
+    },
+    {
+      title: "Reuters update",
+      domain: "reuters.com",
+      kind: "report",
+      url: "https://www.reuters.com/world/example",
+    },
+    {
+      title: "Wrapped headline",
+      domain: "news.google.com",
+      kind: "search_result",
+      url: "https://news.google.com/articles/example",
+    },
+  ]);
+
+  assert.equal(summary.quality, "strong");
+  assert.equal(summary.officialCount, 1);
+  assert.equal(summary.reportCount, 1);
+  assert.equal(summary.weakCount, 1);
 });
 
 test("richest ranking scope detection keeps city-only prompts out of the people route", () => {
