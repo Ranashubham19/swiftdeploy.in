@@ -56,6 +56,18 @@ const HISTORY_ADDRESS_PREFIX_STOPWORDS = new Set([
   "hi",
   "hello",
   "hey",
+  "tell",
+  "show",
+  "check",
+  "read",
+  "message",
+  "messages",
+  "chat",
+  "history",
+  "summary",
+  "summarize",
+  "conversation",
+  "the",
   "what",
   "when",
   "where",
@@ -203,6 +215,8 @@ type ContactScoreDetail = {
   matchedAlias: string;
   matchBasis: ContactMatchBasis;
 };
+
+type FallbackWhatsAppContactCandidate = Awaited<ReturnType<typeof loadFallbackSyncedWhatsAppContacts>>[number];
 
 const RESOLVED_CONTACT_GENERIC_TOKENS = new Set([
   "contact",
@@ -1028,6 +1042,10 @@ export function buildHistoryDerivedWhatsAppAliasesForTest(messages: WhatsAppMess
   ) as Record<string, string[]>;
 }
 
+export function extractWhatsAppHistorySearchTokensForTest(rawName: string) {
+  return [...extractWhatsAppHistorySearchTokens(rawName)];
+}
+
 function isStructuredContactMatch(match: Pick<ContactMatch, "exact" | "matchBasis">) {
   return Boolean(match.exact || match.matchBasis === "exact" || match.matchBasis === "prefix" || match.matchBasis === "word");
 }
@@ -1063,6 +1081,35 @@ function buildSavedContactCandidates(entries: Array<[string, string]>): ContactS
   return candidates;
 }
 
+function extractWhatsAppHistorySearchTokens(rawName: string) {
+  const normalized = normalizeHistoryAddressPreservingHonorifics(rawName);
+  if (!normalized) {
+    return [] as string[];
+  }
+
+  return uniqueStrings(
+    normalized
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => {
+        if (!token || token.length < 3) {
+          return false;
+        }
+
+        if (HISTORY_ADDRESS_PREFIX_STOPWORDS.has(token)) {
+          return false;
+        }
+
+        if (normalizeAddressHonorificToken(token)) {
+          return false;
+        }
+
+        const canonical = normalizeContactName(token);
+        return Boolean(canonical && !STRICT_RELATIONSHIP_CONTACT_CANONICALS.has(canonical));
+      }),
+  );
+}
+
 function buildPhoneMatchedContact(
   candidate: ContactSearchCandidate,
   score: number,
@@ -1081,29 +1128,14 @@ function buildPhoneMatchedContact(
   };
 }
 
-async function loadWhatsAppContactCandidates(userId: string): Promise<ContactSearchCandidate[]> {
-  const supabaseAdmin = getClawCloudSupabaseAdmin();
-  const [contactsResult, messagesResult] = await Promise.all([
-    supabaseAdmin
-      .from("whatsapp_contacts")
-      .select("jid, phone_number, contact_name, notify_name, verified_name")
-      .eq("user_id", userId)
-      .order("last_seen_at", { ascending: false })
-      .limit(300),
-    supabaseAdmin
-      .from("whatsapp_messages")
-      .select("remote_jid, remote_phone, contact_name, content, direction, message_type, chat_type")
-      .eq("user_id", userId)
-      .order("sent_at", { ascending: false })
-      .limit(WHATSAPP_HISTORY_LIMIT),
-  ]);
-  const fallbackContacts = await loadFallbackSyncedWhatsAppContacts(userId).catch(() => []);
-
-  const contacts = ((contactsResult.data ?? []) as WhatsAppContactRow[]).filter(Boolean);
-  const messages = ((messagesResult.data ?? []) as WhatsAppMessageRow[]).filter(Boolean);
-  const inferredHistoryAliases = buildHistoryDerivedWhatsAppAliases(messages);
+function buildWhatsAppContactCandidatesFromRows(input: {
+  contacts: WhatsAppContactRow[];
+  messages: WhatsAppMessageRow[];
+  fallbackContacts: FallbackWhatsAppContactCandidate[];
+}) {
+  const inferredHistoryAliases = buildHistoryDerivedWhatsAppAliases(input.messages);
   const receiptDerivedAliases = buildWhatsAppReceiptDerivedAliasMap(
-    messages.map((message) => ({
+    input.messages.map((message) => ({
       content: message.content,
       direction: message.direction,
       chatType: message.chat_type,
@@ -1112,7 +1144,7 @@ async function loadWhatsAppContactCandidates(userId: string): Promise<ContactSea
     })),
   );
   const identities = buildClawCloudWhatsAppContactIdentityGraph([
-    ...contacts.map((contact) => ({
+    ...input.contacts.map((contact) => ({
       jid: contact.jid,
       phone: normalizeWhatsAppCandidatePhone(contact.jid, contact.phone_number),
       displayName: contact.contact_name ?? contact.notify_name ?? contact.verified_name,
@@ -1123,13 +1155,13 @@ async function loadWhatsAppContactCandidates(userId: string): Promise<ContactSea
         ...(Array.isArray(contact.aliases) ? contact.aliases : []),
       ]),
     })),
-    ...messages.map((message) => ({
+    ...input.messages.map((message) => ({
       jid: message.remote_jid,
       phone: normalizeWhatsAppCandidatePhone(message.remote_jid, message.remote_phone),
       displayName: message.contact_name ?? message.remote_phone ?? message.remote_jid,
       aliases: uniqueStrings([message.contact_name, message.remote_phone]),
     })),
-    ...fallbackContacts.map((contact) => ({
+    ...input.fallbackContacts.map((contact) => ({
       jid: contact.jid,
       phone: normalizeWhatsAppCandidatePhone(contact.jid, contact.phone_number),
       displayName: contact.contact_name ?? contact.notify_name ?? contact.verified_name,
@@ -1176,7 +1208,89 @@ async function loadWhatsAppContactCandidates(userId: string): Promise<ContactSea
         ...inferredAliases.flatMap((alias) => expandStoredAliasVariants(alias)),
       ])],
       identityKey: identity.identityKey,
-    };
+    } satisfies ContactSearchCandidate;
+  });
+}
+
+async function loadWhatsAppContactCandidates(userId: string): Promise<ContactSearchCandidate[]> {
+  const supabaseAdmin = getClawCloudSupabaseAdmin();
+  const [contactsResult, messagesResult] = await Promise.all([
+    supabaseAdmin
+      .from("whatsapp_contacts")
+      .select("jid, phone_number, contact_name, notify_name, verified_name")
+      .eq("user_id", userId)
+      .order("last_seen_at", { ascending: false })
+      .limit(300),
+    supabaseAdmin
+      .from("whatsapp_messages")
+      .select("remote_jid, remote_phone, contact_name, content, direction, message_type, chat_type")
+      .eq("user_id", userId)
+      .order("sent_at", { ascending: false })
+      .limit(WHATSAPP_HISTORY_LIMIT),
+  ]);
+  const fallbackContacts = await loadFallbackSyncedWhatsAppContacts(userId).catch(() => []);
+
+  const contacts = ((contactsResult.data ?? []) as WhatsAppContactRow[]).filter(Boolean);
+  const messages = ((messagesResult.data ?? []) as WhatsAppMessageRow[]).filter(Boolean);
+  return buildWhatsAppContactCandidatesFromRows({
+    contacts,
+    messages,
+    fallbackContacts,
+  });
+}
+
+async function loadTargetedWhatsAppHistoryCandidates(
+  userId: string,
+  rawName: string,
+): Promise<ContactSearchCandidate[]> {
+  const searchTokens = extractWhatsAppHistorySearchTokens(rawName);
+  if (!searchTokens.length) {
+    return [];
+  }
+
+  const tokenFilters = searchTokens.slice(0, 3);
+  const supabaseAdmin = getClawCloudSupabaseAdmin();
+  const fallbackContacts = await loadFallbackSyncedWhatsAppContacts(userId).catch(() => []);
+  const contactFilter = tokenFilters
+    .flatMap((token) => [
+      `contact_name.ilike.%${token}%`,
+      `notify_name.ilike.%${token}%`,
+      `verified_name.ilike.%${token}%`,
+    ])
+    .join(",");
+  const messageFilter = tokenFilters
+    .flatMap((token) => [
+      `contact_name.ilike.%${token}%`,
+      `content.ilike.%${token}%`,
+    ])
+    .join(",");
+
+  const [contactsResult, messagesResult] = await Promise.all([
+    supabaseAdmin
+      .from("whatsapp_contacts")
+      .select("jid, phone_number, contact_name, notify_name, verified_name")
+      .eq("user_id", userId)
+      .or(contactFilter)
+      .limit(120),
+    supabaseAdmin
+      .from("whatsapp_messages")
+      .select("remote_jid, remote_phone, contact_name, content, direction, message_type, chat_type")
+      .eq("user_id", userId)
+      .or(messageFilter)
+      .order("sent_at", { ascending: false })
+      .limit(1200),
+  ]);
+
+  const contacts = ((contactsResult.data ?? []) as WhatsAppContactRow[]).filter(Boolean);
+  const messages = ((messagesResult.data ?? []) as WhatsAppMessageRow[]).filter(Boolean);
+  if (!contacts.length && !messages.length) {
+    return [];
+  }
+
+  return buildWhatsAppContactCandidatesFromRows({
+    contacts,
+    messages,
+    fallbackContacts,
   });
 }
 
@@ -1303,6 +1417,38 @@ export async function lookupContactFuzzy(
 
   const mergedByIdentity = new Map<string, ContactSearchCandidate>();
   for (const candidate of [...savedCandidates, ...whatsAppCandidates]) {
+    const key = candidate.identityKey ?? candidate.phone ?? candidate.jid;
+    if (!key) {
+      continue;
+    }
+
+    const existing = mergedByIdentity.get(key);
+    if (!existing) {
+      mergedByIdentity.set(key, candidate);
+      continue;
+    }
+
+    const mergedAliases = new Set<string>([...existing.aliases, ...candidate.aliases]);
+    mergedByIdentity.set(key, {
+      name: existing.name.length >= candidate.name.length ? existing.name : candidate.name,
+      phone: existing.phone ?? candidate.phone ?? null,
+      jid: existing.jid ?? candidate.jid ?? null,
+      aliases: [...mergedAliases],
+      identityKey: existing.identityKey ?? candidate.identityKey ?? key,
+    });
+  }
+
+  const initialResult = rankContactCandidates(rawName, [...mergedByIdentity.values()]);
+  if (initialResult.type !== "not_found") {
+    return initialResult;
+  }
+
+  const targetedHistoryCandidates = await loadTargetedWhatsAppHistoryCandidates(userId, rawName).catch(() => []);
+  if (!targetedHistoryCandidates.length) {
+    return initialResult;
+  }
+
+  for (const candidate of targetedHistoryCandidates) {
     const key = candidate.identityKey ?? candidate.phone ?? candidate.jid;
     if (!key) {
       continue;

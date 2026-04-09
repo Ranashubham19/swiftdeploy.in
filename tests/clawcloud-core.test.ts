@@ -43,6 +43,7 @@ import {
 import {
   classifyResolvedContactMatchConfidence,
   buildHistoryDerivedWhatsAppAliasesForTest,
+  extractWhatsAppHistorySearchTokensForTest,
   formatAmbiguousReply,
   normalizeResolvedContactMatchScore,
   rankContactCandidates,
@@ -7398,6 +7399,11 @@ test("history-derived address aliases preserve named honorific phrases for histo
     assert.equal(resolved.contact.phone, "917559608735");
     assert.match(resolved.contact.matchedAlias ?? "", /tanu/i);
   }
+});
+
+test("history-backed contact lookup keeps only anchored searchable name tokens from noisy prompts", () => {
+  assert.deepEqual(extractWhatsAppHistorySearchTokensForTest("Tell me the messages of tanu dii pk"), ["tanu"]);
+  assert.deepEqual(extractWhatsAppHistorySearchTokensForTest("Summarize papa ji"), []);
 });
 
 test("self-chat WhatsApp delivery receipts recover durable aliases for numeric contacts", () => {
