@@ -198,6 +198,7 @@ import {
   extractExplicitReplyLocaleRequest,
   extractExplicitReplyLocaleRequests,
   inferClawCloudMessageLocale,
+  looksLikeTranslationFailureReplyForTest,
   resolveClawCloudReplyLanguage,
   buildClawCloudReplyLanguageInstruction,
   stripExplicitReplyLocaleRequestForContent,
@@ -7417,6 +7418,13 @@ test("history-backed contact lookup keeps only anchored searchable name tokens f
   assert.deepEqual(extractWhatsAppHistorySearchTokensForTest("Summarize papa ji"), []);
 });
 
+test("noisy Tanu history lookup still locks into the WhatsApp history lane", () => {
+  assert.deepEqual(detectIntentForTest("Tell me the messages of tanu dii pk"), {
+    type: "send_message",
+    category: "whatsapp_history",
+  });
+});
+
 test("contact confidence verifies a single anchored specific name inside noisy honorific prompts", () => {
   assert.equal(
     classifyResolvedContactMatchConfidence({
@@ -7945,6 +7953,27 @@ test("wrong-mode detection rejects translation-meta replies for story questions"
       "正確な回答をするために、正確なトピック、名前、アイテム、または数字を教えてください。",
     ),
     true,
+  );
+});
+
+test("translation failure detection rejects translation-meta responses instead of accepting them as real output", () => {
+  assert.equal(
+    looksLikeTranslationFailureReplyForTest(
+      "No translation is needed as the provided text is already in English.",
+    ),
+    true,
+  );
+
+  assert.equal(
+    looksLikeTranslationFailureReplyForTest(
+      "The provided text is already in English and requires no translation.",
+    ),
+    true,
+  );
+
+  assert.equal(
+    looksLikeTranslationFailureReplyForTest("WhatsApp conversation summary with Tanu"),
+    false,
   );
 });
 

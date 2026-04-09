@@ -61,6 +61,13 @@ const TRANSLATION_FAILURE_REPLY_PATTERNS = [
   /\bno translation was provided\b/i,
   /\bno translation was provided in the prompt\b/i,
   /\btranslation was not provided\b/i,
+  /\bhere(?:'s| is) the translation\b/i,
+  /\bdirect translation\b/i,
+  /\bthe (?:provided|source) text is already in\b/i,
+  /\byou(?:'ve| have) already provided the text in\b/i,
+  /\balready in (?:korean|english|hindi|japanese|chinese|spanish|french|arabic|tamil|telugu|punjabi|urdu)\b/i,
+  /\bthere is no need for translation\b/i,
+  /\bthe text remains as is\b/i,
 ];
 
 export type LocalePreferenceCommand =
@@ -89,6 +96,10 @@ function looksLikeTranslationFailureReply(value: string) {
   }
 
   return TRANSLATION_FAILURE_REPLY_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+export function looksLikeTranslationFailureReplyForTest(value: string) {
+  return looksLikeTranslationFailureReply(value);
 }
 const TRAILING_REPLY_LANGUAGE_REQUEST_RE =
   /\b(?:in|into)\s+([\p{L}][\p{L}\p{M}\s()+-]{1,48})[.!?]*$/iu;
@@ -1336,12 +1347,13 @@ export async function translateMessage(
     preferredModels: options?.preferredModels ?? indicModels,
   });
 
-  const candidate = looksLikeTranslationFailureReply(translated) ? message : (translated || message);
+  const translationFailed = looksLikeTranslationFailureReply(translated);
+  const candidate = translationFailed ? message : (translated || message);
   const normalizedCandidate = normalizeMessageForLanguageDetection(candidate);
   const candidateLocale = inferClawCloudMessageLocale(normalizedCandidate);
   const isNonLatinCandidate = !LATIN_SCRIPT_MESSAGE_RE.test(normalizedCandidate);
   const shouldRetryForTargetLocale =
-    options?.force
+    (options?.force || translationFailed)
     && normalizedCandidate.length > 24
     && (
       locale === "en"
