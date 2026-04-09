@@ -1,6 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 
+import {
+  parseOption,
+  writeJsonReport,
+} from "./clawcloud-script-helpers";
+
 type RegressionCase = {
   prompt: string;
   mustMatch: RegExp[];
@@ -14,6 +19,8 @@ type RegressionResult = {
   violations: string[];
   preview: string;
 };
+
+type RegressionProfile = "full" | "scorecard";
 
 const cases: RegressionCase[] = [
   { prompt: "Can you write articles", mustMatch: [/article/i, /(yes|write)/i] },
@@ -158,6 +165,17 @@ const bannedPatterns = [
   /i can explain any technology/i,
 ];
 
+const DEFAULT_REPORT_PATH = "tmp-clawcloud-whatsapp-regression.json";
+const DEFAULT_CONCURRENCY = 4;
+
+const scorecardPrompts = new Set([
+  "What js the update of todays",
+  "Capital of Japan",
+  "ok what write code for n queen in js",
+  "write fibonacci code in ts",
+  "who was the top 10 most powerful countries in 400 ad",
+]);
+
 function loadEnvFile(filePath: string) {
   if (!existsSync(filePath)) return;
   const raw = readFileSync(filePath, "utf8");
@@ -184,10 +202,24 @@ async function main() {
   loadEnvFile(".env.local");
 
   const { routeInboundAgentMessage } = await import("@/lib/clawcloud-agent");
-  const userId = "00000000-0000-0000-0000-000000000703";
-  const results: RegressionResult[] = [];
+  const requestedProfile = (parseOption("--profile") ?? "full").trim().toLowerCase();
+  const profile: RegressionProfile = requestedProfile === "scorecard" ? "scorecard" : "full";
+  const activeCases = profile === "scorecard"
+    ? cases.filter((testCase) => scorecardPrompts.has(testCase.prompt))
+    : cases;
+  const reportPath = parseOption("--report")
+    ?? (profile === "scorecard"
+      ? "tmp-clawcloud-whatsapp-regression.scorecard.json"
+      : DEFAULT_REPORT_PATH);
+  const requestedConcurrency = Number.parseInt(parseOption("--concurrency") ?? "", 10);
+  const concurrency = Number.isFinite(requestedConcurrency) && requestedConcurrency > 0
+    ? Math.min(requestedConcurrency, activeCases.length)
+    : DEFAULT_CONCURRENCY;
+  const results = new Array<RegressionResult>(activeCases.length);
+  let cursor = 0;
 
-  for (const testCase of cases) {
+  const evaluateCase = async (testCase: RegressionCase, index: number) => {
+    const userId = `00000000-0000-0000-0000-${String(703 + index).padStart(12, "0")}`;
     const started = performance.now();
     const answer = (await routeInboundAgentMessage(userId, testCase.prompt)) ?? "";
     const elapsedMs = Number((performance.now() - started).toFixed(1));
@@ -215,25 +247,44 @@ async function main() {
       }
     }
 
-    results.push({
+    results[index] = {
       prompt: testCase.prompt,
       ok: violations.length === 0,
       elapsedMs,
       violations,
       preview: answer.replace(/\s+/g, " ").slice(0, 220),
-    });
-  }
+    };
+  };
+
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= activeCases.length) {
+        return;
+      }
+
+      await evaluateCase(activeCases[index], index);
+    }
+  });
+
+  await Promise.all(workers);
 
   const passed = results.filter((row) => row.ok).length;
   const failed = results.length - passed;
-
-  console.log(JSON.stringify({
+  const report = {
     checkedAt: new Date().toISOString(),
+    reportPath,
+    profile,
+    concurrency,
     total: results.length,
     passed,
     failed,
     results,
-  }, null, 2));
+  };
+
+  writeJsonReport(reportPath, report);
+  console.log(JSON.stringify(report, null, 2));
 
   if (failed > 0) {
     process.exitCode = 1;

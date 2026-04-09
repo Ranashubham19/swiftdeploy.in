@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createClient } from "@supabase/supabase-js";
 import { pickAuthoritativeClawCloudWhatsAppAccount } from "../lib/clawcloud-whatsapp-account-selection";
 
@@ -410,4 +410,83 @@ export function runTsxJsonScript(scriptPath: string, args: string[] = []) {
     stderr,
     json,
   };
+}
+
+export async function runTsxJsonScriptAsync(
+  scriptPath: string,
+  args: string[] = [],
+  options: {
+    timeoutMs?: number;
+  } = {},
+) {
+  const command = process.execPath;
+  const cliPath = resolve(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
+
+  return await new Promise<{
+    ok: boolean;
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+    json: unknown;
+    timedOut: boolean;
+  }>((resolvePromise) => {
+    const child = spawn(command, [cliPath, scriptPath, ...args], {
+      cwd: process.cwd(),
+      env: process.env,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timedOut = false;
+    let timeoutHandle: NodeJS.Timeout | null = null;
+
+    const finish = (exitCode: number) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+
+      resolvePromise({
+        ok: exitCode === 0 && !timedOut,
+        exitCode,
+        stdout,
+        stderr,
+        json: extractLastJsonPayload(stdout),
+        timedOut,
+      });
+    };
+
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk;
+    });
+
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk;
+    });
+
+    child.on("error", (error) => {
+      stderr += error instanceof Error ? error.stack ?? error.message : String(error);
+      finish(1);
+    });
+
+    child.on("close", (code) => {
+      finish(code ?? 1);
+    });
+
+    if (options.timeoutMs && options.timeoutMs > 0) {
+      timeoutHandle = setTimeout(() => {
+        timedOut = true;
+        child.kill();
+      }, options.timeoutMs);
+    }
+  });
 }

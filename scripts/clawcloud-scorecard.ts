@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import {
   loadClawCloudEnv,
   parseFlag,
-  runTsxJsonScript,
+  runTsxJsonScriptAsync,
   writeJsonReport,
 } from "./clawcloud-script-helpers";
 
@@ -13,6 +13,17 @@ type WeightedSection = {
   weight: number;
   score: number | null;
   details: Record<string, unknown>;
+};
+
+type JsonScriptRun = Awaited<ReturnType<typeof runTsxJsonScriptAsync>>;
+
+type ScorecardComponent<T> = {
+  key: string;
+  scriptPath: string;
+  reportPath: string;
+  args?: string[];
+  timeoutMs?: number;
+  parse: (value: T | null, run: JsonScriptRun | null, reused: boolean) => WeightedSection;
 };
 
 function readJsonFile<T>(filePath: string): T | null {
@@ -32,9 +43,13 @@ function extractNumber(value: unknown, fallback = 0) {
 }
 
 function chooseJsonReport<T>(
-  runResult: ReturnType<typeof runTsxJsonScript>,
+  runResult: JsonScriptRun | null,
   filePath: string,
 ) {
+  if (!runResult) {
+    return readJsonFile<T>(filePath);
+  }
+
   if (runResult.ok && runResult.json) {
     return runResult.json as T;
   }
@@ -63,157 +78,166 @@ function summarizeSection(section: WeightedSection) {
   };
 }
 
+function isFreshEnough(checkedAt: unknown, maxAgeHours = 6) {
+  if (typeof checkedAt !== "string" || !checkedAt) {
+    return false;
+  }
+
+  const checkedTime = new Date(checkedAt).getTime();
+  if (Number.isNaN(checkedTime)) {
+    return false;
+  }
+
+  return (Date.now() - checkedTime) <= (maxAgeHours * 60 * 60 * 1000);
+}
+
+async function loadOrRunComponent<T>(
+  component: ScorecardComponent<T>,
+  reuseFreshReports: boolean,
+) {
+  const cachedReport = readJsonFile<T & { checkedAt?: string; generatedAt?: string }>(component.reportPath);
+  const cachedTimestamp = cachedReport?.checkedAt ?? cachedReport?.generatedAt ?? null;
+  const canReuse = reuseFreshReports && isFreshEnough(cachedTimestamp);
+
+  if (canReuse) {
+    return {
+      reused: true,
+      run: null,
+      json: cachedReport as T,
+    };
+  }
+
+  const run = await runTsxJsonScriptAsync(component.scriptPath, component.args ?? [], {
+    timeoutMs: component.timeoutMs,
+  });
+  const json = chooseJsonReport<T>(run, component.reportPath);
+
+  return {
+    reused: false,
+    run,
+    json,
+  };
+}
+
 async function main() {
   loadClawCloudEnv();
   const { getProviderSnapshot } = await import("@/lib/env");
 
   const withLive = parseFlag("--with-live");
+  const reuseFreshReports = !parseFlag("--no-reuse-fresh");
   const reportPath = "tmp-clawcloud-scorecard.json";
   const providerSnapshot = getProviderSnapshot();
-
-  const replayRun = runTsxJsonScript("scripts/clawcloud-replay-eval.ts");
-  const replayJson = chooseJsonReport<{
-    passRate?: number;
-    passed?: number;
-    failed?: number;
-    averageLatencyMs?: number;
-    results?: Array<{ id: string; ok: boolean }>;
-  }>(replayRun, "tmp-clawcloud-replay-report.json") as
-    | {
-      passRate?: number;
-      passed?: number;
-      failed?: number;
-      averageLatencyMs?: number;
-      results?: Array<{ id: string; ok: boolean }>;
-    }
-    | null;
-
-  const benchmarkRun = runTsxJsonScript("scripts/clawcloud-hard-benchmark.ts");
-  const benchmarkJson = chooseJsonReport<{
-    overall?: { percentage?: number };
-    results?: Array<{ key: string; misses?: string[] }>;
-  }>(benchmarkRun, "tmp-clawcloud-hard-benchmark.json") as
-    | {
-      overall?: { percentage?: number };
-      results?: Array<{ key: string; misses?: string[] }>;
-    }
-    | null;
-
-  const regressionRun = runTsxJsonScript("scripts/clawcloud-whatsapp-regression.ts");
-  const regressionJson = chooseJsonReport<{
-    total?: number;
-    passed?: number;
-    failed?: number;
-    results?: Array<{ prompt: string; ok: boolean }>;
-  }>(regressionRun, "tmp-clawcloud-whatsapp-regression.json") as
-    | {
-      total?: number;
-      passed?: number;
-      failed?: number;
-      results?: Array<{ prompt: string; ok: boolean }>;
-    }
-    | null;
-
-  let liveRun:
-    | {
-      ok: boolean;
-      exitCode: number;
-      stdout: string;
-      stderr: string;
-      json: unknown;
-    }
-    | null = null;
-  let liveJson:
-    | {
-      passed?: number;
-      failed?: number;
-      total?: number;
-      results?: Array<{ id: string; ok: boolean }>;
-    }
-    | null = null;
-
-  if (withLive) {
-    liveRun = runTsxJsonScript("scripts/clawcloud-live-api-qa.ts");
-    liveJson = chooseJsonReport<{
-      passed?: number;
-      failed?: number;
-      total?: number;
-      results?: Array<{ id: string; ok: boolean }>;
-    }>(liveRun, "tmp-clawcloud-live-api-qa.json") as
-      | {
-        passed?: number;
-        failed?: number;
-        total?: number;
-        results?: Array<{ id: string; ok: boolean }>;
-      }
-      | null;
-  }
-
-  const sections: WeightedSection[] = [
+  const components: Array<ScorecardComponent<any>> = [
     {
       key: "replay",
-      label: "WhatsApp replay",
-      weight: 35,
-      score: replayJson ? extractNumber(replayJson.passRate, 0) : null,
-      details: {
-        passed: replayJson?.passed ?? 0,
-        failed: replayJson?.failed ?? 0,
-        averageLatencyMs: replayJson?.averageLatencyMs ?? null,
-        failedCases: (replayJson?.results ?? []).filter((item) => !item.ok).map((item) => item.id),
-        commandOk: replayRun.ok,
-      },
+      scriptPath: "scripts/clawcloud-replay-eval.ts",
+      reportPath: "tmp-clawcloud-replay-report.json",
+      timeoutMs: 10 * 60 * 1000,
+      parse: (replayJson, run, reused) => ({
+        key: "replay",
+        label: "WhatsApp replay",
+        weight: 35,
+        score: replayJson ? extractNumber(replayJson.passRate, 0) : null,
+        details: {
+          passed: replayJson?.passed ?? 0,
+          failed: replayJson?.failed ?? 0,
+          averageLatencyMs: replayJson?.averageLatencyMs ?? null,
+          failedCases: (replayJson?.results ?? []).filter((item: { ok: boolean }) => !item.ok).map((item: { id: string }) => item.id),
+          commandOk: reused ? Boolean(replayJson) : run?.ok ?? false,
+          reusedFreshReport: reused,
+          timedOut: run?.timedOut ?? false,
+        },
+      }),
     },
     {
       key: "regression",
-      label: "Regression suite",
-      weight: 20,
-      score: regressionJson
-        ? Number(
-          ((extractNumber(regressionJson.passed, 0) / Math.max(extractNumber(regressionJson.total, 0), 1)) * 100).toFixed(1),
-        )
-        : null,
-      details: {
-        passed: regressionJson?.passed ?? 0,
-        failed: regressionJson?.failed ?? 0,
-        failedCases: (regressionJson?.results ?? []).filter((item) => !item.ok).map((item) => item.prompt),
-        commandOk: regressionRun.ok,
-      },
+      scriptPath: "scripts/clawcloud-whatsapp-regression.ts",
+      reportPath: "tmp-clawcloud-whatsapp-regression.scorecard.json",
+      args: ["--profile", "scorecard", "--concurrency", "4"],
+      timeoutMs: 8 * 60 * 1000,
+      parse: (regressionJson, run, reused) => ({
+        key: "regression",
+        label: "Regression suite",
+        weight: 20,
+        score: regressionJson
+          ? Number(
+            ((extractNumber(regressionJson.passed, 0) / Math.max(extractNumber(regressionJson.total, 0), 1)) * 100).toFixed(1),
+          )
+          : null,
+        details: {
+          passed: regressionJson?.passed ?? 0,
+          failed: regressionJson?.failed ?? 0,
+          failedCases: (regressionJson?.results ?? []).filter((item: { ok: boolean }) => !item.ok).map((item: { prompt: string }) => item.prompt),
+          commandOk: reused ? Boolean(regressionJson) : run?.ok ?? false,
+          reusedFreshReport: reused,
+          timedOut: run?.timedOut ?? false,
+        },
+      }),
     },
     {
       key: "benchmark",
-      label: "Hard benchmark",
-      weight: 30,
-      score: benchmarkJson ? extractNumber(benchmarkJson.overall?.percentage, 0) : null,
-      details: {
-        weakCases: (benchmarkJson?.results ?? [])
-          .filter((item) => (item.misses?.length ?? 0) > 0)
-          .map((item) => ({
-            key: item.key,
-            misses: item.misses ?? [],
-          })),
-        commandOk: benchmarkRun.ok,
-      },
+      scriptPath: "scripts/clawcloud-hard-benchmark.ts",
+      reportPath: "tmp-clawcloud-hard-benchmark.json",
+      timeoutMs: 10 * 60 * 1000,
+      parse: (benchmarkJson, run, reused) => ({
+        key: "benchmark",
+        label: "Hard benchmark",
+        weight: 30,
+        score: benchmarkJson ? extractNumber(benchmarkJson.overall?.percentage, 0) : null,
+        details: {
+          weakCases: (benchmarkJson?.results ?? [])
+            .filter((item: { misses?: string[] }) => (item.misses?.length ?? 0) > 0)
+            .map((item: { key: string; misses?: string[] }) => ({
+              key: item.key,
+              misses: item.misses ?? [],
+            })),
+          commandOk: reused ? Boolean(benchmarkJson) : run?.ok ?? false,
+          reusedFreshReport: reused,
+          timedOut: run?.timedOut ?? false,
+        },
+      }),
     },
   ];
 
   if (withLive) {
-    sections.push({
+    components.push({
       key: "live_api",
-      label: "Live API QA",
-      weight: 15,
-      score: liveJson
-        ? Number(
-          ((extractNumber(liveJson.passed, 0) / Math.max(extractNumber(liveJson.total, 0), 1)) * 100).toFixed(1),
-        )
-        : null,
-      details: {
-        passed: liveJson?.passed ?? 0,
-        failed: liveJson?.failed ?? 0,
-        failedCases: (liveJson?.results ?? []).filter((item) => !item.ok).map((item) => item.id),
-        commandOk: liveRun?.ok ?? false,
-      },
+      scriptPath: "scripts/clawcloud-daily-canary.ts",
+      reportPath: "tmp-clawcloud-daily-canary.json",
+      timeoutMs: 4 * 60 * 1000,
+      parse: (liveJson, run, reused) => ({
+        key: "live_api",
+        label: "Live production canary",
+        weight: 15,
+        score: liveJson
+          ? Number(
+            ((extractNumber(liveJson.passed, 0) / Math.max(extractNumber(liveJson.total, 0), 1)) * 100).toFixed(1),
+          )
+          : null,
+        details: {
+          passed: liveJson?.passed ?? 0,
+          failed: liveJson?.failed ?? 0,
+          failedCases: (liveJson?.results ?? []).filter((item: { ok: boolean }) => !item.ok).map((item: { id: string }) => item.id),
+          commandOk: reused ? Boolean(liveJson) : run?.ok ?? false,
+          reusedFreshReport: reused,
+          timedOut: run?.timedOut ?? false,
+        },
+      }),
     });
   }
+
+  const componentResults = await Promise.all(
+    components.map(async (component) => {
+      const resolved = await loadOrRunComponent(component, reuseFreshReports);
+      return {
+        key: component.key,
+        run: resolved.run,
+        section: component.parse(resolved.json, resolved.run, resolved.reused),
+      };
+    }),
+  );
+
+  const sections = componentResults.map((item) => item.section);
 
   const scoredSections = sections.filter((section) => section.score !== null) as Array<WeightedSection & { score: number }>;
   const totalWeight = scoredSections.reduce((sum, section) => sum + section.weight, 0);
@@ -236,20 +260,31 @@ async function main() {
       totalWeight,
     },
     sections: Object.fromEntries(sections.map((section) => [section.key, summarizeSection(section)])),
-    commandStatus: {
-      replay: { ok: replayRun.ok, exitCode: replayRun.exitCode },
-      regression: { ok: regressionRun.ok, exitCode: regressionRun.exitCode },
-      benchmark: { ok: benchmarkRun.ok, exitCode: benchmarkRun.exitCode },
-      live: withLive
-        ? { ok: liveRun?.ok ?? false, exitCode: liveRun?.exitCode ?? 1 }
-        : { ok: null, exitCode: null },
-    },
+    commandStatus: Object.fromEntries(
+      componentResults.map((item) => {
+        const details = item.section.details as {
+          commandOk?: boolean;
+          reusedFreshReport?: boolean;
+        };
+
+        return [item.key === "live_api" ? "live" : item.key, {
+          ok: details.commandOk ?? false,
+          exitCode: item.run?.exitCode ?? 0,
+          reusedFreshReport: details.reusedFreshReport ?? false,
+        }];
+      }),
+    ),
   };
 
   writeJsonReport(reportPath, report);
   console.log(JSON.stringify(report, null, 2));
 
-  if (!replayRun.ok || !regressionRun.ok || !benchmarkRun.ok || (withLive && !liveRun?.ok)) {
+  const componentFailed = componentResults.some((item) => {
+    const details = item.section.details as { commandOk?: boolean };
+    return details.commandOk !== true;
+  });
+
+  if (componentFailed) {
     process.exitCode = 1;
   }
 }

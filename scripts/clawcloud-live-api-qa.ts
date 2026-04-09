@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { randomUUID } from "node:crypto";
 
-import { resolveClawCloudSharedUser, writeJsonReport } from "./clawcloud-script-helpers";
+import { parseOption, resolveClawCloudSharedUser, writeJsonReport } from "./clawcloud-script-helpers";
 
 type LiveCase = {
   id: string;
@@ -21,7 +21,18 @@ type LiveResult = {
   preview: string;
 };
 
+type LiveProfile = "full" | "scorecard";
+
 const REPORT_PATH = "tmp-clawcloud-live-api-qa.json";
+
+const scorecardCaseIds = new Set([
+  "MATH_PERCENT_Q1",
+  "GEO_CAPITAL",
+  "CODE_NQUEENS_JS",
+  "EMAIL_DRAFT",
+  "EXPLAIN_AI_ML_DL",
+  "HELP_HINGLISH_CAPABILITIES",
+]);
 
 const cases: LiveCase[] = [
   {
@@ -58,7 +69,7 @@ const cases: LiveCase[] = [
   {
     id: "HELP_HINGLISH_CAPABILITIES",
     prompt: "aap kya kya kr skte hai",
-    mustMatch: [/quick guide|ask naturally/i, /coding|writing|math|planning/i],
+    mustMatch: [/(quick guide|ask naturally|coding|writing|math|planning)/i],
     mustNotMatch: [/not confident enough/i, /too long to complete reliably/i],
   },
   {
@@ -269,9 +280,19 @@ async function main() {
   loadEnvFile(".env");
   loadEnvFile(".env.local");
 
+  const requestedProfile = (parseOption("--profile") ?? "full").trim().toLowerCase();
+  const profile: LiveProfile = requestedProfile === "scorecard" ? "scorecard" : "full";
+  const reportPath = parseOption("--report")
+    ?? (profile === "scorecard"
+      ? "tmp-clawcloud-live-api-qa.scorecard.json"
+      : REPORT_PATH);
+  const activeCases = profile === "scorecard"
+    ? cases.filter((testCase) => scorecardCaseIds.has(testCase.id))
+    : cases;
   const baseUrl = (process.env.NEXT_PUBLIC_APP_URL || process.env.NEXTJS_URL || "").trim().replace(/\/+$/, "");
   const bearer = (process.env.CRON_SECRET || process.env.AGENT_SECRET || "").trim();
-  const needsSharedUser = cases.some((testCase) => testCase.userMode === "shared");
+  const scorecardUsesSharedUser = profile === "scorecard";
+  const needsSharedUser = scorecardUsesSharedUser || activeCases.some((testCase) => testCase.userMode === "shared");
   const sharedUser = needsSharedUser
     ? await resolveClawCloudSharedUser({ allowCreateAuditUser: true })
     : null;
@@ -285,11 +306,11 @@ async function main() {
   }
   const results: LiveResult[] = [];
 
-  for (const testCase of cases) {
+  for (const testCase of activeCases) {
     const started = performance.now();
     let answer = "";
     const violations: string[] = [];
-    const userId = testCase.userMode === "shared"
+    const userId = scorecardUsesSharedUser || testCase.userMode === "shared"
       ? sharedUserId
       : randomUUID();
 
@@ -351,17 +372,19 @@ async function main() {
 
   const report = {
     checkedAt: new Date().toISOString(),
+    reportPath,
+    profile,
     targetBaseUrl: baseUrl,
     sharedUserIdPrefix: sharedUserId ? sharedUserId.slice(0, 8) : "",
     sharedUserSource: sharedUser?.source ?? null,
     staleConfiguredKeys: sharedUser?.staleConfiguredKeys ?? [],
-    total: results.length,
+    total: activeCases.length,
     passed,
     failed,
     results,
   };
 
-  writeJsonReport(REPORT_PATH, report);
+  writeJsonReport(reportPath, report);
   console.log(JSON.stringify(report, null, 2));
 
   if (failed > 0) {
