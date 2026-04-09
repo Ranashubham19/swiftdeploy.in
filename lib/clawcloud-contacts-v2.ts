@@ -32,9 +32,11 @@ const STARTS_WITH_SCORE = 0.92;
 const WORD_MATCH_SCORE = 0.88;
 const FUZZY_THRESHOLD = 0.65;
 const AMBIGUOUS_THRESHOLD = 0.1;
+const ADDRESS_HONORIFIC_MATCH_BONUS = 0.03;
 const WHATSAPP_HISTORY_LIMIT = 600;
 const PARTIAL_MATCH_QUERY_MIN_LENGTH = 3;
 const HISTORY_RELATIONSHIP_ALIAS_MIN_OCCURRENCES = 2;
+const HISTORY_ADDRESS_ALIAS_MIN_OCCURRENCES = 1;
 const HISTORY_RELATIONSHIP_ALIAS_MESSAGE_MAX_LENGTH = 80;
 const HISTORY_RELATIONSHIP_ALIAS_CANONICALS = new Set([
   "maa",
@@ -42,6 +44,52 @@ const HISTORY_RELATIONSHIP_ALIAS_CANONICALS = new Set([
   "didi",
   "bhai",
   "bhaiya",
+]);
+const HISTORY_ADDRESS_PREFIX_STOPWORDS = new Set([
+  "ok",
+  "okay",
+  "acha",
+  "accha",
+  "achha",
+  "haan",
+  "han",
+  "hi",
+  "hello",
+  "hey",
+  "what",
+  "when",
+  "where",
+  "which",
+  "who",
+  "why",
+  "how",
+  "kya",
+  "kyu",
+  "kyun",
+  "kaise",
+  "kab",
+  "kahan",
+  "kaun",
+  "dear",
+  "please",
+  "plz",
+  "pls",
+  "thanks",
+  "thank",
+  "thanku",
+  "thankyou",
+  "thx",
+  "good",
+  "morning",
+  "afternoon",
+  "evening",
+  "night",
+  "gm",
+  "gn",
+  "ga",
+  "ge",
+  "shukriya",
+  "ji",
 ]);
 const SYSTEM_LIKE_HISTORY_ALIAS_PATTERN =
   /\b(?:clawcloud|daily limit reached|message delivered to|active contact mode|upgrade to|whatsapp conversation summary)\b/i;
@@ -208,6 +256,55 @@ function normalizeRelationshipSafeContactName(name: string) {
   }
 
   return words.join(" ").trim();
+}
+
+function normalizeHistoryAddressPreservingHonorifics(name: string) {
+  return String(name ?? "")
+    .normalize("NFKC")
+    .replace(/[\u200d\uFE0F]/g, "")
+    .replace(/[_]+/g, " ")
+    .replace(/[Ã¢â‚¬Å“Ã¢â‚¬Â"']/g, "")
+    .replace(/[^\p{L}\p{M}\p{N}\s.&+\-/\u0900-\u097F]/gu, " ")
+    .toLowerCase()
+    .replace(/'s$/, "")
+    .replace(/\b(?:contact|phone|number)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeAddressAwareContactScoreName(name: string) {
+  const preserved = normalizeHistoryAddressPreservingHonorifics(name);
+  const stripped = normalizeRelationshipSafeContactName(name);
+  if (!preserved) {
+    return stripped;
+  }
+
+  const preservedWords = preserved.split(/\s+/).filter(Boolean);
+  if (preservedWords.length < 2) {
+    return stripped || preserved;
+  }
+
+  const trailingHonorific = preservedWords[preservedWords.length - 1];
+  const leadingToken = preservedWords[0];
+  const leadingIsGenericRelationship = Boolean(
+    leadingToken
+    && (
+      HINDI_HONORIFICS.includes(leadingToken as (typeof HINDI_HONORIFICS)[number])
+      || STRICT_RELATIONSHIP_CONTACT_CANONICALS.has(normalizeContactName(leadingToken))
+    ),
+  );
+
+  if (
+    trailingHonorific
+    && HINDI_HONORIFICS.includes(trailingHonorific as (typeof HINDI_HONORIFICS)[number])
+    && leadingToken
+    && leadingToken.length >= 3
+    && !leadingIsGenericRelationship
+  ) {
+    return preserved;
+  }
+
+  return stripped || preserved;
 }
 
 function getSingleCanonicalRelationshipAlias(value: string) {
@@ -487,11 +584,20 @@ function getNameVariants(query: string): string[] {
 
 function expandStoredAliasVariants(alias: string): string[] {
   const normalized = normalizeName(alias);
-  if (!normalized) {
+  const addressAware = normalizeAddressAwareContactScoreName(alias);
+  if (!normalized && !addressAware) {
     return [];
   }
 
-  const variants = new Set<string>([normalized, normalized.replace(/\s+/g, "")]);
+  const variants = new Set<string>();
+  for (const variant of [normalized, addressAware]) {
+    if (!variant) {
+      continue;
+    }
+    variants.add(variant);
+    variants.add(variant.replace(/\s+/g, ""));
+  }
+
   const words = normalized.split(/\s+/).filter(Boolean);
 
   for (const word of words) {
@@ -514,11 +620,49 @@ function pickBetterContactScore(current: ContactScoreDetail | null, next: Contac
     return next;
   }
 
+  if (next.score === current.score) {
+    const currentAlias = normalizeAddressAwareContactScoreName(current.matchedAlias);
+    const nextAlias = normalizeAddressAwareContactScoreName(next.matchedAlias);
+    const currentWordCount = currentAlias.split(/\s+/).filter(Boolean).length;
+    const nextWordCount = nextAlias.split(/\s+/).filter(Boolean).length;
+
+    if (nextWordCount > currentWordCount) {
+      return next;
+    }
+
+    if (nextWordCount === currentWordCount && nextAlias.length > currentAlias.length) {
+      return next;
+    }
+  }
+
   return current;
 }
 
 function namesShareTokenLoosely(left: string, right: string) {
   return left === right || left.startsWith(right) || right.startsWith(left);
+}
+
+function normalizeAddressHonorificToken(token: string) {
+  const normalized = normalizeContactName(token);
+  if (normalized && HINDI_HONORIFICS.includes(normalized as (typeof HINDI_HONORIFICS)[number])) {
+    return normalized;
+  }
+
+  for (const expansion of COMMON_NICKNAME_EXPANSIONS[normalized] ?? []) {
+    const canonical = normalizeContactName(expansion);
+    if (canonical && HINDI_HONORIFICS.includes(canonical as (typeof HINDI_HONORIFICS)[number])) {
+      return canonical;
+    }
+  }
+
+  return null;
+}
+
+function extractAddressHonorificTokens(value: string) {
+  return normalizeHistoryAddressPreservingHonorifics(value)
+    .split(/\s+/)
+    .map((token) => normalizeAddressHonorificToken(token))
+    .filter((token): token is string => Boolean(token));
 }
 
 function scoreContact(
@@ -527,9 +671,15 @@ function scoreContact(
   primaryQuery: string,
   rawRequestedName: string,
 ): ContactScoreDetail {
-  const normalizedStored = normalizeName(storedName);
+  const normalizedStored = normalizeAddressAwareContactScoreName(storedName);
   const storedWords = normalizedStored.split(/\s+/).filter(Boolean);
   const primaryQueryWords = primaryQuery.split(/\s+/).filter(Boolean);
+  const requestedHonorifics = new Set(extractAddressHonorificTokens(rawRequestedName));
+  const storedHonorifics = new Set(extractAddressHonorificTokens(storedName));
+  const addressHonorificBonus =
+    requestedHonorifics.size && [...storedHonorifics].some((token) => requestedHonorifics.has(token))
+      ? ADDRESS_HONORIFIC_MATCH_BONUS
+      : 0;
   const compactPrimaryQuery = primaryQuery.replace(/\s+/g, "");
   const compactStored = normalizedStored.replace(/\s+/g, "");
   const hasCompositePrimaryQuery = primaryQueryWords.length > 1;
@@ -541,8 +691,8 @@ function scoreContact(
     best = pickBetterContactScore(best, {
       score:
         normalizedStored.startsWith(primaryQuery) || compactStored.startsWith(compactPrimaryQuery)
-          ? STARTS_WITH_SCORE + 0.04
-          : WORD_MATCH_SCORE + 0.06,
+          ? STARTS_WITH_SCORE + 0.04 + addressHonorificBonus
+          : WORD_MATCH_SCORE + 0.06 + addressHonorificBonus,
       exact: false,
       matchedAlias: storedName,
       matchBasis:
@@ -592,7 +742,7 @@ function scoreContact(
       }
 
       best = pickBetterContactScore(best, {
-        score: WORD_MATCH_SCORE + 0.01,
+        score: WORD_MATCH_SCORE + 0.01 + addressHonorificBonus,
         exact: false,
         matchedAlias: storedName,
         matchBasis: "word",
@@ -609,7 +759,7 @@ function scoreContact(
       && (normalizedStored.startsWith(query) || query.startsWith(normalizedStored))
     ) {
       best = pickBetterContactScore(best, {
-        score: STARTS_WITH_SCORE,
+        score: STARTS_WITH_SCORE + addressHonorificBonus,
         exact: false,
         matchedAlias: storedName,
         matchBasis: "prefix",
@@ -629,7 +779,7 @@ function scoreContact(
       for (const word of storedWords) {
         if (word === query || word.startsWith(query) || query.startsWith(word)) {
           best = pickBetterContactScore(best, {
-            score: WORD_MATCH_SCORE,
+            score: WORD_MATCH_SCORE + addressHonorificBonus,
             exact: false,
             matchedAlias: storedName,
             matchBasis: "word",
@@ -640,14 +790,14 @@ function scoreContact(
 
     if (query === primaryQuery) {
       best = pickBetterContactScore(best, {
-        score: similarity(query, normalizedStored),
+        score: similarity(query, normalizedStored) + addressHonorificBonus,
         exact: false,
         matchedAlias: storedName,
         matchBasis: "fuzzy",
       });
 
       best = pickBetterContactScore(best, {
-        score: similarity(query, storedWords[0] ?? normalizedStored) * 0.9,
+        score: similarity(query, storedWords[0] ?? normalizedStored) * 0.9 + addressHonorificBonus,
         exact: false,
         matchedAlias: storedWords[0] ?? storedName,
         matchBasis: "fuzzy",
@@ -758,6 +908,55 @@ function inferRelationshipAliasesFromShortDirectChatText(value: string | null | 
     .filter((alias) => HISTORY_RELATIONSHIP_ALIAS_CANONICALS.has(alias));
 }
 
+function inferAddressLikeAliasesFromShortDirectChatText(value: string | null | undefined) {
+  const raw = String(value ?? "").trim();
+  if (
+    !raw
+    || raw.length > HISTORY_RELATIONSHIP_ALIAS_MESSAGE_MAX_LENGTH
+    || /[\r\n]/.test(raw)
+    || SYSTEM_LIKE_HISTORY_ALIAS_PATTERN.test(raw)
+  ) {
+    return [] as string[];
+  }
+
+  const normalized = normalizeHistoryAliasInferenceText(raw);
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (!words.length) {
+    return [] as string[];
+  }
+
+  const relationshipAliases = inferRelationshipAliasesFromShortDirectChatText(raw);
+  const trimmedWords = [...words];
+  while (trimmedWords.length && HISTORY_ADDRESS_PREFIX_STOPWORDS.has(trimmedWords[0]!)) {
+    trimmedWords.shift();
+  }
+
+  if (trimmedWords.length < 2) {
+    return relationshipAliases;
+  }
+
+  const first = trimmedWords[0]!;
+  const second = trimmedWords[1]!;
+  const third = trimmedWords[2] ?? "";
+  const secondIsHonorific = HINDI_HONORIFICS.includes(second as (typeof HINDI_HONORIFICS)[number]);
+  const thirdIsHonorific = HINDI_HONORIFICS.includes(third as (typeof HINDI_HONORIFICS)[number]);
+  const firstIsSpecificName =
+    first.length >= 3
+    && !HINDI_HONORIFICS.includes(first as (typeof HINDI_HONORIFICS)[number])
+    && !HISTORY_ADDRESS_PREFIX_STOPWORDS.has(first)
+    && !STRICT_RELATIONSHIP_CONTACT_CANONICALS.has(normalizeContactName(first));
+
+  const aliases = new Set<string>(relationshipAliases);
+  if (firstIsSpecificName && secondIsHonorific) {
+    aliases.add(normalizeHistoryAddressPreservingHonorifics(`${first} ${second}`));
+    if (third && thirdIsHonorific) {
+      aliases.add(normalizeHistoryAddressPreservingHonorifics(`${first} ${second} ${third}`));
+    }
+  }
+
+  return [...aliases].filter(Boolean);
+}
+
 function buildHistoryDerivedWhatsAppAliases(messages: WhatsAppMessageRow[]) {
   const aliasCounts = new Map<string, Map<string, number>>();
 
@@ -776,7 +975,7 @@ function buildHistoryDerivedWhatsAppAliases(messages: WhatsAppMessageRow[]) {
       continue;
     }
 
-    const inferredAliases = inferRelationshipAliasesFromShortDirectChatText(message.content);
+    const inferredAliases = inferAddressLikeAliasesFromShortDirectChatText(message.content);
     if (!inferredAliases.length) {
       continue;
     }
@@ -799,7 +998,14 @@ function buildHistoryDerivedWhatsAppAliases(messages: WhatsAppMessageRow[]) {
   const inferredByIdentity = new Map<string, string[]>();
   for (const [key, counts] of aliasCounts.entries()) {
     const aliases = [...counts.entries()]
-      .filter(([, count]) => count >= HISTORY_RELATIONSHIP_ALIAS_MIN_OCCURRENCES)
+      .filter(([alias, count]) => {
+        const canonicalAlias = normalizeContactName(alias);
+        if (HISTORY_RELATIONSHIP_ALIAS_CANONICALS.has(canonicalAlias)) {
+          return count >= HISTORY_RELATIONSHIP_ALIAS_MIN_OCCURRENCES;
+        }
+
+        return count >= HISTORY_ADDRESS_ALIAS_MIN_OCCURRENCES;
+      })
       .sort((left, right) => {
         if (right[1] !== left[1]) {
           return right[1] - left[1];
@@ -1032,10 +1238,7 @@ export function rankContactCandidates(
   for (const candidate of candidates) {
     const bestMatch = candidate.aliases.reduce<ContactScoreDetail | null>((best, alias) => {
       const detail = scoreContact(queryVariants, alias, primaryQuery, rawName);
-      if (detail.score > (best?.score ?? 0)) {
-        return detail;
-      }
-      return best;
+      return pickBetterContactScore(best, detail);
     }, null);
 
     if ((bestMatch?.score ?? 0) >= FUZZY_THRESHOLD) {

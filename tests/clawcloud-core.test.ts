@@ -410,7 +410,10 @@ import {
 import { env, getPublicAppConfig, isGooglePublicSignInEnabled } from "@/lib/env";
 import { detectWhatsAppSettingsCommandIntent } from "@/lib/clawcloud-whatsapp-settings-commands";
 import { shouldBootstrapClawCloudWhatsAppWorkspace } from "@/lib/clawcloud-whatsapp";
-import { pickAuthoritativeClawCloudWhatsAppAccount } from "@/lib/clawcloud-whatsapp-account-selection";
+import {
+  pickAuthoritativeClawCloudWhatsAppAccount,
+  pickAuthoritativeClawCloudWhatsAppLinkedUser,
+} from "@/lib/clawcloud-whatsapp-account-selection";
 import {
   buildWhatsAppApprovalContextReply,
   buildWhatsAppApprovalReviewReply,
@@ -2590,6 +2593,38 @@ test("authoritative WhatsApp account selection prefers the active live row over 
 
   assert.equal(account?.phone_number, "918091392311");
   assert.equal(account?.display_name, "Live WhatsApp");
+});
+
+test("authoritative WhatsApp linked-user selection prefers the active linked session over stale audit rows", () => {
+  const account = pickAuthoritativeClawCloudWhatsAppLinkedUser([
+    {
+      user_id: "71fdc326-b08c-42ec-bf12-5b92b221554a",
+      phone_number: "919111111111",
+      display_name: "Stale Audit User",
+      is_active: false,
+      connected_at: "2026-04-08T10:00:00.000Z",
+      last_used_at: "2026-04-08T10:05:00.000Z",
+    },
+    {
+      user_id: "e52689bf-d26c-4ab2-8f8d-a387875e931e",
+      phone_number: "918091392311",
+      display_name: "Live WhatsApp User",
+      is_active: true,
+      connected_at: "2026-04-09T19:38:30.699Z",
+      last_used_at: "2026-04-09T19:57:01.706Z",
+    },
+    {
+      user_id: "",
+      phone_number: "919222222222",
+      display_name: "Invalid Linked Row",
+      is_active: true,
+      connected_at: "2026-04-10T10:00:00.000Z",
+      last_used_at: "2026-04-10T10:05:00.000Z",
+    },
+  ]);
+
+  assert.equal(account?.user_id, "e52689bf-d26c-4ab2-8f8d-a387875e931e");
+  assert.equal(account?.phone_number, "918091392311");
 });
 
 test("setup status prefers the most recent active WhatsApp account when duplicate rows exist", () => {
@@ -7324,6 +7359,44 @@ test("history-derived didi aliases beat weak di-prefix WhatsApp names", () => {
   if (resolved.type === "found") {
     assert.equal(resolved.contact.name, "Didi");
     assert.equal(resolved.contact.phone, "917876831969");
+  }
+});
+
+test("history-derived address aliases preserve named honorific phrases for history-backed contact lookup", () => {
+  const inferredAliases = buildHistoryDerivedWhatsAppAliasesForTest([
+    {
+      remote_jid: "917559608735@s.whatsapp.net",
+      remote_phone: "917559608735",
+      contact_name: "917559608735",
+      direction: "outbound",
+      message_type: "text",
+      chat_type: "direct",
+      content: "Thanku tanu didi ji🥰😍☺️",
+    },
+  ]);
+
+  assert.deepEqual(inferredAliases["phone:917559608735"], ["tanu didi", "tanu didi ji"]);
+
+  const resolved = rankContactCandidates("tanu dii pk", [
+    {
+      name: "Tanu",
+      phone: "917559608735",
+      jid: "917559608735@s.whatsapp.net",
+      aliases: ["tanu", ...(inferredAliases["phone:917559608735"] ?? [])],
+    },
+    {
+      name: "Neha Dii",
+      phone: "918894195689",
+      jid: "918894195689@s.whatsapp.net",
+      aliases: ["neha dii", "neha didi"],
+    },
+  ]);
+
+  assert.equal(resolved.type, "found");
+  if (resolved.type === "found") {
+    assert.equal(resolved.contact.name, "Tanu");
+    assert.equal(resolved.contact.phone, "917559608735");
+    assert.match(resolved.contact.matchedAlias ?? "", /tanu/i);
   }
 });
 

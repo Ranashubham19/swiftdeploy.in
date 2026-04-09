@@ -113,6 +113,7 @@ async function main() {
     sharedUser = await resolveClawCloudSharedUser({
       cliUserId: parseOption("--user"),
       allowCreateAuditUser: true,
+      requireActiveWhatsApp: true,
     });
     userId = sharedUser.userId;
   }
@@ -134,7 +135,7 @@ async function main() {
       notes: [
         "Dry-run mode skipped network calls.",
         "Set NEXT_PUBLIC_APP_URL and CRON_SECRET or AGENT_SECRET to run the live canary.",
-        "The script pins to the configured shared QA user from CLAWCLOUD_AUDIT_USER_ID or WHATSAPP_AUTO_TEST_USER_ID unless you override it with --user.",
+        "When a shared user is needed, the script now prefers the active WhatsApp-linked QA user instead of a stale configured audit id unless you override it with --user.",
       ],
     };
     writeJsonReport(reportPath, report);

@@ -6,6 +6,10 @@ export type ClawCloudWhatsAppAccountCandidate = {
   last_used_at?: string | null;
 };
 
+export type ClawCloudWhatsAppLinkedUserCandidate = ClawCloudWhatsAppAccountCandidate & {
+  user_id?: string | null;
+};
+
 function toTimestamp(value: string | null | undefined) {
   const parsed = Date.parse(String(value ?? ""));
   return Number.isFinite(parsed) ? parsed : null;
@@ -54,4 +58,22 @@ export function pickAuthoritativeClawCloudWhatsAppAccount<T extends ClawCloudWha
 
     return String(left.display_name ?? "").localeCompare(String(right.display_name ?? ""));
   })[0] ?? null;
+}
+
+export function pickAuthoritativeClawCloudWhatsAppLinkedUser<T extends ClawCloudWhatsAppLinkedUserCandidate>(
+  accounts: T[] | null | undefined,
+): T | null {
+  const candidates = (accounts ?? []).filter((account) => {
+    if (!account || typeof account !== "object") {
+      return false;
+    }
+
+    return typeof account.user_id === "string" && account.user_id.trim().length > 0;
+  });
+
+  if (!candidates.length) {
+    return null;
+  }
+
+  return pickAuthoritativeClawCloudWhatsAppAccount(candidates);
 }

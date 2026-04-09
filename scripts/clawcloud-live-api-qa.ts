@@ -294,7 +294,10 @@ async function main() {
   const scorecardUsesSharedUser = profile === "scorecard";
   const needsSharedUser = scorecardUsesSharedUser || activeCases.some((testCase) => testCase.userMode === "shared");
   const sharedUser = needsSharedUser
-    ? await resolveClawCloudSharedUser({ allowCreateAuditUser: true })
+    ? await resolveClawCloudSharedUser({
+      allowCreateAuditUser: true,
+      requireActiveWhatsApp: true,
+    })
     : null;
   const sharedUserId = sharedUser?.userId ?? "";
 

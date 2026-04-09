@@ -2,7 +2,10 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createClient } from "@supabase/supabase-js";
-import { pickAuthoritativeClawCloudWhatsAppAccount } from "../lib/clawcloud-whatsapp-account-selection";
+import {
+  pickAuthoritativeClawCloudWhatsAppAccount,
+  pickAuthoritativeClawCloudWhatsAppLinkedUser,
+} from "../lib/clawcloud-whatsapp-account-selection";
 
 const DEFAULT_CLAWCLOUD_AUDIT_EMAIL = "clawcloud-audit@swiftdeploy.test";
 const DEFAULT_CLAWCLOUD_AUDIT_NAME = "ClawCloud Audit";
@@ -11,6 +14,7 @@ type ScriptUserSource =
   | "cli"
   | "env"
   | "env_unverified"
+  | "active_whatsapp"
   | "audit_email"
   | "audit_created";
 
@@ -153,6 +157,36 @@ async function hasActiveWhatsAppAccount(userId: string) {
   return Boolean(preferredAccount?.is_active);
 }
 
+async function findActiveWhatsAppLinkedUser() {
+  const supabaseAdmin = createSupabaseAdminClient();
+  if (!supabaseAdmin) {
+    return null;
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("connected_accounts")
+    .select("user_id, phone_number, display_name, is_active, connected_at, last_used_at")
+    .eq("provider", "whatsapp")
+    .eq("is_active", true)
+    .limit(100);
+
+  if (error) {
+    throw new Error(`Unable to inspect active WhatsApp-linked QA users: ${error.message}`);
+  }
+
+  const preferredAccount = pickAuthoritativeClawCloudWhatsAppLinkedUser(data ?? []);
+  if (!preferredAccount?.user_id) {
+    return null;
+  }
+
+  const resolvedUserId = await findPublicUserById(String(preferredAccount.user_id));
+  if (!resolvedUserId) {
+    return null;
+  }
+
+  return resolvedUserId;
+}
+
 async function createAuditUser(email: string, fullName: string) {
   const supabaseAdmin = createSupabaseAdminClient();
   if (!supabaseAdmin) {
@@ -226,6 +260,12 @@ export async function resolveClawCloudSharedUser(
       throw new Error(`The provided --user value does not exist in public.users: ${cliUserId}`);
     }
 
+    if (requireActiveWhatsApp && !(await hasActiveWhatsAppAccount(resolvedCliUserId).catch(() => false))) {
+      throw new Error(
+        `The provided --user value does not have an active WhatsApp connection: ${maskUserId(resolvedCliUserId)}`,
+      );
+    }
+
     return {
       userId: resolvedCliUserId,
       source: "cli",
@@ -292,6 +332,18 @@ export async function resolveClawCloudSharedUser(
     staleConfiguredKeys.push(key);
   }
 
+  if (requireActiveWhatsApp) {
+    const activeWhatsAppUserId = await findActiveWhatsAppLinkedUser().catch(() => null);
+    if (activeWhatsAppUserId) {
+      return {
+        userId: activeWhatsAppUserId,
+        source: "active_whatsapp",
+        staleConfiguredKeys,
+        auditEmail,
+      };
+    }
+  }
+
   const existingAuditUserId = await findPublicUserByEmail(auditEmail);
   if (existingAuditUserId) {
     if (await hasActiveWhatsAppAccount(existingAuditUserId).catch(() => false)) {
@@ -301,6 +353,12 @@ export async function resolveClawCloudSharedUser(
         staleConfiguredKeys,
         auditEmail,
       };
+    }
+
+    if (requireActiveWhatsApp) {
+      throw new Error(
+        `No active WhatsApp-linked shared QA user is available. Checked ${envKeys.join(", ")} and audit user ${auditEmail}. Connect WhatsApp for a shared QA user or pass --user with an active account.`,
+      );
     }
 
     return {
@@ -314,6 +372,12 @@ export async function resolveClawCloudSharedUser(
   if (!options.allowCreateAuditUser) {
     throw new Error(
       `No valid shared QA user id was found in ${envKeys.join(", ")} and no audit user exists at ${auditEmail}.`,
+    );
+  }
+
+  if (requireActiveWhatsApp) {
+    throw new Error(
+      `No active WhatsApp-linked shared QA user is available. Checked ${envKeys.join(", ")} and no audit user exists at ${auditEmail}. Connect WhatsApp for a shared QA user or pass --user with an active account.`,
     );
   }
 
