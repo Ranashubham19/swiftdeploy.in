@@ -155,6 +155,11 @@ import {
   shouldCooldownClawCloudAppStateCollection,
   type ClawCloudWhatsAppAppStateCollection,
 } from "./lib/clawcloud-whatsapp-app-state";
+import {
+  CLAWCLOUD_WHATSAPP_WAITING_QR_RECONNECT_MAX_ATTEMPTS,
+  shouldAutoRestoreClawCloudWhatsAppSession,
+  shouldRequireManualWhatsAppQrReconnect,
+} from "./lib/clawcloud-whatsapp-reconnect-policy";
 
 loadEnvConfig(process.cwd());
 
@@ -6735,11 +6740,20 @@ async function connectSession(userId: string): Promise<SessionRecord> {
       const code = (lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
       const reconnect = code !== DisconnectReason.loggedOut;
       const closedAt = Date.now();
+      const shouldPauseQrReconnect = reconnect
+        && shouldRequireManualWhatsAppQrReconnect({
+          status: current.status,
+          phone: current.phone,
+          disconnectCode: typeof code === "number" ? code : null,
+          reconnectAttempts: current.reconnectAttempts,
+        });
       current.lastDisconnectCode = typeof code === "number" ? code : null;
       current.lastDisconnectAt = closedAt;
       current.nextReconnectAt = null;
-      current.lastSyncError = reconnect
-        ? current.lastSyncError ?? `WhatsApp socket closed (code: ${code ?? "?"}).`
+      current.lastSyncError = shouldPauseQrReconnect
+        ? `WhatsApp QR expired before pairing after ${CLAWCLOUD_WHATSAPP_WAITING_QR_RECONNECT_MAX_ATTEMPTS} attempts. Open connect again to generate a fresh QR.`
+        : reconnect
+          ? current.lastSyncError ?? `WhatsApp socket closed (code: ${code ?? "?"}).`
         : "WhatsApp session logged out and needs a fresh QR reconnect.";
       touchSessionActivity(current, closedAt);
       clearSessionRuntimeResources(userId, current);
@@ -6765,7 +6779,27 @@ async function connectSession(userId: string): Promise<SessionRecord> {
       }
 
       console.warn(`[agent] Closed for ${userId} (code: ${code ?? "?"}) reconnect=${reconnect}`);
-      if (reconnect) {
+      if (shouldPauseQrReconnect) {
+        current.reconnectAttempts = Math.max(
+          CLAWCLOUD_WHATSAPP_WAITING_QR_RECONNECT_MAX_ATTEMPTS,
+          current.reconnectAttempts + 1,
+        );
+        persistSessionSyncCheckpoint(userId, current);
+        persistSessionRecoveryCheckpoint(userId, {
+          record: current,
+          connectionStatus: "disconnected",
+          connected: false,
+          requiresReauth: true,
+          reconnectAttempts: current.reconnectAttempts,
+          lastDisconnectAt: current.lastDisconnectAt,
+          nextReconnectAt: null,
+          lastSyncError: current.lastSyncError,
+          updatedAt: closedAt,
+        });
+        console.warn(
+          `[agent] Pausing WhatsApp reconnect for ${userId} after repeated expired QR attempts; waiting for a fresh manual reconnect.`,
+        );
+      } else if (reconnect) {
         scheduleSessionReconnect(userId, current, `connection.close.${code ?? "unknown"}`);
       }
     }
@@ -7804,6 +7838,12 @@ async function restoreSessions() {
     console.log(`[agent] Restoring ${ids.length} session(s)...`);
     for (const id of ids) {
       const checkpoint = readSessionRecoveryCheckpoint(id);
+      if (!shouldAutoRestoreClawCloudWhatsAppSession(checkpoint)) {
+        console.log(
+          `[agent] Skipping restore for ${id}: waiting for a fresh WhatsApp QR reconnect.`,
+        );
+        continue;
+      }
       const reconnectWaitMs = getClawCloudWhatsAppReconnectWaitMs(checkpoint);
       if (reconnectWaitMs > 0 && !checkpoint?.requiresReauth) {
         console.log(

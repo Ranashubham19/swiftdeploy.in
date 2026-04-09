@@ -75,6 +75,11 @@ import {
   shouldCooldownClawCloudAppStateCollection,
 } from "@/lib/clawcloud-whatsapp-app-state";
 import {
+  CLAWCLOUD_WHATSAPP_WAITING_QR_RECONNECT_MAX_ATTEMPTS,
+  shouldAutoRestoreClawCloudWhatsAppSession,
+  shouldRequireManualWhatsAppQrReconnect,
+} from "@/lib/clawcloud-whatsapp-reconnect-policy";
+import {
   detectImageGenIntent,
   extractImagePrompt,
   getImageGenerationStatus,
@@ -11906,4 +11911,40 @@ test("manual contact refresh uses the stable app-state subset without critical_u
     CLAWCLOUD_WHATSAPP_CONTACT_REFRESH_COLLECTIONS,
     ["regular", "regular_high", "regular_low", "critical_block"],
   );
+});
+
+test("waiting QR sessions require manual reconnect after repeated 408 expirations", () => {
+  assert.equal(
+    shouldRequireManualWhatsAppQrReconnect({
+      status: "waiting",
+      phone: null,
+      disconnectCode: 408,
+      reconnectAttempts: CLAWCLOUD_WHATSAPP_WAITING_QR_RECONNECT_MAX_ATTEMPTS - 1,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldRequireManualWhatsAppQrReconnect({
+      status: "connected",
+      phone: "918091392311",
+      disconnectCode: 408,
+      reconnectAttempts: CLAWCLOUD_WHATSAPP_WAITING_QR_RECONNECT_MAX_ATTEMPTS - 1,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldRequireManualWhatsAppQrReconnect({
+      status: "waiting",
+      phone: null,
+      disconnectCode: 500,
+      reconnectAttempts: CLAWCLOUD_WHATSAPP_WAITING_QR_RECONNECT_MAX_ATTEMPTS - 1,
+    }),
+    false,
+  );
+});
+
+test("session restore skips checkpoints that explicitly require a fresh QR reconnect", () => {
+  assert.equal(shouldAutoRestoreClawCloudWhatsAppSession({ requiresReauth: true }), false);
+  assert.equal(shouldAutoRestoreClawCloudWhatsAppSession({ requiresReauth: false }), true);
+  assert.equal(shouldAutoRestoreClawCloudWhatsAppSession(null), true);
 });
