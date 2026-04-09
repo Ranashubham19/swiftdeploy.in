@@ -7406,6 +7406,20 @@ test("history-backed contact lookup keeps only anchored searchable name tokens f
   assert.deepEqual(extractWhatsAppHistorySearchTokensForTest("Summarize papa ji"), []);
 });
 
+test("contact confidence verifies a single anchored specific name inside noisy honorific prompts", () => {
+  assert.equal(
+    classifyResolvedContactMatchConfidence({
+      requestedName: "tanu dii pk",
+      resolvedName: "Tanu",
+      exact: false,
+      score: 0.88,
+      matchBasis: "word",
+      source: "fuzzy",
+    }),
+    "verified",
+  );
+});
+
 test("self-chat WhatsApp delivery receipts recover durable aliases for numeric contacts", () => {
   const receiptAliases = buildWhatsAppReceiptDerivedAliasMapForTest([
     {
