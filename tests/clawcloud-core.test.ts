@@ -68,6 +68,7 @@ import {
 } from "@/lib/clawcloud-india-normalization";
 import { detectIndianStockQuery, detectTrainIntent } from "@/lib/clawcloud-india-live";
 import {
+  CLAWCLOUD_WHATSAPP_ALL_APP_STATE_COLLECTIONS,
   buildClawCloudAppStateCollectionCooldownExpiry,
   CLAWCLOUD_WHATSAPP_CONTACT_REFRESH_COLLECTIONS,
   getClawCloudEligibleAppStateCollections,
@@ -11878,10 +11879,10 @@ test("eligible app-state collections exclude cooled-down critical_unblock_low un
       "critical_unblock_low",
       buildClawCloudAppStateCollectionCooldownExpiry(now, 30_000),
     ],
-  ]) as Map<(typeof CLAWCLOUD_WHATSAPP_CONTACT_REFRESH_COLLECTIONS)[number], number>;
+  ]) as Map<(typeof CLAWCLOUD_WHATSAPP_ALL_APP_STATE_COLLECTIONS)[number], number>;
 
   const duringCooldown = getClawCloudEligibleAppStateCollections(
-    CLAWCLOUD_WHATSAPP_CONTACT_REFRESH_COLLECTIONS,
+    CLAWCLOUD_WHATSAPP_ALL_APP_STATE_COLLECTIONS,
     cooldowns,
     now,
   );
@@ -11889,9 +11890,20 @@ test("eligible app-state collections exclude cooled-down critical_unblock_low un
   assert.equal(duringCooldown.includes("regular"), true);
 
   const afterCooldown = getClawCloudEligibleAppStateCollections(
-    CLAWCLOUD_WHATSAPP_CONTACT_REFRESH_COLLECTIONS,
+    CLAWCLOUD_WHATSAPP_ALL_APP_STATE_COLLECTIONS,
     cooldowns,
     now + 31_000,
   );
   assert.equal(afterCooldown.includes("critical_unblock_low"), true);
+});
+
+test("manual contact refresh uses the stable app-state subset without critical_unblock_low", () => {
+  assert.equal(
+    CLAWCLOUD_WHATSAPP_CONTACT_REFRESH_COLLECTIONS.join(",").includes("critical_unblock_low"),
+    false,
+  );
+  assert.deepEqual(
+    CLAWCLOUD_WHATSAPP_CONTACT_REFRESH_COLLECTIONS,
+    ["regular", "regular_high", "regular_low", "critical_block"],
+  );
 });

@@ -1,4 +1,4 @@
-export const CLAWCLOUD_WHATSAPP_CONTACT_REFRESH_COLLECTIONS = [
+export const CLAWCLOUD_WHATSAPP_ALL_APP_STATE_COLLECTIONS = [
   "regular",
   "regular_high",
   "regular_low",
@@ -6,8 +6,15 @@ export const CLAWCLOUD_WHATSAPP_CONTACT_REFRESH_COLLECTIONS = [
   "critical_unblock_low",
 ] as const;
 
+export const CLAWCLOUD_WHATSAPP_CONTACT_REFRESH_COLLECTIONS = [
+  "regular",
+  "regular_high",
+  "regular_low",
+  "critical_block",
+] as const;
+
 export type ClawCloudWhatsAppAppStateCollection =
-  typeof CLAWCLOUD_WHATSAPP_CONTACT_REFRESH_COLLECTIONS[number];
+  typeof CLAWCLOUD_WHATSAPP_ALL_APP_STATE_COLLECTIONS[number];
 
 const CRITICAL_UNBLOCK_LOW_PATCH_MISMATCH_PATTERN = /tried remove, but no previous op/i;
 
