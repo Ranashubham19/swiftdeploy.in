@@ -5449,18 +5449,12 @@ test("AI model ranking answers stay acceptable on the shared web-search route", 
 
 test("AI model prompts get a domain-specific no-live-data fallback instead of the generic stale-data template", () => {
   const fallback = buildNoLiveDataReply("name top 10 best ai model of 2026");
-  assert.match(fallback, /AI model ranking/i);
-  assert.doesNotMatch(fallback, /Time-sensitive query/i);
-  assert.doesNotMatch(fallback, /Live search unavailable for this query/i);
+  assert.equal(fallback, "__NO_LIVE_DATA_INTERNAL_SIGNAL__");
 });
 
 test("current-affairs logistics prompts get a domain-specific no-live-data fallback instead of the generic stale-data template", () => {
   const fallback = buildNoLiveDataReply("is russia oil tanker reached cuba how much oil is there in that tanker");
-  assert.match(fallback, /current-affairs check/i);
-  assert.match(fallback, /could not confirm from the live source batch whether the tanker had already reached Cuba/i);
-  assert.match(fallback, /could not verify a current cargo figure/i);
-  assert.doesNotMatch(fallback, /Time-sensitive query/i);
-  assert.doesNotMatch(fallback, /Live search unavailable for this query/i);
+  assert.equal(fallback, "__NO_LIVE_DATA_INTERNAL_SIGNAL__");
 });
 
 test("AI model ranking answers keep current-year evidence instead of tripping the strict live freshness guard", () => {
@@ -8366,8 +8360,8 @@ test("current-affairs verification requests build stronger event queries", () =>
   assert.equal(shouldUseLiveSearch("who is the current founder of OpenAI"), true);
   assert.equal(classifyClawCloudLiveSearchTier("what is the latest Samsung model right now"), "volatile");
   assert.equal(shouldUseLiveSearch("what is the latest Samsung model right now"), true);
-  assert.match(buildNoLiveDataReply("who is the current founder of OpenAI"), /\*Freshness check\*/i);
-  assert.match(buildNoLiveDataReply("what is the latest Samsung model right now"), /\*Freshness check\*/i);
+  assert.equal(buildNoLiveDataReply("who is the current founder of OpenAI"), "__NO_LIVE_DATA_INTERNAL_SIGNAL__");
+  assert.equal(buildNoLiveDataReply("what is the latest Samsung model right now"), "__NO_LIVE_DATA_INTERNAL_SIGNAL__");
   assert.equal(buildNoLiveDataReply("search the web for how does a b+ tree work"), "__NO_LIVE_DATA_INTERNAL_SIGNAL__");
   assert.match(
     buildCurrentAffairsClarificationReply("did north korea entered the current war"),

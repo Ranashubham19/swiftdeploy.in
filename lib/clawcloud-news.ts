@@ -3226,7 +3226,7 @@ export async function answerWebSearch(question: string): Promise<string> {
 
 export function buildNoLiveDataReply(question: string): string {
   if (detectAiModelRoutingDecision(question)?.mode === "web_search") {
-    return buildAiModelEvidenceOnlyAnswer(question, []);
+    return "__NO_LIVE_DATA_INTERNAL_SIGNAL__";
   }
 
   if (
@@ -3235,11 +3235,11 @@ export function buildNoLiveDataReply(question: string): string {
     || looksLikeCurrentAffairsDemandQuestion(question)
     || isYesNoCurrentAffairsQuestion(question)
   ) {
-    return `${buildCurrentAffairsEvidenceAnswer(question, [])}${buildFreshnessLabel([])}`;
+    return "__NO_LIVE_DATA_INTERNAL_SIGNAL__";
   }
 
   if (shouldFailClosedWithoutFreshData(question)) {
-    return buildFreshDataRequiredReply(question);
+    return "__NO_LIVE_DATA_INTERNAL_SIGNAL__";
   }
 
   // NEVER return a refusal. Return an internal signal so the agent layer
