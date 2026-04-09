@@ -148,6 +148,13 @@ import {
   type WhatsAppOutboundSource,
   type WhatsAppSettings,
 } from "./lib/clawcloud-whatsapp-workspace-types";
+import {
+  buildClawCloudAppStateCollectionCooldownExpiry,
+  CLAWCLOUD_WHATSAPP_CONTACT_REFRESH_COLLECTIONS,
+  getClawCloudEligibleAppStateCollections,
+  shouldCooldownClawCloudAppStateCollection,
+  type ClawCloudWhatsAppAppStateCollection,
+} from "./lib/clawcloud-whatsapp-app-state";
 
 loadEnvConfig(process.cwd());
 
@@ -174,13 +181,8 @@ const MAX_SEND_RETRIES = 3;
 const RETRY_DELAYS_MS = [1_000, 3_000, 9_000] as const;
 const GROUP_RATE_LIMIT_MS = 8_000;
 const CONTACT_REFRESH_WAIT_MS = 1_000;
-const CONTACT_REFRESH_COLLECTIONS = [
-  "regular",
-  "regular_high",
-  "regular_low",
-  "critical_block",
-  "critical_unblock_low",
-] as const;
+const CONTACT_REFRESH_COLLECTIONS = CLAWCLOUD_WHATSAPP_CONTACT_REFRESH_COLLECTIONS;
+const CONTACT_REFRESH_COLLECTION_COOLDOWN_MS = 30 * 60_000;
 const CONTACT_REFRESH_FOLLOWUP_DELAY_MS = 4_000;
 const CONTACT_REFRESH_FOLLOWUP_DELAYS_MS = [
   CONTACT_REFRESH_FOLLOWUP_DELAY_MS,
@@ -278,6 +280,7 @@ type SessionRecord = {
   lastDisconnectCode: number | null;
   lastDisconnectAt: number | null;
   nextReconnectAt: number | null;
+  appStateCollectionCooldowns: Map<ClawCloudWhatsAppAppStateCollection, number>;
   sharedPhoneJids: Map<string, string>;
   contacts: Map<string, SessionContactEntry>;
   historyRows: Map<string, SessionHistoryEntry>;
@@ -3753,6 +3756,55 @@ function processSessionHistorySync(
   }
 }
 
+async function resyncSessionContactRefreshCollections(
+  userId: string,
+  record: SessionRecord,
+  reason: string,
+) {
+  const now = Date.now();
+  const collections = getClawCloudEligibleAppStateCollections(
+    CONTACT_REFRESH_COLLECTIONS,
+    record.appStateCollectionCooldowns,
+    now,
+  );
+
+  if (collections.length === 0) {
+    console.warn(
+      `[agent] Skipping WhatsApp app-state resync for ${userId} via ${reason}: all collections are cooling down.`,
+    );
+    return;
+  }
+
+  try {
+    await record.sock.resyncAppState(collections, false);
+    return;
+  } catch (error) {
+    const degradedCollection = collections.find((collection) =>
+      shouldCooldownClawCloudAppStateCollection(collection, error));
+
+    if (!degradedCollection || collections.length <= 1) {
+      throw error;
+    }
+
+    const cooldownUntil = buildClawCloudAppStateCollectionCooldownExpiry(
+      now,
+      CONTACT_REFRESH_COLLECTION_COOLDOWN_MS,
+    );
+    record.appStateCollectionCooldowns.set(degradedCollection, cooldownUntil);
+    const fallbackCollections = collections.filter((collection) => collection !== degradedCollection);
+    const cooldownMinutes = Math.max(
+      1,
+      Math.round(CONTACT_REFRESH_COLLECTION_COOLDOWN_MS / 60_000),
+    );
+
+    console.warn(
+      `[agent] WhatsApp app-state resync degraded for ${userId} via ${reason}: cooling down ${degradedCollection} for ${cooldownMinutes}m and retrying ${fallbackCollections.join(", ")}.`,
+    );
+
+    await record.sock.resyncAppState(fallbackCollections, false);
+  }
+}
+
 async function requestSessionContactRefresh(
   userId: string,
   record: SessionRecord,
@@ -3791,7 +3843,7 @@ async function requestSessionContactRefresh(
           break;
         }
 
-        await record.sock.resyncAppState(CONTACT_REFRESH_COLLECTIONS, false);
+        await resyncSessionContactRefreshCollections(userId, record, `${reason}.pass${pass + 1}`);
         await new Promise((resolve) => setTimeout(resolve, CONTACT_REFRESH_WAIT_MS));
         if (!isActiveSessionRecord(userId, record) || record.status !== "connected") {
           break;
@@ -6489,6 +6541,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
     sharedPhoneJids: new Map<string, string>(),
     contacts: new Map<string, SessionContactEntry>(),
     historyRows: new Map<string, SessionHistoryEntry>(),
+    appStateCollectionCooldowns: new Map<ClawCloudWhatsAppAppStateCollection, number>(),
   };
 
   sessions.set(userId, record);

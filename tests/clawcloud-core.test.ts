@@ -68,6 +68,12 @@ import {
 } from "@/lib/clawcloud-india-normalization";
 import { detectIndianStockQuery, detectTrainIntent } from "@/lib/clawcloud-india-live";
 import {
+  buildClawCloudAppStateCollectionCooldownExpiry,
+  CLAWCLOUD_WHATSAPP_CONTACT_REFRESH_COLLECTIONS,
+  getClawCloudEligibleAppStateCollections,
+  shouldCooldownClawCloudAppStateCollection,
+} from "@/lib/clawcloud-whatsapp-app-state";
+import {
   detectImageGenIntent,
   extractImagePrompt,
   getImageGenerationStatus,
@@ -11839,4 +11845,53 @@ test("whatsapp reply delivery keeps a single bubble with a fast typing lead", ()
   assert.ok(plan.initialDelayMs <= 3_500);
   assert.equal(plan.totalDelayMs, plan.initialDelayMs);
   assert.equal(plan.chunkDelayMs.length, 0);
+});
+
+test("critical_unblock_low patch mismatch errors cool down only that app-state collection", () => {
+  assert.equal(
+    shouldCooldownClawCloudAppStateCollection(
+      "critical_unblock_low",
+      new Error("tried remove, but no previous op"),
+    ),
+    true,
+  );
+  assert.equal(
+    shouldCooldownClawCloudAppStateCollection(
+      "regular",
+      new Error("tried remove, but no previous op"),
+    ),
+    false,
+  );
+  assert.equal(
+    shouldCooldownClawCloudAppStateCollection(
+      "critical_unblock_low",
+      new Error("network timeout"),
+    ),
+    false,
+  );
+});
+
+test("eligible app-state collections exclude cooled-down critical_unblock_low until expiry", () => {
+  const now = 1_710_000_000_000;
+  const cooldowns = new Map([
+    [
+      "critical_unblock_low",
+      buildClawCloudAppStateCollectionCooldownExpiry(now, 30_000),
+    ],
+  ]) as Map<(typeof CLAWCLOUD_WHATSAPP_CONTACT_REFRESH_COLLECTIONS)[number], number>;
+
+  const duringCooldown = getClawCloudEligibleAppStateCollections(
+    CLAWCLOUD_WHATSAPP_CONTACT_REFRESH_COLLECTIONS,
+    cooldowns,
+    now,
+  );
+  assert.equal(duringCooldown.includes("critical_unblock_low"), false);
+  assert.equal(duringCooldown.includes("regular"), true);
+
+  const afterCooldown = getClawCloudEligibleAppStateCollections(
+    CLAWCLOUD_WHATSAPP_CONTACT_REFRESH_COLLECTIONS,
+    cooldowns,
+    now + 31_000,
+  );
+  assert.equal(afterCooldown.includes("critical_unblock_low"), true);
 });
