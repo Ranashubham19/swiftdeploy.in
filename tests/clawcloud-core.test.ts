@@ -802,8 +802,8 @@ test("agent server enforces explicit user commands before any external-chat repl
 test("freshness-sensitive live questions fail closed before emergency model-memory fallback", () => {
   const source = readFileSync(path.resolve(process.cwd(), "lib/clawcloud-agent.ts"), "utf8");
 
-  assert.match(source, /const noLiveDataReply = buildNoLiveDataReply\(question\)\.trim\(\);/);
   assert.match(source, /shouldFailClosedWithoutFreshData\(question\)/);
+  assert.match(source, /return buildStrictFreshnessReply\(question\);/);
 });
 
 test("agent server keeps a wider answer window and no longer emits resend-the-question fallbacks", () => {
@@ -11370,6 +11370,33 @@ test("web search results expose live evidence bundles for deterministic country 
     assert.equal(result.liveAnswerBundle?.sourceSummary.includes("worldbank.org"), true);
     assert.equal(result.liveAnswerBundle?.metadata.strategy, "deterministic");
     assert.equal(result.liveAnswerBundle?.metadata.freshness_guarded, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("latest submarine prompts fail closed instead of returning stale knowledge", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+    throw new Error(`Unexpected fetch during test: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const result = await routeInboundAgentMessageResult(
+      "test-user",
+      "latest submarine india launch in indian Ocean",
+    );
+    assert.match(result.response ?? "", /freshness check/i);
+    assert.match(result.response ?? "", /\b2026-dated source\b/i);
+    assert.doesNotMatch(result.response ?? "", /\bINS Arighaat\b/i);
   } finally {
     globalThis.fetch = originalFetch;
   }

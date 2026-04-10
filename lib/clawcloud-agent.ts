@@ -305,6 +305,7 @@ import {
 } from "@/lib/clawcloud-user-memory";
 import {
   answerShortDefinitionLookup,
+  buildFreshDataRequiredReply,
   detectWorldBankCountryMetricComparisonQuestion,
   detectWorldBankCountryMetricQuestion,
   fetchWorldBankCountryMetricComparisonAnswer,
@@ -1292,13 +1293,8 @@ async function emergencyDirectAnswer(
 ): Promise<string> {
   // No more early-exit for news â€” fall through to the knowledge-based answer below
   const isNewsQ = detectNewsQuestion(question);
-  const noLiveDataReply = buildNoLiveDataReply(question).trim();
-  if (
-    shouldFailClosedWithoutFreshData(question)
-    && noLiveDataReply
-    && noLiveDataReply !== "__NO_LIVE_DATA_INTERNAL_SIGNAL__"
-  ) {
-    return normalizeResearchMarkdownForWhatsApp(noLiveDataReply);
+  if (shouldFailClosedWithoutFreshData(question)) {
+    return buildStrictFreshnessReply(question);
   }
 
   const emergencyIntent = detectIntent(question).type;
@@ -2908,6 +2904,31 @@ function isDeprecatedInternalFallbackLeak(value: string) {
     || /\bno translation was provided\b/i.test(normalized)
     || /\btranslation was not provided\b/i.test(normalized)
   );
+}
+
+function isStrictFreshnessCheckReply(reply: string | null | undefined) {
+  const value = reply?.trim() ?? "";
+  if (!value) return false;
+
+  return (
+    /^\*(?:Live )?Freshness check\*/i.test(value)
+    || /won't present past-year or stale dated data as if it were current/i.test(value)
+  );
+}
+
+function buildStrictFreshnessReply(question: string) {
+  const strictReply = buildFreshDataRequiredReply(question).trim();
+  if (strictReply) {
+    return normalizeResearchMarkdownForWhatsApp(strictReply);
+  }
+
+  const currentYear = new Date().getFullYear();
+  return normalizeResearchMarkdownForWhatsApp([
+    "*Freshness check*",
+    "",
+    `I need a clearly current ${currentYear}-dated live source before I answer this as a latest/current question.`,
+    "I won't present older information as if it were current.",
+  ].join("\n"));
 }
 
 const KNOWN_CLAWCLOUD_INTENTS = new Set<IntentType>([
@@ -16112,6 +16133,15 @@ async function routeInboundAgentMessageCore(
     );
   const liveRoutingQuestion = shouldUseOriginalQuestionForLiveRouting ? trimmed : finalMessage;
 
+  if (
+    preferPrimaryConversationLane
+    && !hasDocumentContext
+    && !driveRouteMessage
+    && shouldUseLiveSearch(liveRoutingQuestion)
+  ) {
+    preferPrimaryConversationLane = false;
+  }
+
   if (resolvedType !== "email" && aiModelRouting?.mode === "clarify" && aiModelRouting.clarificationReply) {
     void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
     return finalizeEarlyRaw(aiModelRouting.clarificationReply, "technology", "technology");
@@ -16135,7 +16165,7 @@ async function routeInboundAgentMessageCore(
     !preferPrimaryConversationLane
     &&
     !hasDocumentContext
-    && (resolvedCategory === "research" || resolvedCategory === "economics")
+    && (resolvedCategory === "research" || resolvedCategory === "economics" || resolvedCategory === "general")
     && !driveRouteMessage
     && shouldUseLiveSearch(liveRoutingQuestion)
   ) {
@@ -16842,6 +16872,10 @@ async function routeInboundAgentMessageCore(
       }
 
       // Live price data unavailable â€” give knowledge-based answer instead of refusing
+      if (shouldFailClosedWithoutFreshData(finalMessage) || isStrictFreshnessCheckReply(normalizedSearch)) {
+        return finalizeRaw(buildStrictFreshnessReply(finalMessage), "finance", "finance");
+      }
+
       const financeFallback = await emergencyDirectAnswer(
         finalMessage,
         memory.recentTurns,
@@ -16892,6 +16926,7 @@ async function routeInboundAgentMessageCore(
         || isAcceptableAiModelWebAnswer(normalizedSearch, webSearchQuestion)
         || /\bcurrent-affairs clarification\b/i.test(normalizedSearch)
         || /\bfreshness-safe reply\b/i.test(normalizedSearch)
+        || isStrictFreshnessCheckReply(normalizedSearch)
         || freshnessGuardedBundle
       ) {
         void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
@@ -16901,6 +16936,10 @@ async function routeInboundAgentMessageCore(
           "web_search",
           { liveAnswerBundle: searchResult.liveAnswerBundle },
         );
+      }
+
+      if (shouldFailClosedWithoutFreshData(webSearchQuestion)) {
+        return finalizeRaw(buildStrictFreshnessReply(webSearchQuestion), "web_search", "web_search");
       }
 
       const history = memory.recentTurns.length
@@ -17043,7 +17082,7 @@ async function routeInboundAgentMessageCore(
         liveAnswerBundle: null,
       }));
       const normalizedNews = newsResult.answer.trim();
-      if (isAcceptableNewsCoverageAnswer(normalizedNews, finalMessage)) {
+      if (isAcceptableNewsCoverageAnswer(normalizedNews, finalMessage) || isStrictFreshnessCheckReply(normalizedNews)) {
         void upsertAnalyticsDaily(userId, { tasks_run: 1, wa_messages_sent: 1 }).catch(() => null);
         return finalizeRaw(
           normalizeResearchMarkdownForWhatsApp(normalizedNews),
@@ -17073,6 +17112,10 @@ async function routeInboundAgentMessageCore(
       }
 
       // Live news unavailable — fall back to a dated best-known snapshot.
+      if (shouldFailClosedWithoutFreshData(finalMessage)) {
+        return finalizeRaw(buildStrictFreshnessReply(finalMessage), "news", "news");
+      }
+
       const currentYear = new Date().getFullYear();
       const latestOnlyInstruction = [
         "Answer with best-known facts, but do NOT claim they are the latest unless you can verify the date.",

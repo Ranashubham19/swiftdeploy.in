@@ -99,6 +99,8 @@ const VOLATILE_PATTERNS: RegExp[] = [
   /\b(top\s*\d+\s*(ai|llm|model)\s*(of|in)\s*(20\d\d|today|now)?)\b/i,
   /\b(current population of|population of .* (20\d\d|today|current))\b/i,
   /\b(gdp|inflation|unemployment)\s+(of|in|rate)\b/i,
+  /\b(latest|current|newest)\b.{0,50}\b(submarine|warship|destroyer|frigate|carrier|navy|naval|military|defen(?:s|c)e|missile)\b/i,
+  /\b(submarine|warship|destroyer|frigate|carrier|navy|naval|military|defen(?:s|c)e|missile)\b.{0,50}\b(latest|current|newest|launch(?:ed)?|commissioned|inducted|deployment|status)\b/i,
   /\b(who won the (oscar|grammy|nobel|bafta|golden globe)|(oscar|grammy|nobel|pulitzer)\s+(winner|winners))\b/i,
   /\b(icc ranking|fifa ranking|atp ranking|wta ranking)\b/i,
 ];
@@ -139,7 +141,7 @@ const VOLATILE_ENTITY_CUE = /\b(net worth|billionaire|forbes|ceo|president|prime
 const BROAD_FRESHNESS_RECENCY_CUE =
   /\b(latest|newest|current|currently|today|today's|this week|this month|this year|right now|as of now|recent|recently|updated|update|release date|released|launch(?:ed)?|announced?)\b/i;
 const BROAD_FRESHNESS_ENTITY_CUE =
-  /\b(ceo|cto|cfo|founder|president|prime minister|governor|director|chair(?:man|person|woman)?|leadership|model|version|release|launch|pricing|price|cost|plan|subscription|market cap|net worth|ranking|population|gdp|inflation|unemployment|exchange rate|stock|share|crypto|forecast|weather|score|result|headline|headlines|news|status|situation)\b/i;
+  /\b(ceo|cto|cfo|founder|president|prime minister|governor|director|chair(?:man|person|woman)?|leadership|model|version|release|launch|pricing|price|cost|plan|subscription|market cap|net worth|ranking|population|gdp|inflation|unemployment|exchange rate|stock|share|crypto|forecast|weather|score|result|headline|headlines|news|status|situation|submarine|warship|destroyer|frigate|carrier|navy|naval|military|defen(?:s|c)e|missile|commissioned|inducted)\b/i;
 const BROAD_FRESHNESS_SOFTWARE_ENTITY_CUE =
   /\b(gpt|chatgpt|claude|gemini|llama|mistral|deepseek|openai|anthropic|meta|google|microsoft|apple|tesla|vercel|next\.?js|react|node(?:\.js)?|typescript|python|ios|android|windows)\b/i;
 const STABLE_KNOWLEDGE_BLOCKER_CUE =
@@ -1431,6 +1433,7 @@ function buildStrictCurrentTimelineReply(
   freshestAt?: string | null,
 ) {
   const normalized = normalizeQuestion(question);
+  const currentYear = currentUtcYear();
   const latestMode =
     /\b(price|rate|worth|value|weather|forecast|score|news|update|updates|status|situation)\b/i.test(normalized)
       ? "live reading"
@@ -1440,6 +1443,7 @@ function buildStrictCurrentTimelineReply(
     route.tier === "realtime" ? "*Live freshness check*" : "*Freshness check*",
     "",
     "I won't present past-year or stale dated data as if it were current.",
+    `I need a clearly current ${currentYear}-dated source before I answer this as a safe ${latestMode}.`,
     freshestAt
       ? `The freshest dated signal I found was ${freshestAt}, which is still too old for a safe ${latestMode}.`
       : `I could not confirm a clearly current dated source for a safe ${latestMode}.`,
