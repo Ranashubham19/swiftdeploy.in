@@ -6132,6 +6132,17 @@ test("send-message action planning escalates multi-recipient and broadcast reque
   }
 });
 
+test("send-message parsing keeps explicit both/comma recipient lists separated", () => {
+  const parsed = parseSendMessageCommand(
+    "Send a beautiful professional good morning to both maa, dii and papa ji",
+  );
+
+  assert.ok(parsed);
+  assert.equal(parsed?.kind, "contacts");
+  assert.deepEqual(parsed?.contactNames, ["maa", "dii", "papa ji"]);
+  assert.equal(parsed?.message, "a beautiful professional good morning");
+});
+
 test("active contact mode parses professional handoff commands and only proxies normal follow-up messages", () => {
   assert.equal(parseSendMessageCommand("Talk to Aman on my behalf"), null);
   assert.equal(parseSendMessageCommand("Start talking to Aman on my behalf"), null);

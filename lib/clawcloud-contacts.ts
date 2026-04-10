@@ -422,6 +422,8 @@ function extractDirectPhone(value: string) {
 
 function splitContactNames(rawRecipients: string) {
   const cleaned = rawRecipients
+    .replace(/,/g, " and ")
+    .replace(/\bboth\b/gi, " ")
     .replace(/\b(?:contacts?|people|person)\b/gi, " ")
     .replace(/\b(?:at once|all together|together)\b/gi, " ")
     .replace(/\s+/g, " ")
@@ -447,7 +449,11 @@ function buildParsedSendCommand(
   message: string,
 ): ParsedSendMessageCommand | null {
   const cleanedRecipients = stripRecipientTrailingOperationalNoise(
-    rawRecipients.trim().replace(/^[,:-]+|[,:-]+$/g, "").trim(),
+    rawRecipients
+      .trim()
+      .replace(/^[,:-]+|[,:-]+$/g, "")
+      .replace(/,\s*/g, " and ")
+      .trim(),
   );
   const cleanedMessage = message.trim().replace(/^["']|["']$/g, "").trim();
   if (!cleanedRecipients || !cleanedMessage) {
