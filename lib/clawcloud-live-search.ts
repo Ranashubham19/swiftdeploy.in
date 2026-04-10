@@ -261,6 +261,13 @@ const WEAK_LIVE_DOMAINS = [
   "wordpress.com",
   "medium.com",
 ];
+const OFFICIAL_PUBLIC_SECTOR_DOMAIN_PATTERNS = [
+  /(?:^|\.)gov$/i,
+  /(?:^|\.)gov\.[a-z]{2,}$/i,
+  /(?:^|\.)mil$/i,
+  /(?:^|\.)mil\.[a-z]{2,}$/i,
+  /(?:^|\.)nic\.in$/i,
+];
 type ClawCloudLiveEvidenceQuality = "weak" | "mixed" | "strong";
 type ClawCloudLiveEvidenceQualitySummary = {
   quality: ClawCloudLiveEvidenceQuality;
@@ -1473,44 +1480,17 @@ function guardStrictCurrentTimelineAnswer(input: {
   }
 
   const answerYears = extractReferencedYears(answer);
-  const answerDates = extractReferencedDates(answer);
-  const evidenceDates = (input.evidence ?? [])
-    .map((item) => item.publishedAt ?? null)
-    .filter(Boolean)
-    .map((value) => new Date(value as string))
-    .filter((date) => Number.isFinite(date.getTime()));
-
-  const allDatedSignals = [...answerDates, ...evidenceDates].sort((left, right) => right.getTime() - left.getTime());
-  const freshest = allDatedSignals[0] ?? null;
-  const maxAgeDays = strictCurrentTimelineMaxAgeDays(input.question, input.route);
-  const maxAgeMs = maxAgeDays * 86_400_000;
-  const now = Date.now();
-  const aiModelRouting = detectAiModelRoutingDecision(input.question);
+  const strictEvidence = assessStrictCurrentTimelineEvidenceSupport({
+    question: input.question,
+    route: input.route,
+    evidence: input.evidence ?? [],
+  });
 
   const hasPastYearInAnswer = answerYears.some((year) => year < currentUtcYear());
-  const hasPastYearEvidence = evidenceDates.some((date) => date.getUTCFullYear() < currentUtcYear());
-  const hasOverAgeDate = allDatedSignals.some((date) => now - date.getTime() > maxAgeMs);
-  const missingFreshnessEvidence = !allDatedSignals.length;
-  const hasFreshCurrentYearOfficialAiEvidence =
-    aiModelRouting?.mode === "web_search"
-    && (input.evidence ?? []).filter((item) => {
-      if (item.kind !== "official_page" && item.kind !== "official_api") {
-        return false;
-      }
-      const publishedAt = item.publishedAt ? new Date(item.publishedAt) : null;
-      if (!publishedAt || !Number.isFinite(publishedAt.getTime())) {
-        return false;
-      }
-      return publishedAt.getUTCFullYear() === currentUtcYear() && now - publishedAt.getTime() <= maxAgeMs;
-    }).length >= 2;
 
   if (
     !hasPastYearInAnswer
-    && !missingFreshnessEvidence
-    && (
-      (!hasPastYearEvidence && !hasOverAgeDate)
-      || hasFreshCurrentYearOfficialAiEvidence
-    )
+    && strictEvidence.freshStrongCount >= 1
   ) {
     return {
       answer,
@@ -1522,7 +1502,7 @@ function guardStrictCurrentTimelineAnswer(input: {
     answer: buildStrictCurrentTimelineReply(
       input.question,
       input.route,
-      freshest ? formatLiveSnapshotTimestamp(freshest) : null,
+      strictEvidence.freshest ? formatLiveSnapshotTimestamp(strictEvidence.freshest) : null,
     ),
     freshnessGuarded: true,
   };
@@ -2108,9 +2088,41 @@ function buildLiveSearchQueries(question: string, route: ClawCloudLiveSearchRout
   const currentAffairsQueries = looksLikeCurrentAffairsLogisticsQuestion(q)
     ? buildCurrentAffairsQueries(q)
     : [];
+  const strictCurrentTimeline = requiresStrictCurrentTimeline(q, route);
 
   for (const query of currentAffairsQueries.slice(0, 4)) {
     queries.add(query);
+  }
+
+  if (strictCurrentTimeline) {
+    queries.add(`${q} ${year}`);
+    queries.add(`${q} official ${year}`);
+
+    if (/\b(openai|chatgpt|gpt)\b/i.test(lower)) {
+      queries.add(`site:openai.com ${q} ${year}`);
+      queries.add(`site:platform.openai.com ${q}`);
+    }
+    if (/\b(anthropic|claude)\b/i.test(lower)) {
+      queries.add(`site:anthropic.com ${q} ${year}`);
+      queries.add(`site:docs.anthropic.com ${q}`);
+    }
+    if (/\b(gemini|deepmind|google ai|ai google)\b/i.test(lower)) {
+      queries.add(`site:blog.google ${q} ${year}`);
+      queries.add(`site:deepmind.google ${q} ${year}`);
+      queries.add(`site:ai.google.dev ${q}`);
+    }
+    if (/\b(meta|llama)\b/i.test(lower)) {
+      queries.add(`site:ai.meta.com ${q} ${year}`);
+      queries.add(`site:meta.com ${q} ${year}`);
+    }
+    if (
+      /\bindia\b/i.test(lower)
+      && /\b(submarine|warship|destroyer|frigate|carrier|navy|naval|military|defen(?:s|c)e|missile)\b/i.test(lower)
+    ) {
+      queries.add(`site:pib.gov.in ${q} ${year}`);
+      queries.add(`site:mod.gov.in ${q} ${year}`);
+      queries.add(`site:indiannavy.nic.in ${q} ${year}`);
+    }
   }
 
   if (route.tier === "realtime") {
@@ -2203,7 +2215,7 @@ function buildLiveSearchQueries(question: string, route: ClawCloudLiveSearchRout
   if (!historicalYear && !looksLikeHistoricalWealthQuestion(q)) {
     queries.add(`${q} latest`);
   }
-  return [...queries].slice(0, 5);
+  return [...queries].slice(0, strictCurrentTimeline ? 8 : 5);
 }
 
 function looksLikeTierOneLiveSource(source: ResearchSource) {
@@ -2219,7 +2231,11 @@ function domainMatchesCandidate(domain: string, candidate: string) {
 }
 
 function isOfficialLiveDomain(domain: string) {
-  return OFFICIAL_LIVE_DOMAINS.some((candidate) => domainMatchesCandidate(domain, candidate));
+  const normalized = domain.trim().toLowerCase();
+  return (
+    OFFICIAL_LIVE_DOMAINS.some((candidate) => domainMatchesCandidate(normalized, candidate))
+    || OFFICIAL_PUBLIC_SECTOR_DOMAIN_PATTERNS.some((pattern) => pattern.test(normalized))
+  );
 }
 
 function isTierOneReportDomain(domain: string) {
@@ -2228,6 +2244,137 @@ function isTierOneReportDomain(domain: string) {
 
 function isWeakLiveDomain(domain: string) {
   return WEAK_LIVE_DOMAINS.some((candidate) => domainMatchesCandidate(domain, candidate));
+}
+
+function isTrustedLiveDomain(domain: string) {
+  return TRUSTED_LIVE_DOMAINS.some((candidate) => domainMatchesCandidate(domain, candidate));
+}
+
+function isStrongLiveDomain(domain: string) {
+  return isOfficialLiveDomain(domain) || isTierOneReportDomain(domain) || isTrustedLiveDomain(domain);
+}
+
+function isStrongLiveEvidenceItem(item: ClawCloudEvidenceItem) {
+  return (
+    item.kind === "official_api"
+    || item.kind === "official_page"
+    || item.kind === "report"
+    || item.kind === "market_data"
+    || item.kind === "weather_provider"
+    || isStrongLiveDomain(String(item.domain || "").trim().toLowerCase())
+  );
+}
+
+function parseClawCloudFreshnessDate(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+function getEvidenceFreshnessDate(item: ClawCloudEvidenceItem) {
+  const published = parseClawCloudFreshnessDate(item.publishedAt ?? null);
+  if (published) {
+    return published;
+  }
+
+  if (
+    item.kind === "official_api"
+    || item.kind === "market_data"
+    || item.kind === "weather_provider"
+  ) {
+    return parseClawCloudFreshnessDate(item.observedAt ?? null);
+  }
+
+  return null;
+}
+
+function isFreshCurrentYearDate(date: Date, maxAgeMs: number) {
+  const now = Date.now();
+  return date.getUTCFullYear() === currentUtcYear() && now - date.getTime() <= maxAgeMs;
+}
+
+function assessStrictCurrentTimelineEvidenceSupport(input: {
+  question: string;
+  route: ClawCloudLiveSearchRoute;
+  evidence: ClawCloudEvidenceItem[];
+}) {
+  const maxAgeMs = strictCurrentTimelineMaxAgeDays(input.question, input.route) * 86_400_000;
+  let freshest: Date | null = null;
+  let datedEvidenceCount = 0;
+  let freshStrongCount = 0;
+  let freshOfficialCount = 0;
+  let freshReportCount = 0;
+  let freshMarketLikeCount = 0;
+
+  for (const item of input.evidence) {
+    const date = getEvidenceFreshnessDate(item);
+    if (!date) {
+      continue;
+    }
+
+    datedEvidenceCount += 1;
+    if (!freshest || date.getTime() > freshest.getTime()) {
+      freshest = date;
+    }
+
+    if (!isStrongLiveEvidenceItem(item) || !isFreshCurrentYearDate(date, maxAgeMs)) {
+      continue;
+    }
+
+    freshStrongCount += 1;
+
+    if (item.kind === "official_api" || item.kind === "official_page" || isOfficialLiveDomain(item.domain)) {
+      freshOfficialCount += 1;
+    }
+    if (item.kind === "report" || isTierOneReportDomain(item.domain) || isTrustedLiveDomain(item.domain)) {
+      freshReportCount += 1;
+    }
+    if (item.kind === "market_data" || item.kind === "weather_provider") {
+      freshMarketLikeCount += 1;
+    }
+  }
+
+  return {
+    freshest,
+    datedEvidenceCount,
+    freshStrongCount,
+    freshOfficialCount,
+    freshReportCount,
+    freshMarketLikeCount,
+  };
+}
+
+function parseLiveSourcePublishedDate(source: ResearchSource) {
+  if (!source.publishedDate) {
+    return null;
+  }
+
+  const published = new Date(source.publishedDate);
+  return Number.isFinite(published.getTime()) ? published : null;
+}
+
+function isStrongFreshLiveSourceForStrictCurrentTimeline(
+  question: string,
+  route: ClawCloudLiveSearchRoute,
+  source: ResearchSource,
+) {
+  const domain = String(source.domain || "").trim().toLowerCase();
+  if (!isStrongLiveDomain(domain)) {
+    return false;
+  }
+
+  const published = parseLiveSourcePublishedDate(source);
+  if (!published) {
+    return false;
+  }
+
+  return isFreshCurrentYearDate(
+    published,
+    strictCurrentTimelineMaxAgeDays(question, route) * 86_400_000,
+  );
 }
 
 function classifyLiveEvidenceKindFromSource(
@@ -2321,6 +2468,11 @@ function hasSufficientClawCloudLiveEvidenceSupport(input: {
   const summary = assessClawCloudLiveEvidenceQuality(input.evidence);
   if (!input.evidence.length || summary.quality === "weak") {
     return false;
+  }
+
+  if (requiresStrictCurrentTimeline(input.question, input.route)) {
+    const strictSupport = assessStrictCurrentTimelineEvidenceSupport(input);
+    return strictSupport.freshStrongCount >= 1;
   }
 
   if (detectWorldBankCountryMetricQuestion(input.question) || detectOfficialPricingQuery(input.question)) {
@@ -3186,6 +3338,8 @@ function scoreLiveSource(
   source: ResearchSource,
   questionTokens: string[],
   focusTokens: string[],
+  question?: string,
+  route?: ClawCloudLiveSearchRoute,
 ) {
   const haystack = `${source.title} ${source.snippet} ${source.domain}`.toLowerCase();
   const overlap = questionTokens.filter((token) => haystack.includes(token)).length;
@@ -3214,19 +3368,65 @@ function scoreLiveSource(
     if (ageHours <= 24 * 30) return 0.08;
     return 0;
   })();
+  const strictCurrentTimeline =
+    question && route ? requiresStrictCurrentTimeline(question, route) : false;
+  const strictFreshnessAdjustment = (() => {
+    if (!strictCurrentTimeline) {
+      return 0;
+    }
 
-  return Number(source.score || 0) + overlap * 0.25 + focusOverlap * 0.5 + authorityBoost + recencyBoost - weakPenalty;
+    const published = parseLiveSourcePublishedDate(source);
+    if (!published) {
+      return isStrongLiveDomain(domain) ? -0.12 : -0.55;
+    }
+
+    const maxAgeMs = strictCurrentTimelineMaxAgeDays(question!, route!) * 86_400_000;
+    if (isFreshCurrentYearDate(published, maxAgeMs)) {
+      return isStrongLiveDomain(domain) ? 1.15 : 0.45;
+    }
+
+    return isStrongLiveDomain(domain) ? -1.0 : -0.6;
+  })();
+
+  return Number(source.score || 0)
+    + overlap * 0.25
+    + focusOverlap * 0.5
+    + authorityBoost
+    + recencyBoost
+    + strictFreshnessAdjustment
+    - weakPenalty;
 }
 
-function selectRelevantLiveSources(question: string, sources: ResearchSource[]) {
+function selectRelevantLiveSources(
+  question: string,
+  route: ClawCloudLiveSearchRoute,
+  sources: ResearchSource[],
+) {
   const questionTokens = tokenizeQuestion(question);
   const focusTokens = focusTokensForQuestion(question);
+  const strictCurrentTimeline = requiresStrictCurrentTimeline(question, route);
   const scored = sources
     .map((source) => ({
       source,
-      score: scoreLiveSource(source, questionTokens, focusTokens),
+      score: scoreLiveSource(source, questionTokens, focusTokens, question, route),
     }))
     .sort((left, right) => right.score - left.score);
+
+  if (strictCurrentTimeline) {
+    const prioritized = scored
+      .filter((entry) => isStrongFreshLiveSourceForStrictCurrentTimeline(question, route, entry.source))
+      .map((entry) => entry.source);
+
+    if (prioritized.length >= 1) {
+      const seen = new Set(prioritized.map((entry) => entry.url));
+      return [
+        ...prioritized,
+        ...scored
+          .map((entry) => entry.source)
+          .filter((entry) => !seen.has(entry.url)),
+      ].slice(0, 8);
+    }
+  }
 
   const focused = scored
     .filter((entry) => entry.score >= 1.0)
@@ -3468,7 +3668,29 @@ export function buildClawCloudLiveAnswerBundle(input: {
   evidence?: ClawCloudEvidenceItem[];
   strategy: ClawCloudLiveBundleStrategy;
 }): ClawCloudAnswerBundle {
-  const evidence = (input.evidence?.length ? input.evidence : inferEvidenceFromRenderedAnswer(input.answer)).slice(0, 6);
+  const evidence = (input.evidence?.length ? input.evidence : inferEvidenceFromRenderedAnswer(input.answer))
+    .slice(0, 6)
+    .map((item) => {
+      if (
+        input.strategy === "deterministic"
+        && !item.publishedAt
+        && item.observedAt
+        && (
+          item.kind === "official_api"
+          || item.kind === "official_page"
+          || item.kind === "report"
+          || item.kind === "market_data"
+          || item.kind === "weather_provider"
+        )
+      ) {
+        return {
+          ...item,
+          publishedAt: item.observedAt,
+        };
+      }
+
+      return item;
+    });
   const sourceQuality = assessClawCloudLiveEvidenceQuality(evidence);
   const freshness = guardStrictCurrentTimelineAnswer({
     question: input.question,
@@ -3612,16 +3834,17 @@ export async function fetchLiveAnswerBundle(question: string): Promise<ClawCloud
   }
 
   const queries = buildLiveSearchQueries(question, route);
+  const strictCurrentTimeline = requiresStrictCurrentTimeline(question, route);
   const search = await searchInternetWithDiagnostics(queries, {
-    maxQueries: Math.min(queries.length, route.tier === "realtime" ? 3 : 4),
-    maxResults: route.tier === "realtime" ? 12 : 16,
+    maxQueries: Math.min(queries.length, strictCurrentTimeline ? (route.tier === "realtime" ? 5 : 6) : (route.tier === "realtime" ? 3 : 4)),
+    maxResults: strictCurrentTimeline ? (route.tier === "realtime" ? 16 : 20) : (route.tier === "realtime" ? 12 : 16),
   });
 
   if (!search.sources.length) {
     return null;
   }
 
-  const sources = selectRelevantLiveSources(question, search.sources);
+  const sources = selectRelevantLiveSources(question, route, search.sources);
   const evidence = sources.map((source) => mapResearchSourceToEvidence(source));
   if (
     (!hasSufficientClawCloudLiveEvidenceSupport({ question, route, evidence }))

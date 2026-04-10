@@ -11333,6 +11333,97 @@ test("live answer bundles carry explicit evidence metadata and render cleanly", 
   assert.match(rendered, /won't present past-year or stale dated data as if it were current/i);
 });
 
+test("strict current timeline guard ignores a model-written As of line when sources are not actually dated", () => {
+  const bundle = buildClawCloudLiveAnswerBundle({
+    question: "who is the latest CEO of OpenAI",
+    answer: [
+      "Sam Altman is the CEO of OpenAI.",
+      "",
+      "As of: April 10, 2026 at 01:00 PM UTC",
+      "Sources: openai.com",
+    ].join("\n"),
+    route: {
+      tier: "volatile",
+      requiresWebSearch: true,
+      badge: "*Fresh answer*",
+      sourceNote: "Source note: checked against live web signals.",
+    },
+    strategy: "search_synthesis",
+  });
+
+  assert.equal(bundle.metadata.freshness_guarded, true);
+  assert.match(bundle.answer, /\*Freshness check\*/i);
+  assert.match(bundle.answer, /won't present past-year or stale dated data as if it were current/i);
+});
+
+test("strict current timeline guard accepts fresh strong evidence even when one older source is present", () => {
+  const bundle = buildClawCloudLiveAnswerBundle({
+    question: "latest submarine india launch in indian Ocean",
+    answer: [
+      "The latest confirmed Indian submarine milestone in the current source set is a 2026-dated official or tier-one report update.",
+      "",
+      "As of: April 10, 2026 at 01:00 PM UTC",
+      "Sources: pib.gov.in, reuters.com",
+    ].join("\n"),
+    route: {
+      tier: "volatile",
+      requiresWebSearch: true,
+      badge: "*Fresh answer*",
+      sourceNote: "Source note: checked against live web signals.",
+    },
+    evidence: [
+      {
+        title: "PIB submarine update",
+        domain: "pib.gov.in",
+        kind: "official_page",
+        url: "https://pib.gov.in/example",
+        snippet: "Official Indian government update.",
+        publishedAt: "2026-04-09T08:00:00.000Z",
+        observedAt: "2026-04-10T13:00:00.000Z",
+      },
+      {
+        title: "Reuters naval report",
+        domain: "reuters.com",
+        kind: "report",
+        url: "https://reuters.com/example",
+        snippet: "Tier-one report about the update.",
+        publishedAt: "2026-04-09T09:15:00.000Z",
+        observedAt: "2026-04-10T13:00:00.000Z",
+      },
+      {
+        title: "Older backgrounder",
+        domain: "news.google.com",
+        kind: "search_result",
+        url: "https://news.google.com/example",
+        snippet: "Old background coverage.",
+        publishedAt: "2025-08-19T09:00:00.000Z",
+        observedAt: "2026-04-10T13:00:00.000Z",
+      },
+    ],
+    strategy: "search_synthesis",
+  });
+
+  assert.equal(bundle.metadata.freshness_guarded, false);
+  assert.match(bundle.answer, /latest confirmed Indian submarine milestone/i);
+});
+
+test("government domains count as strong official live evidence", () => {
+  const summary = assessClawCloudLiveEvidenceQualityForTest([
+    {
+      title: "PIB update",
+      domain: "pib.gov.in",
+      kind: "search_result",
+      url: "https://pib.gov.in/example",
+      snippet: "Government press release.",
+      publishedAt: "2026-04-09T08:00:00.000Z",
+      observedAt: "2026-04-10T13:00:00.000Z",
+    },
+  ]);
+
+  assert.equal(summary.officialCount, 1);
+  assert.equal(summary.quality, "strong");
+});
+
 test("AI model comparison live answers fail closed when only stale prior-year evidence is available", () => {
   const result = buildSourceBackedLiveAnswerResult({
     question: "what is the key difference betweeen gpt 5.4 vs opus 4.6 and gemini 3.2 pro and when were they released and rate them all out of 100 accoriding to there performance",
