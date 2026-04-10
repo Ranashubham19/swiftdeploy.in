@@ -22577,7 +22577,7 @@ function looksLikeInChatClawCloudRequestDuringActiveContact(message: string) {
   return false;
 }
 
-function looksLikePlainChatFollowUpForActiveContact(message: string) {
+function looksLikeExplicitActiveContactOutboundInstruction(message: string) {
   const normalized = normalizeClawCloudUnderstandingMessage(String(message ?? "")).trim();
   if (!normalized) {
     return false;
@@ -22588,39 +22588,20 @@ function looksLikePlainChatFollowUpForActiveContact(message: string) {
   }
 
   const lower = normalized.toLowerCase();
-  const words = lower.split(/\s+/).filter(Boolean);
-  const directConversationSignal = detectDirectConversationSignal(normalized);
+  if (parseSendMessageCommand(normalized) !== null) {
+    return true;
+  }
+
   if (
-    directConversationSignal
-    && !directConversationSignal.asksCapability
-    && !directConversationSignal.asksAssistantName
+    /^(?:please\s+)?(?:send|message|msg|text|reply|respond|tell|say|inform|let)\b/i.test(normalized)
+    || /^(?:please\s+)?(?:write|draft|compose|create|prepare|generate)\b.{0,64}\b(?:message|reply|text|wish|note|caption)\b/i.test(normalized)
   ) {
     return true;
   }
 
   if (
-    /^(?:please\s+)?(?:tell|say|inform|let)\b.{0,80}\b(?:him|her|them)\b/i.test(normalized)
-    || /^(?:please\s+)?(?:bolo|bata(?:\s*do|\s*dena)?|keh(?:\s*do|\s*dena)?)\b/i.test(lower)
-  ) {
-    return true;
-  }
-
-  if (
-    /^(?:hi+|hello+|hey+|hlo+|helo+|good morning|good afternoon|good evening|good night|namaste|thanks?|thank you|sorry|ok(?:ay)?|haan|han|hmm|hm|theek hai|thik hai)\b/i.test(lower)
-  ) {
-    return true;
-  }
-
-  if (
-    words.length <= 24
-    && /\b(?:where are you|are you free|call me|text me|let me know|on my way|i(?:'m| am)?|i will|i'll|ill|main|mai|mein|mujhe|meri|mera|tum|tu|aap|free ho|kahan ho|kahaan ho|kab aa(?:oge|rahe)|late|busy|reached|reach gaya|reach gya|milte|take care|tc)\b/i.test(lower)
-  ) {
-    return true;
-  }
-
-  if (
-    words.length <= 14
-    && /^(?:please\s+)?(?:call|come|wait|listen|take care|tc|gn|gm|good night|good morning|miss you|love you)\b/i.test(lower)
+    /^(?:please\s+)?(?:bolo|bata(?:\s*(?:do|dena|dijiye|de))?|keh(?:\s*(?:do|dena|dijiye|de))?|bhej(?:\s*(?:do|dena|dijiye|de))?|send\s+kar(?:\s*(?:do|dena))?|message\s+kar(?:\s*(?:do|dena))?|reply\s+kar(?:\s*(?:do|dena))?)\b/i.test(lower)
+    || /^(?:please\s+)?(?:us(?:ko|se)?|un(?:ko|se)?|isko|isse|inko|inse)\s+(?:bolo|bata(?:\s*(?:do|dena|dijiye|de))?|keh(?:\s*(?:do|dena|dijiye|de))?|reply\s*(?:do|kar(?:\s*(?:do|dena))?))\b/i.test(lower)
   ) {
     return true;
   }
@@ -22672,7 +22653,7 @@ function shouldRouteMessageToActiveWhatsAppContactSession(
   return Boolean(
     session
     && !shouldBypassWhatsAppActiveContactSessionRouting(message)
-    && looksLikePlainChatFollowUpForActiveContact(message),
+    && looksLikeExplicitActiveContactOutboundInstruction(message),
   );
 }
 
@@ -23368,8 +23349,9 @@ function buildWhatsAppActiveContactSessionStartedReply(input: {
         ? `Active contact mode ab *${previousTargetLabel}* se *${nextTargetLabel}* par move ho gaya hai.`
         : `Active contact mode ab *${nextTargetLabel}* ke liye on hai.`,
       "",
-      `Ab se, main yahan aapke normal messages ko ${nextTargetLabel} ke liye message maanunga jab tak aap mujhe stop karne ko nahi bolte.`,
-      "Simple chat-type follow-ups us contact ko jayenge. Send/reply commands, save-contact commands, aur ClawCloud se help ya knowledge wale sawal isi chat me rahenge.",
+      `Ab se, main ${nextTargetLabel} ko selected WhatsApp target ke roop me yaad rakhunga, lekin message tabhi bhejunga jab aap clear send ya reply instruction doge.`,
+      "Normal sawal, knowledge requests, translations, drafts, aur casual messages isi chat me rahenge.",
+      "Examples: _Send good morning._  _Reply that I will call later._",
       "Jab clear hoga, main us contact ki recent chat language ke hisaab se automatically adapt karunga, unless aap kisi specific message ke liye alag output language bolo.",
       "Agar aap ClawCloud se normal baat karna chahte ho, pehle is mode ko stop karo.",
       `Stop karne ke liye bolo: _Stop talking to ${input.next.contactName}_.`,
@@ -23383,8 +23365,9 @@ function buildWhatsAppActiveContactSessionStartedReply(input: {
       ? `Active contact mode moved from *${previousTargetLabel}* to *${nextTargetLabel}*.` 
       : `Active contact mode is now on for *${nextTargetLabel}*.`,
     "",
-    `From now on, I will treat your normal messages here as messages for ${nextTargetLabel} until you tell me to stop.`,
-    "Plain chat-like follow-ups will go to that contact. Direct send/reply commands, save-contact commands, and ClawCloud help or knowledge questions will stay in this chat.",
+    `I will keep ${nextTargetLabel} as the selected WhatsApp target here, but I will send only when you give an explicit send or reply instruction.`,
+    "Normal questions, knowledge requests, translations, drafts, and casual messages will stay in this chat.",
+    "Examples: _Send good morning._  _Reply that I will call later._",
     "I will automatically adapt to that contact's recent chat language when it is clear, unless you explicitly ask for a different output language in a specific message.",
     "If you want to talk to ClawCloud normally again, stop this mode first.",
     `To stop, say: _Stop talking to ${input.next.contactName}_.`,
@@ -23444,8 +23427,9 @@ function buildWhatsAppActiveContactSessionStatusReply(
     return [
       `Abhi active contact: *${formatWhatsAppActiveContactSessionTarget(session)}*`,
       "",
-      "Yahan aap jo normal messages bhejoge, woh us contact ko jayenge jab tak aap stop nahi bolte, aur main us contact ki recent chat language ke hisaab se adapt karunga unless aap explicitly override karo.",
-      "Send/reply commands aur ClawCloud se help ya knowledge wale sawal isi chat me rahenge.",
+      "Yahan yeh contact selected hai, lekin message tabhi bheja jayega jab aap explicit send ya reply command doge.",
+      "Normal sawal, knowledge requests, translations, drafts, aur casual messages isi chat me rahenge.",
+      "Examples: _Send good morning._  _Reply that I will call later._",
       `Stop karne ke liye bolo: _Stop talking to ${session.contactName}_.`,
     ].join("\n");
   }
@@ -23461,8 +23445,9 @@ function buildWhatsAppActiveContactSessionStatusReply(
   return [
     `Active contact mode: *${formatWhatsAppActiveContactSessionTarget(session)}*`,
     "",
-    "Normal messages you send here will go to that contact until you tell me to stop, and I will adapt to that contact's recent chat language unless you explicitly override it.",
-    "Direct send/reply commands, save-contact commands, and ClawCloud help or knowledge questions stay in this chat.",
+    "That contact is selected here, but I will send only when you give an explicit send or reply command.",
+    "Normal questions, knowledge requests, translations, drafts, and casual messages stay in this chat.",
+    "Examples: _Send good morning._  _Reply that I will call later._",
     `To stop, say: _Stop talking to ${session.contactName}_.`,
   ].join("\n");
 }
@@ -23481,6 +23466,17 @@ async function sendWhatsAppMessageThroughActiveContactSession(input: {
   }
   // Override input.message with cleaned version for all downstream use
   input = { ...input, message: cleanMessage };
+
+  if (!looksLikeExplicitActiveContactOutboundInstruction(input.message)) {
+    return [
+      `I kept that in this chat because active contact mode now sends only on an explicit send or reply command for ${input.session.contactName}.`,
+      "",
+      "No WhatsApp message was sent to the contact.",
+      "Examples:",
+      "- _Send good morning._",
+      "- _Reply that I will call later._",
+    ].join("\n");
+  }
 
   if (looksLikeActiveContactControlFollowUp(input.message) || looksLikeInChatClawCloudRequestDuringActiveContact(input.message)) {
     return [

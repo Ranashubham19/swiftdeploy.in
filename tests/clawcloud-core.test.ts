@@ -6372,11 +6372,25 @@ test("active contact mode parses professional handoff commands and only proxies 
       "Call me when free.",
       activeSession,
     ),
-    true,
+    false,
   );
   assert.equal(
     shouldRouteMessageToActiveWhatsAppContactSessionForTest(
       "Where are you right now?",
+      activeSession,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRouteMessageToActiveWhatsAppContactSessionForTest(
+      "Send good morning.",
+      activeSession,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldRouteMessageToActiveWhatsAppContactSessionForTest(
+      "Reply that I will call later.",
       activeSession,
     ),
     true,
@@ -7040,12 +7054,13 @@ test("active-contact Hinglish status and stop replies stay in Roman Hinglish thr
     reply: [
       "Abhi active contact: didi (+917876831969)",
       "",
-      "Yahan aap jo normal messages bhejoge, woh us contact ko jayenge jab tak aap stop nahi bolte, aur main us contact ki recent chat language ke hisaab se adapt karunga unless aap explicitly override karo.",
+      "Yahan yeh contact selected hai, lekin message tabhi bheja jayega jab aap explicit send ya reply command doge.",
+      "Normal sawal, knowledge requests, translations, drafts, aur casual messages isi chat me rahenge.",
       "Stop karne ke liye bolo: _Stop talking to didi_.",
     ].join("\n"),
   });
   assert.match(status.response ?? "", /Abhi active contact:\s*didi(?: \(\+917876831969\))?/i);
-  assert.match(status.response ?? "", /recent chat language ke hisaab se adapt karunga/i);
+  assert.match(status.response ?? "", /explicit send ya reply command/i);
   assert.doesNotMatch(status.response ?? "", /No active contact mode is running right now/i);
   assert.doesNotMatch(status.response ?? "", /Normal messages you send here will go to that contact/i);
 
@@ -7117,6 +7132,7 @@ test("active-contact status recovery plan rebuilds real status replies instead o
   assert.equal(englishPlan?.locale, "en");
   assert.equal(englishPlan?.alreadyTranslated, true);
   assert.match(englishPlan?.reply ?? "", /Active contact mode:\s*\*Hansraj Lpu \(\+918949826240\)\*/i);
+  assert.match(englishPlan?.reply ?? "", /send only when you give an explicit send or reply command/i);
   assert.doesNotMatch(englishPlan?.reply ?? "", /could not check active contact mode/i);
 
   const hinglishPlan = buildWhatsAppActiveContactStatusRecoveryPlanForTest({
@@ -7128,6 +7144,7 @@ test("active-contact status recovery plan rebuilds real status replies instead o
   assert.equal(hinglishPlan?.locale, "en");
   assert.equal(hinglishPlan?.preserveRomanScript, true);
   assert.match(hinglishPlan?.reply ?? "", /Abhi active contact:\s*\*Hansraj Lpu \(\+918949826240\)\*/i);
+  assert.match(hinglishPlan?.reply ?? "", /explicit send ya reply command/i);
   assert.doesNotMatch(hinglishPlan?.reply ?? "", /status check nahi kar paaya/i);
 });
 
