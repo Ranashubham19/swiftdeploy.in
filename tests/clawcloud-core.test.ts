@@ -105,6 +105,7 @@ import {
   buildWhatsAppHistoryBackfillContacts,
   prepareWhatsAppContactUpsertRows,
 } from "@/lib/clawcloud-whatsapp-contacts";
+import { registerInboundMessageId } from "@/lib/clawcloud-whatsapp-inbound-dedupe";
 import { listRetiredWhatsAppOwnerUserIds } from "@/lib/clawcloud-whatsapp-owner-handoff";
 import {
   defaultWhatsAppSettings,
@@ -7301,6 +7302,36 @@ test("captioned image replies stay as one compact WhatsApp-style block", () => {
   assert.match(reply, /^This is a Paytm and PhonePe payment QR screen/i);
   assert.match(reply, /\n- Amount shown is transfer ₹1499\.97\./i);
   assert.match(reply, /\n- Timer visible is 05:52\./i);
+});
+
+test("inbound message dedupe blocks repeated media deliveries before a second reply is generated", () => {
+  const cache = new Map<string, number>();
+
+  assert.equal(registerInboundMessageId(cache, "wamid-media-1", {
+    now: 1_000,
+    ttlMs: 60_000,
+    maxEntries: 8,
+  }), true);
+  assert.equal(registerInboundMessageId(cache, "wamid-media-1", {
+    now: 1_500,
+    ttlMs: 60_000,
+    maxEntries: 8,
+  }), false);
+  assert.equal(registerInboundMessageId(cache, "wamid-media-1", {
+    now: 62_000,
+    ttlMs: 60_000,
+    maxEntries: 8,
+  }), true);
+});
+
+test("agent server dedupes inbound messages before the image branch runs", () => {
+  const source = readFileSync(path.resolve(process.cwd(), "agent-server.ts"), "utf8");
+  const dedupeIndex = source.indexOf("registerInboundMessageId(inboundIds, messageId");
+  const imageBranchIndex = source.indexOf("if (!text && message.message?.imageMessage)");
+
+  assert.ok(dedupeIndex >= 0, "expected early inbound dedupe guard");
+  assert.ok(imageBranchIndex >= 0, "expected image handling branch");
+  assert.ok(dedupeIndex < imageBranchIndex, "expected dedupe to run before image analysis");
 });
 
 test("localized WhatsApp send receipts preserve explicit send confirmation structure", async () => {

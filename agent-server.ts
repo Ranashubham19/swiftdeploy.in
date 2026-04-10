@@ -124,6 +124,7 @@ import {
   normalizeClawCloudWhatsAppSyncCheckpoint,
   type ClawCloudWhatsAppSyncCheckpoint,
 } from "./lib/clawcloud-whatsapp-sync-checkpoint";
+import { registerInboundMessageId } from "./lib/clawcloud-whatsapp-inbound-dedupe";
 import {
   buildClawCloudWhatsAppSessionStorageHealth,
   resolveClawCloudWhatsAppSessionBaseDir,
@@ -595,25 +596,6 @@ let cachedSessionStorageHealth:
 
 const INBOUND_ID_TTL_MS = 10 * 60_000;
 const INBOUND_ID_MAX = 5_000;
-
-function pruneInboundIdCache(now = Date.now()) {
-  if (inboundIds.size <= INBOUND_ID_MAX) {
-    for (const [id, seenAt] of inboundIds) {
-      if (now - seenAt > INBOUND_ID_TTL_MS) {
-        inboundIds.delete(id);
-      }
-    }
-    return;
-  }
-
-  const entries = [...inboundIds.entries()].sort((a, b) => a[1] - b[1]);
-  const keepFrom = Math.max(0, entries.length - INBOUND_ID_MAX);
-  inboundIds.clear();
-  for (let i = keepFrom; i < entries.length; i += 1) {
-    const [id, ts] = entries[i];
-    inboundIds.set(id, ts);
-  }
-}
 
 function isGroupRateLimited(groupJid: string): boolean {
   const lastAt = groupLastReplyAt.get(groupJid);
@@ -6936,6 +6918,13 @@ async function connectSession(userId: string): Promise<SessionRecord> {
         }
         replyTargetJid = assistantSelfTargetJid ?? replyTargetJid;
 
+        if (!message.key.fromMe && !registerInboundMessageId(inboundIds, messageId, {
+          ttlMs: INBOUND_ID_TTL_MS,
+          maxEntries: INBOUND_ID_MAX,
+        })) {
+          continue;
+        }
+
         let text =
           message.message?.conversation ||
           message.message?.extendedTextMessage?.text ||
@@ -7289,16 +7278,6 @@ async function connectSession(userId: string): Promise<SessionRecord> {
 
       if (!text) {
         continue;
-      }
-
-      if (messageId) {
-        const now = Date.now();
-        pruneInboundIdCache(now);
-        const seenAt = inboundIds.get(messageId);
-        if (seenAt && now - seenAt <= INBOUND_ID_TTL_MS) {
-          continue;
-        }
-        inboundIds.set(messageId, now);
       }
 
       if (!isGroupMessage) {
