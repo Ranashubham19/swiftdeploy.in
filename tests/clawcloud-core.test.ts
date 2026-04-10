@@ -5650,10 +5650,14 @@ test("recipient-targeted write prompts stay in preview mode while explicit send 
   );
   assert.equal(
     shouldPreviewRecipientTargetedWhatsAppDraftForTest("send a professional good afternoon message to maa"),
-    true,
+    false,
   );
   assert.equal(
     shouldPreviewRecipientTargetedWhatsAppDraftForTest("maa ko good afternoon bhej do"),
+    false,
+  );
+  assert.equal(
+    shouldPreviewRecipientTargetedWhatsAppDraftForTest("send a beautiful professional good morning to maa, dii and papa ji"),
     false,
   );
 });

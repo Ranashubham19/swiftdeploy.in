@@ -23175,16 +23175,16 @@ function shouldPreviewRecipientTargetedWhatsAppDraft(originalRequest: string) {
     return true;
   }
 
-  const parsed = parseSendMessageCommand(originalRequest);
-  const requestedMessage = parsed?.message?.trim() ?? "";
-  if (requestedMessage && resolveWhatsAppDraftingMode(originalRequest, requestedMessage) === "styled") {
-    return true;
-  }
-
   const explicitImmediateSend =
     /\b(?:send|sned|snd|reply|replly|tell)\b/i.test(normalized)
     || /^(?:message|mesage|msg|whatsapp|whatsap|whatsaap|wa)\b/i.test(normalized)
     || /\b(?:bhej(?:\s*(?:do|de|dena|dijiye|na))|send\s*(?:kar(?:o|do|na)?))\b/i.test(normalized);
+  const parsed = parseSendMessageCommand(originalRequest);
+  const requestedMessage = parsed?.message?.trim() ?? "";
+  if (requestedMessage && resolveWhatsAppDraftingMode(originalRequest, requestedMessage) === "styled") {
+    return !explicitImmediateSend;
+  }
+
   return [
     /\b(?:draft|preview)\b/,
     /\bshow\b.{0,48}\b(?:draft|message|text|reply|wish)\b/,
