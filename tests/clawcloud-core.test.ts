@@ -6739,6 +6739,37 @@ test("family relationship synonym matches require confirmation when the visible 
   }
 });
 
+test("bare family aliases require confirmation before named relationship contacts", () => {
+  assert.equal(isConfidentRecipientNameMatchForTest({
+    requestedName: "dii",
+    resolvedName: "Neha Dii",
+    exact: false,
+    score: 0.91,
+    matchBasis: "word",
+  }), false);
+
+  assert.equal(isProfessionallyCommittedRecipientMatchForTest({
+    requestedName: "dii",
+    resolvedName: "Neha Dii",
+    exact: false,
+    score: 0.91,
+    matchBasis: "word",
+    source: "fuzzy",
+  }), false);
+
+  assert.equal(
+    classifyResolvedContactMatchConfidence({
+      requestedName: "dii",
+      resolvedName: "Neha Dii",
+      exact: false,
+      score: 0.91,
+      matchBasis: "word",
+      source: "fuzzy",
+    }),
+    "confirmation_required",
+  );
+});
+
 test("full inbound route prioritizes active-contact status and stop commands over casual chat fallbacks", async () => {
   const start = await routeInboundAgentMessageResult("test-user", "Talk to Aman on my behalf");
   assert.match(start.response ?? "", /WhatsApp web session is not active right now\./i);

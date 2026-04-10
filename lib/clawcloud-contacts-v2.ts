@@ -436,6 +436,38 @@ function hasLiteralRelationshipTokenOverlap(requestedName: string, resolvedName:
     resolvedTokens.some((resolvedToken) => namesShareTokenLoosely(requestedToken, resolvedToken)));
 }
 
+function isSpecificNamedRelationshipVariant(
+  resolvedName: string,
+  requestedRelationshipAlias: string,
+) {
+  const resolvedTokens = normalizeHistoryAddressPreservingHonorifics(resolvedName)
+    .split(/\s+/)
+    .filter(Boolean);
+  if (resolvedTokens.length < 2) {
+    return false;
+  }
+
+  const canonicalTokens = resolvedTokens
+    .map((token) => normalizeContactName(token))
+    .filter(Boolean);
+  if (!canonicalTokens.includes(requestedRelationshipAlias)) {
+    return false;
+  }
+
+  return resolvedTokens.some((token) => {
+    if (token.length < 3) {
+      return false;
+    }
+
+    if (normalizeAddressHonorificToken(token)) {
+      return false;
+    }
+
+    const canonical = normalizeContactName(token);
+    return Boolean(canonical && !STRICT_RELATIONSHIP_CONTACT_CANONICALS.has(canonical));
+  });
+}
+
 function requiresStrictRelationshipAliasConfirmation(input: {
   requestedName: string;
   resolvedName: string;
@@ -443,6 +475,10 @@ function requiresStrictRelationshipAliasConfirmation(input: {
   const requestedRelationshipAlias = getSingleCanonicalRelationshipAlias(input.requestedName);
   if (!requestedRelationshipAlias) {
     return false;
+  }
+
+  if (isSpecificNamedRelationshipVariant(input.resolvedName, requestedRelationshipAlias)) {
+    return true;
   }
 
   return !hasLiteralRelationshipTokenOverlap(input.requestedName, input.resolvedName);
