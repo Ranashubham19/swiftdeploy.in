@@ -161,6 +161,7 @@ function buildImageDescriptionPrompt() {
   return [
     "You are a WhatsApp AI assistant. A user just sent you this image on WhatsApp.",
     "RESPOND to the image like a smart friend would — understand WHAT the image means and reply accordingly.",
+    "Return one compact WhatsApp reply only. Do not split the answer into titled sections or multiple separate blocks.",
     "",
     "CRITICAL RULES:",
     "1. GREETING IMAGES (Good Morning/सुप्रभात/Good Night/शुभ रात्रि/Happy Birthday/festival wishes/motivational quotes):",
@@ -214,6 +215,7 @@ function buildGroundedReasoningPrompt(
     "You are answering a question about an image using extracted visual evidence only.",
     "Use only the evidence below.",
     "Reply in the same language as the user's question unless the user explicitly asked for another language.",
+    "Return one compact WhatsApp reply only. Do not add decorative headers or split the answer into multiple titled sections.",
     "Follow every rule in the user's question in the exact order given.",
     "If the winning answer has an owner, engineer, assignee, or named person attached to it, include that name in the final answer.",
     "If a row is excluded by a rule, say so briefly.",
@@ -244,6 +246,7 @@ function buildImageEvidenceSummaryPrompt(
     "You are preparing a final reply from extracted image evidence only.",
     "Use only the evidence below.",
     "Reply in the same language as the user's question when a question is provided. Otherwise match the dominant language visible in the image.",
+    "Return one compact WhatsApp reply only. Do not use multiple titled sections or separated answer blocks.",
     "If the image is a screenshot, payment page, QR code, table, or dashboard, focus on the exact visible content such as app names, amounts, timers, statuses, warnings, codes, and identifiers.",
     "If any detail is partial or unreadable, say that briefly instead of guessing.",
     "",
@@ -630,6 +633,40 @@ function cleanVisionResponse(raw: string): string {
   return cleaned.trim();
 }
 
+function compactVisionReplyForWhatsApp(raw: string): string {
+  const normalized = cleanVisionResponse(raw)
+    .replace(/\r/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  if (!normalized) {
+    return "";
+  }
+
+  const lines = normalized
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const compactLines: string[] = [];
+
+  for (const line of lines) {
+    if (/^(?:🖼️\s*)?\*?image analysis:?\*?$/i.test(line)) {
+      continue;
+    }
+    if (/^\*?why:?\*?$/i.test(line)) {
+      continue;
+    }
+
+    const bulletNormalized = line
+      .replace(/^[•*]\s+/, "- ")
+      .replace(/^\d+\)\s+/, (match) => match.replace(")", "."));
+
+    compactLines.push(bulletNormalized);
+  }
+
+  return compactLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 export function looksLikeVisionPlaceholderReplyForTest(raw: string) {
   return looksLikeVisionPlaceholderReply(raw);
 }
@@ -643,10 +680,10 @@ export function formatVisionReply(
   rawAnswer: string,
   hadCaption: boolean,
 ): string {
-  const cleaned = cleanVisionResponse(rawAnswer);
+  const cleaned = compactVisionReplyForWhatsApp(rawAnswer);
 
   if (hadCaption) {
-    return "🖼️ *Image analysis:*\n\n" + cleaned;
+    return cleaned;
   }
   // No prefix for uncaptioned images — the AI response is already natural and conversational
   return cleaned;

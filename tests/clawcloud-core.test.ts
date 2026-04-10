@@ -85,7 +85,7 @@ import {
   extractImagePrompt,
   getImageGenerationStatus,
 } from "@/lib/clawcloud-imagegen";
-import { looksLikeVisionPlaceholderReplyForTest } from "@/lib/clawcloud-vision";
+import { formatVisionReply, looksLikeVisionPlaceholderReplyForTest } from "@/lib/clawcloud-vision";
 import { solveCodingArchitectureQuestion, solveHardMathQuestion } from "@/lib/clawcloud-expert";
 import {
   buildClawCloudSafetyReply,
@@ -7189,6 +7189,28 @@ test("active contact send receipts stay short and mirror the user's message lang
     },
   });
   assert.equal(englishReceipt, "Message delivered to didi (+917876831969).");
+});
+
+test("captioned image replies stay as one compact WhatsApp-style block", () => {
+  const reply = formatVisionReply(
+    [
+      "🖼️ *Image analysis:*",
+      "",
+      "Final answer: This is a Paytm and PhonePe payment QR screen with a one-time QR code.",
+      "",
+      "Why:",
+      "- Amount shown is transfer ₹1499.97.",
+      "- Timer visible is 05:52.",
+    ].join("\n"),
+    true,
+  );
+
+  assert.doesNotMatch(reply, /image analysis/i);
+  assert.doesNotMatch(reply, /final answer:/i);
+  assert.doesNotMatch(reply, /\n\s*\n\s*\n/);
+  assert.match(reply, /^This is a Paytm and PhonePe payment QR screen/i);
+  assert.match(reply, /\n- Amount shown is transfer ₹1499\.97\./i);
+  assert.match(reply, /\n- Timer visible is 05:52\./i);
 });
 
 test("localized WhatsApp send receipts preserve explicit send confirmation structure", async () => {
