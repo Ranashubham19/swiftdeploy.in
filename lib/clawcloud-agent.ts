@@ -17002,6 +17002,16 @@ async function routeInboundAgentMessageCore(
 
         const normalizedKnowledgeFallback = knowledgeFallback.trim();
         if (normalizedKnowledgeFallback && !isVisibleFallbackReply(normalizedKnowledgeFallback)) {
+          const needsCurrentYear = /(?:\blatest\b|\bcurrent\b|\bthis year\b)/i.test(webSearchQuestion)
+            || webSearchQuestion.includes(String(currentYear));
+          const hasCurrentYear = new RegExp(`\\b${currentYear}\\b`).test(normalizedKnowledgeFallback);
+          if (needsCurrentYear && !hasCurrentYear) {
+            const permissionReply = [
+              `To answer this with ${currentYear}-level accuracy, I need permission to run live search.`,
+              "Do you want me to run live search and confirm the latest update?",
+            ].join(" ");
+            return finalizeRaw(permissionReply, "web_search", "web_search");
+          }
           return finalizeRaw(
             normalizeResearchMarkdownForWhatsApp(normalizedKnowledgeFallback),
             "web_search",
@@ -17071,15 +17081,22 @@ async function routeInboundAgentMessageCore(
         "Do not provide older-year answers as 'latest' when the user asked for the latest year.",
         "Never say 'I could not verify' or 'live search unavailable'.",
       ].join(" ");
-      return finalizeRaw(
-        await emergencyDirectAnswer(
-          finalMessage,
-          memory.recentTurns,
-          [replyLanguageInstruction, latestOnlyInstruction].filter(Boolean).join("\n"),
-        ),
-        "news",
-        "news",
+      const newsFallback = await emergencyDirectAnswer(
+        finalMessage,
+        memory.recentTurns,
+        [replyLanguageInstruction, latestOnlyInstruction].filter(Boolean).join("\n"),
       );
+      const needsCurrentYear = /(?:\blatest\b|\bcurrent\b|\bthis year\b)/i.test(finalMessage)
+        || finalMessage.includes(String(currentYear));
+      const hasCurrentYear = new RegExp(`\\b${currentYear}\\b`).test(newsFallback);
+      if (needsCurrentYear && !hasCurrentYear) {
+        const permissionReply = [
+          `To answer this with ${currentYear}-level accuracy, I need permission to run live search.`,
+          "Do you want me to run live search and confirm the latest update?",
+        ].join(" ");
+        return finalizeRaw(permissionReply, "news", "news");
+      }
+      return finalizeRaw(newsFallback, "news", "news");
 
     }
 
