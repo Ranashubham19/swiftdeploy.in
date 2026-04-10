@@ -180,6 +180,7 @@ import {
   looksEncryptedSecretValue,
   maskSecretValue,
 } from "@/lib/clawcloud-secret-box";
+import { resolveSearchResultDomainForTest } from "@/lib/search";
 import {
   buildBillingWebhookPayloadHash,
   normalizeBillingWebhookUserId,
@@ -11422,6 +11423,26 @@ test("government domains count as strong official live evidence", () => {
 
   assert.equal(summary.officialCount, 1);
   assert.equal(summary.quality, "strong");
+});
+
+test("wrapped Google News results inherit the visible publisher domain for ranking quality", () => {
+  assert.equal(
+    resolveSearchResultDomainForTest(
+      "https://news.google.com/rss/articles/example",
+      "\"Baseless\": India Rejects Report Claiming US Using Its Ports For Iran Strikes - NDTV",
+      "\"Baseless\": India Rejects Report Claiming US Using Its Ports For Iran Strikes    NDTV",
+    ),
+    "ndtv.com",
+  );
+
+  assert.equal(
+    resolveSearchResultDomainForTest(
+      "https://news.google.com/rss/articles/example-two",
+      "India submarine programme update - Reuters",
+      "India submarine programme update    Reuters",
+    ),
+    "reuters.com",
+  );
 });
 
 test("AI model comparison live answers fail closed when only stale prior-year evidence is available", () => {

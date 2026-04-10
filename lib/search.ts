@@ -34,6 +34,86 @@ type SerpApiResponse = {
   }>;
 };
 
+const WRAPPED_NEWS_PUBLISHER_DOMAIN_MAP: Record<string, string> = {
+  "abc news": "abcnews.go.com",
+  "ap": "apnews.com",
+  "ap news": "apnews.com",
+  "bbc": "bbc.com",
+  "bbc news": "bbc.com",
+  "bloomberg": "bloomberg.com",
+  "cnbc": "cnbc.com",
+  "cnn": "cnn.com",
+  "economic times": "economictimes.indiatimes.com",
+  "financial times": "ft.com",
+  "forbes": "forbes.com",
+  "hindustan times": "hindustantimes.com",
+  "indian express": "indianexpress.com",
+  "mint": "livemint.com",
+  "ndtv": "ndtv.com",
+  "news18": "news18.com",
+  "npr": "npr.org",
+  "reuters": "reuters.com",
+  "the guardian": "theguardian.com",
+  "the hindu": "thehindu.com",
+  "times of india": "timesofindia.indiatimes.com",
+  "wall street journal": "wsj.com",
+};
+
+function normalizePublisherLabel(value: string) {
+  return value
+    .replace(/&nbsp;/gi, " ")
+    .replace(/[|–—:]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function inferWrappedNewsPublisherDomain(title: string, snippet: string) {
+  const candidates = new Set<string>();
+  const normalizedTitle = title.replace(/&nbsp;/gi, " ").trim();
+  const normalizedSnippet = snippet.replace(/&nbsp;/gi, " ").trim();
+
+  const titleTail = normalizedTitle.split(/\s+-\s+|\s+\|\s+/).at(-1)?.trim();
+  const snippetTail = normalizedSnippet.split(/\s{2,}|\u00a0{2,}/).at(-1)?.trim();
+  if (titleTail) {
+    candidates.add(titleTail);
+  }
+  if (snippetTail) {
+    candidates.add(snippetTail);
+  }
+
+  for (const candidate of candidates) {
+    const normalized = normalizePublisherLabel(candidate);
+    if (!normalized) {
+      continue;
+    }
+
+    if (WRAPPED_NEWS_PUBLISHER_DOMAIN_MAP[normalized]) {
+      return WRAPPED_NEWS_PUBLISHER_DOMAIN_MAP[normalized];
+    }
+
+    const fuzzy = Object.entries(WRAPPED_NEWS_PUBLISHER_DOMAIN_MAP).find(([label]) => normalized.includes(label));
+    if (fuzzy) {
+      return fuzzy[1];
+    }
+  }
+
+  return "";
+}
+
+function resolveSearchResultDomain(url: string, title: string, snippet: string) {
+  const baseDomain = domainFromUrl(url);
+  if (baseDomain !== "news.google.com") {
+    return baseDomain;
+  }
+
+  return inferWrappedNewsPublisherDomain(title, snippet) || baseDomain;
+}
+
+export function resolveSearchResultDomainForTest(url: string, title: string, snippet: string) {
+  return resolveSearchResultDomain(url, title, snippet);
+}
+
 function dedupeSources(sources: ResearchSource[]) {
   const unique = uniqueBy(sources, (result) => result.url);
   const strong = unique.filter((source) => !isLowSignalSearchResult(source));
@@ -74,7 +154,7 @@ function parseJinaSearchText(query: string, payload: string) {
       url,
       snippet,
       provider: "jina",
-      domain: domainFromUrl(url),
+      domain: resolveSearchResultDomain(url, pendingTitle || domainFromUrl(url), snippet),
       score: Math.max(0.2, 1 - sources.length * 0.08),
     });
     pendingTitle = "";
@@ -129,7 +209,7 @@ function parseJinaSearchText(query: string, payload: string) {
       url,
       snippet: clipText(payload, 220),
       provider: "jina" as const,
-      domain: domainFromUrl(url),
+      domain: resolveSearchResultDomain(url, query, payload),
       score: Math.max(0.15, 0.7 - index * 0.05),
     }));
 
@@ -184,7 +264,11 @@ async function tavilySearch(query: string): Promise<ResearchSource[]> {
       url: result.url ?? "",
       snippet: clipText(result.content ?? "", 250),
       provider: "tavily" as const,
-      domain: domainFromUrl(result.url ?? ""),
+      domain: resolveSearchResultDomain(
+        result.url ?? "",
+        result.title ?? "Untitled source",
+        clipText(result.content ?? "", 250),
+      ),
       score: Number(result.score ?? 0),
     }));
 }
@@ -218,7 +302,11 @@ async function serpApiSearch(query: string): Promise<ResearchSource[]> {
       url: result.link ?? "",
       snippet: clipText(result.snippet ?? "", 250),
       provider: "serpapi" as const,
-      domain: domainFromUrl(result.link ?? ""),
+      domain: resolveSearchResultDomain(
+        result.link ?? "",
+        result.title ?? "Untitled source",
+        clipText(result.snippet ?? "", 250),
+      ),
       score: 1 / Math.max(result.position ?? 1, 1),
       publishedDate: result.date,
     }));
