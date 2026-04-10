@@ -246,6 +246,7 @@ import {
   detectWhatsAppActiveContactQuotedIncomingMessageForTest,
   looksLikeAssistantReplyRepairRequestForTest,
   parseWhatsAppActiveContactSessionCommandForTest,
+  recoverWhatsAppPendingContactSelectionFromRecentTurnsForTest,
   resolveWhatsAppPendingContactSelectionForTest,
   shouldBypassWhatsAppPendingContactSelectionForTest,
   resolveWhatsAppPendingDraftReviewActionForTest,
@@ -3425,6 +3426,21 @@ test("conversation continuity prefers the older matching topic over a newer unre
   assert.equal(continuity.anchorUserTurn, "Compare Gmail and Outlook for startup ops");
   assert.match(continuity.resolvedQuestion, /Gmail and Outlook/i);
   assert.doesNotMatch(continuity.resolvedQuestion, /Slack|Teams/i);
+});
+
+test("conversation continuity keeps short selection follow-ups anchored to the previous request", () => {
+  const continuity = analyzeConversationContinuityForTest({
+    currentMessage: "go with jaideep room mate",
+    recentTurns: [
+      { role: "user", content: "Just send hello how are you to jaideep in chinese" },
+      { role: "assistant", content: 'I found more than one strong WhatsApp match for "jaideep".\n\nWhich jaideep should I use?\n\n*1.* Jai Shree Radhe Krishna J - +919625239280 (shared name word)\n*2.* Jaideep Room Mate LPU - +919053776191 (shared name word)\n\nTell me the exact contact name or full number and I will use the right chat.' },
+    ],
+  });
+
+  assert.equal(continuity.isFollowUp, true);
+  assert.equal(continuity.anchorUserTurn, "Just send hello how are you to jaideep in chinese");
+  assert.match(continuity.resolvedQuestion, /Just send hello how are you to jaideep in chinese/i);
+  assert.match(continuity.resolvedQuestion, /Follow-up: go with jaideep room mate/i);
 });
 
 test("conversation continuity keeps short fresh questions standalone when no real context link exists", () => {
@@ -6621,6 +6637,71 @@ test("pending WhatsApp contact selection does not revive the contact lane for lo
     }),
     { type: "none" },
   );
+});
+
+test("pending WhatsApp contact selection accepts single-option confirmation replies", () => {
+  const pending = {
+    kind: "active_contact_start" as const,
+    requestedName: "dii",
+    resumePrompt: "From now onward you will message dii from my side",
+    createdAt: new Date().toISOString(),
+    options: [
+      {
+        name: "Neha Dii",
+        phone: "918894195689",
+        jid: "918894195689@s.whatsapp.net",
+      },
+    ],
+  };
+
+  assert.deepEqual(
+    resolveWhatsAppPendingContactSelectionForTest({
+      message: "confirmed",
+      pending,
+    }),
+    {
+      type: "selected",
+      option: pending.options[0],
+      resumePrompt: "Talk to +918894195689 on my behalf",
+    },
+  );
+});
+
+test("recent WhatsApp clarification context can recover a lost pending selection from the last turns", () => {
+  const recovered = recoverWhatsAppPendingContactSelectionFromRecentTurnsForTest({
+    message: "go with jaideep room mate",
+    recentTurns: [
+      { role: "user", content: "Just send hello how are you to jaideep in chinese" },
+      { role: "assistant", content: 'I found more than one strong WhatsApp match for "jaideep".\n\nWhich jaideep should I use?\n\n*1.* Jai Shree Radhe Krishna J - +919625239280 (shared name word)\n*2.* Jaideep Room Mate LPU - +919053776191 (shared name word)\n\nTell me the exact contact name or full number and I will use the right chat.' },
+    ],
+  });
+
+  assert.equal(recovered.type, "selected");
+  if (recovered.type !== "selected") {
+    throw new Error("expected recent-turn recovery to select the pending contact");
+  }
+
+  assert.equal(recovered.pending.kind, "send_message");
+  assert.equal(recovered.pending.requestedName, "jaideep");
+  assert.equal(recovered.pending.resumePrompt, "Just send hello how are you to jaideep in chinese");
+  assert.deepEqual(recovered.pending.options, [
+    {
+      name: "Jai Shree Radhe Krishna J",
+      phone: "919625239280",
+      jid: "919625239280@s.whatsapp.net",
+    },
+    {
+      name: "Jaideep Room Mate LPU",
+      phone: "919053776191",
+      jid: "919053776191@s.whatsapp.net",
+    },
+  ]);
+  assert.deepEqual(recovered.option, {
+    name: "Jaideep Room Mate LPU",
+    phone: "919053776191",
+    jid: "919053776191@s.whatsapp.net",
+  });
+  assert.equal(recovered.resumePrompt, "Send message to +919053776191: hello how are you in chinese");
 });
 
 test("recipient confidence rejects partial multi-token word matches that could hit the wrong contact", () => {

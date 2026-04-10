@@ -100,6 +100,8 @@ const FRESH_ACTION_REQUEST_START =
   /^(?:send|reply|read|show|draft|write|translate|open|search|find|check|from now(?: on(?:ward)?)?|start|stop)\b/i;
 const CONTINUATION_OPENER =
   /^(?:and|also|so|then|but|or|aur|ab|ab se|phir|same|continue|go on|tell me more|what about|how about|which one|that one|this one|those|them|it)\b/i;
+const SELECTION_FOLLOW_UP_START =
+  /^(?:(?:go\s+(?:with|for)|choose|pick|take)\s+.+|use\s+(?:it|that|this|same|the\s+(?:first|second|third|fourth|1st|2nd|3rd|4th)\s+one)\b.*|reply\s+with\s+.+|option\s*\d+\b.*|(?:the\s+)?(?:first|second|third|fourth|1st|2nd|3rd|4th)\s+one(?:\s+.+)?|(?:this|that|same)\s+one(?:\s+.+)?|confirm(?:ed)?|yes\s+(?:this|that|same|it|one)|correct|right)$/i;
 const LANGUAGE_OR_STYLE_ONLY_FOLLOW_UP =
   /^(?:(?:in|into)\s+(?:english|hindi|hinglish|urdu|punjabi|thai|chinese|japanese|korean|tamil|telugu|bengali|marathi|french|spanish|arabic|german|italian|russian)|(?:make|keep|write|say|reply|send|translate|explain)\s+(?:it\s+)?(?:in|into)\s+(?:english|hindi|hinglish|urdu|punjabi|thai|chinese|japanese|korean|tamil|telugu|bengali|marathi|french|spanish|arabic|german|italian|russian)|(?:short(?:er)?|brief(?:ly)?|simple(?:r)?|professional(?:ly)?|formal(?:ly)?|polite(?:ly)?|more detailed|detailed))\b/i;
 const VOLATILE_FRESH_QUERY_START =
@@ -275,6 +277,7 @@ function buildContinuityAnchorCandidates(
   const currentTopics = extractTopics(currentMessage);
   const hasContextCue = PRONOUN_START.test(currentMessage) || CONTEXTUAL_REFERENCE.test(currentMessage);
   const hasContinuationCue = CONTINUATION_OPENER.test(currentMessage);
+  const hasSelectionCue = SELECTION_FOLLOW_UP_START.test(currentMessage);
   const styleOnly = LANGUAGE_OR_STYLE_ONLY_FOLLOW_UP.test(currentMessage);
   const documentFollowUp = looksLikeDocumentFollowUp(currentMessage);
   const standaloneQuestion = looksLikeStandaloneQuestion(
@@ -301,7 +304,7 @@ function buildContinuityAnchorCandidates(
     const candidateTopics = extractTopics(combinedContext);
     const topicOverlap = Math.max(
       computeTopicOverlap(currentTopics, candidateTopics),
-      !currentTopics.length && (hasContextCue || hasContinuationCue || styleOnly)
+      !currentTopics.length && (hasContextCue || hasContinuationCue || hasSelectionCue || styleOnly)
         ? computeTopicOverlap(activeTopics, candidateTopics)
         : 0,
     );
@@ -321,15 +324,16 @@ function buildContinuityAnchorCandidates(
 
     if (hasContextCue) score += index === recentTurns.length - 1 ? 2 : 1;
     if (hasContinuationCue) score += index === recentTurns.length - 1 ? 1.5 : 0.75;
+    if (hasSelectionCue) score += index === recentTurns.length - 1 ? 3 : 1.5;
     if (styleOnly) score += index === recentTurns.length - 1 ? 3 : 1;
     if (documentFollowUp && looksLikeDocumentPrompt(combinedContext)) score += 3;
     if (assistantTurn && !isLowSignalTurn(assistantTurn)) score += 0.25;
 
-    if (freshAction && overlap === 0 && topicOverlap === 0 && !hasContextCue && !hasContinuationCue) {
+    if (freshAction && overlap === 0 && topicOverlap === 0 && !hasContextCue && !hasContinuationCue && !hasSelectionCue) {
       score -= 3;
     }
 
-    if (standaloneQuestion && overlap === 0 && topicOverlap === 0 && !hasContextCue && !styleOnly) {
+    if (standaloneQuestion && overlap === 0 && topicOverlap === 0 && !hasContextCue && !hasSelectionCue && !styleOnly) {
       score -= 4;
     }
 
@@ -356,7 +360,7 @@ function looksLikeStandaloneTopicShift(
     return false;
   }
 
-  if (PRONOUN_START.test(msg) || CONTEXTUAL_REFERENCE.test(msg) || CONTINUATION_OPENER.test(msg)) {
+  if (PRONOUN_START.test(msg) || CONTEXTUAL_REFERENCE.test(msg) || CONTINUATION_OPENER.test(msg) || SELECTION_FOLLOW_UP_START.test(msg)) {
     return false;
   }
 
@@ -394,6 +398,7 @@ function isFollowUpQuestion(currentMessage: string, recentTurns: MemoryTurn[]): 
   if (!msg) return false;
   if (PRONOUN_START.test(msg)) return true;
   if (LANGUAGE_OR_STYLE_ONLY_FOLLOW_UP.test(msg)) return Boolean(anchorUserTurn || anchorAssistantTurn);
+  if (SELECTION_FOLLOW_UP_START.test(msg)) return Boolean(anchorUserTurn || anchorAssistantTurn);
   if (CONTINUATION_OPENER.test(msg) && !looksLikeStandaloneQuestion(msg, wordCount)) return true;
   if (looksLikeFreshActionRequest(msg) && !CONTEXTUAL_REFERENCE.test(msg)) return false;
   if (looksLikeStandaloneQuestion(msg, wordCount)) return false;
@@ -445,6 +450,7 @@ function analyzeConversationContinuity(
   );
   const hasContextCue = PRONOUN_START.test(msg) || CONTEXTUAL_REFERENCE.test(msg);
   const hasContinuationCue = CONTINUATION_OPENER.test(msg);
+  const hasSelectionCue = SELECTION_FOLLOW_UP_START.test(msg);
   const styleOnly = LANGUAGE_OR_STYLE_ONLY_FOLLOW_UP.test(msg);
   const standaloneQuestion = looksLikeStandaloneQuestion(msg, words);
   const freshAction = looksLikeFreshActionRequest(msg);
@@ -458,6 +464,7 @@ function analyzeConversationContinuity(
   if (PRONOUN_START.test(msg)) score += 4;
   if (hasContextCue) score += 2;
   if (hasContinuationCue) score += 2;
+  if (hasSelectionCue) score += 3;
   if (styleOnly) score += 3;
   if (looksLikeDocumentFollowUp(msg)) score += 2;
   if (words <= 3) {
@@ -472,7 +479,7 @@ function analyzeConversationContinuity(
   if (topicOverlap >= 0.6) score += 2;
   else if (topicOverlap > 0) score += 1;
   if (standaloneQuestion) score -= 4;
-  if (freshAction && !hasContextCue && !hasContinuationCue) score -= 3;
+  if (freshAction && !hasContextCue && !hasContinuationCue && !hasSelectionCue) score -= 3;
   if (standaloneTopicShift) score -= 5;
   if (words >= 8 && overlap === 0 && topicOverlap === 0 && !hasContextCue && !styleOnly) score -= 1;
 
@@ -512,6 +519,10 @@ function resolveFollowUp(
 
   if (LANGUAGE_OR_STYLE_ONLY_FOLLOW_UP.test(msg) && lastUserContext) {
     return normalizeWhitespace(`${lastUserContext} ${msg}`);
+  }
+
+  if (SELECTION_FOLLOW_UP_START.test(msg) && lastUserContext) {
+    return normalizeWhitespace(`${lastUserContext}. Follow-up: ${msg}`);
   }
 
   if (/^(?:what about|how about|same for)\b/i.test(msg) && lastUserContext) {

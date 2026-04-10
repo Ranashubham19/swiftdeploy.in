@@ -13951,6 +13951,53 @@ async function routeInboundAgentMessageResultCore(
     };
   }
 
+  if (!shouldBypassPendingContactSelection && pendingContactSelection.type === "none") {
+    const recentTurns = await withSoftTimeout(
+      buildConversationMemory(userId, normalizedMessage).then((memory) => memory.recentTurns),
+      [] as Array<{ role: "user" | "assistant"; content: string }>,
+      NON_CRITICAL_ROUTE_LOOKUP_TIMEOUT_MS,
+    );
+    const recoveredPendingSelection = recoverWhatsAppPendingContactSelectionFromRecentTurns({
+      message: normalizedMessage,
+      recentTurns,
+    });
+
+    if (recoveredPendingSelection.type === "remind") {
+      await rememberWhatsAppPendingContactResolution({
+        userId,
+        kind: recoveredPendingSelection.pending.kind,
+        requestedName: recoveredPendingSelection.pending.requestedName,
+        resumePrompt: recoveredPendingSelection.pending.resumePrompt,
+        draftMessage: recoveredPendingSelection.pending.draftMessage ?? null,
+        matches: recoveredPendingSelection.pending.options,
+      }).catch(() => null);
+
+      return {
+        response: buildWhatsAppPendingContactResolutionReply(recoveredPendingSelection.pending),
+        liveAnswerBundle: null,
+        modelAuditTrail: null,
+      };
+    }
+
+    if (recoveredPendingSelection.type === "selected") {
+      await rememberWhatsAppVerifiedContactSelection({
+        userId,
+        kind: recoveredPendingSelection.pending.kind,
+        requestedName: recoveredPendingSelection.pending.requestedName,
+        contactName: recoveredPendingSelection.option.name,
+        phone: recoveredPendingSelection.option.phone,
+        jid: recoveredPendingSelection.option.jid,
+        resumePrompt: recoveredPendingSelection.resumePrompt,
+      }).catch(() => null);
+      await clearWhatsAppPendingContactResolution(userId).catch(() => null);
+      return routeInboundAgentMessageResultCore(userId, recoveredPendingSelection.resumePrompt, {
+        ...options,
+        skipConversationStyleChoice: true,
+        conversationStyle: baselineConversationStyle,
+      });
+    }
+  }
+
   const recentVerifiedContactSelection = preflightWhatsAppSettings?.recentVerifiedContactSelection ?? null;
   if (
     recentVerifiedContactSelection
@@ -15181,7 +15228,17 @@ async function routeInboundAgentMessageCore(
     }
 
     if (resolved.type === "confirmation_required") {
-      await clearWhatsAppPendingContactResolution(userId).catch(() => null);
+      await rememberWhatsAppSingleOptionPendingContactResolution({
+        userId,
+        kind: "active_contact_start",
+        requestedName: activeContactSessionCommand.contactName,
+        resumePrompt: trimmed,
+        contact: {
+          name: resolved.contact.name,
+          phone: resolved.contact.phone ?? null,
+          jid: resolved.contact.jid ?? null,
+        },
+      }).catch(() => null);
       return finalizeActiveContactReply(
         buildWhatsAppExactContactRequiredReply({
           requestedName: activeContactSessionCommand.contactName,
@@ -15207,7 +15264,17 @@ async function routeInboundAgentMessageCore(
       matchBasis: resolved.contact.matchBasis,
       source: resolved.contact.source,
     })) {
-      await clearWhatsAppPendingContactResolution(userId).catch(() => null);
+      await rememberWhatsAppSingleOptionPendingContactResolution({
+        userId,
+        kind: "active_contact_start",
+        requestedName: activeContactSessionCommand.contactName,
+        resumePrompt: trimmed,
+        contact: {
+          name: resolved.contact.name,
+          phone: resolved.contact.phone ?? null,
+          jid: resolved.contact.jid ?? null,
+        },
+      }).catch(() => null);
       return finalizeActiveContactReply(
         buildWhatsAppExactContactRequiredReply({
           requestedName: activeContactSessionCommand.contactName,
@@ -18983,6 +19050,13 @@ async function handleSendMessageToContact(
   }
 
   if (resolved.type === "ambiguous") {
+    await rememberWhatsAppPendingContactResolution({
+      userId,
+      kind: "send_message",
+      requestedName: contactName,
+      resumePrompt: text,
+      matches: resolved.matches,
+    }).catch(() => null);
     return translateMessage(
       formatAmbiguousReply(contactName, resolved.matches),
       locale,
@@ -18990,6 +19064,17 @@ async function handleSendMessageToContact(
   }
 
   if (resolved.type === "confirmation_required") {
+    await rememberWhatsAppSingleOptionPendingContactResolution({
+      userId,
+      kind: "send_message",
+      requestedName: contactName,
+      resumePrompt: text,
+      contact: {
+        name: resolved.contact.name,
+        phone: resolved.contact.phone ?? null,
+        jid: resolved.contact.jid ?? null,
+      },
+    }).catch(() => null);
     return translateMessage(
       buildWhatsAppExactContactRequiredReply({
         requestedName: contactName,
@@ -19011,6 +19096,17 @@ async function handleSendMessageToContact(
     matchBasis: resolved.contact.matchBasis,
     source: resolved.contact.source,
   })) {
+    await rememberWhatsAppSingleOptionPendingContactResolution({
+      userId,
+      kind: "send_message",
+      requestedName: contactName,
+      resumePrompt: text,
+      contact: {
+        name: resolvedName,
+        phone,
+        jid: resolved.contact.jid ?? null,
+      },
+    }).catch(() => null);
     return translateMessage(
       buildWhatsAppExactContactRequiredReply({
         requestedName: contactName,
@@ -21166,6 +21262,128 @@ function stripWhatsAppPendingContactSelectionTrailingNoise(value: string) {
     .trim();
 }
 
+function looksLikeAffirmativeWhatsAppPendingSelection(value: string) {
+  const normalized = normalizeWhatsAppPendingContactSelectionText(value).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return /^(?:yes|yep|yeah|sure|ok(?:ay)?|haan|han|hm+|hmm+|confirm(?:ed)?|correct|right|go\s+ahead|this\s+one|that\s+one|same\s+one|use\s+(?:it|that|this|same\s+one)|go\s+with\s+(?:it|that|this|same\s+one))$/i.test(normalized);
+}
+
+function parseWhatsAppPendingContactOptionLine(line: string): WhatsAppPendingContactOption | null {
+  const cleaned = String(line ?? "")
+    .replace(/^[\s>*•-]+/g, "")
+    .trim();
+  if (!cleaned) {
+    return null;
+  }
+
+  const numbered = cleaned.match(/^\*?(\d{1,2})\*?\s*(?:\.\*?|\)|\.)\s*(.+)$/);
+  if (!numbered?.[2]) {
+    return null;
+  }
+
+  const body = numbered[2].trim();
+  const phoneMatch = body.match(/\+?\d[\d\s-]{6,}/);
+  const phone = normalizeWhatsAppPhoneDigits(phoneMatch?.[0] ?? null);
+  let name = phoneMatch
+    ? body.slice(0, phoneMatch.index ?? body.length)
+    : body;
+
+  name = name
+    .replace(/[-–—,(]+$/g, "")
+    .replace(/\((?:exact alias|close alias|shared name word|similar alias)[^)]*\)\s*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!name && phone) {
+    name = `+${phone}`;
+  }
+
+  if (!name) {
+    return null;
+  }
+
+  return {
+    name,
+    phone,
+    jid: phone ? `${phone}@s.whatsapp.net` : null,
+  };
+}
+
+function extractWhatsAppPendingContactOptionsFromAssistantTurn(text: string) {
+  const seen = new Set<string>();
+  return String(text ?? "")
+    .split(/\r?\n/)
+    .map((line) => parseWhatsAppPendingContactOptionLine(line))
+    .filter((option): option is WhatsAppPendingContactOption => Boolean(option))
+    .filter((option) => {
+      const key =
+        normalizeWhatsAppPhoneDigits(option.phone)
+        || normalizeContactName(option.name)
+        || option.jid
+        || option.name;
+      if (!key || seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+}
+
+function extractQuotedRequestedWhatsAppContactName(text: string) {
+  const quotedMatch = String(text ?? "").match(/["“”']([^"“”'\n]{1,120})["“”']/u);
+  return quotedMatch?.[1]?.trim() || null;
+}
+
+function inferWhatsAppPendingContactKindFromRecentTurnContext(input: {
+  previousUserTurn: string;
+  assistantTurn: string;
+}): WhatsAppPendingContactResolution["kind"] | null {
+  const activeContactCommand = parseWhatsAppActiveContactSessionCommand(input.previousUserTurn);
+  if (activeContactCommand.type === "start") {
+    return "active_contact_start";
+  }
+
+  if (looksLikeWhatsAppHistoryQuestion(input.previousUserTurn)) {
+    return "whatsapp_history";
+  }
+
+  if (parseSendMessageCommand(input.previousUserTurn) !== null) {
+    return "send_message";
+  }
+
+  return inferRecentWhatsAppContactFollowUpIntent([
+    { role: "assistant", content: input.assistantTurn },
+  ]);
+}
+
+function extractRequestedContactNameFromWhatsAppPrompt(
+  prompt: string,
+  kind: WhatsAppPendingContactResolution["kind"],
+) {
+  if (kind === "active_contact_start") {
+    const command = parseWhatsAppActiveContactSessionCommand(prompt);
+    return command.type === "start" ? command.contactName : null;
+  }
+
+  if (kind === "whatsapp_history") {
+    return resolveWhatsAppHistoryContactHint(prompt);
+  }
+
+  const parsed = parseSendMessageCommand(prompt);
+  if (!parsed) {
+    return null;
+  }
+
+  if (parsed.kind === "contacts") {
+    return parsed.contactNames[0] ?? parsed.contactName;
+  }
+
+  return parsed.contactName ?? null;
+}
+
 function matchWhatsAppPendingContactSelectionByIndex(
   text: string,
   options: WhatsAppPendingContactOption[],
@@ -21283,6 +21501,16 @@ type WhatsAppPendingContactSelectionResolution =
   | { type: "remind" }
   | { type: "selected"; option: WhatsAppPendingContactOption; resumePrompt: string };
 
+type RecentWhatsAppPendingContactSelectionRecovery =
+  | { type: "none" }
+  | { type: "remind"; pending: WhatsAppPendingContactResolution }
+  | {
+    type: "selected";
+    pending: WhatsAppPendingContactResolution;
+    option: WhatsAppPendingContactOption;
+    resumePrompt: string;
+  };
+
 function resolveWhatsAppPendingContactSelection(input: {
   message: string;
   pending: WhatsAppPendingContactResolution | null | undefined;
@@ -21309,7 +21537,12 @@ function resolveWhatsAppPendingContactSelection(input: {
   const option =
     matchWhatsAppPendingContactSelectionByIndex(stripped, pending.options)
     ?? matchWhatsAppPendingContactSelectionByLabel(stripped, pending.options)
-    ?? matchWhatsAppPendingContactSelectionByLabel(trimmed, pending.options);
+    ?? matchWhatsAppPendingContactSelectionByLabel(trimmed, pending.options)
+    ?? (
+      pending.options.length === 1 && looksLikeAffirmativeWhatsAppPendingSelection(trimmed)
+        ? (pending.options[0] ?? null)
+        : null
+    );
   if (option) {
     return {
       type: "selected",
@@ -21344,6 +21577,21 @@ function resolveWhatsAppPendingContactSelection(input: {
     return { type: "remind" };
   }
 
+  if (looksLikeAffirmativeWhatsAppPendingSelection(trimmed)) {
+    return pending.options.length === 1
+      ? {
+        type: "selected",
+        option: pending.options[0]!,
+        resumePrompt: buildWhatsAppPendingContactResumePrompt(
+          pending.kind,
+          pending.options[0]!,
+          pending.resumePrompt,
+          pending.requestedName,
+        ),
+      }
+      : { type: "remind" };
+  }
+
   return { type: "none" };
 }
 
@@ -21352,6 +21600,90 @@ export function resolveWhatsAppPendingContactSelectionForTest(input: {
   pending: WhatsAppPendingContactResolution | null | undefined;
 }) {
   return resolveWhatsAppPendingContactSelection(input);
+}
+
+function recoverWhatsAppPendingContactSelectionFromRecentTurns(input: {
+  message: string;
+  recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
+}): RecentWhatsAppPendingContactSelectionRecovery {
+  const normalizedMessage = normalizeWhatsAppPendingContactSelectionText(input.message);
+  if (!normalizedMessage || looksLikeClawCloudDirectedRequestDuringPendingWhatsAppAction(normalizedMessage)) {
+    return { type: "none" };
+  }
+
+  for (let assistantIndex = input.recentTurns.length - 1; assistantIndex >= 0; assistantIndex -= 1) {
+    const assistantTurn = input.recentTurns[assistantIndex];
+    if (!assistantTurn || assistantTurn.role !== "assistant" || !assistantTurn.content.trim()) {
+      continue;
+    }
+
+    let previousUserTurn: string | null = null;
+    for (let userIndex = assistantIndex - 1; userIndex >= 0; userIndex -= 1) {
+      const candidate = input.recentTurns[userIndex];
+      if (candidate?.role === "user" && candidate.content.trim()) {
+        previousUserTurn = candidate.content.trim();
+        break;
+      }
+    }
+
+    if (!previousUserTurn) {
+      continue;
+    }
+
+    const kind = inferWhatsAppPendingContactKindFromRecentTurnContext({
+      previousUserTurn,
+      assistantTurn: assistantTurn.content,
+    });
+    if (!kind) {
+      continue;
+    }
+
+    const options = extractWhatsAppPendingContactOptionsFromAssistantTurn(assistantTurn.content);
+    if (!options.length) {
+      continue;
+    }
+
+    const pending: WhatsAppPendingContactResolution = {
+      kind,
+      requestedName:
+        extractRequestedContactNameFromWhatsAppPrompt(previousUserTurn, kind)
+        || extractQuotedRequestedWhatsAppContactName(assistantTurn.content)
+        || options[0]!.name,
+      resumePrompt: previousUserTurn,
+      options,
+      createdAt: new Date().toISOString(),
+    };
+
+    const recovered = resolveWhatsAppPendingContactSelection({
+      message: normalizedMessage,
+      pending,
+    });
+
+    if (recovered.type === "selected") {
+      return {
+        type: "selected",
+        pending,
+        option: recovered.option,
+        resumePrompt: recovered.resumePrompt,
+      };
+    }
+
+    if (recovered.type === "remind") {
+      return {
+        type: "remind",
+        pending,
+      };
+    }
+  }
+
+  return { type: "none" };
+}
+
+export function recoverWhatsAppPendingContactSelectionFromRecentTurnsForTest(input: {
+  message: string;
+  recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
+}) {
+  return recoverWhatsAppPendingContactSelectionFromRecentTurns(input);
 }
 
 function buildWhatsAppPendingContactOptions(
@@ -21498,6 +21830,30 @@ async function rememberWhatsAppPendingContactResolution(input: {
   }).catch(() => null);
 }
 
+async function rememberWhatsAppSingleOptionPendingContactResolution(input: {
+  userId: string;
+  kind: WhatsAppPendingContactResolution["kind"];
+  requestedName: string;
+  resumePrompt: string;
+  contact: {
+    name: string;
+    phone?: string | null;
+    jid?: string | null;
+  };
+}) {
+  return rememberWhatsAppPendingContactResolution({
+    userId: input.userId,
+    kind: input.kind,
+    requestedName: input.requestedName,
+    resumePrompt: input.resumePrompt,
+    matches: [{
+      name: input.contact.name,
+      phone: input.contact.phone ?? null,
+      jid: input.contact.jid ?? null,
+    }],
+  });
+}
+
 function dedupeWhatsAppPendingContactMatches(
   matches: Array<{ name: string; phone?: string | null; jid?: string | null }>,
 ) {
@@ -21594,6 +21950,18 @@ async function buildWhatsAppHistoryNoRowsReply(input: {
   const requestedName = input.contactHint || input.resolvedContactName || "that contact";
 
   if (input.requireVerifiedContactMatch) {
+    if (input.unverifiedContactCandidate?.name) {
+      await rememberWhatsAppSingleOptionPendingContactResolution({
+        userId: input.userId,
+        kind: "whatsapp_history",
+        requestedName,
+        resumePrompt: input.promptText,
+        contact: {
+          name: input.unverifiedContactCandidate.name,
+          phone: input.unverifiedContactCandidate.phone ?? null,
+        },
+      }).catch(() => null);
+    }
     return formatWhatsAppHistoryUnverifiedContactReply({
       requestedName,
       candidateName: input.unverifiedContactCandidate?.name ?? null,
@@ -23542,6 +23910,17 @@ async function handleSendMessageToContactProfessional(
     }
 
     if (resolved.type === "confirmation_required") {
+      await rememberWhatsAppSingleOptionPendingContactResolution({
+        userId,
+        kind: "send_message",
+        requestedName,
+        resumePrompt: text,
+        contact: {
+          name: resolved.contact.name,
+          phone: resolved.contact.phone ?? null,
+          jid: resolved.contact.jid ?? null,
+        },
+      }).catch(() => null);
       return translateMessage(
         buildWhatsAppExactContactRequiredReply({
           requestedName,
@@ -23596,6 +23975,17 @@ async function handleSendMessageToContactProfessional(
         continue;
       }
 
+      await rememberWhatsAppSingleOptionPendingContactResolution({
+        userId,
+        kind: "send_message",
+        requestedName,
+        resumePrompt: text,
+        contact: {
+          name: resolved.contact.name,
+          phone: resolved.contact.phone ?? null,
+          jid: resolved.contact.jid ?? null,
+        },
+      }).catch(() => null);
       return translateMessage(
         buildWhatsAppExactContactRequiredReply({
           requestedName,
