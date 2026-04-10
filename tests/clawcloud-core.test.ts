@@ -226,6 +226,7 @@ import {
   buildLocalizedDeterministicKnownStoryReplyForTest,
   buildCodingFallbackV2,
   buildIntentAlignedRecoveryReplyForTest,
+  buildInboundAgentTimeoutResultForTest,
   buildTimeboxedProfessionalReplyForTest,
   formatWhatsAppHistoryResolvedNoRowsReplyForTest,
   formatWhatsAppHistoryUnverifiedContactReplyForTest,
@@ -11629,6 +11630,14 @@ test("latest submarine prompts fail closed instead of returning stale knowledge"
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("inbound timeout fallback for latest submarine prompts stays immediate and freshness-safe", () => {
+  const result = buildInboundAgentTimeoutResultForTest("latest submarine india launch in indian Ocean");
+  assert.match(result.response ?? "", /freshness check/i);
+  assert.match(result.response ?? "", /\b2026-dated source\b/i);
+  assert.doesNotMatch(result.response ?? "", /\bINS Arighaat\b/i);
+  assert.equal(result.liveAnswerBundle, null);
 });
 
 test("full inbound route keeps country GDP prompts on the country-metric live path", async () => {

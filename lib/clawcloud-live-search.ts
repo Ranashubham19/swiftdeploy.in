@@ -3252,6 +3252,34 @@ function buildSynthesisSourceBlock(sources: ResearchSource[]) {
     .join("\n\n");
 }
 
+function withLiveSearchTimeout<T>(promise: Promise<T>, fallback: T, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(fallback);
+      }
+    }, timeoutMs);
+
+    promise
+      .then((value) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        }
+      })
+      .catch(() => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(fallback);
+        }
+      });
+  });
+}
+
 async function synthesizeLiveAnswerFromSources(
   question: string,
   route: ClawCloudLiveSearchRoute,
@@ -3285,11 +3313,11 @@ async function synthesizeLiveAnswerFromSources(
       sourceBlock,
     ].join("\n"),
     intent: "research",
-    responseMode: "deep",
-    maxTokens: 1_200,
+    responseMode: "fast",
+    maxTokens: 900,
     fallback: "",
     skipCache: true,
-    temperature: 0.22,
+    temperature: 0.14,
   });
 
   return answer.trim();
@@ -3585,8 +3613,8 @@ export async function fetchLiveAnswerBundle(question: string): Promise<ClawCloud
 
   const queries = buildLiveSearchQueries(question, route);
   const search = await searchInternetWithDiagnostics(queries, {
-    maxQueries: Math.min(queries.length, 5),
-    maxResults: 24,
+    maxQueries: Math.min(queries.length, route.tier === "realtime" ? 3 : 4),
+    maxResults: route.tier === "realtime" ? 12 : 16,
   });
 
   if (!search.sources.length) {
@@ -3602,14 +3630,33 @@ export async function fetchLiveAnswerBundle(question: string): Promise<ClawCloud
     return null;
   }
 
-  const synthesized = await synthesizeLiveAnswerFromSources(question, route, sources);
-  if (!synthesized) {
+  const synthesized = await withLiveSearchTimeout(
+    synthesizeLiveAnswerFromSources(question, route, sources),
+    "",
+    route.tier === "realtime" ? 9_000 : 12_000,
+  );
+  const freshestEvidenceDate = evidence
+    .map((item) => item.publishedAt ?? null)
+    .filter(Boolean)
+    .map((value) => new Date(value as string))
+    .filter((date) => Number.isFinite(date.getTime()))
+    .sort((left, right) => right.getTime() - left.getTime())[0] ?? null;
+  const fallbackAnswer =
+    requiresStrictCurrentTimeline(question, route)
+      ? buildStrictCurrentTimelineReply(
+        question,
+        route,
+        freshestEvidenceDate ? formatLiveSnapshotTimestamp(freshestEvidenceDate) : null,
+      )
+      : "";
+  const finalAnswer = synthesized.trim() || fallbackAnswer.trim();
+  if (!finalAnswer) {
     return null;
   }
 
   return buildClawCloudLiveAnswerBundle({
     question,
-    answer: synthesized,
+    answer: finalAnswer,
     route,
     evidence,
     strategy: "search_synthesis",

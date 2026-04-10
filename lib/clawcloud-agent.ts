@@ -14182,50 +14182,34 @@ async function routeInboundAgentMessageResultCore(
   });
 }
 
-async function buildInboundAgentTimeoutResult(
-  userId: string,
+function buildInboundAgentTimeoutResult(
   message: string,
-): Promise<RouteInboundAgentMessageResult> {
+): RouteInboundAgentMessageResult {
   const normalizedMessage = normalizeInboundMessageForConsent(message);
   if (!normalizedMessage) {
-    return { response: null, liveAnswerBundle: null };
+    return { response: null, liveAnswerBundle: null, modelAuditTrail: null };
   }
 
-  const timeoutLocaleState = await getUserLocalePreferenceState(userId).catch(() => ({
-    locale: "en" as SupportedLocale,
-    explicit: false,
-  }));
-  const timeoutReplyLanguageResolution = resolveClawCloudReplyLanguage({
-    message: normalizedMessage,
-    preferredLocale: timeoutLocaleState.locale,
-    storedLocaleIsExplicit: timeoutLocaleState.explicit,
-  });
-  const activeContactStatusRecovery = await resolveWhatsAppActiveContactStatusRecoveryResult({
-    userId,
-    message,
-  });
-  if (activeContactStatusRecovery) {
-    return activeContactStatusRecovery;
-  }
-  const activeContactFallback = buildWhatsAppActiveContactOperationalFallback(normalizedMessage);
-  if (activeContactFallback) {
-    const localizedActiveContactFallback =
-      timeoutReplyLanguageResolution.locale !== "en"
-      && !timeoutReplyLanguageResolution.preserveRomanScript
-        ? await withSoftTimeout(
-          translateMessage(activeContactFallback, timeoutReplyLanguageResolution.locale),
-          "",
-          6_000,
-        ).catch(() => "")
-        : "";
+  const timeoutRoutingMessage = stripWhatsAppRoutingContextPrefix(normalizedMessage) || normalizedMessage;
+  const protectedWhatsAppClarification = buildUnhandledWhatsAppOperationalClarification(timeoutRoutingMessage);
+  if (protectedWhatsAppClarification) {
     return {
-      response: localizedActiveContactFallback.trim() || activeContactFallback,
+      response: protectedWhatsAppClarification.reply,
       liveAnswerBundle: null,
       modelAuditTrail: null,
     };
   }
 
-  const unsupportedWhatsAppCallReply = buildUnsupportedWhatsAppCallReply(normalizedMessage);
+  const activeContactFallback = buildWhatsAppActiveContactOperationalFallback(timeoutRoutingMessage);
+  if (activeContactFallback) {
+    return {
+      response: activeContactFallback,
+      liveAnswerBundle: null,
+      modelAuditTrail: null,
+    };
+  }
+
+  const unsupportedWhatsAppCallReply = buildUnsupportedWhatsAppCallReply(timeoutRoutingMessage);
   if (unsupportedWhatsAppCallReply) {
     return {
       response: unsupportedWhatsAppCallReply,
@@ -14234,7 +14218,7 @@ async function buildInboundAgentTimeoutResult(
     };
   }
 
-  const deterministicCodingReply = buildDeterministicCodingReply(normalizedMessage);
+  const deterministicCodingReply = buildDeterministicCodingReply(timeoutRoutingMessage);
   if (deterministicCodingReply) {
     return {
       response: deterministicCodingReply,
@@ -14243,105 +14227,50 @@ async function buildInboundAgentTimeoutResult(
     };
   }
 
-  if (looksLikeClawCloudCapabilityQuestion(normalizedMessage)) {
+  if (looksLikeClawCloudCapabilityQuestion(timeoutRoutingMessage)) {
     return {
-      response: normalizeReplyForClawCloudDisplay(buildLocalizedCapabilityReplyFromMessage(normalizedMessage)),
+      response: normalizeReplyForClawCloudDisplay(buildLocalizedCapabilityReplyFromMessage(timeoutRoutingMessage)),
       liveAnswerBundle: null,
       modelAuditTrail: null,
     };
   }
 
-  const timeoutMultilingualRoutingBridge = await resolveMultilingualRoutingBridge(
-    normalizedMessage,
-    timeoutReplyLanguageResolution,
-  );
-  const timeoutRoutingMessage = timeoutMultilingualRoutingBridge.gloss || normalizedMessage;
   const detected = detectStrictIntentRoute(timeoutRoutingMessage)?.intent
     ?? detectStrictIntentRoute(normalizedMessage)?.intent
-    ?? timeoutMultilingualRoutingBridge.intent
     ?? detectIntent(timeoutRoutingMessage);
-  if (detected.category === "email_search" || isLockedGmailReadIntentMessage(normalizedMessage)) {
-    const baseReply = buildGmailSearchUnavailableReply(normalizedMessage);
-    const localizedReply = timeoutReplyLanguageResolution.locale !== "en"
-      ? await withSoftTimeout(
-        translateMessage(baseReply, timeoutReplyLanguageResolution.locale),
-        "",
-        6_000,
-      ).catch(() => "")
-      : "";
+
+  if (detected.category === "email_search" || isLockedGmailReadIntentMessage(timeoutRoutingMessage)) {
     return {
-      response: localizedReply.trim() || baseReply,
+      response: buildGmailSearchUnavailableReply(timeoutRoutingMessage),
       liveAnswerBundle: null,
       modelAuditTrail: null,
     };
   }
 
-  let response = buildTimeboxedProfessionalReply(normalizedMessage, detected.type);
+  let response = shouldFailClosedWithoutFreshData(timeoutRoutingMessage)
+    ? buildStrictFreshnessReply(timeoutRoutingMessage)
+    : buildTimeboxedProfessionalReply(timeoutRoutingMessage, detected.type);
 
   if (
-    (isVisibleFallbackReply(response) || isLowQualityTemplateReply(response))
-    && timeoutRoutingMessage !== normalizedMessage
+    !response
+    || isVisibleFallbackReply(response)
+    || isLowQualityTemplateReply(response)
+    || response.trim().length < 20
   ) {
-    const glossFallback = buildTimeboxedProfessionalReply(timeoutRoutingMessage, detected.type);
-    if (!isVisibleFallbackReply(glossFallback) && !isLowQualityTemplateReply(glossFallback)) {
-      const localizedGlossFallback = timeoutReplyLanguageResolution.locale !== "en"
-        ? await withSoftTimeout(
-          translateMessage(glossFallback, timeoutReplyLanguageResolution.locale),
-          "",
-          6_000,
-        ).catch(() => "")
-        : "";
-      response = localizedGlossFallback.trim() || glossFallback;
-    }
-  }
-
-  // If the template response is a fallback/low-quality, attempt a quick AI call
-  // with a small bounded budget as last resort before returning template garbage
-  if (!response || isVisibleFallbackReply(response) || isLowQualityTemplateReply(response)) {
-    try {
-      // Detect non-Latin script and translate for the timeout emergency call too
-      const hasNonLatinTimeout = /[^\u0000-\u024F\u1E00-\u1EFF\u2C60-\u2C7F\uA720-\uA7FF]/u.test(normalizedMessage);
-      const timeoutLocale = hasNonLatinTimeout ? inferClawCloudMessageLocale(normalizedMessage) : null;
-      let timeoutUserPrompt = normalizedMessage;
-      let timeoutLanguageHint = "";
-      if (hasNonLatinTimeout && timeoutLocale && timeoutLocale !== "en") {
-        const timeoutGloss = await withSoftTimeout(
-          translateMessage(normalizedMessage, "en", { force: true }).catch(() => ""),
-          "",
-          1_500,
-        );
-        if (timeoutGloss?.trim() && timeoutGloss.trim().toLowerCase() !== normalizedMessage.trim().toLowerCase()) {
-          timeoutUserPrompt = timeoutGloss.trim();
-          timeoutLanguageHint = `\nIMPORTANT: The user wrote in ${localeNames[timeoutLocale] ?? timeoutLocale}. Original message: ${normalizedMessage}\nAnswer in ${localeNames[timeoutLocale] ?? timeoutLocale}, NOT in English. Use the English translation only to understand the question.`;
-        }
-      }
-      const timeoutStrictRoute = detectStrictIntentRoute(timeoutUserPrompt)
-        ?? detectStrictIntentRoute(normalizedMessage);
-      const emergencyReply = await withSoftTimeout(completeClawCloudPrompt({
-        system: `You are ClawCloud AI, the world's most capable AI assistant. Answer the user's question completely, accurately, and directly. Do NOT say you cannot help. Do NOT ask for more details â€” answer with what you know. Silently repair obvious misspellings, shorthand, and incomplete phrasing before answering. Use WhatsApp markdown (*bold*, _italic_, bullet points).${timeoutLanguageHint}`,
-        user: timeoutUserPrompt,
-        intent: timeoutStrictRoute?.intent.type ?? detected.type,
-        temperature: 0.15,
-        maxTokens: 2000,
-        fallback: "",
-      }), "", INBOUND_AGENT_TIMEOUT_RECOVERY_MS);
-      if (emergencyReply?.trim() && !isVisibleFallbackReply(emergencyReply) && !isLowQualityTemplateReply(emergencyReply)) {
-        return {
-          response: emergencyReply.trim(),
-          liveAnswerBundle: null,
-          modelAuditTrail: null,
-        };
-      }
-    } catch {
-      // Emergency call failed â€” fall through to template
-    }
+    response = shouldFailClosedWithoutFreshData(timeoutRoutingMessage)
+      ? buildStrictFreshnessReply(timeoutRoutingMessage)
+      : buildGuaranteedServerRecoveryReply(timeoutRoutingMessage);
   }
 
   return {
-    response,
+    response: normalizeReplyForClawCloudDisplay(response),
     liveAnswerBundle: null,
     modelAuditTrail: null,
   };
+}
+
+export function buildInboundAgentTimeoutResultForTest(message: string) {
+  return buildInboundAgentTimeoutResult(message);
 }
 
 export async function finalizeAgentReplyForTest(input: {
@@ -14656,7 +14585,7 @@ export async function routeInboundAgentMessageResult(
       (): RouteInboundAgentMessageResult => ({ response: null as unknown as string, liveAnswerBundle: null, modelAuditTrail: null }),
     ),
     new Promise<RouteInboundAgentMessageResult>((resolve) => {
-      setTimeout(() => resolve(buildInboundAgentTimeoutResult(userId, message)), timeoutPolicy.timeoutMs);
+      setTimeout(() => resolve(buildInboundAgentTimeoutResult(message)), timeoutPolicy.timeoutMs);
     }),
   ]);
 
