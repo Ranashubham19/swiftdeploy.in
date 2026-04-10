@@ -14550,7 +14550,7 @@ async function applyEndToEndReplyLanguageLockWithinBudget(input: {
     return safeFallbackResult;
   }
 
-  if (!input.deadlineMs || budgetMs >= INBOUND_AGENT_LANGUAGE_LOCK_TIMEOUT_MS) {
+  if (!input.deadlineMs) {
     return applyEndToEndReplyLanguageLock({
       userId: input.userId,
       message: input.message,
@@ -14558,6 +14558,10 @@ async function applyEndToEndReplyLanguageLockWithinBudget(input: {
     });
   }
 
+  const boundedLanguageLockBudgetMs = Math.max(
+    450,
+    Math.min(budgetMs, INBOUND_AGENT_LANGUAGE_LOCK_TIMEOUT_MS),
+  );
   return withSoftTimeout(
     applyEndToEndReplyLanguageLock({
       userId: input.userId,
@@ -14565,7 +14569,7 @@ async function applyEndToEndReplyLanguageLockWithinBudget(input: {
       result: input.result,
     }),
     safeFallbackResult,
-    budgetMs,
+    boundedLanguageLockBudgetMs,
   );
 }
 
