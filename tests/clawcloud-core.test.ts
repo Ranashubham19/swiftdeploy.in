@@ -241,6 +241,7 @@ import {
   autoCorrectWhatsAppOutgoingMessageForTest,
   isUnsafeStyledWhatsAppDraftCandidateForTest,
   buildWhatsAppActiveContactStatusRecoveryPlanForTest,
+  buildLocalizedWhatsAppSendReceiptForTest,
   buildWhatsAppActiveContactSendReceiptForTest,
   detectWhatsAppActiveContactQuotedIncomingMessageForTest,
   looksLikeAssistantReplyRepairRequestForTest,
@@ -7188,6 +7189,21 @@ test("active contact send receipts stay short and mirror the user's message lang
     },
   });
   assert.equal(englishReceipt, "Message delivered to didi (+917876831969).");
+});
+
+test("localized WhatsApp send receipts preserve explicit send confirmation structure", async () => {
+  const receipt = await buildLocalizedWhatsAppSendReceiptForTest({
+    message: "Send a professional and beautiful good morning message to dii in hindi",
+    locale: "en",
+    statusLine: "Message delivered to Dii (+917876831969).",
+    sentText: "Suprabhat Dii, aapka din bahut sundar rahe.",
+    note: "WhatsApp accepted the send and is waiting for final delivery sync.",
+  });
+
+  assert.match(receipt, /Message delivered to Dii/i);
+  assert.match(receipt, /Sent text:/i);
+  assert.match(receipt, /Suprabhat Dii, aapka din bahut sundar rahe\./i);
+  assert.match(receipt, /Note:/i);
 });
 
 test("contact ranking resolves family aliases from synced WhatsApp names and recent chat history", () => {

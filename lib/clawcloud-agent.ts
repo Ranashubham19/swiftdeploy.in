@@ -19036,6 +19036,13 @@ async function handleSendMessageToContact(
       targetLabel: resolvedName,
       action: "message",
     })}*`;
+    return buildLocalizedWhatsAppSendReceipt({
+      message: text,
+      locale,
+      statusLine,
+      sentText: message,
+      note: sendResult.warning,
+    });
     return translateMessage(
       [
         statusLine,
@@ -21027,19 +21034,17 @@ async function handleWhatsAppPendingDraftReview(input: {
       }) || target.name;
       return {
         handled: true,
-        response: await translateMessage(
-          [
-            buildWhatsAppSingleSendStatusLine({
-              sendResult,
-              targetLabel,
-              action: "message",
-            }),
-            "",
-            `Sent text: "${pending.draftMessage}"`,
-            ...(sendResult.warning ? ["", `Note: ${sendResult.warning}`] : []),
-          ].join("\n"),
-          input.locale,
-        ),
+        response: await buildLocalizedWhatsAppSendReceipt({
+          message: pending.resumePrompt,
+          locale: input.locale,
+          statusLine: buildWhatsAppSingleSendStatusLine({
+            sendResult,
+            targetLabel,
+            action: "message",
+          }),
+          sentText: pending.draftMessage,
+          note: sendResult.warning,
+        }),
       };
     } catch (error) {
       console.error("[agent] pending WhatsApp draft send failed:", error);
@@ -22677,6 +22682,101 @@ function summarizeWhatsAppBatchSendDisposition(input: {
   return `WhatsApp ${actionWordPlural} processed for ${total} contacts: ${fragments.join(", ")}.`;
 }
 
+async function translateWhatsAppSendReceiptLine(
+  line: string,
+  resolution: ClawCloudReplyLanguageResolution,
+) {
+  if (!line.trim()) {
+    return line;
+  }
+
+  if (resolution.locale === "en" && !resolution.preserveRomanScript) {
+    return line;
+  }
+
+  const translationLocale = resolution.locale === "en" && resolution.preserveRomanScript
+    ? "hi"
+    : resolution.locale;
+  const targetLanguageName = translationLocale === "hi"
+    ? "Hindi"
+    : resolution.targetLanguageName;
+
+  return translateMessage(line, translationLocale, {
+    force: true,
+    preserveRomanScript: resolution.preserveRomanScript,
+    targetLanguageName,
+  }).catch(() => line);
+}
+
+async function buildLocalizedWhatsAppSendReceipt(input: {
+  message: string;
+  locale: SupportedLocale;
+  statusLine: string;
+  sentText?: string | null;
+  note?: string | null;
+  recipients?: Array<{
+    label: string;
+    status: string;
+  }>;
+  failedRecipients?: string[];
+}) {
+  const resolution = resolveClawCloudReplyLanguage({
+    message: input.message,
+    preferredLocale: input.locale,
+  });
+
+  const lines = [await translateWhatsAppSendReceiptLine(input.statusLine, resolution)];
+
+  if (input.sentText?.trim()) {
+    lines.push(
+      "",
+      `${await translateWhatsAppSendReceiptLine("Sent text", resolution)}: "${input.sentText.trim()}"`,
+    );
+  }
+
+  if (input.note?.trim()) {
+    lines.push(
+      "",
+      `${await translateWhatsAppSendReceiptLine("Note", resolution)}: ${input.note.trim()}`,
+    );
+  }
+
+  if (input.recipients?.length) {
+    lines.push("", `${await translateWhatsAppSendReceiptLine("Recipients", resolution)}:`);
+    const translatedStatuses = await Promise.all(
+      input.recipients.map((recipient) => translateWhatsAppSendReceiptLine(recipient.status, resolution)),
+    );
+    lines.push(
+      ...input.recipients.map((recipient, index) => `- ${recipient.label}: ${translatedStatuses[index]}`),
+    );
+  }
+
+  if (input.failedRecipients?.length) {
+    lines.push(
+      "",
+      `${await translateWhatsAppSendReceiptLine("Not delivered", resolution)}:`,
+      ...input.failedRecipients.map((entry) => `- ${entry}`),
+    );
+  }
+
+  return lines.join("\n");
+}
+
+export async function buildLocalizedWhatsAppSendReceiptForTest(input: {
+  message: string;
+  locale: SupportedLocale;
+  statusLine: string;
+  sentText?: string | null;
+  note?: string | null;
+  recipients?: Array<{
+    label: string;
+    status: string;
+  }>;
+  failedRecipients?: string[];
+}) {
+  return buildLocalizedWhatsAppSendReceipt(input);
+}
+
 async function buildWhatsAppActiveContactSendReceipt(input: {
   message: string;
   session: WhatsAppActiveContactSession;
@@ -23338,15 +23438,13 @@ async function handleSendMessageToContactProfessional(
         targetLabel: `+${parsed.phone}`,
         action: "message",
       });
-      return translateMessage(
-        [
-          statusLine,
-          "",
-          `Sent text: "${professionalDraft}"`,
-          ...(sendResult.warning ? ["", `Note: ${sendResult.warning}`] : []),
-        ].join("\n"),
+      return buildLocalizedWhatsAppSendReceipt({
+        message: text,
         locale,
-      );
+        statusLine,
+        sentText: professionalDraft,
+        note: sendResult.warning,
+      });
     } catch (error) {
       console.error("[agent] direct phone send failed:", error);
       return translateMessage(
@@ -23600,15 +23698,13 @@ async function handleSendMessageToContactProfessional(
         targetLabel: recipientLabel,
         action: "message",
       })}`;
-      return translateMessage(
-        [
-          statusLine,
-          "",
-          `*Sent:* "${professionalDraft}"`,
-          ...(sendResult.warning ? ["", `_Note: ${sendResult.warning}_`] : []),
-        ].join("\n"),
+      return buildLocalizedWhatsAppSendReceipt({
+        message: text,
         locale,
-      );
+        statusLine,
+        sentText: professionalDraft,
+        note: sendResult.warning,
+      });
     } catch (error) {
       console.error("[agent] direct contact send failed:", error);
       return translateMessage(
@@ -23701,31 +23797,25 @@ async function handleSendMessageToContactProfessional(
     tasks_run: 1,
   }).catch(() => null);
 
-  const lines = [
-    summarizeWhatsAppBatchSendDisposition({
+  return buildLocalizedWhatsAppSendReceipt({
+    message: text,
+    locale,
+    statusLine: summarizeWhatsAppBatchSendDisposition({
       sendResults: sentRecipients.map(({ label, disposition }) => ({ label, disposition })),
       action: "message",
     }),
-    "",
-    `Sent text: "${professionalDraft}"`,
-  ];
-
-  if (sentRecipients.length > 1) {
-    lines.push(
-      "",
-      "Recipients:",
-      ...sentRecipients.map((entry) => `- ${entry.label}: ${buildWhatsAppBatchRecipientStatusLabel({
-        sendResult: entry.sendResult,
-        action: "message",
-      })}`),
-    );
-  }
-
-  if (failedRecipients.length) {
-    lines.push("", "Not delivered:", ...failedRecipients.map((entry) => `- ${entry}`));
-  }
-
-  return translateMessage(lines.join("\n"), locale);
+    sentText: professionalDraft,
+    recipients: sentRecipients.length > 1
+      ? sentRecipients.map((entry) => ({
+        label: entry.label,
+        status: buildWhatsAppBatchRecipientStatusLabel({
+          sendResult: entry.sendResult,
+          action: "message",
+        }),
+      }))
+      : undefined,
+    failedRecipients,
+  });
 }
 
 async function handleSaveContactCommand(
