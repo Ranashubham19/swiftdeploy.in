@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import {
+  buildInboundAgentTimeoutResultForRouteFallback,
   routeInboundAgentMessageResult,
 } from "@/lib/clawcloud-agent";
 import { recordClawCloudAnswerObservability } from "@/lib/clawcloud-answer-observability";
@@ -21,6 +22,89 @@ import { env } from "@/lib/env";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
+
+async function proxyAgentMessageToRailway(input: {
+  userId: string;
+  message: string;
+  skipAppAccessConsent?: boolean;
+  skipConversationStyleChoice?: boolean;
+  conversationStyle?: import("@/lib/clawcloud-conversation-style").ClawCloudConversationStyle;
+}) {
+  const agentServerUrl =
+    env.AGENT_SERVER_URL?.trim().replace(/\/+$/, "")
+    || env.BACKEND_API_URL?.trim().replace(/\/+$/, "")
+    || "";
+  const agentSecret = env.AGENT_SECRET?.trim() || "";
+  if (!agentServerUrl || !agentSecret) {
+    return { kind: "not_configured" as const };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 85_000);
+  try {
+    const response = await fetch(`${agentServerUrl}/agent/message`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agentSecret}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(input),
+      cache: "no-store",
+      signal: controller.signal,
+    });
+
+    const payload = await response.json().catch(() => null) as null | {
+      success?: boolean;
+      response?: string | null;
+      liveAnswerBundle?: import("@/lib/types").ClawCloudAnswerBundle | null;
+      modelAuditTrail?: import("@/lib/types").ClawCloudModelAuditTrail | null;
+      consentRequest?: import("@/lib/clawcloud-app-access-consent").AppAccessConsentRequest | null;
+      styleRequest?: import("@/lib/clawcloud-conversation-style").ClawCloudConversationStyleRequest | null;
+    };
+
+    if (!response.ok || !payload?.success) {
+      return { kind: "failed" as const };
+    }
+
+    return {
+      kind: "success" as const,
+      result: {
+        response: payload.response ?? null,
+        liveAnswerBundle: payload.liveAnswerBundle ?? null,
+        modelAuditTrail: payload.modelAuditTrail ?? null,
+        consentRequest: payload.consentRequest ?? null,
+        styleRequest: payload.styleRequest ?? null,
+      },
+    };
+  } catch {
+    return { kind: "failed" as const };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function resolveAgentMessageResult(input: {
+  userId: string;
+  message: string;
+  skipAppAccessConsent?: boolean;
+  skipConversationStyleChoice?: boolean;
+  conversationStyle?: import("@/lib/clawcloud-conversation-style").ClawCloudConversationStyle;
+}) {
+  const proxied = await proxyAgentMessageToRailway(input);
+  if (proxied.kind === "success") {
+    return proxied.result;
+  }
+
+  if (proxied.kind === "not_configured") {
+    return routeInboundAgentMessageResult(input.userId, input.message, {
+      skipAppAccessConsent: input.skipAppAccessConsent,
+      skipConversationStyleChoice: input.skipConversationStyleChoice,
+      conversationStyle: input.conversationStyle,
+    });
+  }
+
+  return buildInboundAgentTimeoutResultForRouteFallback(input.message);
+}
 
 async function recordAgentMessageObservability(input: {
   userId: string;
@@ -138,7 +222,9 @@ export async function POST(request: NextRequest) {
         }
 
         await clearLatestAppAccessConsent(verified.userId, body.consentToken).catch(() => undefined);
-        const result = await routeInboundAgentMessageResult(verified.userId, verified.originalMessage, {
+        const result = await resolveAgentMessageResult({
+          userId: verified.userId,
+          message: verified.originalMessage,
           skipAppAccessConsent: true,
         });
         recordAgentMessageObservabilityLater({
@@ -169,7 +255,10 @@ export async function POST(request: NextRequest) {
         return jsonUtf8({ error: "message is required" }, { status: 400 });
       }
 
-      const result = await routeInboundAgentMessageResult(body.userId, body.message);
+      const result = await resolveAgentMessageResult({
+        userId: body.userId,
+        message: body.message,
+      });
       recordAgentMessageObservabilityLater({
         userId: body.userId,
         message: body.message,
@@ -263,7 +352,9 @@ export async function POST(request: NextRequest) {
       }
 
       await clearLatestAppAccessConsent(auth.user.id, body.consentToken).catch(() => undefined);
-      const result = await routeInboundAgentMessageResult(auth.user.id, verified.originalMessage, {
+      const result = await resolveAgentMessageResult({
+        userId: auth.user.id,
+        message: verified.originalMessage,
         skipAppAccessConsent: true,
       });
       recordAgentMessageObservabilityLater({
@@ -299,7 +390,10 @@ export async function POST(request: NextRequest) {
       return jsonUtf8({ error: "Forbidden" }, { status: 403 });
     }
 
-    const result = await routeInboundAgentMessageResult(userId, body.message);
+    const result = await resolveAgentMessageResult({
+      userId,
+      message: body.message,
+    });
     recordAgentMessageObservabilityLater({
       userId,
       message: body.message,

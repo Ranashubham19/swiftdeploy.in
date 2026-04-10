@@ -8240,6 +8240,47 @@ app.post("/wa/send-user/:userId", auth, async (req, res) => {
   });
 });
 
+app.post("/agent/message", auth, async (req, res) => {
+  try {
+    const userId = String(req.body.userId ?? "").trim();
+    const message = String(req.body.message ?? "").trim();
+    const skipAppAccessConsent = req.body.skipAppAccessConsent === true;
+    const skipConversationStyleChoice = req.body.skipConversationStyleChoice === true;
+    const conversationStyle = typeof req.body.conversationStyle === "string"
+      ? String(req.body.conversationStyle).trim()
+      : undefined;
+
+    if (!userId || !message) {
+      res.status(400).json({ error: "userId and message required" });
+      return;
+    }
+
+    const { routeInboundAgentMessageResult } = await import("./lib/clawcloud-agent");
+    const result = await routeInboundAgentMessageResult(userId, message, {
+      skipAppAccessConsent,
+      skipConversationStyleChoice,
+      conversationStyle:
+        conversationStyle === "direct_action" || conversationStyle === "professional"
+          ? conversationStyle
+          : undefined,
+    });
+
+    res.json({
+      success: true,
+      response: result.response,
+      liveAnswerBundle: result.liveAnswerBundle ?? null,
+      modelAuditTrail: result.modelAuditTrail ?? null,
+      consentRequest: result.consentRequest ?? null,
+      styleRequest: result.styleRequest ?? null,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "agent_message_failed",
+    });
+  }
+});
+
 app.get("/health", (_req, res) => {
   const error = configError();
   const sessionStorage = readSessionStorageHealth();

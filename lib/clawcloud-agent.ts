@@ -14273,6 +14273,10 @@ export function buildInboundAgentTimeoutResultForTest(message: string) {
   return buildInboundAgentTimeoutResult(message);
 }
 
+export function buildInboundAgentTimeoutResultForRouteFallback(message: string) {
+  return buildInboundAgentTimeoutResult(message);
+}
+
 export async function finalizeAgentReplyForTest(input: {
   locale: SupportedLocale;
   preserveRomanScript?: boolean;
