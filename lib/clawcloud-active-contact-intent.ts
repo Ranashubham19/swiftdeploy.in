@@ -4,6 +4,8 @@ import {
 } from "@/lib/clawcloud-query-understanding";
 
 const ACTIVE_CONTACT_TRAILING_PUNCTUATION = "[\\u3002.!?\\uFF01\\uFF1F\\u061F\\u06D4]*$";
+const ACTIVE_CONTACT_USER_SIDE_PHRASE =
+  "(?:on\\s+my\\s+behalf|for\\s+me|from\\s+my\\s+side)";
 
 export const ACTIVE_CONTACT_START_PATTERNS = [
   new RegExp(
@@ -11,7 +13,7 @@ export const ACTIVE_CONTACT_START_PATTERNS = [
       + `(?:from\\s+now\\s+on\\s+)?`
       + `(?:talk|speak|chat|reply|message|send\\s+(?:messages?|texts?))\\s+`
       + `(?:to|with)\\s+(.+?)\\s+`
-      + `(?:on\\s+my\\s+behalf|for\\s+me)`
+      + ACTIVE_CONTACT_USER_SIDE_PHRASE
       + ACTIVE_CONTACT_TRAILING_PUNCTUATION,
     "iu",
   ),
@@ -28,15 +30,23 @@ export const ACTIVE_CONTACT_START_PATTERNS = [
     `^(?:(?:can|could|would|will)\\s+you\\s+(?:please\\s+)?|(?:please\\s+)?)`
       + `(?:from\\s+now\\s+on\\s+)?`
       + `(?:handle|manage)\\s+(.+?)\\s+`
-      + `(?:on\\s+whatsapp\\s+)?(?:on\\s+my\\s+behalf|for\\s+me)`
+      + `(?:on\\s+whatsapp\\s+)?` + ACTIVE_CONTACT_USER_SIDE_PHRASE
       + ACTIVE_CONTACT_TRAILING_PUNCTUATION,
     "iu",
   ),
   new RegExp(
-    `^(?:ok(?:ay)?[, ]+)?(?:from\\s+now\\s+on\\s+)?(?:you(?:'ll|\\s+will)\\s+)?`
+    `^(?:ok(?:ay)?[, ]+)?(?:from\\s*\\.?\\s*now\\s+(?:on|onward|onwards)\\s+)?(?:you(?:'ll|\\s+will)\\s+)?`
       + `(?:talk|speak|chat|reply|message|send\\s+(?:messages?|texts?))\\s+`
       + `(?:to|with)\\s+(.+?)\\s+`
-      + `(?:on\\s+my\\s+behalf|for\\s+me)`
+      + ACTIVE_CONTACT_USER_SIDE_PHRASE
+      + ACTIVE_CONTACT_TRAILING_PUNCTUATION,
+    "iu",
+  ),
+  new RegExp(
+    `^(?:ok(?:ay)?[, ]+)?(?:from\\s*\\.?\\s*now\\s+(?:on|onward|onwards)\\s+)?(?:you(?:'ll|\\s+will)\\s+)?`
+      + `(?:message|text|reply(?:\\s+to)?|respond(?:\\s+to)?|handle|manage)\\s+`
+      + `(.+?)\\s+`
+      + ACTIVE_CONTACT_USER_SIDE_PHRASE
       + ACTIVE_CONTACT_TRAILING_PUNCTUATION,
     "iu",
   ),
@@ -70,22 +80,22 @@ export const ACTIVE_CONTACT_START_PATTERNS = [
 
 const ACTIVE_CONTACT_PERSISTENT_START_PATTERNS = [
   new RegExp(
-    `^(?:ok(?:ay)?[, ]+)?(?:from\\s+now\\s+(?:on|onward|onwards)|starting\\s+now|from\\s+here\\s+on)\\s+`
+    `^(?:ok(?:ay)?[, ]+)?(?:from\\s*\\.?\\s*now\\s+(?:on|onward|onwards)|starting\\s+now|from\\s+here\\s+on)\\s+`
       + `(?:you(?:'ll|\\s+will)\\s+)?`
       + `(?:message|text|reply(?:\\s+to)?|respond(?:\\s+to)?|handle|manage)\\s+`
       + `(?:every|all)\\s+(?:question|questions|message|messages|reply|replies|text|texts)\\s+(?:of|from)\\s+`
       + `(.+?)`
-      + `(?:\\s+(?:on\\s+my\\s+behalf|for\\s+me))?`
+      + `(?:\\s+` + ACTIVE_CONTACT_USER_SIDE_PHRASE + `)?`
       + ACTIVE_CONTACT_TRAILING_PUNCTUATION,
     "iu",
   ),
   new RegExp(
-    `^(?:ok(?:ay)?[, ]+)?(?:from\\s+now\\s+(?:on|onward|onwards)|starting\\s+now|from\\s+here\\s+on)\\s+`
+    `^(?:ok(?:ay)?[, ]+)?(?:from\\s*\\.?\\s*now\\s+(?:on|onward|onwards)|starting\\s+now|from\\s+here\\s+on)\\s+`
       + `(?:you(?:'ll|\\s+will)\\s+)?`
       + `(?:talk|speak|chat|reply|respond|message|text|handle|manage)\\s+`
       + `(?:to|with)\\s+`
       + `(.+?)`
-      + `(?:\\s+(?:on\\s+my\\s+behalf|for\\s+me))?`
+      + `(?:\\s+` + ACTIVE_CONTACT_USER_SIDE_PHRASE + `)?`
       + ACTIVE_CONTACT_TRAILING_PUNCTUATION,
     "iu",
   ),
@@ -103,14 +113,25 @@ function buildActiveContactStartCandidates(value: string) {
     return [];
   }
 
+  const punctuationNormalizedRaw = raw
+    .replace(/\bfrom\s*\.\s*now\b/giu, "from now")
+    .replace(/\bfrom\s+my\s+side\b/giu, "on my behalf");
   const stripped = stripClawCloudConversationalLeadIn(raw);
-  const normalizedRaw = normalizeClawCloudUnderstandingMessage(raw).trim();
+  const punctuationNormalizedStripped = stripClawCloudConversationalLeadIn(punctuationNormalizedRaw);
+  const normalizedRaw = normalizeClawCloudUnderstandingMessage(punctuationNormalizedRaw).trim();
   const normalizedStripped = normalizedRaw
     ? stripClawCloudConversationalLeadIn(normalizedRaw)
     : "";
 
   return Array.from(
-    new Set([raw, stripped, normalizedRaw, normalizedStripped].filter(Boolean)),
+    new Set([
+      raw,
+      punctuationNormalizedRaw,
+      stripped,
+      punctuationNormalizedStripped,
+      normalizedRaw,
+      normalizedStripped,
+    ].filter(Boolean)),
   );
 }
 

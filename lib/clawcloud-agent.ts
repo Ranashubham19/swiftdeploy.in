@@ -10110,6 +10110,10 @@ function looksLikeWhatsAppHistoryQuestion(text: string) {
     return false;
   }
 
+  if (extractActiveContactStartCommand(normalizedText)) {
+    return false;
+  }
+
   if (
     explicitSurfaces.length === 1
     && explicitSurfaces[0] === "whatsapp"

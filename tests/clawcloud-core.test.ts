@@ -6174,6 +6174,10 @@ test("active contact mode parses professional handoff commands and only proxies 
     { type: "start", contactName: "jaideep" },
   );
   assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("From. Now onward you will message dii From my side"),
+    { type: "start", contactName: "dii" },
+  );
+  assert.deepEqual(
     parseWhatsAppActiveContactSessionCommandForTest("ab se app mere behalf mai maa se baat karange"),
     { type: "start", contactName: "maa" },
   );
@@ -6781,6 +6785,11 @@ test("full inbound route prioritizes active-contact status and stop commands ove
   assert.match(questionStyleStart.response ?? "", /WhatsApp web session is not active right now\./i);
   assert.doesNotMatch(questionStyleStart.response ?? "", /tell me exactly what you want me to say/i);
   assert.doesNotMatch(questionStyleStart.response ?? "", /what do you want me to say/i);
+
+  const fromMySideStart = await routeInboundAgentMessageResult("test-user", "From. Now onward you will message dii From my side");
+  assert.match(fromMySideStart.response ?? "", /WhatsApp web session is not active right now\./i);
+  assert.doesNotMatch(fromMySideStart.response ?? "", /I couldn't verify a synced WhatsApp contact named "side"/i);
+  assert.doesNotMatch(fromMySideStart.response ?? "", /unknown-number threads/i);
 
   const status = await routeInboundAgentMessageResult("test-user", "abhi kis se baat kar rahe ho");
   assert.match(status.response ?? "", /Koi active contact mode abhi chal nahi raha hai\./i);
@@ -7857,6 +7866,13 @@ test("strict intent routing keeps typoed contact-conversation prompts in the Wha
   assert.equal(route?.intent.category, "whatsapp_history");
   assert.equal(route?.confidence, "medium");
   assert.equal(route?.clarificationReply, null);
+});
+
+test("active-contact handoff phrasing with 'from my side' stays out of the WhatsApp history lane", () => {
+  assert.deepEqual(
+    detectIntentForTest("From. Now onward you will message dii From my side"),
+    { type: "send_message", category: "send_message" },
+  );
 });
 
 test("strict intent routing uses typo normalization to keep contact-history lookups locked early", () => {
