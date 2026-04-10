@@ -16969,10 +16969,12 @@ async function routeInboundAgentMessageCore(
         noLiveDataSignal === "__NO_LIVE_DATA_INTERNAL_SIGNAL__"
         || (isVisibleFallbackReply(noLiveDataSignal) && !noLiveDataAiModelAcceptable)
       ) {
+        const currentYear = new Date().getFullYear();
         const latestOnlyInstruction = [
           "Answer with best-known facts, but do NOT claim they are the latest unless you can verify the date.",
-          "Include an explicit date or year for any time-sensitive claim (e.g., 'Last confirmed: 2024-08-29').",
-          "If you cannot verify a current date, say 'Last confirmed:' and give the most recent date you know.",
+          `Include an explicit date or year for any time-sensitive claim (e.g., 'Last confirmed: ${currentYear}-04-10').`,
+          `If you cannot verify a ${currentYear} date for a 'latest' request, ask for permission to run live search so you can confirm the ${currentYear} status.`,
+          "Do not provide older-year answers as 'latest' when the user asked for the latest year.",
           "Never say 'I could not verify' or 'live search unavailable'.",
           "Never ask the user to retry as your primary response.",
         ].join(" ");
@@ -17061,10 +17063,12 @@ async function routeInboundAgentMessageCore(
       }
 
       // Live news unavailable — fall back to a dated best-known snapshot.
+      const currentYear = new Date().getFullYear();
       const latestOnlyInstruction = [
         "Answer with best-known facts, but do NOT claim they are the latest unless you can verify the date.",
-        "Include an explicit date or year for any time-sensitive claim (e.g., 'Last confirmed: 2024-08-29').",
-        "If you cannot verify a current date, say 'Last confirmed:' and give the most recent date you know.",
+        `Include an explicit date or year for any time-sensitive claim (e.g., 'Last confirmed: ${currentYear}-04-10').`,
+        `If you cannot verify a ${currentYear} date for a 'latest' request, ask for permission to run live search so you can confirm the ${currentYear} status.`,
+        "Do not provide older-year answers as 'latest' when the user asked for the latest year.",
         "Never say 'I could not verify' or 'live search unavailable'.",
       ].join(" ");
       return finalizeRaw(
