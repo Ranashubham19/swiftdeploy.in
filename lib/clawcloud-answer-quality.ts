@@ -16,6 +16,7 @@ import {
   detectWorldBankCountryMetricQuestion,
   extractRichestRankingScope,
   isCompleteCountryMetricAnswer,
+  looksLikeLatestMilestoneQuestion,
   shouldUseLiveSearch,
 } from "@/lib/clawcloud-live-search";
 import { detectAiModelRoutingDecision } from "@/lib/clawcloud-ai-model-routing";
@@ -263,6 +264,11 @@ const WRONG_MODE_TRANSLATION_PATTERNS = [
   /\balready in (?:korean|english|hindi|japanese|chinese|spanish|french|arabic)\b/i,
   /\bthere is no need for translation\b/i,
   /\bthe text remains as is\b/i,
+  /\bnot in a language i can understand directly\b/i,
+  /\bi want to make sure i['’]m following you correctly\b/i,
+  /\bcould you please rephrase\b/i,
+  /\bplease rephrase or provide more context\b/i,
+  /\btell me what this\/that refers to\b/i,
   /\bif you'd like, i can help\b/i,
   /\bprovide more context\b/i,
   /\bplease let me know how i can assist\b/i,
@@ -338,8 +344,19 @@ function looksLikeScienceOrResearchQuestion(question: string, intent: string, ca
   );
 }
 
+function looksLikePastTenseFactQuestion(question: string): boolean {
+  return /\bwhen\s+(?:was|did|were)\b.+\b(?:released?|launched?|announced?|unveiled)\b/i.test(question)
+    || /\b(?:was|were|did)\b.+\b(?:released?|launched?|announced?|unveiled)\b/i.test(question)
+    || /\b(?:released?|launched?|announced?)\s+(?:in|on|back|last|earlier)\b/i.test(question);
+}
+
 function looksLikeFreshnessSensitiveTechQuestion(question: string) {
   if (!question.trim() || hasPastYearScope(question)) {
+    return false;
+  }
+
+  // Past-tense factual questions about releases are historical, not live
+  if (looksLikePastTenseFactQuestion(question)) {
     return false;
   }
 
@@ -360,7 +377,6 @@ function looksLikeFreshnessSensitiveTechQuestion(question: string) {
 
 function requiresFreshLiveGroundingQuestion(question: string, category: string) {
   return category === "news"
-    || category === "web_search"
     || shouldUseLiveSearch(question)
     || detectWorldBankCountryMetricComparisonQuestion(question) !== null
     || looksLikeFreshnessSensitiveTechQuestion(question);
@@ -642,9 +658,18 @@ function looksLikeClearDirectQuestion(question: string) {
     return false;
   }
 
+  const hasDenseNonLatinQuestionSignal = (() => {
+    const nonLatinUnits = normalizedQuestion.match(/[^\p{Script=Latin}\p{N}\p{P}\p{Sc}\p{Sm}\p{Zs}]/gu) ?? [];
+    if (nonLatinUnits.length >= 6) {
+      return true;
+    }
+
+    return /[?？]|(?:ですか|ますか|なのか|인가요|입니까|나요|까요|吗|嗎|呢|么|嗎|หรือ|ไหม)\s*$/u.test(normalizedQuestion);
+  })();
+
   const detectedLocale = inferClawCloudMessageLocale(normalizedQuestion);
   if (detectedLocale && detectedLocale !== "en") {
-    return normalizedQuestion.split(/\s+/).filter(Boolean).length >= 4;
+    return hasDenseNonLatinQuestionSignal || normalizedQuestion.split(/\s+/).filter(Boolean).length >= 4;
   }
 
   if (looksLikeExistingStorySummaryQuestion(normalizedQuestion)) {
@@ -823,6 +848,7 @@ function domainForQuestion(question: string, intent: string, category: string, i
   if (isDocumentBound) return "document";
   if (intent === "language" || category === "language") return "general";
   if (detectTaxQuery(question)) return "tax";
+  if (detectAiModelRoutingDecision(question)?.mode === "web_search") return "live";
   if (requiresFreshLiveGroundingQuestion(question, category)) return "live";
   if (intent === "finance" || category === "finance") return "finance";
   if (matchesAny(question, MENTAL_HEALTH_PATTERNS)) return "mental_health";
@@ -1058,6 +1084,15 @@ function looksPastYearFreshnessLeak(question: string | undefined, answer: string
     return false;
   }
 
+  if (looksLikeLatestMilestoneQuestion(question)) {
+    return false;
+  }
+
+  // If the question asks "when was X released/launched", past years in the answer are expected
+  if (looksLikePastTenseFactQuestion(question)) {
+    return false;
+  }
+
   const explicitYear = extractExplicitQuestionYear(question);
   const currentYear = new Date().getUTCFullYear();
   if ((explicitYear !== null && explicitYear < currentYear) || hasPastYearScope(question)) {
@@ -1147,9 +1182,28 @@ export function isClawCloudGroundedLiveAnswer(input: {
   answer: string | null | undefined;
 }): boolean {
   const answer = input.answer?.trim() ?? "";
+  const normalized = answer.toLowerCase();
   if (!answer) return false;
   if (matchesAny(answer, LOW_CONFIDENCE_PATTERNS) || matchesAny(answer, LIVE_REFUSAL_PATTERNS)) {
     return false;
+  }
+  if (
+    input.question
+    && looksLikeLatestMilestoneQuestion(input.question)
+    && (
+      normalized.includes("source note:")
+      || normalized.includes("sources:")
+      || normalized.includes("according to")
+      || normalized.includes("official")
+      || normalized.includes("as of")
+    )
+    && (
+      /\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}\b/.test(answer)
+      || /\b[A-Za-z]{3,9}\s+\d{1,2},\s+\d{4}\b/.test(answer)
+      || /\b(20\d{2}|19\d{2})\b/.test(answer)
+    )
+  ) {
+    return true;
   }
   if (looksWeakGenericLiveAnswer(answer, input.question)) {
     return false;
@@ -1530,7 +1584,7 @@ export function buildClawCloudLowConfidenceReply(
   }
 
   if (profile.requiresLiveGrounding) {
-    return "I need the exact place, date, person, item, or market you want checked to answer that accurately.";
+    return "I need the exact place, date, event, item, or market you want checked to answer that accurately.";
   }
 
   if (profile.intent === "coding") {

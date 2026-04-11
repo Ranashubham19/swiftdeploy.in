@@ -37,7 +37,9 @@ import { detectBillingIntent } from "@/lib/clawcloud-billing-wa";
 import {
   analyzeSendMessageCommandSafety,
   buildParsedSendMessageAction,
+  looksLikeListContactsCommand,
   normalizeContactName,
+  parseSaveContactCommand,
   parseSendMessageCommand,
 } from "@/lib/clawcloud-contacts";
 import {
@@ -59,7 +61,15 @@ import {
 import {
   buildDocumentGroundingFailureReply,
 } from "@/lib/clawcloud-docs";
-import { analyzeConversationContinuityForTest } from "@/lib/clawcloud-memory";
+import {
+  analyzeConversationContinuityForTest,
+  buildConversationMemory,
+} from "@/lib/clawcloud-memory";
+import {
+  clearClawCloudEphemeralConversationHistoryForTest,
+  rememberClawCloudEphemeralConversationExchange,
+} from "@/lib/clawcloud-ephemeral-conversation";
+import { SUPER_BRAIN } from "@/lib/super-brain";
 import { detectDriveIntent } from "@/lib/clawcloud-drive";
 import { answerHolidayQuery, detectHolidayQuery } from "@/lib/clawcloud-holidays";
 import {
@@ -105,7 +115,14 @@ import {
   buildWhatsAppHistoryBackfillContacts,
   prepareWhatsAppContactUpsertRows,
 } from "@/lib/clawcloud-whatsapp-contacts";
-import { registerInboundMessageId } from "@/lib/clawcloud-whatsapp-inbound-dedupe";
+import {
+  buildAssistantSelfReplyEchoKey,
+  buildInboundMessageDedupKey,
+  hasReplyEligibleInboundPayload,
+  hasRecentMessageDedupKey,
+  rememberRecentMessageDedupKey,
+  registerInboundMessageId,
+} from "@/lib/clawcloud-whatsapp-inbound-dedupe";
 import { listRetiredWhatsAppOwnerUserIds } from "@/lib/clawcloud-whatsapp-owner-handoff";
 import {
   defaultWhatsAppSettings,
@@ -119,6 +136,7 @@ import {
 } from "@/lib/clawcloud-whatsapp-control";
 import { buildWhatsAppWorkspaceDeletePlanForTest } from "@/lib/clawcloud-whatsapp-governance";
 import {
+  buildAssistantReplyIdempotencyKey,
   buildWhatsAppOutboundIdempotencyKey,
   isWhatsAppOutboundFinalizedStatus,
   resolveWhatsAppOutboundStatusFromAckStatus,
@@ -229,7 +247,10 @@ import {
   buildIntentAlignedRecoveryReplyForTest,
   buildInboundAgentTimeoutResultForTest,
   buildTimeboxedProfessionalReplyForTest,
+  buildGuaranteedServerRecoveryReply,
+  buildFastDeterministicAgentReplyForRoute,
   formatWhatsAppHistoryResolvedNoRowsReplyForTest,
+  looksLikeLanguageConfusionClarificationReplyForTest,
   formatWhatsAppHistoryUnverifiedContactReplyForTest,
   isConfidentRecipientNameMatchForTest,
   isProfessionallyCommittedRecipientMatchForTest,
@@ -337,6 +358,7 @@ import {
   buildNamedEntityIdentityAnswerForTest,
   buildShortDefinitionClarificationSuggestionForTest,
   buildClawCloudLiveAnswerBundle,
+  buildLiveSearchQueriesForTest,
   classifyClawCloudLiveSearchTier,
   detectWorldBankCountryMetricComparisonQuestion,
   detectShortDefinitionLookup,
@@ -655,6 +677,125 @@ test("whatsapp outbound lifecycle helpers stay deterministic and dedupe-safe", (
     }),
     false,
   );
+});
+
+test("assistant reply idempotency stays deterministic for the same inbound message and target", () => {
+  const keyA = buildAssistantReplyIdempotencyKey({
+    userId: "user-1",
+    targetJid: "919999999999@s.whatsapp.net",
+    inboundMessageId: "wamid-1",
+    messageText: "The Khalsa is a spiritual brotherhood and sisterhood in Sikhism.",
+  });
+  const keyB = buildAssistantReplyIdempotencyKey({
+    userId: "user-1",
+    targetJid: "919999999999@s.whatsapp.net",
+    inboundMessageId: "wamid-1",
+    messageText: "A different polished answer should still map to the same inbound reply key.",
+  });
+  const keyC = buildAssistantReplyIdempotencyKey({
+    userId: "user-1",
+    targetJid: "919999999999@s.whatsapp.net",
+    inboundMessageId: "wamid-2",
+    messageText: "The Khalsa is a spiritual brotherhood and sisterhood in Sikhism.",
+  });
+
+  assert.equal(keyA, keyB);
+  assert.notEqual(keyA, keyC);
+});
+
+test("assistant reply idempotency does not collapse two distinct inbound messages with identical text", () => {
+  const first = buildAssistantReplyIdempotencyKey({
+    userId: "user-1",
+    targetJid: "919999999999@s.whatsapp.net",
+    inboundMessageId: "wamid-same-text-1",
+    messageText: "Same polished answer",
+  });
+  const second = buildAssistantReplyIdempotencyKey({
+    userId: "user-1",
+    targetJid: "919999999999@s.whatsapp.net",
+    inboundMessageId: "wamid-same-text-2",
+    messageText: "Same polished answer",
+  });
+
+  assert.notEqual(first, second);
+});
+
+test("assistant self-reply echo keys stay stable for the same self chat and normalized text", () => {
+  const first = buildAssistantSelfReplyEchoKey({
+    targetJid: "919999999999@s.whatsapp.net",
+    messageText: "The   Khalsa is a spiritual brotherhood.",
+  });
+  const second = buildAssistantSelfReplyEchoKey({
+    targetJid: "919999999999@s.whatsapp.net",
+    messageText: "the khalsa is a spiritual brotherhood.",
+  });
+  const differentChat = buildAssistantSelfReplyEchoKey({
+    targetJid: "918888888888@s.whatsapp.net",
+    messageText: "the khalsa is a spiritual brotherhood.",
+  });
+
+  assert.equal(first, second);
+  assert.notEqual(first, differentChat);
+});
+
+test("assistant self-reply echo cache blocks recent reply echoes without collapsing later user turns", () => {
+  const cache = new Map<string, number>();
+  const key = buildAssistantSelfReplyEchoKey({
+    targetJid: "919999999999@s.whatsapp.net",
+    messageText: "The Khalsa is a spiritual brotherhood.",
+  });
+
+  rememberRecentMessageDedupKey(cache, key, {
+    now: 1_000,
+    ttlMs: 60_000,
+    maxEntries: 8,
+  });
+
+  assert.equal(hasRecentMessageDedupKey(cache, key, {
+    now: 1_500,
+    ttlMs: 60_000,
+    maxEntries: 8,
+  }), true);
+
+  assert.equal(hasRecentMessageDedupKey(cache, key, {
+    now: 62_000,
+    ttlMs: 60_000,
+    maxEntries: 8,
+  }), false);
+});
+
+test("reply-eligible inbound payload detection ignores placeholder upserts but keeps real user prompts", () => {
+  assert.equal(hasReplyEligibleInboundPayload({
+    message: {
+      conversation: "  What is khalsa?  ",
+    },
+  }), true);
+
+  assert.equal(hasReplyEligibleInboundPayload({
+    message: {
+      extendedTextMessage: {
+        text: "Ok from now onward you will talk to rajnish on my behalf",
+      },
+    },
+  }), true);
+
+  assert.equal(hasReplyEligibleInboundPayload({
+    message: {
+      imageMessage: {},
+    },
+  }), true);
+
+  assert.equal(hasReplyEligibleInboundPayload({
+    message: {
+      extendedTextMessage: {
+        text: "   ",
+      },
+    },
+  }), false);
+
+  assert.equal(hasReplyEligibleInboundPayload({
+    message: {},
+  }), false);
 });
 
 test("whatsapp send result classification distinguishes pending retries from duplicates", () => {
@@ -2437,6 +2578,11 @@ test("app access consent routing classifies Gmail, calendar, drive, and WhatsApp
     operation: "read",
     summary: "read from your WhatsApp",
   });
+  assert.deepEqual(inferAppAccessRequirementForTest("Ridhima ne mujhe kya message bheje hain?"), {
+    surface: "whatsapp",
+    operation: "read",
+    summary: "read from your WhatsApp",
+  });
 
   assert.deepEqual(inferAppAccessRequirementForTest("Send message to Maa: Good morning"), {
     surface: "whatsapp",
@@ -2451,6 +2597,11 @@ test("app access consent routing classifies Gmail, calendar, drive, and WhatsApp
   });
 
   assert.deepEqual(inferAppAccessRequirementForTest("Reply to Mehak on WhatsApp saying I am testing right now"), {
+    surface: "whatsapp",
+    operation: "write",
+    summary: "use your WhatsApp to send or reply",
+  });
+  assert.deepEqual(inferAppAccessRequirementForTest("给爸爸发消息：我晚点到"), {
     surface: "whatsapp",
     operation: "write",
     summary: "use your WhatsApp to send or reply",
@@ -3329,6 +3480,9 @@ test("memory snippet carries tone and continuity signals for casual conversation
   assert.match(snippet, /User emotional context:/i);
   assert.match(snippet, /Recent conversation anchor:/i);
   assert.match(snippet, /Resolved question:/i);
+  assert.match(snippet, /Conversation awareness:/i);
+  assert.match(snippet, /Resolve implicit references like it, this, that, why, when, and how/i);
+  assert.match(snippet, /ask one brief clarification instead of guessing/i);
 });
 
 test("memory snippet warns the model not to merge unrelated old chat into new standalone requests", () => {
@@ -3368,6 +3522,24 @@ test("casual talk instruction tells the model to sound human and use prior threa
   assert.match(instruction, /thoughtful human teammate/i);
   assert.match(instruction, /Observed emotional context:/i);
   assert.match(instruction, /Resolved follow-up context:/i);
+  assert.match(instruction, /Classify the user's message as a NEW question, a FOLLOW-UP, or a CLARIFICATION/i);
+  assert.match(instruction, /Resolve words like it, this, that, why, when, and how/i);
+});
+
+test("super brain reliability rules classify question type and allow explicit uncertainty when evidence is weak", () => {
+  assert.match(SUPER_BRAIN, /Classify the question type before answering/i);
+  assert.match(SUPER_BRAIN, /Real-time \/ live data/i);
+  assert.match(SUPER_BRAIN, /Stable factual \/ historical information/i);
+  assert.match(SUPER_BRAIN, /I cannot verify this with confidence/i);
+  assert.match(SUPER_BRAIN, /authoritative sources such as official announcements, original releases, or primary references even if they are older/i);
+});
+
+test("live search synthesis rules keep authoritative older sources valid for stable facts", () => {
+  const source = readFileSync(path.resolve(process.cwd(), "lib/clawcloud-live-search.ts"), "utf8");
+
+  assert.match(source, /authoritative official older sources remain valid/i);
+  assert.match(source, /should not be discarded just because they predate the current year/i);
+  assert.match(source, /If sources conflict, mention the uncertainty briefly/i);
 });
 
 test("conversation continuity skips low-signal turns and keeps the real previous question as anchor", () => {
@@ -3398,6 +3570,20 @@ test("conversation continuity carries pure language/style follow-ups into the pr
   assert.equal(continuity.isFollowUp, true);
   assert.equal(continuity.anchorUserTurn, "tell me the story of bad boys");
   assert.equal(continuity.resolvedQuestion, "tell me the story of bad boys in thai");
+});
+
+test("conversation continuity resolves pronoun follow-ups against the last logical subject", () => {
+  const continuity = analyzeConversationContinuityForTest({
+    currentMessage: "why is it called so?",
+    recentTurns: [
+      { role: "user", content: "What is jeera?" },
+      { role: "assistant", content: "Jeera is cumin, a spice made from the dried seeds of Cuminum cyminum." },
+    ],
+  });
+
+  assert.equal(continuity.isFollowUp, true);
+  assert.equal(continuity.anchorUserTurn, "What is jeera?");
+  assert.match(continuity.resolvedQuestion, /why is it called so\? regarding What is jeera\?/i);
 });
 
 test("conversation continuity understands roman-hindi pronoun follow-ups as part of the existing thread", () => {
@@ -4190,15 +4376,15 @@ test("locale preference commands are explicit and do not depend on email domains
   assert.equal(detectLocaleFromEmail("founder@startup.invest"), "en");
 });
 
-test("plain Latin follow-ups honor an explicitly stored non-English locale preference", () => {
+test("plain English follow-ups stay in English even with an explicitly stored non-English locale preference", () => {
   const resolution = resolveClawCloudReplyLanguage({
     message: "what is gorkha",
     preferredLocale: "th",
     storedLocaleIsExplicit: true,
   });
 
-  assert.equal(resolution.locale, "th");
-  assert.equal(resolution.source, "stored_preference");
+  assert.equal(resolution.locale, "en");
+  assert.equal(resolution.source, "mirrored_message");
   assert.equal(resolution.preserveRomanScript, false);
 });
 
@@ -4373,6 +4559,21 @@ test("Hinglish detection does not misclassify technical English prompts or short
   assert.equal(detectHinglish("What is shali"), false);
 });
 
+test("short English colloquial follow-ups do not get misclassified as Hinglish", () => {
+  assert.equal(detectHinglish("what it do"), false);
+  assert.equal(detectHinglish("how to do so"), false);
+  assert.equal(detectHinglish("kr do"), true);
+
+  const englishFollowUp = resolveClawCloudReplyLanguage({
+    message: "what it do",
+    preferredLocale: "hi",
+    storedLocaleIsExplicit: true,
+  });
+  assert.equal(englishFollowUp.locale, "en");
+  assert.equal(englishFollowUp.source, "mirrored_message");
+  assert.equal(englishFollowUp.preserveRomanScript, false);
+});
+
 test("reply language resolver keeps active-contact Hinglish commands in Roman script", () => {
   const startResolution = resolveClawCloudReplyLanguage({
     message: "ab mere behalf me aap dii se baat karange",
@@ -4530,7 +4731,7 @@ test("reply language resolver mirrors Roman Punjabi and keeps Roman script", () 
     preferredLocale: "pa",
   });
   assert.equal(samePreferred.locale, "pa");
-  assert.equal(samePreferred.source, "stored_preference");
+  assert.equal(samePreferred.source, "mirrored_message");
   assert.equal(samePreferred.preserveRomanScript, true);
 
   const instruction = buildClawCloudReplyLanguageInstruction(mirrored);
@@ -4552,7 +4753,7 @@ test("latin-script operational commands do not inherit stale non-English locale 
   assert.equal(resolution.preserveRomanScript, false);
 });
 
-test("plain English follow-up queries honor an explicitly stored non-English reply preference", () => {
+test("plain English follow-up queries stay in English even with an explicitly stored non-English reply preference", () => {
   const resolution = resolveClawCloudReplyLanguage({
     message: "is it has its branch in lpu",
     preferredLocale: "af",
@@ -4562,8 +4763,8 @@ test("plain English follow-up queries honor an explicitly stored non-English rep
     ],
   });
 
-  assert.equal(resolution.locale, "af");
-  assert.equal(resolution.source, "stored_preference");
+  assert.equal(resolution.locale, "en");
+  assert.equal(resolution.source, "mirrored_message");
   assert.equal(resolution.preserveRomanScript, false);
 });
 
@@ -4617,6 +4818,99 @@ test("reply language verification rejects wrong-language answers and keeps same-
       aiReply: "Main theek hoon, tu bata?",
       resolution: hinglishResolution,
     }).verified,
+    true,
+  );
+});
+
+test("language-confusion clarification replies are rejected for native-language prompts", () => {
+  const englishClarification =
+    "I'm happy to help, but it seems like your message is not in a language I can understand directly. Could you please rephrase or provide more context so I can better assist you?";
+  const japaneseQuestion = "量子もつれはなぜ超光速通信に使えないのですか。";
+  const japaneseResolution = resolveClawCloudReplyLanguage({
+    message: japaneseQuestion,
+    preferredLocale: "en",
+  });
+
+  assert.equal(japaneseResolution.locale, "ja");
+  assert.equal(
+    verifyReplyLanguageMatch({
+      userMessage: japaneseQuestion,
+      aiReply: englishClarification,
+      resolution: japaneseResolution,
+    }).verified,
+    false,
+  );
+  assert.equal(looksLikeLanguageConfusionClarificationReplyForTest(englishClarification), true);
+
+  const koreanQuestion = "딥러닝에서 배치 정규화가 내부 공변량 변화 문제를 완전히 해결한다고 보면 왜 부정확한가요?";
+  const koreanResolution = resolveClawCloudReplyLanguage({
+    message: koreanQuestion,
+    preferredLocale: "en",
+  });
+
+  assert.equal(koreanResolution.locale, "ko");
+  assert.equal(
+    verifyReplyLanguageMatch({
+      userMessage: koreanQuestion,
+      aiReply: englishClarification,
+      resolution: koreanResolution,
+    }).verified,
+    false,
+  );
+});
+
+test("dense non-latin prompts stay eligible for same-language direct-answer routing", () => {
+  const japaneseQuestion =
+    "量子もつれはなぜ超光速通信に使えないのですか。ノーシグナリング定理と測定の観点から詳しく説明してください。";
+  const japaneseResolution = resolveClawCloudReplyLanguage({
+    message: japaneseQuestion,
+    preferredLocale: "en",
+  });
+  const japaneseIntent = detectNativeLanguageDirectAnswerLaneIntentForTest(
+    japaneseQuestion,
+    japaneseResolution,
+  );
+
+  assert.equal(japaneseResolution.locale, "ja");
+  assert.equal(shouldUseMultilingualRoutingBridgeForTest(japaneseQuestion, japaneseResolution), true);
+  assert.ok(japaneseIntent);
+  assert.ok(["general", "science", "technology", "research", "language", "explain"].includes(japaneseIntent?.type ?? ""));
+  assert.equal(
+    shouldAttemptDirectAnswerRecovery(
+      japaneseQuestion,
+      buildClawCloudAnswerQualityProfile({
+        question: japaneseQuestion,
+        intent: "science",
+        category: "science",
+      }),
+    ),
+    true,
+  );
+
+  const koreanQuestion =
+    "딥러닝에서 배치 정규화가 내부 공변량 변화 문제를 완전히 해결한다고 보면 왜 부정확한가요? 최적화와 일반화 관점에서 설명해주세요.";
+  const koreanResolution = resolveClawCloudReplyLanguage({
+    message: koreanQuestion,
+    preferredLocale: "en",
+  });
+  const koreanIntent = detectNativeLanguageDirectAnswerLaneIntentForTest(
+    koreanQuestion,
+    koreanResolution,
+  );
+
+  assert.equal(koreanResolution.locale, "ko");
+  assert.equal(shouldUseMultilingualRoutingBridgeForTest(koreanQuestion, koreanResolution), true);
+  assert.ok(koreanIntent);
+  assert.ok(["general", "science", "technology", "research", "language", "explain"].includes(koreanIntent?.type ?? ""));
+  assert.equal(
+    shouldAttemptDirectAnswerRecovery(
+      koreanQuestion,
+      buildClawCloudAnswerQualityProfile({
+        question: koreanQuestion,
+        intent: "technology",
+        category: "technology",
+      }),
+    ),
     true,
   );
 });
@@ -5538,6 +5832,21 @@ test("send-message parsing keeps contact commands strict and avoids tell-me hija
   assert.equal(parsed?.message, "I will be 10 minutes late");
 });
 
+test("contact commands recognize localized save and list phrasing", () => {
+  const saved = parseSaveContactCommand("Guarda contacto Priya = +919876543210");
+  assert.deepEqual(saved, {
+    name: "Priya",
+    phone: "+919876543210",
+  });
+
+  assert.equal(looksLikeListContactsCommand("Show my WhatsApp contacts"), true);
+  assert.equal(looksLikeListContactsCommand("Muestra mis contactos de WhatsApp"), true);
+  assert.deepEqual(detectIntentForTest("Muestra mis contactos de WhatsApp"), {
+    type: "save_contact",
+    category: "save_contact",
+  });
+});
+
 test("send-message parsing understands natural WhatsApp send and reply phrasing", () => {
   const sendParsed = parseSendMessageCommand("Send a WhatsApp message to Mehak saying hello from ClawCloud");
   assert.ok(sendParsed);
@@ -5550,6 +5859,26 @@ test("send-message parsing understands natural WhatsApp send and reply phrasing"
   assert.equal(replyParsed?.kind, "contacts");
   assert.equal(replyParsed?.contactName, "Mehak");
   assert.equal(replyParsed?.message, "I am testing right now");
+});
+
+test("send-message parsing supports multilingual WhatsApp commands", () => {
+  const spanish = parseSendMessageCommand("Envia un mensaje a Priya diciendo llegare tarde");
+  assert.ok(spanish);
+  assert.equal(spanish?.kind, "contacts");
+  assert.equal(spanish?.contactName, "Priya");
+  assert.equal(spanish?.message, "llegare tarde");
+
+  const chinese = parseSendMessageCommand("给爸爸发消息：我晚点到");
+  assert.ok(chinese);
+  assert.equal(chinese?.kind, "contacts");
+  assert.equal(chinese?.contactName, "爸爸");
+  assert.equal(chinese?.message, "我晚点到");
+
+  const korean = parseSendMessageCommand("엄마한테 메시지 보내: 늦을게");
+  assert.ok(korean);
+  assert.equal(korean?.kind, "contacts");
+  assert.equal(korean?.contactName, "엄마");
+  assert.equal(korean?.message, "늦을게");
 });
 
 test("send-message parsing tolerates common typos in send and reply commands", () => {
@@ -5651,6 +5980,18 @@ test("send-message parsing understands Hinglish recipient-targeted write prompts
   assert.equal(recipientFirst?.message, "ek good afternoon message");
 });
 
+test("send-message parsing understands natural Hinglish send prompts with recipient after send verb", () => {
+  const parsed = parseSendMessageCommand(
+    "aap ek sunder sa messsage send kro dii ko jisse uska man fresh ho jaye",
+  );
+
+  assert.ok(parsed);
+  assert.equal(parsed?.kind, "contacts");
+  assert.equal(normalizeContactName(parsed?.contactName ?? ""), "didi");
+  assert.match(parsed?.message ?? "", /sunder sa message/i);
+  assert.match(parsed?.message ?? "", /man fresh ho jaye/i);
+});
+
 test("recipient-targeted write prompts stay in preview mode while explicit send commands still send", () => {
   assert.equal(
     shouldPreviewRecipientTargetedWhatsAppDraftForTest("ek good afternoon message likh do maa ko"),
@@ -5679,6 +6020,14 @@ test("recipient-targeted write prompts stay in preview mode while explicit send 
   assert.equal(
     shouldPreviewRecipientTargetedWhatsAppDraftForTest("send a beautiful professional good morning to maa, dii and papa ji"),
     false,
+  );
+  assert.equal(
+    shouldPreviewRecipientTargetedWhatsAppDraftForTest("aap ek sunder sa messsage send kro dii ko jisse uska man fresh ho jaye"),
+    false,
+  );
+  assert.equal(
+    shouldPreviewRecipientTargetedWhatsAppDraftForTest("aap ek sunder sa message likho dii ko jisse uska man fresh ho jaye"),
+    true,
   );
 });
 
@@ -6092,6 +6441,48 @@ test("Hindi recipient-in-the-middle WhatsApp send prompts stay on the send-messa
   });
 });
 
+test("natural Hinglish send prompts with a message goal stay on the send-message route", () => {
+  const prompt = "aap ek sunder sa messsage send kro dii ko jisse uska man fresh ho jaye";
+
+  assert.deepEqual(detectIntentForTest(prompt), {
+    type: "send_message",
+    category: "send_message",
+  });
+});
+
+test("recipient-first Hinglish send prompts keep the contact clean and preserve language/style instructions", () => {
+  const prompt = "ap rajnish ko chinese mai ek professional message send kro jisse uska mood kafi acha ho jaye";
+  const parsed = parseSendMessageCommand(prompt);
+
+  assert.ok(parsed);
+  assert.equal(parsed?.kind, "contacts");
+  assert.deepEqual(parsed?.contactNames, ["rajnish"]);
+  assert.match(parsed?.message ?? "", /chinese mai/i);
+  assert.match(parsed?.message ?? "", /professional message/i);
+  assert.match(parsed?.message ?? "", /mood kafi acha ho jaye/i);
+  assert.deepEqual(detectIntentForTest(prompt), {
+    type: "send_message",
+    category: "send_message",
+  });
+});
+
+test("recipient-first short Hinglish sends drop speaker address words from the contact name", () => {
+  const parsed = parseSendMessageCommand("ap rajnish ko hii send kro");
+
+  assert.ok(parsed);
+  assert.equal(parsed?.kind, "contacts");
+  assert.deepEqual(parsed?.contactNames, ["rajnish"]);
+  assert.equal(parsed?.message, "hii");
+});
+
+test("malformed operational send prompts stay in the WhatsApp send lane instead of falling into research", () => {
+  const route = detectStrictIntentRouteForTest("ap rajnish ko send kro");
+
+  assert.equal(route?.intent.type, "send_message");
+  assert.equal(route?.intent.category, "send_message");
+  assert.match(route?.clarificationReply ?? "", /WhatsApp send lane/i);
+});
+
 test("send-message safety blocks scheduled, conditional, and ambiguous recipient commands without breaking normal drafts", () => {
   const scheduled = analyzeSendMessageCommandSafety('Send "Good morning" to Maa tomorrow at 8am');
   assert.ok(scheduled && !scheduled.allowed);
@@ -6215,6 +6606,10 @@ test("active contact mode parses professional handoff commands and only proxies 
   assert.deepEqual(
     parseWhatsAppActiveContactSessionCommandForTest("ab se app meri tarf se dii se baat karoge"),
     { type: "start", contactName: "dii" },
+  );
+  assert.deepEqual(
+    parseWhatsAppActiveContactSessionCommandForTest("ab se ap rajnish se meri taraf se baat karoge"),
+    { type: "start", contactName: "rajnish" },
   );
   assert.deepEqual(
     parseWhatsAppActiveContactSessionCommandForTest("میری طرف سے رجنیش سے بات کریں۔"),
@@ -6873,6 +7268,46 @@ test("bare family aliases require confirmation before named relationship contact
   );
 });
 
+test("matched plain family aliases can verify a named contact when the alias itself is exact", () => {
+  assert.equal(isProfessionallyCommittedRecipientMatchForTest({
+    requestedName: "dii",
+    resolvedName: "Neha Dii",
+    matchedAlias: "didi",
+    exact: true,
+    score: 1,
+    matchBasis: "exact",
+    source: "fuzzy",
+  }), true);
+
+  assert.equal(
+    classifyResolvedContactMatchConfidence({
+      requestedName: "dii",
+      resolvedName: "Neha Dii",
+      matchedAlias: "didi",
+      exact: true,
+      score: 1,
+      matchBasis: "exact",
+      source: "fuzzy",
+    }),
+    "verified",
+  );
+});
+
+test("named family aliases still require confirmation when the matched alias is also named", () => {
+  assert.equal(
+    classifyResolvedContactMatchConfidence({
+      requestedName: "dii",
+      resolvedName: "Neha Dii",
+      matchedAlias: "neha didi",
+      exact: false,
+      score: 0.91,
+      matchBasis: "word",
+      source: "fuzzy",
+    }),
+    "confirmation_required",
+  );
+});
+
 test("full inbound route prioritizes active-contact status and stop commands over casual chat fallbacks", async () => {
   const start = await routeInboundAgentMessageResult("test-user", "Talk to Aman on my behalf");
   assert.match(start.response ?? "", /WhatsApp web session is not active right now\./i);
@@ -7343,14 +7778,61 @@ test("inbound message dedupe blocks repeated media deliveries before a second re
   }), true);
 });
 
+test("self-chat fallback inbound dedupe keys stay stable within a short bucket and rotate later", () => {
+  const first = buildInboundMessageDedupKey({
+    remoteJid: "919999999999@s.whatsapp.net",
+    fromMe: true,
+    messageType: "text",
+    contentPreview: "What is khalsa",
+    timestampMs: 1_710_000_000_000,
+  });
+  const second = buildInboundMessageDedupKey({
+    remoteJid: "919999999999@s.whatsapp.net",
+    fromMe: true,
+    messageType: "text",
+    contentPreview: "What is khalsa",
+    timestampMs: 1_710_000_010_000,
+  });
+  const later = buildInboundMessageDedupKey({
+    remoteJid: "919999999999@s.whatsapp.net",
+    fromMe: true,
+    messageType: "text",
+    contentPreview: "What is khalsa",
+    timestampMs: 1_710_000_020_000,
+  });
+
+  assert.equal(first, second);
+  assert.notEqual(first, later);
+});
+
 test("agent server dedupes inbound messages before the image branch runs", () => {
   const source = readFileSync(path.resolve(process.cwd(), "agent-server.ts"), "utf8");
-  const dedupeIndex = source.indexOf("registerInboundMessageId(inboundIds, messageId");
+  const payloadGateIndex = source.indexOf("if (!hasReplyEligibleInboundPayload(message)) {");
+  const dedupeKeyIndex = source.indexOf("const inboundDedupKey = buildInboundMessageDedupKey(");
+  const dedupeIndex = source.indexOf("registerInboundMessageId(inboundIds, inboundDedupKey");
   const imageBranchIndex = source.indexOf("if (!text && message.message?.imageMessage)");
 
+  assert.ok(payloadGateIndex >= 0, "expected reply-eligible payload gate");
+  assert.ok(dedupeKeyIndex >= 0, "expected inbound dedupe key builder");
   assert.ok(dedupeIndex >= 0, "expected early inbound dedupe guard");
   assert.ok(imageBranchIndex >= 0, "expected image handling branch");
+  assert.ok(payloadGateIndex < dedupeIndex, "expected placeholder payloads to be filtered before dedupe");
   assert.ok(dedupeIndex < imageBranchIndex, "expected dedupe to run before image analysis");
+  assert.equal(source.includes("!message.key.fromMe && !registerInboundMessageId"), false);
+});
+
+test("agent server blocks recent assistant self-reply echoes before the main reply path", () => {
+  const source = readFileSync(path.resolve(process.cwd(), "agent-server.ts"), "utf8");
+  const selfTargetIndex = source.indexOf("const assistantSelfTargetJid = resolveAssistantSelfReplyTarget(current, replyTargetJid);");
+  const echoGuardIndex = source.indexOf("hasRecentMessageDedupKey(assistantSelfReplyEchoIds, assistantSelfReplyEchoKey");
+  const handleInboundIndex = source.indexOf("await handleInbound(");
+
+  assert.ok(selfTargetIndex >= 0, "expected self-target resolution");
+  assert.ok(echoGuardIndex >= 0, "expected assistant self-reply echo guard");
+  assert.ok(handleInboundIndex >= 0, "expected handleInbound call");
+  assert.ok(selfTargetIndex < echoGuardIndex, "expected echo guard after self-chat resolution");
+  assert.ok(echoGuardIndex < handleInboundIndex, "expected echo guard before main inbound handling");
+  assert.match(source, /rememberRecentMessageDedupKey\(assistantSelfReplyEchoIds, assistantSelfReplyEchoKey/);
 });
 
 test("localized WhatsApp send receipts preserve explicit send confirmation structure", async () => {
@@ -7638,6 +8120,13 @@ test("history-backed contact lookup keeps only anchored searchable name tokens f
 
 test("noisy Tanu history lookup still locks into the WhatsApp history lane", () => {
   assert.deepEqual(detectIntentForTest("Tell me the messages of tanu dii pk"), {
+    type: "send_message",
+    category: "whatsapp_history",
+  });
+});
+
+test("noisy Hinglish WhatsApp history prompts keep the exact contact in the history lane", () => {
+  assert.deepEqual(detectIntentForTest("aap mujhe hansraj lpu ke messages read karke batao"), {
     type: "send_message",
     category: "whatsapp_history",
   });
@@ -8591,8 +9080,21 @@ test("current-affairs verification requests build stronger event queries", () =>
   assert.equal(shouldUseLiveSearch("who is the current founder of OpenAI"), true);
   assert.equal(classifyClawCloudLiveSearchTier("what is the latest Samsung model right now"), "volatile");
   assert.equal(shouldUseLiveSearch("what is the latest Samsung model right now"), true);
+  assert.equal(classifyClawCloudLiveSearchTier("When s26 was released and what was its features"), "volatile");
+  assert.equal(shouldUseLiveSearch("When s26 was released and what was its features"), true);
+  assert.deepEqual(
+    buildLiveSearchQueriesForTest("When s26 was released and what was its features").slice(0, 5),
+    [
+      "When s26 was released and what was its features",
+      "Samsung Galaxy S26 release date 2026",
+      "site:news.samsung.com Samsung Galaxy S26 2026",
+      "site:samsung.com Samsung Galaxy S26",
+      "Samsung Galaxy S26 features 2026",
+    ],
+  );
   assert.equal(buildNoLiveDataReply("who is the current founder of OpenAI"), "__NO_LIVE_DATA_INTERNAL_SIGNAL__");
   assert.equal(buildNoLiveDataReply("what is the latest Samsung model right now"), "__NO_LIVE_DATA_INTERNAL_SIGNAL__");
+  assert.equal(buildNoLiveDataReply("When s26 was released and what was its features"), "__NO_LIVE_DATA_INTERNAL_SIGNAL__");
   assert.equal(buildNoLiveDataReply("search the web for how does a b+ tree work"), "__NO_LIVE_DATA_INTERNAL_SIGNAL__");
   assert.match(
     buildCurrentAffairsClarificationReply("did north korea entered the current war"),
@@ -9372,6 +9874,13 @@ test("whatsapp send drafting mode only enables styled rewrites for explicit draf
     resolveWhatsAppDraftingModeForTest('send "professional good morning message" to rajnish', "professional good morning message"),
     "verbatim",
   );
+  assert.equal(
+    resolveWhatsAppDraftingModeForTest(
+      "aap ek sunder sa message send kro dii ko jisse uska man fresh ho jaye",
+      "ek sunder sa message jisse uska man fresh ho jaye",
+    ),
+    "styled",
+  );
 });
 
 test("whatsapp send drafting mode upgrades abstract note requests without rewriting literal courtesy text", () => {
@@ -9762,6 +10271,8 @@ test("whatsapp settings command routing recognizes status and update prompts", (
   assert.equal(detectWhatsAppSettingsCommandIntent("Turn off group replies"), "whatsapp_settings_update");
   assert.equal(detectWhatsAppSettingsCommandIntent("Set quiet hours from 10pm to 7am"), "whatsapp_settings_update");
   assert.equal(detectWhatsAppSettingsCommandIntent("Sync WhatsApp contacts"), "whatsapp_contacts_sync");
+  assert.equal(detectWhatsAppSettingsCommandIntent("Sincroniza los contactos de WhatsApp"), "whatsapp_contacts_sync");
+  assert.equal(detectWhatsAppSettingsCommandIntent("同步 WhatsApp 联系人"), "whatsapp_contacts_sync");
 });
 
 test("whatsapp privacy delete plan covers exported workspace data without recreating delete-all residue", () => {
@@ -9816,6 +10327,7 @@ test("intent detection routes upgraded Gmail, Calendar, and WhatsApp control pro
   assert.deepEqual(detectIntentForTest("tell me the conversation of mehak with me"), { type: "send_message", category: "whatsapp_history" });
   assert.deepEqual(detectIntentForTest("mehak ke saath meri chat dikhao"), { type: "send_message", category: "whatsapp_history" });
   assert.deepEqual(detectIntentForTest("rajnish ke messages summarize karo"), { type: "send_message", category: "whatsapp_history" });
+  assert.deepEqual(detectIntentForTest("Ridhima ne mujhe kya message bheje hain?"), { type: "send_message", category: "whatsapp_history" });
   assert.deepEqual(
     detectIntentForTest("what was the conversation there in hansraj contact tell me"),
     { type: "send_message", category: "whatsapp_history" },
@@ -9832,6 +10344,7 @@ test("intent detection routes upgraded Gmail, Calendar, and WhatsApp control pro
   assert.deepEqual(detectIntentForTest("Create a calendar event called Project Sync tomorrow at 4pm"), { type: "calendar", category: "calendar_create" });
   assert.deepEqual(detectIntentForTest("Show my WhatsApp settings"), { type: "send_message", category: "whatsapp_settings_status" });
   assert.deepEqual(detectIntentForTest("Sync WhatsApp contacts"), { type: "send_message", category: "whatsapp_contacts_sync" });
+  assert.deepEqual(detectIntentForTest("Muestra mis contactos de WhatsApp"), { type: "save_contact", category: "save_contact" });
 });
 
 test("architecture prompts with inbox-style dedupe terminology stay on the coding path instead of triggering Gmail access", () => {
@@ -9901,6 +10414,129 @@ test("full inbound route for the obstacle-removal prompt returns a coding answer
 
   assert.doesNotMatch(result.response ?? "", /10\s*\^\s*5\s*=\s*100000/i);
   assert.match(result.response ?? "", /Shortest Path With Up To k Obstacle Removals|shortest_path_with_k_removals|best_remaining|remaining_k/i);
+});
+
+test("count-smaller-after-self prompt gets deterministic O(n log n) TypeScript answer", async () => {
+  const prompt = "Design an O(n log n) algorithm to count, for each element in an integer array, how many smaller elements appear after it. Explain the approach clearly and provide TypeScript code.";
+  const reply = buildTimeboxedProfessionalReplyForTest(prompt, "coding");
+
+  assert.match(reply, /Count Smaller Elements After Each Element/i);
+  assert.match(reply, /Fenwick Tree|Binary Indexed Tree/i);
+  assert.match(reply, /O\(n log n\)/i);
+  assert.match(reply, /```ts/i);
+  assert.match(reply, /countSmallerAfterSelf/i);
+  assert.doesNotMatch(reply, /couldn't safely recover|exact question or task|send the exact problem statement/i);
+
+  const recovered = buildGuaranteedServerRecoveryReply(prompt);
+  assert.match(recovered, /Fenwick Tree|Binary Indexed Tree/i);
+  assert.doesNotMatch(recovered, /couldn't safely recover|exact question or task/i);
+
+  const result = await routeInboundAgentMessageResult("test-user", prompt);
+  assert.match(result.response ?? "", /Fenwick Tree|Binary Indexed Tree/i);
+  assert.match(result.response ?? "", /countSmallerAfterSelf/i);
+  assert.doesNotMatch(result.response ?? "", /couldn't safely recover|exact question or task/i);
+});
+
+test("negative-weight shortest path prompt gets fast deterministic TypeScript answer", async () => {
+  const prompt = "Given a directed weighted graph with up to 2e5 edges, edges may have negative weights but there are no negative cycles. Find shortest paths from a source efficiently. Explain why Dijkstra fails, choose the right algorithm, optimize it, and provide TypeScript code.";
+  const fastReply = buildFastDeterministicAgentReplyForRoute(prompt);
+
+  assert.ok(fastReply);
+  assert.match(fastReply.response ?? "", /Shortest Paths With Negative Edges/i);
+  assert.match(fastReply.response ?? "", /Dijkstra is not valid|Dijkstra fails/i);
+  assert.match(fastReply.response ?? "", /Bellman-Ford|SPFA/i);
+  assert.match(fastReply.response ?? "", /```ts/i);
+  assert.match(fastReply.response ?? "", /shortestPathsWithNegativeEdges/i);
+  assert.doesNotMatch(fastReply.response ?? "", /couldn't safely recover|exact question or task/i);
+
+  const recovered = buildGuaranteedServerRecoveryReply(prompt);
+  assert.match(recovered, /Shortest Paths With Negative Edges/i);
+  assert.match(recovered, /```ts/i);
+  assert.doesNotMatch(recovered, /couldn't safely recover|exact question or task/i);
+
+  const result = await routeInboundAgentMessageResult("test-user", prompt);
+  assert.match(result.response ?? "", /Bellman-Ford|SPFA/i);
+  assert.match(result.response ?? "", /shortestPathsWithNegativeEdges/i);
+  assert.doesNotMatch(result.response ?? "", /couldn't safely recover|exact question or task/i);
+});
+
+test("offline dynamic connectivity prompts stay coding and bypass live freshness fallback", async () => {
+  const prompt = "Design an algorithm for offline dynamic connectivity in an undirected graph with up to 2e5 operations: add edge, remove edge, and query whether u and v are connected at that time. Explain rollback DSU plus segment tree over time, analyze complexity, and provide TypeScript code.";
+
+  assert.equal(shouldUseLiveSearch(prompt), false);
+  assert.equal(classifyClawCloudLiveSearchTier(prompt), "knowledge");
+
+  const timeout = getInboundRouteTimeoutPolicyForTest(prompt);
+  assert.equal(timeout.kind, "deep_reasoning");
+  assert.equal(timeout.timeoutMs, 70000);
+
+  const strictRoute = detectStrictIntentRouteForTest(prompt);
+  assert.equal(strictRoute?.intent.type, "coding");
+  assert.equal(strictRoute?.intent.category, "coding");
+
+  const fastReply = buildFastDeterministicAgentReplyForRoute(prompt);
+  assert.ok(fastReply);
+  assert.match(fastReply.response ?? "", /Offline Dynamic Connectivity/i);
+  assert.match(fastReply.response ?? "", /Rollback DSU/i);
+  assert.match(fastReply.response ?? "", /segment tree over time/i);
+  assert.match(fastReply.response ?? "", /```ts/i);
+  assert.match(fastReply.response ?? "", /offlineDynamicConnectivity/i);
+  assert.doesNotMatch(fastReply.response ?? "", /Live freshness check|current 2026|safe current snapshot/i);
+
+  const timeoutReply = buildInboundAgentTimeoutResultForTest(prompt);
+  assert.match(timeoutReply.response ?? "", /Rollback DSU|offlineDynamicConnectivity/i);
+  assert.doesNotMatch(timeoutReply.response ?? "", /Live freshness check|current 2026|safe current snapshot/i);
+
+  const result = await routeInboundAgentMessageResult("test-user", prompt);
+  assert.match(result.response ?? "", /Rollback DSU|offlineDynamicConnectivity/i);
+  assert.doesNotMatch(result.response ?? "", /Live freshness check|current 2026|safe current snapshot/i);
+});
+
+test("ephemeral conversation memory resolves coding follow-ups from recent API turns", async () => {
+  const userId = "test-follow-up-memory";
+  clearClawCloudEphemeralConversationHistoryForTest(userId);
+
+  rememberClawCloudEphemeralConversationExchange(
+    userId,
+    "Explain offline dynamic connectivity with rollback DSU and segment tree over time in one paragraph.",
+    "Offline dynamic connectivity uses a segment tree over time plus a rollback DSU so each time interval applies only the edges active in that interval.",
+    "test",
+  );
+
+  const memory = await buildConversationMemory(
+    userId,
+    "Now explain why it cannot use path compression, and what breaks if we try to compress paths during rollback?",
+  );
+
+  assert.equal(memory.isFollowUp, true);
+  assert.match(memory.resolvedQuestion, /path compression/i);
+  assert.match(memory.resolvedQuestion, /rollback/i);
+  assert.match(memory.continuityHint ?? "", /offline dynamic connectivity|rollback dsu|segment tree over time/i);
+
+  clearClawCloudEphemeralConversationHistoryForTest(userId);
+});
+
+test("rollback dsu path-compression follow-ups stay in coding mode and avoid generic clarification fallbacks", async () => {
+  const prompt = "Now explain why it cannot use path compression, and what breaks if we try to compress paths during rollback?";
+
+  assert.equal(shouldUseLiveSearch(prompt), false);
+  assert.equal(classifyClawCloudLiveSearchTier(prompt), "knowledge");
+
+  const fastReply = buildFastDeterministicAgentReplyForRoute(prompt);
+  assert.ok(fastReply);
+  assert.match(fastReply.response ?? "", /path compression/i);
+  assert.match(fastReply.response ?? "", /rollback dsu|rollback/i);
+  assert.doesNotMatch(fastReply.response ?? "", /general, food, tech, business, law, medicine, or finance/i);
+
+  const recovered = buildGuaranteedServerRecoveryReply(prompt);
+  assert.match(recovered, /path compression/i);
+  assert.match(recovered, /rollback/i);
+  assert.doesNotMatch(recovered, /general, food, tech, business, law, medicine, or finance/i);
+
+  const result = await routeInboundAgentMessageResult("test-user", prompt);
+  assert.match(result.response ?? "", /path compression/i);
+  assert.match(result.response ?? "", /rollback/i);
+  assert.doesNotMatch(result.response ?? "", /general, food, tech, business, law, medicine, or finance/i);
 });
 
 test("standalone exponent questions still keep the direct math shortcut", () => {
@@ -10123,6 +10759,22 @@ test("whatsapp history hint extraction understands natural contact-conversation 
       contactHint: "rajnish",
       queryHint: null,
       direction: null,
+    },
+  );
+  assert.deepEqual(
+    extractWhatsAppHistoryHintsForTest("Ridhima ne mujhe kya message bheje hain?"),
+    {
+      contactHint: "Ridhima",
+      queryHint: null,
+      direction: "inbound",
+    },
+  );
+  assert.deepEqual(
+    extractWhatsAppHistoryHintsForTest("Que mensajes me mando Ridhima"),
+    {
+      contactHint: "Ridhima",
+      queryHint: null,
+      direction: "inbound",
     },
   );
   assert.deepEqual(
@@ -10561,6 +11213,32 @@ test("consumer tech release questions do not get hijacked by the help route", ()
     detectIntentForTest("when s26 ultra was realesed and what all features it is having"),
     { type: "web_search", category: "web_search" },
   );
+  assert.deepEqual(
+    detectIntentForTest("When s26 was released and what was its features"),
+    { type: "web_search", category: "web_search" },
+  );
+});
+
+test("official source lines in deterministic live bundles count as official evidence", () => {
+  const bundle = buildClawCloudLiveAnswerBundle({
+    question: "When s26 was released and what was its features",
+    answer: [
+      "*Galaxy S26 official release snapshot*",
+      "Galaxy S26 was introduced at Samsung Unpacked on February 24, 2026.",
+      "Samsung's U.S. newsroom said the Galaxy S26 lineup was available worldwide on March 10, 2026.",
+      "Sources: samsung.com, news.samsung.com",
+    ].join("\n"),
+    route: {
+      tier: "volatile",
+      requiresWebSearch: true,
+      badge: "📅 *Fresh answer*",
+      sourceNote: "_Source note: based on recently retrieved web sources (Tavily/SerpAPI where available)._",
+    },
+    strategy: "deterministic",
+  });
+
+  assert.equal(bundle.metadata?.official_source_count, 2);
+  assert.equal(bundle.metadata?.source_quality, "strong");
 });
 
 test("structured multi-part technical challenge prompts lock to deep research routing", () => {
@@ -11717,6 +12395,110 @@ test("web search results expose live evidence bundles for deterministic country 
   }
 });
 
+test("web search results prefer Gemini grounding for latest live questions when configured", async () => {
+  const originalFetch = globalThis.fetch;
+  const previousGeminiKey = env.GOOGLE_GEMINI_API_KEY;
+  const previousGeminiModel = env.GOOGLE_GEMINI_LIVE_MODEL;
+
+  env.GOOGLE_GEMINI_API_KEY = "test-gemini-key";
+  env.GOOGLE_GEMINI_LIVE_MODEL = "models/gemini-2.5-flash";
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+    if (url.includes("generativelanguage.googleapis.com")) {
+      return new Response(JSON.stringify({
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: "The latest submarine launched by India is S4*, launched on October 16, 2024.",
+                },
+              ],
+            },
+            groundingMetadata: {
+              webSearchQueries: ["latest submarine launched by India"],
+              groundingChunks: [
+                {
+                  web: {
+                    title: "economictimes.com",
+                    uri: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/example-1",
+                  },
+                },
+                {
+                  web: {
+                    title: "wikipedia.org",
+                    uri: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/example-2",
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    throw new Error(`Unexpected fetch during test: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const result = await answerWebSearchResult("Which is the latest submarine India launched?");
+    assert.match(result.answer, /S4\*/i);
+    assert.ok(result.liveAnswerBundle);
+    assert.equal(result.liveAnswerBundle?.metadata.provider, "google_gemini_grounding");
+    assert.equal(result.liveAnswerBundle?.metadata.provider_model, "models/gemini-2.5-flash");
+    assert.equal(result.liveAnswerBundle?.sourceSummary.includes("economictimes.com"), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    env.GOOGLE_GEMINI_API_KEY = previousGeminiKey;
+    env.GOOGLE_GEMINI_LIVE_MODEL = previousGeminiModel;
+  }
+});
+
+test("latest live questions fail closed when Gemini grounding is configured but unavailable", async () => {
+  const originalFetch = globalThis.fetch;
+  const previousGeminiKey = env.GOOGLE_GEMINI_API_KEY;
+  const previousGeminiModel = env.GOOGLE_GEMINI_LIVE_MODEL;
+
+  env.GOOGLE_GEMINI_API_KEY = "test-gemini-key";
+  env.GOOGLE_GEMINI_LIVE_MODEL = "models/gemini-2.5-flash";
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+    if (url.includes("generativelanguage.googleapis.com")) {
+      return new Response("rate limited", { status: 429 });
+    }
+
+    throw new Error(`Unexpected fetch during test: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const result = await answerWebSearchResult("Which is the latest submarine India launched?");
+    assert.match(result.answer, /freshness check/i);
+    assert.match(result.answer, /\b2026-dated source\b/i);
+    assert.equal(result.liveAnswerBundle ?? null, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+    env.GOOGLE_GEMINI_API_KEY = previousGeminiKey;
+    env.GOOGLE_GEMINI_LIVE_MODEL = previousGeminiModel;
+  }
+});
+
 test("latest submarine prompts fail closed instead of returning stale knowledge", async () => {
   const originalFetch = globalThis.fetch;
 
@@ -12656,6 +13438,19 @@ test("whatsapp reply delivery keeps a single bubble with a fast typing lead", ()
   assert.ok(plan.initialDelayMs <= 3_500);
   assert.equal(plan.totalDelayMs, plan.initialDelayMs);
   assert.equal(plan.chunkDelayMs.length, 0);
+});
+
+test("assistant reply send path reuses outbound reconciliation and deterministic reply keys", () => {
+  const source = readFileSync(path.resolve(process.cwd(), "agent-server.ts"), "utf8");
+  const sendReplyIndex = source.indexOf("async function sendReply(");
+  const idempotencyIndex = source.indexOf("buildAssistantReplyIdempotencyKey({", sendReplyIndex);
+  const reconcileIndex = source.indexOf("reconcileTrackedOutboundBeforeSend({", sendReplyIndex);
+
+  assert.ok(sendReplyIndex >= 0, "expected sendReply implementation");
+  assert.ok(idempotencyIndex >= 0, "expected deterministic assistant reply idempotency");
+  assert.ok(reconcileIndex >= 0, "expected outbound reconciliation reuse");
+  assert.ok(idempotencyIndex > sendReplyIndex, "expected reply idempotency inside sendReply");
+  assert.ok(reconcileIndex > sendReplyIndex, "expected reconciliation inside sendReply");
 });
 
 test("critical_unblock_low patch mismatch errors cool down only that app-state collection", () => {

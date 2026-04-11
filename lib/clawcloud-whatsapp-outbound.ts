@@ -217,6 +217,35 @@ export function buildWhatsAppOutboundIdempotencyKey(input: {
   return `wa-outbound-${crypto.createHash("sha256").update(payload).digest("hex").slice(0, 32)}`;
 }
 
+export function buildAssistantReplyIdempotencyKey(input: {
+  userId: string;
+  targetJid: string;
+  inboundMessageId?: string | null;
+  inboundDedupKey?: string | null;
+  messageText?: string | null;
+}) {
+  const inboundMessageId = cleanText(input.inboundMessageId);
+  const inboundDedupKey = cleanText(input.inboundDedupKey);
+  const seed = inboundMessageId ?? inboundDedupKey;
+
+  if (seed) {
+    return buildWhatsAppOutboundIdempotencyKey({
+      userId: input.userId,
+      source: "assistant_reply",
+      remoteJid: input.targetJid,
+      messageText: `assistant-reply:${seed}`,
+    });
+  }
+
+  return buildWhatsAppOutboundIdempotencyKey({
+    userId: input.userId,
+    source: "assistant_reply",
+    remoteJid: input.targetJid,
+    workflowRunId: crypto.randomBytes(8).toString("hex"),
+    messageText: cleanText(input.messageText) ?? "assistant-reply",
+  });
+}
+
 async function getWhatsAppOutboundMessageByFilter(
   userId: string,
   filter: {

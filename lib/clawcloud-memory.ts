@@ -6,6 +6,10 @@ import {
   inferClawCloudCasualTalkProfile,
   inferClawCloudEmotionalContext,
 } from "@/lib/clawcloud-casual-talk";
+import {
+  getClawCloudEphemeralConversationTurns,
+  mergeClawCloudConversationTurns,
+} from "@/lib/clawcloud-ephemeral-conversation";
 import { getClawCloudSupabaseAdmin } from "@/lib/clawcloud-supabase";
 
 export type MemoryTurn = {
@@ -394,9 +398,13 @@ function isFollowUpQuestion(currentMessage: string, recentTurns: MemoryTurn[]): 
   const wordCount = words.length;
   const anchorUserTurn = findLatestSubstantiveTurn(recentTurns, "user");
   const anchorAssistantTurn = findLatestSubstantiveTurn(recentTurns, "assistant");
+  const questionPronounFollowUp =
+    /^(?:why|when|where|who|how much|how many|which one)\b[\s\S]*\b(?:it|this|that|these|those|so|such)\b/i
+      .test(msg);
 
   if (!msg) return false;
   if (PRONOUN_START.test(msg)) return true;
+  if (questionPronounFollowUp) return true;
   if (LANGUAGE_OR_STYLE_ONLY_FOLLOW_UP.test(msg)) return Boolean(anchorUserTurn || anchorAssistantTurn);
   if (SELECTION_FOLLOW_UP_START.test(msg)) return Boolean(anchorUserTurn || anchorAssistantTurn);
   if (CONTINUATION_OPENER.test(msg) && !looksLikeStandaloneQuestion(msg, wordCount)) return true;
@@ -448,7 +456,10 @@ function analyzeConversationContinuity(
     extractTopics(msg),
     extractTopics(`${lastUserContext} ${lastAssistantContext}`.trim()),
   );
-  const hasContextCue = PRONOUN_START.test(msg) || CONTEXTUAL_REFERENCE.test(msg);
+  const questionPronounFollowUp =
+    /^(?:why|when|where|who|how much|how many|which one)\b[\s\S]*\b(?:it|this|that|these|those|so|such)\b/i
+      .test(msg);
+  const hasContextCue = PRONOUN_START.test(msg) || CONTEXTUAL_REFERENCE.test(msg) || questionPronounFollowUp;
   const hasContinuationCue = CONTINUATION_OPENER.test(msg);
   const hasSelectionCue = SELECTION_FOLLOW_UP_START.test(msg);
   const styleOnly = LANGUAGE_OR_STYLE_ONLY_FOLLOW_UP.test(msg);
@@ -462,6 +473,7 @@ function analyzeConversationContinuity(
 
   let score = bestAnchor?.score ?? 0;
   if (PRONOUN_START.test(msg)) score += 4;
+  if (questionPronounFollowUp) score += 4;
   if (hasContextCue) score += 2;
   if (hasContinuationCue) score += 2;
   if (hasSelectionCue) score += 3;
@@ -628,6 +640,12 @@ function findRecentDocumentContext(recentTurns: MemoryTurn[]): string | null {
 }
 
 async function loadRawHistory(userId: string, limit: number): Promise<MemoryTurn[]> {
+  const ephemeralTurns = getClawCloudEphemeralConversationTurns(userId, limit).map((turn) => ({
+    role: turn.role,
+    content: truncateHistoryContent(turn.content),
+    timestampMs: turn.timestampMs,
+  }));
+
   try {
     const { data } = await getClawCloudSupabaseAdmin()
       .from("whatsapp_messages")
@@ -636,17 +654,28 @@ async function loadRawHistory(userId: string, limit: number): Promise<MemoryTurn
       .order("sent_at", { ascending: false })
       .limit(limit);
 
-    if (!data?.length) return [];
-
-    return data
-      .reverse()
+    const databaseTurns = (data ?? [])
       .map((row) => ({
         role: (row.direction === "inbound" ? "user" : "assistant") as "user" | "assistant",
         content: truncateHistoryContent(String(row.content ?? "")),
+        timestampMs: Number.isFinite(new Date(String(row.sent_at ?? "")).getTime())
+          ? new Date(String(row.sent_at ?? "")).getTime()
+          : 0,
       }))
       .filter((turn) => turn.content.length > 0);
+
+    return mergeClawCloudConversationTurns([
+      ...databaseTurns,
+      ...ephemeralTurns,
+    ], limit).map(({ role, content }) => ({
+      role,
+      content,
+    }));
   } catch {
-    return [];
+    return ephemeralTurns.map(({ role, content }) => ({
+      role,
+      content,
+    }));
   }
 }
 
@@ -718,7 +747,9 @@ export function buildMemorySystemSnippet(
   memory: ConversationMemory,
   userProfileSnippet?: string,
 ): string {
-  const lines: string[] = [];
+  const lines: string[] = [
+    "Conversation awareness: first decide whether the current message is a NEW question, a FOLLOW-UP, or a CLARIFICATION.",
+  ];
 
   if (memory.topicSummary) {
     lines.push(`Conversation history: ${memory.topicSummary}`);
@@ -742,9 +773,12 @@ export function buildMemorySystemSnippet(
     } else {
       lines.push(`Resolved question: ${memory.resolvedQuestion}`);
     }
+    lines.push("Stay on the same topic unless the user clearly changes it.");
+    lines.push("Resolve implicit references like it, this, that, why, when, and how against the latest logical subject from recent turns.");
+    lines.push("If more than one earlier topic fits, ask one brief clarification instead of guessing.");
     lines.push("IMPORTANT: Answer in the context of the ongoing conversation. Do not treat this as a standalone question.");
   } else if (memory.recentTurns.length) {
-    lines.push("Current message appears standalone. Do not merge unrelated old context unless the user clearly refers back to prior chat.");
+    lines.push("Current message appears standalone. Answer it independently and do not merge unrelated old context unless the user clearly refers back to prior chat.");
   }
   if (memory.recentDocumentContext && !looksLikeDocumentPrompt(memory.resolvedQuestion)) {
     lines.push("Recent document context is available from the previous uploaded file. Use it when the user refers back to the document.");

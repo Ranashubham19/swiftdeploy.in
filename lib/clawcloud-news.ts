@@ -279,6 +279,18 @@ export function buildSourceBackedLiveAnswerResult(input: {
     route: input.route ?? buildForcedFreshWebRoute(input.question) ?? undefined,
   });
 
+  if (
+    detectAiModelRoutingDecision(input.question)?.mode === "web_search"
+    && looksAcceptableAiModelWebAnswer(answer, input.question)
+    && input.sources.some((source) => {
+      if (!source.publishedDate) return false;
+      const parsed = new Date(source.publishedDate);
+      return Number.isFinite(parsed.getTime()) && parsed.getUTCFullYear() >= new Date().getUTCFullYear();
+    })
+  ) {
+    return buildWebSearchAnswerResult(answer, liveAnswerBundle);
+  }
+
   if (liveAnswerBundle?.metadata?.freshness_guarded === true) {
     return buildWebSearchAnswerResult(
       renderClawCloudAnswerBundle(liveAnswerBundle),
@@ -3039,6 +3051,14 @@ export async function answerNewsQuestionResult(question: string): Promise<ClawCl
     return buildWebSearchAnswerResult(clarification);
   }
 
+  const liveAnswerBundle = await fetchLiveAnswerBundle(question);
+  if (liveAnswerBundle) {
+    return finalizeDirectLiveWebAnswer(question, liveAnswerBundle);
+  }
+  if (env.GOOGLE_GEMINI_API_KEY?.trim()) {
+    return buildWebSearchAnswerResult(buildFreshDataRequiredReply(question));
+  }
+
   const queries = buildNewsQueries(question);
   const sources = await fastNewsSearch(queries);
   if (
@@ -3102,6 +3122,41 @@ export async function answerWebSearchResult(question: string): Promise<ClawCloud
     );
   }
 
+  if (looksLikeDirectWeatherQuestion(question)) {
+    const city = parseWeatherCity(question);
+    if (city) {
+      const weather = await getWeather(city).catch(() => null);
+      if (weather?.trim()) {
+        return buildWebSearchAnswerResult(
+          weather.trim(),
+          maybeBuildClawCloudLiveAnswerBundle({
+            question,
+            answer: weather.trim(),
+          }),
+        );
+      }
+    }
+  }
+
+  const liveAnswerBundle = await fetchLiveAnswerBundle(question);
+  if (liveAnswerBundle) {
+    return finalizeDirectLiveWebAnswer(question, liveAnswerBundle);
+  }
+
+  const geminiManagedFreshRoute =
+    Boolean(env.GOOGLE_GEMINI_API_KEY?.trim())
+    && (
+      detectNewsQuestion(question)
+      || shouldFailClosedWithoutFreshData(question)
+      || buildForcedFreshWebRoute(question) !== null
+    );
+  if (geminiManagedFreshRoute) {
+    const freshnessRequired = buildFreshDataRequiredReply(question);
+    if (freshnessRequired.trim()) {
+      return buildWebSearchAnswerResult(freshnessRequired);
+    }
+  }
+
   if (detectNewsQuestion(question)) {
     return answerNewsQuestionResult(question);
   }
@@ -3128,27 +3183,6 @@ export async function answerWebSearchResult(question: string): Promise<ClawCloud
     if (historicalPowerReply) {
       return buildWebSearchAnswerResult(historicalPowerReply);
     }
-  }
-
-  if (looksLikeDirectWeatherQuestion(question)) {
-    const city = parseWeatherCity(question);
-    if (city) {
-      const weather = await getWeather(city).catch(() => null);
-      if (weather?.trim()) {
-        return buildWebSearchAnswerResult(
-          weather.trim(),
-          maybeBuildClawCloudLiveAnswerBundle({
-            question,
-            answer: weather.trim(),
-          }),
-        );
-      }
-    }
-  }
-
-  const liveAnswerBundle = await fetchLiveAnswerBundle(question);
-  if (liveAnswerBundle) {
-    return finalizeDirectLiveWebAnswer(question, liveAnswerBundle);
   }
 
   const officialPricingAnswer = await fetchOfficialPricingAnswer(question);

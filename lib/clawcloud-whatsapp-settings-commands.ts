@@ -11,6 +11,23 @@ export type WhatsAppSettingsCommandIntent =
   | "whatsapp_settings_update"
   | "whatsapp_contacts_sync";
 
+const WHATSAPP_CONTACTS_SYNC_PATTERNS = [
+  /\b(sync|refresh|resync|scan)\b.*\bwhatsapp\b.*\bcontacts?\b/i,
+  /\b(sync|refresh|resync|scan)\b.*\bcontacts?\b.*\bwhatsapp\b/i,
+  /\b(?:sincroniza|sincronizar|actualiza|actualizar|refresca|refrescar)\b.*\b(?:contactos?|contatos?)\b.*\bwhatsapp\b/iu,
+  /\b(?:synchronise|synchroniser|synchroniser|rafra[iî]chis|actualise)\b.*\bcontacts?\b.*\bwhatsapp\b/iu,
+  /\b(?:kontakte|kontakte\s+aktualisieren|kontakte\s+synchronisieren)\b.*\bwhatsapp\b/iu,
+  /\b(?:sincronizza|sincronizzare|aggiorna|aggiornare)\b.*\bcontatti\b.*\bwhatsapp\b/iu,
+  /\b(?:kişileri|kişilerimi|kişi\s+listesini)\b.*\b(?:senkronize|yenile|tara)\b.*\bwhatsapp\b/iu,
+  /\b(?:синхронизируй|обнови|проверь)\b.*\bконтакты\b.*\bwhatsapp\b/u,
+  /\b(?:زامن|حد[ثّ]ث|حدّث|افحص)\b.*\bجهات\s+الاتصال\b.*\bواتساب\b/u,
+  /(?:同步|刷新|更新).*(?:WhatsApp|whatsapp).*(?:联系人|聯絡人)/u,
+  /(?:WhatsApp|whatsapp).*(?:联系人|聯絡人).*(?:同步|刷新|更新)/u,
+  /(?:WhatsApp|whatsapp).*(?:連絡先|コンタクト).*(?:同期|更新|再読み込み|再読込)/u,
+  /(?:왓츠앱|whatsapp).*(?:연락처|주소록).*(?:동기화|새로고침|업데이트)/u,
+  /(?:ซิงค์|รีเฟรช|อัปเดต).*(?:รายชื่อผู้ติดต่อ|ผู้ติดต่อ).*(?:WhatsApp|whatsapp)/u,
+];
+
 function normalizeText(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
@@ -104,9 +121,7 @@ export function detectWhatsAppSettingsCommandIntent(text: string): WhatsAppSetti
   }
 
   if (
-    /\b(sync|refresh|resync|scan)\b/.test(normalized)
-    && /\bwhatsapp\b/.test(normalized)
-    && /\bcontacts?\b/.test(normalized)
+    WHATSAPP_CONTACTS_SYNC_PATTERNS.some((pattern) => pattern.test(text))
   ) {
     return "whatsapp_contacts_sync";
   }

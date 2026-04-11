@@ -34,43 +34,43 @@ const howItWorks = [
       "Create your account in 30 seconds using your Google login. No credit card required on the free plan.",
   },
   {
-    title: "Connect your accounts",
+    title: "Connect WhatsApp",
     description:
-      "One-click OAuth for Gmail and Calendar. Scan a QR code for WhatsApp. The whole thing takes under 60 seconds.",
+      "Scan one WhatsApp QR code and your personal ClawCloud agent is ready inside the chat app you already use.",
   },
   {
-    title: "Pick your AI tasks",
+    title: "Pick WhatsApp tasks",
     description:
-      "Choose what your agent does: morning briefings, email drafts, meeting reminders. Simple toggles, no settings pages.",
+      "Choose WhatsApp reminders, contact memory, chat summaries, and media understanding. Simple toggles, no complex setup.",
   },
   {
-    title: "Your agent goes live",
+    title: "Chat naturally",
     description:
-      "We spin up your personal AI on our servers instantly. It starts working immediately, even while you sleep.",
+      "Ask questions, read chats, send messages, analyze media, or set reminders directly from WhatsApp when you want.",
   },
 ] as const;
 
 
 const features: readonly Feature[] = [
   {
-    icon: "\u{1F4E7}",
-    title: "Email Triage",
+    icon: "\u{1F4AC}",
+    title: "WhatsApp-first AI",
     description:
-      "Every morning, receive a smart inbox summary of what matters, what can wait, and what to ignore. No more opening 47 unread emails.",
+      "Ask coding, study, current-affairs, translation, writing, and daily-life questions directly inside WhatsApp.",
     tag: "Most used feature",
     hot: true,
   },
   {
-    icon: "\u{1F4C5}",
-    title: "Calendar Reminders",
+    icon: "\u{1F465}",
+    title: "Contact-safe actions",
     description:
-      "Get a reminder 30 minutes before every meeting with a context briefing pulled from your last email thread with that person.",
+      "Send, reply, summarize, and read messages only when you explicitly ask, with safer contact matching before delivery.",
   },
   {
-    icon: "\u270D",
-    title: "Draft Replies",
+    icon: "\u{1F5BC}",
+    title: "Media understanding",
     description:
-      'Say "draft a reply to Vikram" and your AI writes it professionally, saves it to Gmail drafts. You just review and send.',
+      "Send photos, PDFs, recordings, and documents for one-box WhatsApp-style explanations, extraction, and summaries.",
   },
   {
     icon: "\u{1F514}",
@@ -80,15 +80,15 @@ const features: readonly Feature[] = [
   },
   {
     icon: "\u{1F50D}",
-    title: "Search Your Email",
+    title: "Latest-source answers",
     description:
-      'Ask in plain English: "What did Sarah say about the invoice last month?" Your agent finds and summarises it in seconds.',
+      "For current topics, ClawCloud routes through live evidence checks instead of pretending stale model memory is enough.",
   },
   {
     icon: "\u26A1",
-    title: "Scheduled Briefings",
+    title: "Conversation memory",
     description:
-      "Get automatic briefings at 7am, noon, and 6pm. Full day overview, nothing missed, everything prioritised.",
+      "Follow-up questions stay attached to the previous topic, and WhatsApp contact tasks stay separated from general Q&A.",
   },
 ] as const;
 
@@ -100,12 +100,12 @@ const pricingPlans: readonly PricingPlan[] = [
     buttonLabel: "Get started free",
     buttonClassName: "plan-btn",
     features: [
-      { label: "1 active AI task", enabled: true },
-      { label: "WhatsApp connection", enabled: true },
-      { label: "Gmail read access", enabled: true },
-      { label: "10 runs per day", enabled: true },
-      { label: "Calendar integration", enabled: false },
-      { label: "Draft replies", enabled: false },
+      { label: "WhatsApp agent setup", enabled: true },
+      { label: "3 active WhatsApp tasks", enabled: true },
+      { label: "10 AI runs per day", enabled: true },
+      { label: "Chat, reminders, and media Q&A", enabled: true },
+      { label: "Advanced task capacity", enabled: false },
+      { label: "Priority support", enabled: false },
     ],
   },
   {
@@ -115,11 +115,11 @@ const pricingPlans: readonly PricingPlan[] = [
     buttonLabel: "Start free trial \u2192",
     buttonClassName: "plan-btn primary",
     features: [
-      { label: "5 active AI tasks", enabled: true },
-      { label: "WhatsApp + Telegram", enabled: true },
-      { label: "Gmail + Calendar", enabled: true },
-      { label: "Unlimited daily runs", enabled: true },
-      { label: "Draft email replies", enabled: true },
+      { label: "WhatsApp agent setup", enabled: true },
+      { label: "10 active WhatsApp tasks", enabled: true },
+      { label: "100 AI runs per day", enabled: true },
+      { label: "Contact memory and chat summaries", enabled: true },
+      { label: "Media, PDF, and voice understanding", enabled: true },
       { label: "Priority support", enabled: false },
     ],
   },
@@ -130,10 +130,10 @@ const pricingPlans: readonly PricingPlan[] = [
     buttonLabel: "Get Pro \u2192",
     buttonClassName: "plan-btn",
     features: [
-      { label: "Unlimited AI tasks", enabled: true },
-      { label: "All messaging apps", enabled: true },
-      { label: "All integrations", enabled: true },
-      { label: "Custom schedules", enabled: true },
+      { label: "Unlimited WhatsApp tasks", enabled: true },
+      { label: "Unlimited AI runs", enabled: true },
+      { label: "Advanced contact and history controls", enabled: true },
+      { label: "Deep answers and stronger live-source checks", enabled: true },
       { label: "Priority support", enabled: true },
       { label: "Analytics dashboard", enabled: true },
     ],
@@ -145,9 +145,9 @@ const testimonials = [
     initials: "RK",
     avatarStyle: { background: "rgba(127,119,221,0.18)", color: "#AFA9EC" },
     text:
-      '"I used to spend 45 minutes every morning triaging email. Now ClawCloud sends me a WhatsApp summary at 7am and I\'m done in 5 minutes. It\'s unreal."',
+      '"I ask everything on WhatsApp now - coding questions, contact summaries, reminders, and quick translations. It feels like a serious assistant, not another app to open."',
     name: "Rahul Kumar",
-    role: "Freelance Designer, Delhi",
+    role: "Student, Delhi",
   },
   {
     initials: "PS",
@@ -161,27 +161,27 @@ const testimonials = [
     initials: "AM",
     avatarStyle: { background: "rgba(216,90,48,0.18)", color: "#F0997B" },
     text:
-      '"The meeting briefing feature alone is worth every rupee. I always know the context before every call. My clients think I have an incredible memory."',
+      '"The contact safety matters most for me. It asks when a name is unclear and only sends when I explicitly tell it to send. That makes it feel trustworthy."',
     name: "Arjun Mehta",
-    role: "Sales Manager, Mumbai",
+    role: "Founder, Mumbai",
   },
 ] as const;
 
 const faqs = [
   {
-    question: "Is my email data safe?",
+    question: "Is my WhatsApp data safe?",
     answer:
-      "Yes. We request only the Google permissions needed for the features you enable. ClawCloud processes Gmail and Calendar content in real time, does not store full inbox copies by default, and lets you revoke Google access at any time.",
+      "ClawCloud uses your linked WhatsApp session only to power the tasks you request. It is designed to avoid autonomous outbound messages, keep contact actions explicit, and let you disconnect the session when needed.",
   },
   {
     question: "Do I need to install anything?",
     answer:
-      "Nothing at all. ClawCloud runs entirely on our cloud servers. You connect your accounts on our website, scan a WhatsApp QR code, and your agent goes live immediately. No apps, no downloads, no command line required.",
+      "Nothing extra. ClawCloud runs in the cloud. You sign in, scan a WhatsApp QR code, and then use the assistant from WhatsApp.",
   },
   {
-    question: "Does it work with Telegram too?",
+    question: "Does it work with other apps too?",
     answer:
-      "Yes! WhatsApp is available on all plans including free. Telegram is available on Starter and Pro plans. We are actively working on Signal support and will announce it soon.",
+      "The current product experience is focused on WhatsApp only. Pricing, setup, and dashboard flows are now built around WhatsApp tasks.",
   },
   {
     question: "What AI model powers ClawCloud?",
@@ -194,9 +194,9 @@ const faqs = [
       "Yes, cancel any time from your dashboard with a single click. No questions asked, no hidden fees, no cancellation penalties. Your free tier access continues forever even after cancelling a paid plan.",
   },
   {
-    question: "Will it send emails without my approval?",
+    question: "Will it send WhatsApp messages without my approval?",
     answer:
-      "ClawCloud only sends when you explicitly ask it to send or reply. It does not start autonomous outbound messages on its own, and background workflows stay read-only until you trigger them directly.",
+      "No. ClawCloud only sends or replies when you explicitly give a send/reply instruction. General questions, drafts, translations, and casual chat stay in your own chat unless you command a contact action.",
   },
 ] as const;
 
@@ -361,8 +361,8 @@ export function ClawCloudLanding() {
         </h1>
 
         <p className="hero-sub">
-          Clears your inbox, drafts emails, reminds you of meetings - all from the chat app already on your
-          phone. No apps. No code. Just type.
+          Answers questions, manages WhatsApp contacts safely, reads chat history when you ask, analyzes media,
+          and sets reminders from the chat app already on your phone. No extra app. No code. Just type.
         </p>
 
         <div className="hero-btns">
@@ -478,9 +478,9 @@ export function ClawCloudLanding() {
         <div className="pricing-inner">
           <div className="reveal">
             <div className="sec-label">Pricing</div>
-            <div className="sec-title">Simple, honest pricing.</div>
+            <div className="sec-title">WhatsApp-only pricing for ClawCloud.</div>
             <div className="sec-sub" style={{ margin: "0 auto" }}>
-              Start free. Upgrade only when you&apos;re ready.
+              Start free with WhatsApp. Upgrade only when you need more tasks, more runs, or priority support.
             </div>
           </div>
 

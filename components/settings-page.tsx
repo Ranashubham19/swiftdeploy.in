@@ -33,7 +33,7 @@ type DisconnectResult = {
 const tabs = [
   { id: "profile", icon: "\u{1F464}", label: "Profile", title: "\u{1F464} Profile" },
   { id: "notifications", icon: "\u{1F514}", label: "Notifications", title: "\u{1F514} Notifications" },
-  { id: "integrations", icon: "\u{1F517}", label: "Integrations", title: "\u{1F517} Integrations" },
+  { id: "integrations", icon: "\u{1F4AC}", label: "WhatsApp", title: "\u{1F4AC} WhatsApp workspace" },
   { id: "agent", icon: "\u{1F916}", label: "Agent settings", title: "\u{1F916} Agent settings" },
   { id: "billing", icon: "\u{1F4B3}", label: "Plan & billing", title: "\u{1F4B3} Plan & billing" },
   { id: "danger", icon: "\u26A0\uFE0F", label: "Danger zone", title: "\u26A0\uFE0F Danger zone" },
@@ -133,9 +133,8 @@ export function SettingsPage({ config }: SettingsPageProps) {
 
     const params = new URLSearchParams(window.location.search);
     const tab = params.get("tab");
-    const driveStatus = params.get("drive");
     const errorMessage = params.get("error");
-    const signature = `${params.toString()}::${driveStatus ?? ""}::${errorMessage ?? ""}`;
+    const signature = `${params.toString()}::${errorMessage ?? ""}`;
 
     if (tab === "integrations") {
       setActiveTab("integrations");
@@ -145,29 +144,19 @@ export function SettingsPage({ config }: SettingsPageProps) {
       return;
     }
 
-    let handled = false;
-    if (driveStatus === "connected") {
-      showToast("Google Drive connected.");
-      refetch();
-      handled = true;
-    }
-
     if (errorMessage) {
       showToast(errorMessage);
-      handled = true;
-    }
-
-    if (!handled) {
-      return;
     }
 
     handledSearchStateRef.current = signature;
+    if (!params.has("error")) {
+      return;
+    }
     const nextParams = new URLSearchParams(params.toString());
-    nextParams.delete("drive");
     nextParams.delete("error");
     const nextQuery = nextParams.toString();
     router.replace(nextQuery ? `/settings?${nextQuery}` : "/settings");
-  }, [refetch, router]);
+  }, [router]);
 
   useEffect(() => {
     if (upgradeError) showToast(upgradeError);
@@ -513,19 +502,14 @@ export function SettingsPage({ config }: SettingsPageProps) {
   const canOpenTelegramBot = Boolean(telegramBotLink);
 
   const taskBadges = [
-    ["Morning briefing", tasks.some((task) => task.task_type === "morning_briefing" && task.is_enabled)],
-    ["Meeting reminders", tasks.some((task) => task.task_type === "meeting_reminders" && task.is_enabled)],
-    ["Draft replies", tasks.some((task) => task.task_type === "draft_replies" && task.is_enabled)],
-    ["Evening summary", tasks.some((task) => task.task_type === "evening_summary" && task.is_enabled)],
+    ["Smart reminders", tasks.some((task) => task.task_type === "custom_reminder" && task.is_enabled)],
+    ["Contact memory", tasks.some((task) => task.task_type === "user_contacts" && task.is_enabled)],
     ["Weekly spend summary", tasks.some((task) => task.task_type === "weekly_spend" && task.is_enabled)],
   ] as const;
 
   const featureRows: Array<[string, DashboardRuntimeFeatureState]> = featureStatus
     ? [
-        ["Global Lite Connect", featureStatus.global_lite_connect],
-        ["Google Workspace connect", featureStatus.google_workspace_connect],
         ["WhatsApp agent backend", featureStatus.whatsapp_agent],
-        ["Telegram bot", featureStatus.telegram_bot],
         ["Voice transcription", featureStatus.voice_transcription],
         ["Image analysis", featureStatus.image_analysis],
         ["Image generation", featureStatus.image_generation],
@@ -668,104 +652,15 @@ export function SettingsPage({ config }: SettingsPageProps) {
             <div className={styles.tabPanel}>
               <div className={styles.section}>
                 <div className={styles.sectionHead}>
-                  <div className={styles.sectionTitle}>Connected accounts</div>
-                  <div className={styles.sectionDescription}>Live status from connected accounts, fallback Lite links, and runtime checks.</div>
+                  <div className={styles.sectionTitle}>WhatsApp connection</div>
+                  <div className={styles.sectionDescription}>This deployment is configured to run through WhatsApp only.</div>
                 </div>
-                {!featureStatus?.google_workspace_connect.available && featureStatus?.global_lite_connect.available ? (
-                  <div className={styles.integrationBanner}>
-                    <div>
-                      <div className={styles.integrationBannerTitle}>
-                        Global Lite Connect is active for public users
-                      </div>
-                      <div className={styles.integrationBannerText}>
-                        Google Workspace is not available on this deployment right now, so ClawCloud is
-                        using Lite mode for Gmail, Calendar, and Drive until full OAuth is configured.
-                        Lite mode keeps fallback identities and read-only imports ready, but it does
-                        not grant full Gmail, Calendar, or Drive API access.
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      className={styles.secondaryButton}
-                      onClick={() => router.push("/setup")}
-                    >
-                      Open setup
-                    </button>
-                  </div>
-                ) : null}
-                {needsGoogleReconnect ? (
-                  <div className={styles.integrationBanner}>
-                    <div>
-                      <div className={styles.integrationBannerTitle}>
-                        {googleReconnectTitle}
-                      </div>
-                      <div className={styles.integrationBannerText}>
-                        {googleReconnectDetail}
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      className={styles.secondaryButton}
-                      disabled={
-                        !(featureStatus?.google_workspace_connect.available || featureStatus?.google_workspace_extended_connect.available)
-                        || Boolean(saving.googleConnect)
-                      }
-                      onClick={() => void startGoogleWorkspaceConnect(googleReconnectScopeSet)}
-                    >
-                      {saving.googleConnect
-                        ? "Connecting..."
-                        : (featureStatus?.google_workspace_connect.available || featureStatus?.google_workspace_extended_connect.available)
-                        ? "Reconnect Google"
-                        : "Unavailable"}
-                    </button>
-                  </div>
-                ) : null}
                 <div className={styles.card}>
-                  <div className={styles.integrationRow}>
-                    <div className={styles.integrationIcon}>{"\u{1F4E7}"}</div>
-                    <div className={styles.integrationBody}>
-                      <div className={styles.rowTitle}>Google Workspace</div>
-                      <div className={styles.rowDescription}>Gmail, Calendar, and Drive access for ClawCloud workflows.</div>
-                      <div className={styles.scopeText}>{gmail?.account_email || featureStatus?.google_workspace_connect.reason || "Not connected"}</div>
-                      {googleConnected ? (
-                        <div className={styles.scopeText}>
-                          {needsGoogleWriteReconnect
-                            ? (googleCapabilities?.reconnectReason
-                              || "Reconnect Google once to restore Gmail, Calendar, and Drive permissions.")
-                            : drive
-                              ? "Fully connected for Gmail, Calendar, and Drive."
-                              : "Connected for Gmail and Calendar. Reconnect with Drive if you want file and sheet actions too."}
-                        </div>
-                      ) : null}
-                    </div>
-                    <div className={styles.integrationActions}>
-                      <span className={(gmail || calendar || drive) && !needsGoogleWriteReconnect ? styles.connectedBadge : styles.statusBadgeMuted}>
-                        {(gmail || calendar || drive)
-                          ? needsGoogleWriteReconnect
-                            ? "Reconnect needed"
-                            : "Connected"
-                          : "Needs setup"}
-                      </span>
-                      <button
-                        type="button"
-                        className={styles.primaryButton}
-                        disabled={!featureStatus?.google_workspace_connect.available || Boolean(saving.googleConnect)}
-                        onClick={() => void startGoogleWorkspaceConnect("core")}
-                      >
-                        {saving.googleConnect
-                          ? "Connecting..."
-                          : featureStatus?.google_workspace_connect.available
-                            ? "Connect Google"
-                            : "Unavailable"}
-                      </button>
-                      {(gmail || calendar || drive) ? <button type="button" className={styles.dangerButton} disabled={Boolean(saving.google)} onClick={() => void disconnect("google")}>{saving.google ? "Working..." : "Disconnect"}</button> : null}
-                    </div>
-                  </div>
                   <div className={styles.integrationRow}>
                     <div className={styles.integrationIcon}>{"\u{1F4AC}"}</div>
                     <div className={styles.integrationBody}>
                       <div className={styles.rowTitle}>WhatsApp</div>
-                      <div className={styles.rowDescription}>Primary messaging channel for your assistant.</div>
+                      <div className={styles.rowDescription}>Primary and only live messaging channel for this workspace.</div>
                       <div className={styles.scopeText}>{whatsapp?.phone_number || featureStatus?.whatsapp_agent.reason || "Not connected"}</div>
                     </div>
                     <div className={styles.integrationActions}>
@@ -780,197 +675,7 @@ export function SettingsPage({ config }: SettingsPageProps) {
                       {whatsapp ? <button type="button" className={styles.dangerButton} disabled={Boolean(saving.whatsapp)} onClick={() => void disconnect("whatsapp")}>{saving.whatsapp ? "Working..." : "Disconnect"}</button> : null}
                     </div>
                   </div>
-                  <div className={styles.integrationRow}>
-                    <div className={styles.integrationIcon}>{"\u2708\uFE0F"}</div>
-                    <div className={styles.integrationBody}>
-                      <div className={styles.rowTitle}>Telegram</div>
-                      <div className={styles.rowDescription}>Secondary channel for text-based assistant flows.</div>
-                      <div className={styles.scopeText}>{telegram?.account_email || telegram?.phone_number || (plan === "free" ? "Upgrade to Starter to connect" : featureStatus?.telegram_bot.reason || "Open the bot to connect")}</div>
-                    </div>
-                    <div className={styles.integrationActions}>
-                      <span className={telegram ? styles.connectedBadge : styles.statusBadgeMuted}>{telegram ? "Connected" : "Needs setup"}</span>
-                      <button
-                        type="button"
-                        className={telegram ? styles.secondaryButton : styles.primaryButton}
-                        disabled={
-                          telegram
-                            ? !canOpenTelegramBot
-                            : plan === "free"
-                              ? false
-                              : !featureStatus?.telegram_bot.available || !canOpenTelegramBot
-                        }
-                        onClick={
-                          telegram
-                            ? () => window.open(telegramBotLink, "_blank")
-                            : plan === "free"
-                              ? () => void upgrade({ plan: "starter", period: "monthly", currency: "inr" })
-                              : () => window.open(telegramBotLink, "_blank")
-                        }
-                      >
-                        {telegram ? "Open bot" : plan === "free" ? "Upgrade" : "Open bot"}
-                      </button>
-                      {telegram ? <button type="button" className={styles.dangerButton} disabled={Boolean(saving.telegram)} onClick={() => void disconnect("telegram")}>{saving.telegram ? "Working..." : "Disconnect"}</button> : null}
-                    </div>
-                  </div>
                 </div>
-                {featureStatus?.global_lite_connect.available ? (
-                  <div className={styles.card}>
-                    <div className={styles.sectionHead}>
-                      <div className={styles.sectionTitle}>Global Lite Connect</div>
-                      <div className={styles.sectionDescription}>
-                        Public-safe fallback connections for Gmail, Calendar, and Drive while Google
-                        is still reviewing the sensitive Workspace scopes.
-                      </div>
-                    </div>
-
-                    <div className={styles.liteBlock}>
-                      <div className={styles.liteHeader}>
-                        <div>
-                          <div className={styles.rowTitle}>Gmail Lite</div>
-                          <div className={styles.rowDescription}>
-                            {gmailLite
-                              ? describeGlobalLiteConnection(gmailLite)
-                              : "Save the inbox identity you want ClawCloud to organize under Lite mode."}
-                          </div>
-                        </div>
-                        <span className={gmailLite ? styles.connectedBadge : styles.statusBadgeMuted}>
-                          {gmailLite ? "Lite connected" : "Ready"}
-                        </span>
-                      </div>
-                      <div className={styles.field}>
-                        <div className={styles.label}>Inbox email</div>
-                        <input
-                          className={styles.input}
-                          type="email"
-                          value={gmailLiteEmail}
-                          onChange={(event) => setGmailLiteEmail(event.target.value)}
-                          placeholder="you@example.com"
-                        />
-                        <div className={styles.fieldHint}>
-                          This keeps the Gmail Lite identity ready for imported or forwarded inbox
-                          snapshots until full Gmail OAuth is reopened.
-                        </div>
-                      </div>
-                      <div className={styles.cardFooter}>
-                        <button
-                          type="button"
-                          className={styles.primaryButton}
-                          disabled={Boolean(saving["lite-gmail"])}
-                          onClick={() => void saveGlobalLiteConnection("gmail")}
-                        >
-                          {saving["lite-gmail"] ? "Saving..." : gmailLite ? "Update Gmail Lite" : "Enable Gmail Lite"}
-                        </button>
-                        {gmailLite ? (
-                          <button
-                            type="button"
-                            className={styles.dangerButton}
-                            disabled={Boolean(saving["lite-gmail"])}
-                            onClick={() => void removeGlobalLiteConnection("gmail")}
-                          >
-                            Remove
-                          </button>
-                        ) : null}
-                      </div>
-                    </div>
-
-                    <div className={styles.liteBlock}>
-                      <div className={styles.liteHeader}>
-                        <div>
-                          <div className={styles.rowTitle}>Calendar Lite</div>
-                          <div className={styles.rowDescription}>
-                            {calendarLite
-                              ? describeGlobalLiteConnection(calendarLite)
-                              : "Paste a private ICS feed so ClawCloud can read agendas and availability without Calendar OAuth."}
-                          </div>
-                        </div>
-                        <span className={calendarLite ? styles.connectedBadge : styles.statusBadgeMuted}>
-                          {calendarLite ? "Lite connected" : "Ready"}
-                        </span>
-                      </div>
-                      <div className={styles.field}>
-                        <div className={styles.label}>Private ICS link</div>
-                        <input
-                          className={styles.input}
-                          value={calendarLiteIcsUrl}
-                          onChange={(event) => setCalendarLiteIcsUrl(event.target.value)}
-                          placeholder="https://calendar.google.com/calendar/ical/.../basic.ics"
-                        />
-                        <div className={styles.fieldHint}>
-                          Calendar Lite is read-only, but it is the strongest global fallback
-                          because it gives ClawCloud real schedule context today.
-                        </div>
-                      </div>
-                      <div className={styles.cardFooter}>
-                        <button
-                          type="button"
-                          className={styles.primaryButton}
-                          disabled={Boolean(saving["lite-google_calendar"])}
-                          onClick={() => void saveGlobalLiteConnection("google_calendar")}
-                        >
-                          {saving["lite-google_calendar"] ? "Saving..." : calendarLite ? "Update Calendar Lite" : "Enable Calendar Lite"}
-                        </button>
-                        {calendarLite ? (
-                          <button
-                            type="button"
-                            className={styles.dangerButton}
-                            disabled={Boolean(saving["lite-google_calendar"])}
-                            onClick={() => void removeGlobalLiteConnection("google_calendar")}
-                          >
-                            Remove
-                          </button>
-                        ) : null}
-                      </div>
-                    </div>
-
-                    <div className={styles.liteBlock}>
-                      <div className={styles.liteHeader}>
-                        <div>
-                          <div className={styles.rowTitle}>Drive Lite</div>
-                          <div className={styles.rowDescription}>
-                            {driveLite
-                              ? describeGlobalLiteConnection(driveLite)
-                              : "Enable a document vault now so ClawCloud can organize uploads and shared docs whenever Drive OAuth is unavailable on this deployment."}
-                          </div>
-                        </div>
-                        <span className={driveLite ? styles.connectedBadge : styles.statusBadgeMuted}>
-                          {driveLite ? "Lite connected" : "Ready"}
-                        </span>
-                      </div>
-                      <div className={styles.field}>
-                        <div className={styles.label}>Vault label</div>
-                        <input
-                          className={styles.input}
-                          value={driveLiteLabel}
-                          onChange={(event) => setDriveLiteLabel(event.target.value)}
-                          placeholder="My ClawCloud document vault"
-                        />
-                        <div className={styles.fieldHint}>
-                          Drive Lite uses uploads and shared docs whenever full Google Drive OAuth is unavailable on this deployment.
-                        </div>
-                      </div>
-                      <div className={styles.cardFooter}>
-                        <button
-                          type="button"
-                          className={styles.primaryButton}
-                          disabled={Boolean(saving["lite-google_drive"])}
-                          onClick={() => void saveGlobalLiteConnection("google_drive")}
-                        >
-                          {saving["lite-google_drive"] ? "Saving..." : driveLite ? "Update Drive Lite" : "Enable Drive Lite"}
-                        </button>
-                        {driveLite ? (
-                          <button
-                            type="button"
-                            className={styles.dangerButton}
-                            disabled={Boolean(saving["lite-google_drive"])}
-                            onClick={() => void removeGlobalLiteConnection("google_drive")}
-                          >
-                            Remove
-                          </button>
-                        ) : null}
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
               </div>
             </div>
           ) : null}
@@ -1060,8 +765,8 @@ export function SettingsPage({ config }: SettingsPageProps) {
                 <div className={styles.card}>
                   <div className={styles.dangerRow}>
                     <div>
-                      <div className={styles.rowTitle}>Disconnect all integrations</div>
-                      <div className={styles.rowDescription}>Revokes Google tokens, disconnects your WhatsApp session, and unlinks Telegram where connected.</div>
+                      <div className={styles.rowTitle}>Disconnect WhatsApp workspace</div>
+                      <div className={styles.rowDescription}>Ends the linked WhatsApp session for this ClawCloud workspace and removes the live messaging connection.</div>
                     </div>
                     <button
                       type="button"
@@ -1069,7 +774,7 @@ export function SettingsPage({ config }: SettingsPageProps) {
                       disabled={!supabase || Boolean(saving.disconnectAll)}
                       onClick={() => void disconnectAll()}
                     >
-                      {saving.disconnectAll ? "Disconnecting..." : "Disconnect all"}
+                      {saving.disconnectAll ? "Disconnecting..." : "Disconnect WhatsApp"}
                     </button>
                   </div>
                   <div className={styles.dangerRow}>
@@ -1108,7 +813,7 @@ export function SettingsPage({ config }: SettingsPageProps) {
                     <div className={styles.confirmBox}>
                       <div className={styles.confirmTitle}>Delete account permanently</div>
                       <div className={styles.confirmDescription}>
-                        This permanently removes your ClawCloud account and disconnects your active integrations. Type {deleteConfirmationTarget} below to confirm.
+                        This permanently removes your ClawCloud account and disconnects your active WhatsApp workspace. Type {deleteConfirmationTarget} below to confirm.
                       </div>
                       <div className={styles.field}>
                         <div className={styles.label}>Confirmation</div>

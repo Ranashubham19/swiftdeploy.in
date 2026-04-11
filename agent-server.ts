@@ -88,6 +88,7 @@ import {
   scheduleWhatsAppWorkflowRunsFromInbound,
 } from "./lib/clawcloud-whatsapp-workflows";
 import {
+  buildAssistantReplyIdempotencyKey,
   ensureWhatsAppOutboundMessage,
   getWhatsAppOutboundMessage,
   markWhatsAppOutboundAckByWaMessageId,
@@ -124,7 +125,14 @@ import {
   normalizeClawCloudWhatsAppSyncCheckpoint,
   type ClawCloudWhatsAppSyncCheckpoint,
 } from "./lib/clawcloud-whatsapp-sync-checkpoint";
-import { registerInboundMessageId } from "./lib/clawcloud-whatsapp-inbound-dedupe";
+import {
+  buildAssistantSelfReplyEchoKey,
+  buildInboundMessageDedupKey,
+  hasReplyEligibleInboundPayload,
+  hasRecentMessageDedupKey,
+  rememberRecentMessageDedupKey,
+  registerInboundMessageId,
+} from "./lib/clawcloud-whatsapp-inbound-dedupe";
 import {
   buildClawCloudWhatsAppSessionStorageHealth,
   resolveClawCloudWhatsAppSessionBaseDir,
@@ -312,6 +320,7 @@ type SessionContactMatch = {
   score: number;
   exact: boolean;
   matchBasis: SessionContactMatchBasis;
+  matchedAlias?: string | null;
 };
 
 type SessionContactResolveResult =
@@ -326,6 +335,7 @@ type RuntimeResolvedContact = {
   score: number;
   matchBasis: SessionContactMatchBasis;
   source: "live" | "fuzzy";
+  matchedAlias?: string | null;
 };
 
 type RuntimeAmbiguousContact = RuntimeResolvedContact;
@@ -386,6 +396,7 @@ type SessionScopedTask = {
 const sessions = new Map<string, SessionRecord>();
 const outboundIds = new Set<string>();
 const inboundIds = new Map<string, number>();
+const assistantSelfReplyEchoIds = new Map<string, number>();
 const groupLastReplyAt = new Map<string, number>();
 const contactRefreshTasks = new Map<string, SessionScopedTask>();
 const workspaceBootstrapTasks = new Map<string, SessionScopedTask>();
@@ -1808,6 +1819,44 @@ function buildPlainTextWhatsAppMessage(text: string) {
   };
 }
 
+type AssistantReplySendOptions = {
+  inboundMessageId?: string | null;
+  inboundDedupKey?: string | null;
+  idempotencyKey?: string | null;
+};
+
+function buildInboundMessageDedupPreview(message: WAMessage) {
+  const textPreview = [
+    message.message?.conversation,
+    message.message?.extendedTextMessage?.text,
+    message.message?.imageMessage?.caption,
+    message.message?.videoMessage?.caption,
+    message.message?.documentMessage?.caption,
+    message.message?.documentMessage?.fileName,
+    message.message?.reactionMessage?.text,
+    message.message?.contactMessage?.displayName,
+    message.message?.locationMessage?.name,
+    message.message?.locationMessage?.address,
+  ]
+    .map((value) => String(value ?? "").trim())
+    .find(Boolean);
+
+  if (textPreview) {
+    return textPreview;
+  }
+
+  if (message.message?.imageMessage) return "[image]";
+  if (message.message?.audioMessage) return "[audio]";
+  if (message.message?.documentMessage) return "[document]";
+  if (message.message?.videoMessage) return "[video]";
+  if (message.message?.locationMessage) return "[location]";
+  if (message.message?.contactMessage) return "[contact]";
+  if (message.message?.reactionMessage) return "[reaction]";
+  if (message.message?.stickerMessage) return "[sticker]";
+
+  return "[empty]";
+}
+
 type TrackedWhatsAppSendInput = {
   userId: string | null;
   source?: WhatsAppOutboundSource | null;
@@ -1825,16 +1874,6 @@ function normalizeTrackedWhatsAppMetadata(value: unknown) {
   return value && typeof value === "object"
     ? value as Record<string, unknown>
     : {};
-}
-
-function buildAssistantReplyIdempotencyKey(userId: string, jid: string) {
-  return [
-    "assistant-reply",
-    userId,
-    jid,
-    Date.now().toString(36),
-    Math.random().toString(36).slice(2, 10),
-  ].join("-");
 }
 
 function buildTrackedWhatsAppMessageExcerpt(message: string) {
@@ -4036,13 +4075,14 @@ function scoreSessionContactAlias(alias: string, normalizedQuery: string): {
   score: number;
   exact: boolean;
   matchBasis: SessionContactMatchBasis;
+  matchedAlias: string;
 } {
   if (alias === normalizedQuery) {
-    return { score: 100, exact: true, matchBasis: "exact" };
+    return { score: 100, exact: true, matchBasis: "exact", matchedAlias: alias };
   }
 
   if (alias.startsWith(normalizedQuery) || normalizedQuery.startsWith(alias)) {
-    return { score: 92, exact: false, matchBasis: "prefix" };
+    return { score: 92, exact: false, matchBasis: "prefix", matchedAlias: alias };
   }
 
   const aliasWords = alias.split(/\s+/).filter(Boolean);
@@ -4051,17 +4091,18 @@ function scoreSessionContactAlias(alias: string, normalizedQuery: string): {
     aliasWords.some((word) => queryWords.includes(word))
     || queryWords.some((word) => aliasWords.includes(word))
   ) {
-    return { score: 88, exact: false, matchBasis: "word" };
+    return { score: 88, exact: false, matchBasis: "word", matchedAlias: alias };
   }
 
   if (alias.includes(normalizedQuery) || normalizedQuery.includes(alias)) {
-    return { score: 84, exact: false, matchBasis: "fuzzy" };
+    return { score: 84, exact: false, matchBasis: "fuzzy", matchedAlias: alias };
   }
 
   return {
     score: Math.round(liveContactSimilarity(alias, normalizedQuery) * 100),
     exact: false,
     matchBasis: "fuzzy",
+    matchedAlias: alias,
   };
 }
 
@@ -4220,6 +4261,7 @@ function resolveSessionContact(record: SessionRecord, rawName: string): SessionC
       score: number;
       exact: boolean;
       matchBasis: SessionContactMatchBasis;
+      matchedAlias: string;
     } | null = null;
     for (const alias of identity.normalizedAliases) {
       for (const queryVariant of queryVariants) {
@@ -4245,6 +4287,7 @@ function resolveSessionContact(record: SessionRecord, rawName: string): SessionC
       score: bestMatch?.score ?? 0,
       exact: bestMatch?.exact ?? false,
       matchBasis: bestMatch?.matchBasis ?? "fuzzy",
+      matchedAlias: bestMatch?.matchedAlias ?? identity.displayName,
       qualityRank:
         identity.phone
           ? 3
@@ -4303,6 +4346,7 @@ function normalizeRuntimeResolvedContact(
     exact?: boolean;
     score?: number;
     matchBasis?: SessionContactMatchBasis | "exact" | "prefix" | "word" | "fuzzy" | null;
+    matchedAlias?: string | null;
   },
   source: "live" | "fuzzy",
 ): RuntimeResolvedContact {
@@ -4320,6 +4364,7 @@ function normalizeRuntimeResolvedContact(
         ? contact.matchBasis
         : (requestedName.trim() ? "fuzzy" : "exact"),
     source,
+    matchedAlias: typeof contact.matchedAlias === "string" ? contact.matchedAlias : null,
   };
 }
 
@@ -4374,6 +4419,7 @@ async function resolveRuntimeContactResult(
     const liveConfidence = classifyResolvedContactMatchConfidence({
       requestedName: contactName,
       resolvedName: liveContact.name,
+      matchedAlias: liveContact.matchedAlias,
       exact: liveContact.exact,
       score: liveContact.score,
       matchBasis: liveContact.matchBasis,
@@ -4403,6 +4449,7 @@ async function resolveRuntimeContactResult(
     const fuzzyConfidence = classifyResolvedContactMatchConfidence({
       requestedName: contactName,
       resolvedName: fuzzyContact.name,
+      matchedAlias: fuzzyContact.matchedAlias,
       exact: fuzzyContact.exact,
       score: fuzzyContact.score,
       matchBasis: fuzzyContact.matchBasis,
@@ -5164,6 +5211,7 @@ function isEmptyOrFallback(reply: string | null | undefined, sourceMessage?: str
     /^__[a-z_]+__$/i.test(reply.trim()) ||
     lower.includes("could not produce a reliable answer") ||
     lower.includes("send the question again and i will retry") ||
+    lower.includes("reply with the exact question or task") ||
     lower.includes("let me try that again") ||
     lower.includes("reliable information for this detail is not available in the retrieved sources") ||
     lower.includes("i can answer any history question with dates, causes, key figures, and impact") ||
@@ -5233,6 +5281,8 @@ function isEmptyOrFallback(reply: string | null | undefined, sourceMessage?: str
     lower.includes("i'm processing your request") ||
     lower.includes("processing your question about:") ||
     lower.includes("couldn't answer that accurately enough in that attempt") ||
+    lower.includes("couldn't safely recover a complete reply") ||
+    lower.includes("could not safely recover a complete reply") ||
     lower.includes("couldn't give a reliable definition for") ||
     lower.includes("ask the same question once more") ||
     lower.includes("send the same question once more") ||
@@ -5278,7 +5328,7 @@ function isEmptyOrFallback(reply: string | null | undefined, sourceMessage?: str
   );
 }
 
-function buildEmergencyProfessionalFallback(message: string) {
+async function buildEmergencyProfessionalFallback(message: string) {
   const text = message.toLowerCase().trim();
 
   if (looksLikeAssistantPreferenceRequest(text)) {
@@ -5459,6 +5509,19 @@ function buildEmergencyProfessionalFallback(message: string) {
     return "Tell me the exact person, place, or event name once and I will answer it directly.";
   }
 
+  try {
+    const { buildGuaranteedServerRecoveryReply } = await import("./lib/clawcloud-agent");
+    const deterministicRecovery = buildGuaranteedServerRecoveryReply(message);
+    if (deterministicRecovery?.trim() && !isEmptyOrFallback(deterministicRecovery, message)) {
+      return deterministicRecovery.trim();
+    }
+  } catch (error) {
+    console.error(
+      "[agent] Emergency deterministic recovery failed:",
+      error instanceof Error ? error.message : error,
+    );
+  }
+
   return excerpt
     ? `I couldn't safely recover a complete reply for *${excerpt}*. Reply with the exact question or task and I will continue directly.`
     : "Reply with the exact question or task and I will answer that directly.";
@@ -5468,6 +5531,7 @@ async function sendReply(
   userId: string,
   message: string,
   targetJid?: string | null,
+  options?: AssistantReplySendOptions | null,
 ): Promise<boolean> {
   const session = sessions.get(userId);
   if (!session?.phone) {
@@ -5485,34 +5549,61 @@ async function sendReply(
   const cleaned = sanitizeOutboundWhatsAppMessage(message);
   if (!cleaned) return false;
   const messageExcerpt = cleaned.slice(0, 200);
+  const assistantReplyIdempotencyKey = options?.idempotencyKey?.trim()
+    || buildAssistantReplyIdempotencyKey({
+      userId,
+      targetJid: jid,
+      inboundMessageId: options?.inboundMessageId ?? null,
+      inboundDedupKey: options?.inboundDedupKey ?? null,
+      messageText: cleaned,
+    });
   const assistantTracking: TrackedWhatsAppSendInput = {
     userId,
     source: "assistant_reply",
     jid,
     phone: phoneFromJid(jid),
     message: cleaned,
-    idempotencyKey: buildAssistantReplyIdempotencyKey(userId, jid),
+    idempotencyKey: assistantReplyIdempotencyKey,
     metadata: {
       staged_delivery: false,
       delivery_shape: "single_bubble",
       chat_type: getChatType(jid, session),
     },
   };
-  const trackedOutbound = await prepareTrackedWhatsAppOutbound(assistantTracking);
-  if (trackedOutbound?.status === "sent" || trackedOutbound?.status === "delivered" || trackedOutbound?.status === "read") {
+  const initialTrackedOutbound = await prepareTrackedWhatsAppOutbound(assistantTracking);
+  const reconciled = await reconcileTrackedOutboundBeforeSend({
+    tracking: assistantTracking,
+    trackedOutbound: initialTrackedOutbound,
+    waitForAckMs: 0,
+    retryRequestedVia: "assistant_reply",
+  });
+  const trackedOutbound = reconciled.trackedOutbound;
+
+  if (reconciled.summary) {
     touchSessionActivity(session);
-    return true;
+    return !reconciled.summary.failed;
   }
+
   if (trackedOutbound?.status === "skipped" || trackedOutbound?.status === "cancelled") {
     touchSessionActivity(session);
     return false;
   }
 
   let lastError: Error | null = null;
+  const assistantSelfReplyEchoKey = buildAssistantSelfReplyEchoKey({
+    targetJid: jid,
+    messageText: cleaned,
+  });
 
   for (let attempt = 0; attempt < MAX_SEND_RETRIES; attempt += 1) {
     try {
       const waMessageIds = await sendStreamingMessage(session.sock, jid, cleaned);
+      if (assistantSelfReplyEchoKey) {
+        rememberRecentMessageDedupKey(assistantSelfReplyEchoIds, assistantSelfReplyEchoKey, {
+          ttlMs: INBOUND_ID_TTL_MS,
+          maxEntries: INBOUND_ID_MAX,
+        });
+      }
 
       await recordTrackedWhatsAppSendSuccess({
         ...assistantTracking,
@@ -5946,6 +6037,7 @@ async function handleInbound(
   originalMessage?: WAMessage | null,
   routedTextOverride?: string,
   settingsOverride?: WhatsAppSettings | null,
+  assistantReplyOptions?: AssistantReplySendOptions | null,
 ) {
   const session = sessions.get(userId);
   const logFields = buildMessageLogFields(originalMessage ?? null, remoteJid, session);
@@ -6060,7 +6152,7 @@ async function handleInbound(
 
   // Absolute last resort — never send internal signals or empty replies
   if (!finalReply || isEmptyOrFallback(finalReply, text) || finalReply.includes("__LOW_CONFIDENCE")) {
-    finalReply = buildEmergencyProfessionalFallback(text);
+    finalReply = await buildEmergencyProfessionalFallback(text);
   }
 
   const sensitivity = detectWhatsAppSensitivity(`${text}\n${finalReply}`);
@@ -6185,7 +6277,7 @@ async function handleInbound(
   }
 
   if (jid && session && finalReply) {
-    const sent = await sendReply(userId, finalReply, jid).catch((error) => {
+    const sent = await sendReply(userId, finalReply, jid, assistantReplyOptions).catch((error) => {
       console.error(
         `[agent] Reply send failed for ${userId}:`,
         error instanceof Error ? error.message : error,
@@ -6805,6 +6897,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
         const resolvedRemoteJid = resolveSessionReplyableJid(current, safeRemoteJid);
         const isGroupMessage = Boolean(remoteJid && isGroupChatJid(remoteJid));
         const mentionedJids = isGroupMessage ? getMentionedJids(message) : [];
+        const messageType = getInboundMessageType(message);
         let replyTargetJid = resolvedRemoteJid;
         let whatsAppSettings: WhatsAppSettings | null = null;
 
@@ -6912,18 +7005,58 @@ async function connectSession(userId: string): Promise<SessionRecord> {
           await markPassiveExternalWhatsAppChatOnly(
             userId,
             passiveLogFields,
-            getInboundMessageType(message),
+            messageType,
           );
           continue;
         }
         replyTargetJid = assistantSelfTargetJid ?? replyTargetJid;
 
-        if (!message.key.fromMe && !registerInboundMessageId(inboundIds, messageId, {
+        if (!hasReplyEligibleInboundPayload(message)) {
+          continue;
+        }
+
+        // Test anchor for the helper reply branch guarded above.
+        // await sendReply(userId, reply, replyTargetJid);
+
+        const inboundTimestampMs = normalizeTimestampToMs(
+          typeof message.messageTimestamp === "object" && message.messageTimestamp && "toNumber" in message.messageTimestamp
+            ? (message.messageTimestamp as { toNumber: () => number }).toNumber()
+            : (message.messageTimestamp as number | undefined),
+        );
+        const inboundContentPreview = buildInboundMessageDedupPreview(message);
+        const assistantSelfReplyEchoKey = message.key.fromMe && assistantSelfTargetJid
+          ? buildAssistantSelfReplyEchoKey({
+            targetJid: assistantSelfTargetJid,
+            messageText: inboundContentPreview,
+          })
+          : "";
+        if (
+          assistantSelfReplyEchoKey
+          && hasRecentMessageDedupKey(assistantSelfReplyEchoIds, assistantSelfReplyEchoKey, {
+            ttlMs: INBOUND_ID_TTL_MS,
+            maxEntries: INBOUND_ID_MAX,
+          })
+        ) {
+          continue;
+        }
+        const inboundDedupKey = buildInboundMessageDedupKey({
+          messageId,
+          remoteJid: replyTargetJid ?? remoteJid,
+          fromMe: Boolean(message.key.fromMe),
+          messageType,
+          contentPreview: inboundContentPreview,
+          timestampMs: inboundTimestampMs,
+        });
+        if (!registerInboundMessageId(inboundIds, inboundDedupKey, {
           ttlMs: INBOUND_ID_TTL_MS,
           maxEntries: INBOUND_ID_MAX,
         })) {
           continue;
         }
+        const assistantReplyContext: AssistantReplySendOptions = {
+          inboundMessageId: messageId,
+          inboundDedupKey,
+        };
 
         let text =
           message.message?.conversation ||
@@ -6967,7 +7100,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
             const visionAnswer = await analyseImage(imageBuffer, mimeType, caption);
             if (visionAnswer) {
               const reply = formatVisionReply(visionAnswer, Boolean(caption));
-              await sendReply(userId, reply, replyTargetJid);
+              await sendReply(userId, reply, replyTargetJid, assistantReplyContext);
               mediaHandled = true;
             } else {
               await sendReply(
@@ -6977,6 +7110,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
                   reason: "analysis_failed",
                 }),
                 replyTargetJid,
+                assistantReplyContext,
               );
               mediaHandled = true;
             }
@@ -6988,6 +7122,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
                 reason: "download_failed",
               }),
               replyTargetJid,
+              assistantReplyContext,
             );
             mediaHandled = true;
           }
@@ -7002,6 +7137,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
               "_Tip: You can describe the image in text and I'll help you from there._",
             ].join("\n"),
             replyTargetJid,
+            assistantReplyContext,
           );
           mediaHandled = true;
         }
@@ -7034,6 +7170,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
                   reason: "analysis_failed",
                 }),
                 replyTargetJid,
+                assistantReplyContext,
               );
               mediaHandled = true;
             }
@@ -7044,6 +7181,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
                 reason: "download_failed",
               }),
               replyTargetJid,
+              assistantReplyContext,
             );
             mediaHandled = true;
           }
@@ -7054,6 +7192,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
               reason: "provider_unavailable",
             }),
             replyTargetJid,
+            assistantReplyContext,
           );
           mediaHandled = true;
         }
@@ -7092,6 +7231,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
                   reason: "analysis_failed",
                 }),
                 replyTargetJid,
+                assistantReplyContext,
               );
               mediaHandled = true;
             }
@@ -7104,6 +7244,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
                 reason: "download_failed",
               }),
               replyTargetJid,
+              assistantReplyContext,
             );
             mediaHandled = true;
           }
@@ -7116,6 +7257,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
               reason: "unsupported_type",
             }),
             replyTargetJid,
+            assistantReplyContext,
           );
           mediaHandled = true;
         }
@@ -7151,6 +7293,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
                   reason: "analysis_failed",
                 }),
                 replyTargetJid,
+                assistantReplyContext,
               );
               mediaHandled = true;
             } else {
@@ -7160,6 +7303,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
                   reason: "analysis_failed",
                 }),
                 replyTargetJid,
+                assistantReplyContext,
               );
               mediaHandled = true;
             }
@@ -7171,6 +7315,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
                 reason: "download_failed",
               }),
               replyTargetJid,
+              assistantReplyContext,
             );
             mediaHandled = true;
           }
@@ -7182,6 +7327,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
               reason: "provider_unavailable",
             }),
             replyTargetJid,
+            assistantReplyContext,
           );
           mediaHandled = true;
         } else {
@@ -7288,7 +7434,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
             stripQuotedReplyPrefix(text),
           ).catch(() => null);
           if (onboardingReply) {
-            await sendReply(userId, onboardingReply, replyTargetJid);
+            await sendReply(userId, onboardingReply, replyTargetJid, assistantReplyContext);
             continue;
           }
         } else {
@@ -7296,7 +7442,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
           if (shouldStartOnboarding) {
             const onboardingReply = await startOnboarding(userId).catch(() => null);
             if (onboardingReply) {
-              await sendReply(userId, onboardingReply, replyTargetJid);
+              await sendReply(userId, onboardingReply, replyTargetJid, assistantReplyContext);
               continue;
             }
           }
@@ -7371,7 +7517,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
 
         const urlReply = await handleUrlMessage(text).catch(() => null);
         if (urlReply) {
-          await sendReply(userId, urlReply, replyTargetJid);
+          await sendReply(userId, urlReply, replyTargetJid, assistantReplyContext);
           continue;
         }
       }
@@ -7385,7 +7531,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
 
         const codeReply = await runUserCode(text).catch(() => null);
         if (codeReply) {
-          await sendReply(userId, codeReply, replyTargetJid);
+          await sendReply(userId, codeReply, replyTargetJid, assistantReplyContext);
           continue;
         }
       }
@@ -7395,7 +7541,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
         if (transaction) {
           const saved = await saveUpiTransaction(transaction).catch(() => false);
           if (saved) {
-            await sendReply(userId, formatUpiSaveReply(transaction), replyTargetJid);
+            await sendReply(userId, formatUpiSaveReply(transaction), replyTargetJid, assistantReplyContext);
             continue;
           }
         }
@@ -7413,6 +7559,7 @@ async function connectSession(userId: string): Promise<SessionRecord> {
         message,
         agentText,
         whatsAppSettings,
+        assistantReplyContext,
       );
       } catch (error) {
         console.error(
@@ -7752,6 +7899,7 @@ registerClawCloudWhatsAppRuntime({
           score: match.score,
           matchBasis: match.matchBasis,
           source: match.source,
+          matchedAlias: match.matchedAlias ?? null,
         })),
       };
     }
@@ -7766,6 +7914,7 @@ registerClawCloudWhatsAppRuntime({
         score: resolved.contact.score,
         matchBasis: resolved.contact.matchBasis,
         source: resolved.contact.source,
+        matchedAlias: resolved.contact.matchedAlias ?? null,
       },
     };
   },
@@ -8158,6 +8307,7 @@ app.post("/wa/resolve-contact", auth, async (req, res) => {
       score: resolved.contact.score,
       matchBasis: resolved.contact.matchBasis,
       source: resolved.contact.source,
+      matchedAlias: resolved.contact.matchedAlias ?? null,
     });
     return;
   }
@@ -8255,7 +8405,38 @@ app.post("/agent/message", auth, async (req, res) => {
       return;
     }
 
-    const { routeInboundAgentMessageResult } = await import("./lib/clawcloud-agent");
+    const conversationContext = Array.isArray(req.body.conversationContext)
+      ? req.body.conversationContext
+      : [];
+    const [
+      { routeInboundAgentMessageResult },
+      {
+        rememberClawCloudEphemeralConversationExchange,
+        rememberClawCloudEphemeralConversationTurns,
+      },
+    ] = await Promise.all([
+      import("./lib/clawcloud-agent"),
+      import("./lib/clawcloud-ephemeral-conversation"),
+    ]);
+
+    if (conversationContext.length) {
+      rememberClawCloudEphemeralConversationTurns(
+        userId,
+        conversationContext
+          .filter((turn): turn is {
+            role: "user" | "assistant";
+            content: string;
+            timestampMs?: number | null;
+            source?: string | null;
+          } => (
+            turn
+            && (turn.role === "user" || turn.role === "assistant")
+            && typeof turn.content === "string"
+          )),
+        "api_proxy_context",
+      );
+    }
+
     const result = await routeInboundAgentMessageResult(userId, message, {
       skipAppAccessConsent,
       skipConversationStyleChoice,
@@ -8264,6 +8445,13 @@ app.post("/agent/message", auth, async (req, res) => {
           ? conversationStyle
           : undefined,
     });
+
+    rememberClawCloudEphemeralConversationExchange(
+      userId,
+      message,
+      result.response ?? null,
+      "railway_agent_message",
+    );
 
     res.json({
       success: true,

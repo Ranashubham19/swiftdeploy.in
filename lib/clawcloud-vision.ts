@@ -635,6 +635,7 @@ function cleanVisionResponse(raw: string): string {
 
 function compactVisionReplyForWhatsApp(raw: string): string {
   const normalized = cleanVisionResponse(raw)
+    .replace(/(^|\n)\s*final answer:\s*/gi, "$1")
     .replace(/\r/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();

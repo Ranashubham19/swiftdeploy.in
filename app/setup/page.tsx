@@ -6,7 +6,7 @@ import { getPublicAppConfig } from "@/lib/env";
 
 export const metadata: Metadata = {
   title: "ClawCloud - Setup your agent",
-  description: "Connect Gmail, link WhatsApp, and choose your AI tasks for ClawCloud.",
+  description: "Link WhatsApp and choose your WhatsApp tasks for ClawCloud.",
 };
 
 export const dynamic = "force-dynamic";

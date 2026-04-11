@@ -1,12 +1,10 @@
+"use client";
+
 import Link from "next/link";
 
 import styles from "./setup-guide-page.module.css";
 
-export type SetupGuideTopic =
-  | "global-connect"
-  | "workspace-connect"
-  | "whatsapp-connect"
-  | "task-picks";
+export type SetupGuideTopic = "whatsapp-connect" | "task-picks";
 
 type GuideSection = {
   title: string;
@@ -31,135 +29,14 @@ type GuideContent = {
 };
 
 const guideContentByTopic: Record<SetupGuideTopic, GuideContent> = {
-  "global-connect": {
-    eyebrow: "Setup Guide",
-    title: "Connect Gmail, Calendar, and Drive with Global Connect",
-    description:
-      "Use this guide when full Google Workspace OAuth is unavailable on the current deployment. Gmail and Drive can prepare automatically from Google sign-in, and Calendar connects once you paste your private ICS link.",
-    summaryTitle: "Best path for most users",
-    summaryText:
-      "Sign in with Google first, let Gmail and Drive finish automatically, then paste the private ICS calendar link once. After that, continue setup and link WhatsApp.",
-    sections: [
-      {
-        title: "Gmail and Drive automatic connect",
-        intro:
-          "These two connections prepare automatically after Google sign-in, so you normally do not need to type anything.",
-        chips: ["Automatic", "Global-safe", "Fastest setup"],
-        steps: [
-          {
-            line: "Finish Google sign-in and wait a moment on the setup screen.",
-            hint: "Gmail and Drive should switch from Preparing to Connected automatically.",
-          },
-          {
-            line: "If either card does not connect, refresh once and wait 2 to 3 seconds.",
-            hint: "The setup handoff now seeds those two connections before the rest of the page opens.",
-          },
-          {
-            line: "Once both cards show Connected, continue to Calendar and WhatsApp.",
-          },
-        ],
-      },
-      {
-        title: "Calendar ICS link",
-        intro:
-          "Calendar still needs one manual step because Google sign-in does not expose the private ICS feed automatically.",
-        chips: ["One-time step", "Read-only", "Private ICS"],
-        steps: [
-          {
-            line: "Open Google Calendar in a browser and choose the calendar you want ClawCloud to read.",
-          },
-          {
-            line: "Go to Settings and sharing for that calendar.",
-          },
-          {
-            line: "Open the Integrate calendar section and copy the Secret address in iCal format.",
-            hint: "Use the secret/private ICS link, not the public embed link.",
-          },
-          {
-            line: "Paste that link into the Calendar field in setup and press Connect.",
-          },
-        ],
-      },
-      {
-        title: "Finish the setup flow",
-        intro:
-          "After Step 1 is done, ClawCloud is ready for the remaining setup pieces.",
-        chips: ["Continue", "WhatsApp", "Tasks"],
-        steps: [
-          {
-            line: "Press Continue to move to WhatsApp QR linking.",
-          },
-          {
-            line: "Scan the QR from the WhatsApp account you want ClawCloud to run on.",
-          },
-          {
-            line: "Choose the tasks you want active on launch, then finish setup.",
-          },
-        ],
-      },
-    ],
-    noteTitle: "Privacy note",
-    noteText:
-      "Global Connect keeps the fallback flow public-safe when full Google Workspace OAuth is unavailable. Gmail and Drive use the signed-in identity, and Calendar stays read-only through the private ICS feed.",
-    ctaHint: "When you are ready, go back to setup and continue from Step 1.",
-  },
-  "workspace-connect": {
-    eyebrow: "Workspace Guide",
-    title: "Connect Google Workspace in one consent flow",
-    description:
-      "Use this guide when the full Google Workspace connection is available. Gmail, Calendar, and optionally Drive can connect in one permission flow.",
-    summaryTitle: "Recommended flow",
-    summaryText:
-      "Click Continue with Google, approve the requested scopes, wait for the connection badges to turn green, then continue directly to WhatsApp linking.",
-    sections: [
-      {
-        title: "Start the Google consent flow",
-        intro:
-          "The setup page launches the Google OAuth window for Gmail, Calendar, and Drive when those scopes are available.",
-        chips: ["One consent flow", "Gmail", "Calendar"],
-        steps: [
-          {
-            line: "Press Continue with Google on Step 1.",
-          },
-          {
-            line: "Choose the Google account you want ClawCloud to use.",
-          },
-          {
-            line: "Review the permissions and approve the connection.",
-          },
-        ],
-      },
-      {
-        title: "Wait for the cards to finish",
-        intro:
-          "ClawCloud updates the Gmail, Calendar, and Drive state after the callback returns to setup.",
-        chips: ["Connected badges", "Return to setup"],
-        steps: [
-          {
-            line: "Stay on the setup page until the cards stop showing Connecting.",
-          },
-          {
-            line: "Confirm Gmail and Calendar show Connected before pressing Continue.",
-          },
-          {
-            line: "If Drive is part of your enabled scope set, wait for Drive to connect too.",
-          },
-        ],
-      },
-    ],
-    noteTitle: "Troubleshooting note",
-    noteText:
-      "If Google closes the flow before setup returns, open setup again and retry the same account. The latest auth handoff now preserves the correct origin and resumes cleanly.",
-    ctaHint: "Return to setup when the Google window finishes.",
-  },
   "whatsapp-connect": {
     eyebrow: "WhatsApp Guide",
-    title: "Link your WhatsApp or AI number",
+    title: "Link your WhatsApp workspace",
     description:
-      "Use this guide to finish Step 2 cleanly, whether you want ClawCloud on your own number or on a second AI-only WhatsApp number.",
-    summaryTitle: "Fastest option",
+      "Use this guide to finish the WhatsApp connection cleanly, whether you want ClawCloud on your own number or on a dedicated AI-only number.",
+    summaryTitle: "Fastest path",
     summaryText:
-      "Use your own WhatsApp account if you want the quickest setup. Use a second number only if you want ClawCloud to appear as a separate contact-style chat.",
+      "Use your own WhatsApp account for the quickest setup. Use a second number only if you want ClawCloud to appear as a separate contact-style chat.",
     sections: [
       {
         title: "Scan the QR code",
@@ -185,13 +62,14 @@ const guideContentByTopic: Record<SetupGuideTopic, GuideContent> = {
         chips: ["Own number", "Second number", "Self chat"],
         steps: [
           {
-            line: "Use your own number if you want ClawCloud to message you in your self-chat thread.",
+            line: "Use your own number if you want ClawCloud to reply inside your Message yourself or self-chat thread.",
           },
           {
             line: "Use a second WhatsApp number if you want ClawCloud to appear as a separate live chat account.",
           },
           {
-            line: "After a second number connects, send one hello message from your personal number to that AI number to establish the thread.",
+            line: "If you use a second number, send one hello message from your personal WhatsApp to that AI number after it connects.",
+            hint: "That creates the thread ClawCloud will answer in later.",
           },
         ],
       },
@@ -208,53 +86,53 @@ const guideContentByTopic: Record<SetupGuideTopic, GuideContent> = {
             line: "If it does not connect, refresh the QR once and rescan.",
           },
           {
-            line: "Continue to the task selection step once the phone number is shown.",
+            line: "Continue to task selection once the phone number is shown.",
           },
         ],
       },
     ],
     noteTitle: "Good to know",
     noteText:
-      "The personal assistant channel lives inside WhatsApp. On your own number it usually appears in Message yourself or self-chat. On a second number it behaves like a separate chat thread.",
+      "This deployment is now configured around WhatsApp only, so setup, dashboard actions, and task picks all stay centered on the linked WhatsApp workspace.",
     ctaHint: "Go back to setup when you are ready to scan the QR.",
   },
   "task-picks": {
     eyebrow: "Task Guide",
-    title: "Choose the right tasks before launch",
+    title: "Choose your WhatsApp tasks",
     description:
-      "Use this guide to pick the best first tasks for ClawCloud without overloading your plan or enabling things you do not need yet.",
+      "Use this guide to pick the best first WhatsApp tasks without enabling extra things you do not need yet.",
     summaryTitle: "Good default setup",
     summaryText:
-      "Start with Morning briefing, Draft email replies, and Meeting reminders. Add more later after the core flow is working the way you want.",
+      "Start with Smart reminders and Contact memory. Add Weekly spend summary if you want a scheduled WhatsApp update.",
     sections: [
       {
-        title: "Pick the high-value tasks first",
+        title: "Start with the most useful tasks",
         intro:
-          "These are usually the fastest to prove value after setup.",
-        chips: ["Morning briefing", "Drafts", "Reminders"],
+          "These are usually the fastest to prove value once WhatsApp is linked.",
+        chips: ["Reminders", "Contact memory", "Fast setup"],
         steps: [
           {
-            line: "Enable Morning email briefing if you want one daily summary in WhatsApp.",
+            line: 'Enable Smart reminders if you want commands like "Remind me at 5pm to call Raj" to work immediately.',
           },
           {
-            line: "Enable Draft email replies if you want to ask ClawCloud for Gmail drafts on demand.",
+            line: "Enable Contact memory if you want accurate chat recall, summaries, and contact-aware answers inside WhatsApp.",
           },
           {
-            line: "Enable Meeting reminders if your calendar is connected and you want schedule nudges.",
+            line: "Enable Weekly spend summary if you want one scheduled WhatsApp summary each week.",
           },
         ],
       },
       {
-        title: "Stay inside your plan",
+        title: "Keep the first launch simple",
         intro:
-          "Some tasks are trimmed automatically if they exceed the current plan allowance.",
-        chips: ["Plan-safe", "Starter aware"],
+          "A smaller task set usually feels cleaner and is easier to verify during the first run.",
+        chips: ["Simple", "Accurate", "Expandable"],
         steps: [
           {
-            line: "Choose the most important tasks first instead of selecting everything.",
+            line: "Choose only the tasks you know you will use right away.",
           },
           {
-            line: "If a task is skipped at launch, setup will keep the tasks your current plan allows.",
+            line: "Launch setup, test the WhatsApp flow, and confirm the outputs feel right.",
           },
           {
             line: "You can always adjust task choices later from the dashboard.",
@@ -264,16 +142,13 @@ const guideContentByTopic: Record<SetupGuideTopic, GuideContent> = {
     ],
     noteTitle: "Launch tip",
     noteText:
-      "A smaller set of high-signal tasks usually makes the first ClawCloud experience feel much cleaner. Start simple, verify the outputs, then expand from the dashboard later.",
+      "Start small, verify the WhatsApp experience, and then expand. That keeps the first ClawCloud setup cleaner and easier to trust.",
     ctaHint: "Go back to setup and continue to the task step when you are ready.",
   },
 };
 
 export function isSetupGuideTopic(value: string | undefined): value is SetupGuideTopic {
-  return value === "global-connect"
-    || value === "workspace-connect"
-    || value === "whatsapp-connect"
-    || value === "task-picks";
+  return value === "whatsapp-connect" || value === "task-picks";
 }
 
 type SetupGuidePageProps = {
@@ -324,14 +199,11 @@ export function SetupGuidePage({ topic }: SetupGuidePageProps) {
                   ))}
                 </div>
               ) : null}
-              <ol className={styles.stepList}>
-                {section.steps.map((step, stepIndex) => (
-                  <li key={`${section.title}-${stepIndex}`} className={styles.stepItem}>
-                    <span className={styles.stepBullet}>{stepIndex + 1}</span>
-                    <div className={styles.stepBody}>
-                      <div className={styles.stepLine}>{step.line}</div>
-                      {step.hint ? <div className={styles.stepHint}>{step.hint}</div> : null}
-                    </div>
+              <ol className={styles.stepsList}>
+                {section.steps.map((step) => (
+                  <li key={step.line} className={styles.stepItem}>
+                    <div>{step.line}</div>
+                    {step.hint ? <div className={styles.stepHint}>{step.hint}</div> : null}
                   </li>
                 ))}
               </ol>
@@ -342,14 +214,14 @@ export function SetupGuidePage({ topic }: SetupGuidePageProps) {
             <h2 className={styles.noteTitle}>{guide.noteTitle}</h2>
             <p className={styles.noteText}>{guide.noteText}</p>
           </div>
-
-          <div className={styles.ctaRow}>
-            <div className={styles.ctaHint}>{guide.ctaHint}</div>
-            <Link href="/setup" className={styles.ctaButton}>
-              Return to setup
-            </Link>
-          </div>
         </section>
+
+        <footer className={styles.footer}>
+          <div className={styles.footerHint}>{guide.ctaHint}</div>
+          <Link href="/setup" className={styles.footerButton}>
+            Return to setup
+          </Link>
+        </footer>
       </main>
     </div>
   );

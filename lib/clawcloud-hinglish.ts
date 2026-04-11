@@ -181,6 +181,7 @@ const HINGLISH_WORDS = new Set([
 const AMBIGUOUS_HINGLISH_WORDS = new Set([
   "app",
   "detail",
+  "do",
   "internet",
   "loan",
   "mobile",
@@ -225,7 +226,11 @@ const HINGLISH_PHRASES = [
   /\b.+\s+(?:ko|k)\s+.+\s+bhej(?:\s*(?:do|de|dena|dijiye|na))\b/i,
 ];
 
+const SHORT_ENGLISH_COLLOQUIAL_RE =
+  /^(?:what|why|how|when|where|who|which|is|are|do|does|did|can|could|would|should)\b(?:\s+[a-z']+){1,4}$/i;
+
 export function detectHinglish(message: string): boolean {
+  const normalized = String(message ?? "").toLowerCase().replace(/\s+/g, " ").trim();
   const words = message
     .toLowerCase()
     .split(/\s+/)
@@ -242,6 +247,16 @@ export function detectHinglish(message: string): boolean {
   const hasSuffix =
     strongHinglishWordCount >= 1
     && HINDI_SUFFIXES.some((pattern) => pattern.test(message));
+  const looksLikeShortEnglishColloquial =
+    !hasPhrase
+    && !hasSuffix
+    && strongHinglishWordCount <= 1
+    && words.length <= 5
+    && SHORT_ENGLISH_COLLOQUIAL_RE.test(normalized);
+
+  if (looksLikeShortEnglishColloquial) {
+    return false;
+  }
 
   return strongHinglishWordCount >= 2 || hasPhrase || hasSuffix || hinglishRatio > 0.25;
 }

@@ -80,6 +80,10 @@ import {
   getTopCustomCommands,
   handleCustomCommand,
 } from "@/lib/clawcloud-custom-commands";
+import {
+  getClawCloudEphemeralConversationTurns,
+  mergeClawCloudConversationTurns,
+} from "@/lib/clawcloud-ephemeral-conversation";
 import { detectOfficialPricingQuery } from "@/lib/clawcloud-official-pricing";
 import { classifyIntentWithConfidence, resolveIntentOverlap } from "@/lib/clawcloud-intent-confidence";
 import { detectAiModelRoutingDecision, type AiModelRoutingDecision } from "@/lib/clawcloud-ai-model-routing";
@@ -250,6 +254,7 @@ import {
 import {
   analyzeSendMessageCommandSafety,
   listContactsFormatted,
+  looksLikeListContactsCommand,
   normalizeContactName,
   parseSaveContactCommand,
   parseSendMessageCommand,
@@ -963,6 +968,10 @@ WHAT YOU KNOW (with expert depth):
 - Multiple human languages including Indian regional languages and Hinglish
 
 QUALITY MANDATE:
+- Classify the question first: live data, recent/evolving, stable factual/historical, or general knowledge.
+- For live or evolving questions, prefer the freshest reliable evidence.
+- For stable factual or historical questions, prefer authoritative sources even if they are older than the current year.
+- If the evidence is insufficient, say "I don't know" or "I cannot verify this with confidence."
 - Never say "I don't know" â€” give the best available answer and note uncertainty clearly.
 - Never fabricate facts, statistics, citations, dates, or events.
 - Never give a generic answer to a specific question.
@@ -1258,6 +1267,12 @@ const AUTO_DEEP_FAST_HEADSTART_MS: Partial<Record<IntentType, number>> = {
 };
 
 async function getHistory(userId: string, limit = 30) {
+  const ephemeralTurns = getClawCloudEphemeralConversationTurns(userId, limit).map((turn) => ({
+    role: turn.role,
+    content: turn.content,
+    timestampMs: turn.timestampMs,
+  }));
+
   try {
     const { data } = await getClawCloudSupabaseAdmin()
       .from("whatsapp_messages")
@@ -1266,16 +1281,28 @@ async function getHistory(userId: string, limit = 30) {
       .order("sent_at", { ascending: false })
       .limit(limit);
 
-    if (!data?.length) return [];
-    return data
-      .reverse()
-      .map((r) => ({
-        role: (r.direction === "inbound" ? "user" : "assistant") as "user" | "assistant",
-        content: String(r.content ?? "").trim().slice(0, 800),
+    const databaseTurns = (data ?? [])
+      .map((row) => ({
+        role: (row.direction === "inbound" ? "user" : "assistant") as "user" | "assistant",
+        content: String(row.content ?? "").trim().slice(0, 800),
+        timestampMs: Number.isFinite(new Date(String(row.sent_at ?? "")).getTime())
+          ? new Date(String(row.sent_at ?? "")).getTime()
+          : 0,
       }))
-      .filter((m) => m.content.length > 0);
+      .filter((turn) => turn.content.length > 0);
+
+    return mergeClawCloudConversationTurns([
+      ...databaseTurns,
+      ...ephemeralTurns,
+    ], limit).map(({ role, content }) => ({
+      role,
+      content,
+    }));
   } catch {
-    return [];
+    return ephemeralTurns.map(({ role, content }) => ({
+      role,
+      content,
+    }));
   }
 }
 
@@ -1332,6 +1359,8 @@ async function emergencyDirectAnswer(
       "- If data might be slightly outdated, briefly note it at the end (e.g., 'Note: figures are as of [date]').",
       "- Format for WhatsApp: *bold* for key terms, â€¢ bullets, emoji headers for sections.",
       "- Keep the answer professional, accurate, and helpful.",
+      "- Use recent conversation context before assuming the user changed topics.",
+      "- If multiple recent interpretations still fit, ask one brief clarification instead of guessing.",
       languageHint,
     ].filter(Boolean).join("\n"),
     user: question,
@@ -1520,7 +1549,25 @@ function looksLikeStandaloneFreshQuestion(message: string) {
   }
 
   const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+  if (hasDenseNonLatinQuestionSignal(trimmed)) {
+    return true;
+  }
+
   return /[\uac00-\ud7af\u3040-\u30ff\u4e00-\u9fff]/u.test(trimmed) && wordCount >= 4;
+}
+
+function hasDenseNonLatinQuestionSignal(message: string) {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  const nonLatinUnits = trimmed.match(/[^\p{Script=Latin}\p{N}\p{P}\p{Sc}\p{Sm}\p{Zs}]/gu) ?? [];
+  if (nonLatinUnits.length >= 6) {
+    return true;
+  }
+
+  return /[?？]|(?:ですか|ますか|なのか|인가요|입니까|나요|까요|吗|嗎|呢|么|嗎|หรือ|ไหม)\s*$/u.test(trimmed);
 }
 
 function shouldFailClosedForDirectKnowledgeQuestion(message: string, intent: IntentType) {
@@ -1551,6 +1598,10 @@ function shouldFailClosedForDirectKnowledgeQuestion(message: string, intent: Int
     /[\uac00-\ud7af\u3040-\u30ff\u4e00-\u9fff]/u.test(trimmed)
     && trimmed.split(/\s+/).filter(Boolean).length >= 4
   ) {
+    return true;
+  }
+
+  if (hasDenseNonLatinQuestionSignal(trimmed)) {
     return true;
   }
 
@@ -1893,7 +1944,10 @@ function detectNativeLanguageDirectAnswerLaneIntent(
     return null;
   }
 
-  if (trimmed.split(/\s+/).filter(Boolean).length < 4) {
+  if (
+    trimmed.split(/\s+/).filter(Boolean).length < 4
+    && !hasDenseNonLatinQuestionSignal(trimmed)
+  ) {
     return null;
   }
 
@@ -1930,6 +1984,64 @@ function detectNativeLanguageDirectAnswerLaneIntent(
   return null;
 }
 
+async function buildRobustEnglishGloss(
+  message: string,
+  detectedLocale?: SupportedLocale | null,
+  timeoutMs = MULTILINGUAL_ROUTING_BRIDGE_TIMEOUT_MS,
+) {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const directGloss = await withSoftTimeout(
+    translateMessage(trimmed, "en", { force: true }).catch(() => ""),
+    "",
+    Math.min(timeoutMs, 3_500),
+  );
+  const normalizedDirectGloss = normalizeReplyForClawCloudDisplay(directGloss).trim();
+  if (
+    normalizedDirectGloss
+    && normalizedDirectGloss.toLowerCase() !== trimmed.toLowerCase()
+    && inferClawCloudMessageLocale(normalizedDirectGloss) === "en"
+  ) {
+    return normalizedDirectGloss;
+  }
+
+  const languageLabel = detectedLocale
+    ? (localeNames[detectedLocale] ?? detectedLocale)
+    : "the user's language";
+  const modelGloss = await withSoftTimeout(
+    completeClawCloudPrompt({
+      system: [
+        `You are a translation engine. Translate the user's message from ${languageLabel} into natural English.`,
+        "Preserve the actual meaning faithfully.",
+        "Return ONLY the English translation.",
+        "Do not ask questions. Do not explain. Do not add commentary.",
+      ].join(" "),
+      user: trimmed,
+      intent: "language",
+      maxTokens: 500,
+      fallback: "",
+      skipCache: true,
+      temperature: 0.05,
+      preferredModels: buildPreferredModelOrderForIntent("language", "fast", 3),
+    }).catch(() => ""),
+    "",
+    timeoutMs,
+  );
+  const normalizedModelGloss = normalizeReplyForClawCloudDisplay(modelGloss).trim();
+  if (
+    normalizedModelGloss
+    && normalizedModelGloss.toLowerCase() !== trimmed.toLowerCase()
+    && inferClawCloudMessageLocale(normalizedModelGloss) === "en"
+  ) {
+    return normalizedModelGloss;
+  }
+
+  return "";
+}
+
 async function resolveMultilingualRoutingBridge(
   message: string,
   resolution: ClawCloudReplyLanguageResolution,
@@ -1941,9 +2053,9 @@ async function resolveMultilingualRoutingBridge(
     };
   }
 
-  const gloss = await withSoftTimeout(
-    translateMessage(message, "en", { force: true }),
-    "",
+  const gloss = await buildRobustEnglishGloss(
+    message,
+    resolution.detectedLocale ?? resolution.locale,
     MULTILINGUAL_ROUTING_BRIDGE_TIMEOUT_MS,
   );
   const normalizedGloss = gloss.trim();
@@ -2229,6 +2341,7 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || normalized.startsWith("ðŸ¤– i got your message")
     || normalized.includes("send the exact task you want solved")
     || normalized.includes("send me the exact task")
+    || normalized.includes("reply with the exact question or task")
     || normalized.includes("got your message")
     || normalized.includes("you asked about:")
     || normalized.includes("you asked about")
@@ -2450,6 +2563,8 @@ function isVisibleFallbackReply(reply: string | null | undefined) {
     || normalized.includes("give me more details so i can")
     || normalized.includes("tell me which")
     // "Couldn't complete" fallback patterns
+    || normalized.includes("couldn't safely recover a complete reply")
+    || normalized.includes("could not safely recover a complete reply")
     || normalized.includes("couldn't complete a strong answer")
     || normalized.includes("could not complete a strong answer")
     || normalized.includes("i couldn't complete a strong answer")
@@ -2701,6 +2816,24 @@ async function finalizeAgentReply(input: {
       finalReply = correctedReply;
     }
   }
+  if (
+    !verifyReplyLanguageMatch({
+      userMessage: input.question,
+      aiReply: finalReply,
+      resolution: finalReplyLanguageResolution,
+    }).verified
+    || looksLikeLanguageConfusionClarificationReply(finalReply)
+  ) {
+    const repairedSameLanguageReply = await recoverSameLanguageDirectAnswer({
+      question: input.question,
+      answer: finalReply,
+      intent: input.intent as IntentType,
+      languageResolution: finalReplyLanguageResolution,
+    }).catch(() => "");
+    if (repairedSameLanguageReply) {
+      finalReply = repairedSameLanguageReply;
+    }
+  }
 
   const normalizedFinalReply = normalizeReplyForClawCloudDisplay(finalReply);
 
@@ -2865,7 +2998,7 @@ function repairCommonMojibake(value: string) {
     .replace(/\u00e2\u0080\u0098/g, "'")
     .replace(/\u00e2\u0080\u009c/g, "\"")
     .replace(/\u00e2\u0080\u009d/g, "\"")
-    .replace(/\u00e2\u0080\u0093/g, "â€“")
+    .replace(/\u00e2\u0080\u0093/g, "-")
     .replace(/\u00e2\u0080\u0094/g, "â€”")
     .replace(/\u00e2\u0080\u00a6/g, "...")
     .replace(/\u00c2\u00a0/g, " ")
@@ -2889,9 +3022,13 @@ function repairCommonMojibakeForDisplay(value: string) {
   return normalized
     .replace(/\uFFFD\u001A\uFFFD/g, "\u20B9")
     .replace(/\u00e2\u201a\u00b9/g, "\u20B9")
-    .replace(/\u00e2\u0080\u0093/g, "â€“")
+    .replace(/\u00e2\u0080\u0093/g, "-")
     .replace(/\u00e2\u0080\u0094/g, "-")
-    .replace(/\u00e2\u0080\u00a6/g, "...");
+    .replace(/\u00e2\u0080\u00a6/g, "...")
+    .replace(/[\uFFFD\u001d\u0093\u0094]+(?=seven\b)/gi, "-")
+    .replace(/(?<=[A-Za-z0-9])\uFFFD(?=[A-Za-z0-9])/g, "-")
+    .replace(/\uFFFD/g, "")
+    .replace(/[\u001d\u0093\u0094]/g, "");
 }
 
 function isDeprecatedInternalFallbackLeak(value: string) {
@@ -3994,7 +4131,7 @@ function looksLikeConsumerTechReleaseQuestion(message: string) {
   }
 
   const hasDeviceSignal =
-    /\b(?:s\d{2}\s*ultra|galaxy(?:\s*s?\d+)?|iphone\s*\d+(?:\s*pro(?:\s*max)?)?|pixel\s*\d+(?:\s*pro)?|oneplus(?:\s*\d+(?:\s*pro)?)?|samsung)\b/.test(text);
+    /\b(?:s\d{2}(?:\s*(?:ultra|pro|plus|mini|lite))?|galaxy(?:\s*s?\d+)?|iphone\s*\d+(?:\s*pro(?:\s*max)?)?|pixel\s*\d+(?:\s*pro)?|oneplus(?:\s*\d+(?:\s*pro)?)?|samsung)\b/.test(text);
   const hasReleaseOrSpecSignal =
     /\b(?:feature|features|spec|specs|specification|specifications|released?|realeased|realesed|launch(?:ed|ing)?|availability|price)\b/.test(text);
 
@@ -4012,6 +4149,14 @@ function looksLikeClawCloudCapabilityQuestion(message: string) {
   }
 
   if (/^(\/help|help|menu|\/menu)$/i.test(text)) {
+    return true;
+  }
+
+  if (
+    /\bque\s+puedes\s+hacer\b/i.test(text)
+    || /\b(?:aap|app|tum|tu)\b.{0,24}\bkya(?:\s+kya)?\b.{0,24}\b(?:kr|kar)\b.{0,10}\b(?:skte|sakte|skti|sakti|sakta)\b/i.test(text)
+    || /(?:\u0906\u092a|\u0924\u0941\u092e)\s+\u0915\u094d\u092f\u093e\s+\u0915\u0930\s+\u0938\u0915\u0924\u0947/u.test(message)
+  ) {
     return true;
   }
 
@@ -6283,6 +6428,470 @@ function buildKDistinctSlidingWindowReply(message: string) {
   ].join("\n");
 }
 
+function buildCountSmallerAfterSelfReply(message: string) {
+  const normalized = normalizeClawCloudUnderstandingMessage(message)
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const isCountSmallerAfterSelfPrompt =
+    /\b(array|integer|element|numbers?)\b/.test(normalized)
+    && /\b(count|how many|number of)\b/.test(normalized)
+    && /\bsmaller\b/.test(normalized)
+    && /\b(after|right|following|suffix)\b/.test(normalized)
+    && /\b(each|every|self|it|element)\b/.test(normalized)
+    && /\b(o\(n\s*log\s*n\)|n\s*log\s*n|fenwick|binary indexed tree|merge sort|time complexity|provide code|write code|typescript|implementation|approach)\b/.test(normalized);
+  if (!isCountSmallerAfterSelfPrompt) {
+    return null;
+  }
+
+  return [
+    "*Count Smaller Elements After Each Element*",
+    "",
+    "Use *coordinate compression + Fenwick Tree (Binary Indexed Tree)*.",
+    "",
+    "*Approach*",
+    "1. Compress the values because array integers can be large or negative.",
+    "2. Scan the array from right to left.",
+    "3. For `nums[i]`, query the Fenwick tree for how many inserted values have rank `< rank(nums[i])`.",
+    "4. Insert `nums[i]` into the tree and continue left.",
+    "",
+    "*Why this works*",
+    "When scanning from right to left, the Fenwick tree contains exactly the elements that appear after the current index. Querying ranks smaller than the current rank gives the number of smaller elements after it.",
+    "",
+    "*Complexity*",
+    "Time: *O(n log n)* for sorting/compression and Fenwick updates/queries.",
+    "Space: *O(n)* for the compressed values, answer array, and Fenwick tree.",
+    "",
+    "*TypeScript code*",
+    "```ts",
+    "class FenwickTree {",
+    "  private tree: number[];",
+    "",
+    "  constructor(size: number) {",
+    "    this.tree = Array(size + 1).fill(0);",
+    "  }",
+    "",
+    "  add(index: number, delta: number): void {",
+    "    for (let i = index; i < this.tree.length; i += i & -i) {",
+    "      this.tree[i] += delta;",
+    "    }",
+    "  }",
+    "",
+    "  sum(index: number): number {",
+    "    let total = 0;",
+    "    for (let i = index; i > 0; i -= i & -i) {",
+    "      total += this.tree[i];",
+    "    }",
+    "    return total;",
+    "  }",
+    "}",
+    "",
+    "function lowerBound(arr: number[], target: number): number {",
+    "  let left = 0;",
+    "  let right = arr.length;",
+    "",
+    "  while (left < right) {",
+    "    const mid = left + Math.floor((right - left) / 2);",
+    "    if (arr[mid] < target) left = mid + 1;",
+    "    else right = mid;",
+    "  }",
+    "",
+    "  return left;",
+    "}",
+    "",
+    "export function countSmallerAfterSelf(nums: number[]): number[] {",
+    "  const sortedUnique = Array.from(new Set(nums)).sort((a, b) => a - b);",
+    "  const bit = new FenwickTree(sortedUnique.length);",
+    "  const ans = Array(nums.length).fill(0);",
+    "",
+    "  for (let i = nums.length - 1; i >= 0; i -= 1) {",
+    "    const rank = lowerBound(sortedUnique, nums[i]) + 1; // Fenwick is 1-indexed",
+    "    ans[i] = bit.sum(rank - 1);",
+    "    bit.add(rank, 1);",
+    "  }",
+    "",
+    "  return ans;",
+    "}",
+    "",
+    "// Example:",
+    "console.log(countSmallerAfterSelf([5, 2, 6, 1])); // [2, 1, 1, 0]",
+    "```",
+  ].join("\n");
+}
+
+function buildNegativeWeightShortestPathReply(message: string) {
+  const normalized = normalizeClawCloudUnderstandingMessage(message)
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const isNegativeWeightShortestPathPrompt =
+    /\b(directed\s+)?weighted\s+graph\b/.test(normalized)
+    && /\b(shortest paths?|single[-\s]?source|source)\b/.test(normalized)
+    && /\bnegative\s+weights?\b/.test(normalized)
+    && /\bno\s+negative\s+cycles?\b/.test(normalized)
+    && /\b(dijkstra|algorithm|efficient|optimi[sz]e|provide code|write code|typescript|implementation|edges?)\b/.test(normalized);
+  if (!isNegativeWeightShortestPathPrompt) {
+    return null;
+  }
+
+  return [
+    "*Shortest Paths With Negative Edges*",
+    "",
+    "*Direct answer:* Dijkstra is not valid here because a negative edge can reduce the distance to a node after Dijkstra has already finalized it.",
+    "",
+    "For an arbitrary directed graph with negative edges and no negative cycles, the correct general family is *Bellman-Ford*. If the graph is huge, you can use a queue-optimized Bellman-Ford variant, often called *SPFA*, but you must not overclaim the complexity: it is fast on many practical graphs, yet its worst case is still *O(VE)*. If the problem needs guaranteed near-linear time, it must provide extra structure, such as a DAG, non-negative edges, or precomputed Johnson potentials.",
+    "",
+    "*Optimized practical approach*",
+    "1. Build an adjacency list from the edge list.",
+    "2. Keep `dist[source] = 0`, everything else `Infinity`.",
+    "3. Put only changed vertices in a queue instead of scanning every edge in every round.",
+    "4. Relax outgoing edges from queued vertices.",
+    "5. Count relaxations defensively. If any vertex is relaxed at least `n` times, a negative cycle exists, even though the prompt says there is none.",
+    "",
+    "*Complexity*",
+    "Correct worst case: *O(VE)* time and *O(V + E)* space.",
+    "Practical queue-optimized behavior: often much closer to *O(E)* on benign graphs, but not guaranteed.",
+    "",
+    "*TypeScript code*",
+    "```ts",
+    "type Edge = {",
+    "  from: number;",
+    "  to: number;",
+    "  weight: number;",
+    "};",
+    "",
+    "export function shortestPathsWithNegativeEdges(",
+    "  n: number,",
+    "  edges: Edge[],",
+    "  source: number,",
+    "): number[] {",
+    "  const graph: Array<Array<[to: number, weight: number]>> = Array.from(",
+    "    { length: n },",
+    "    () => [],",
+    "  );",
+    "",
+    "  for (const edge of edges) {",
+    "    graph[edge.from].push([edge.to, edge.weight]);",
+    "  }",
+    "",
+    "  const dist = Array<number>(n).fill(Number.POSITIVE_INFINITY);",
+    "  const inQueue = Array<boolean>(n).fill(false);",
+    "  const relaxCount = Array<number>(n).fill(0);",
+    "  const queue: number[] = [];",
+    "",
+    "  dist[source] = 0;",
+    "  queue.push(source);",
+    "  inQueue[source] = true;",
+    "",
+    "  let head = 0;",
+    "  while (head < queue.length) {",
+    "    const u = queue[head++];",
+    "    inQueue[u] = false;",
+    "",
+    "    for (const [v, weight] of graph[u]) {",
+    "      if (dist[u] === Number.POSITIVE_INFINITY) continue;",
+    "",
+    "      const candidate = dist[u] + weight;",
+    "      if (candidate >= dist[v]) continue;",
+    "",
+    "      dist[v] = candidate;",
+    "      relaxCount[v] += 1;",
+    "",
+    "      if (relaxCount[v] >= n) {",
+    "        throw new Error(\"Negative cycle detected\");",
+    "      }",
+    "",
+    "      if (!inQueue[v]) {",
+    "        queue.push(v);",
+    "        inQueue[v] = true;",
+    "      }",
+    "    }",
+    "  }",
+    "",
+    "  return dist;",
+    "}",
+    "",
+    "// Example:",
+    "const distances = shortestPathsWithNegativeEdges(",
+    "  4,",
+    "  [",
+    "    { from: 0, to: 1, weight: 4 },",
+    "    { from: 0, to: 2, weight: 5 },",
+    "    { from: 1, to: 2, weight: -2 },",
+    "    { from: 2, to: 3, weight: 3 },",
+    "  ],",
+    "  0,",
+    ");",
+    "",
+    "console.log(distances); // [0, 4, 2, 5]",
+    "```",
+    "",
+    "*Bottom line:* Dijkstra fails with negative edges. Use Bellman-Ford for correctness; use queue-optimized Bellman-Ford as a practical optimization, while clearly stating the worst-case limit.",
+  ].join("\n");
+}
+
+function buildRollbackDsuPathCompressionFollowUpReply(message: string) {
+  const normalized = normalizeClawCloudUnderstandingMessage(message)
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const isRollbackPathCompressionFollowUp =
+    /\b(path compression|compress(?:ing)? paths?)\b/.test(normalized)
+    && (
+      /\brollback\b/.test(normalized)
+      || /\bdsu\b/.test(normalized)
+      || /\bdisjoint set\b/.test(normalized)
+      || /\bunion[- ]find\b/.test(normalized)
+      || /\boffline dynamic connectivity\b/.test(normalized)
+      || /\bsegment tree over time\b/.test(normalized)
+    )
+    && /\b(why|explain|what breaks|cannot|can't|unable|undo|rollback)\b/.test(normalized);
+
+  if (!isRollbackPathCompressionFollowUp) {
+    return null;
+  }
+
+  return [
+    "*Why Rollback DSU Avoids Path Compression*",
+    "",
+    "A rollback DSU works only if every state change can be undone in strict reverse order with a small log entry.",
+    "",
+    "With *union by size/rank only*, one successful union changes just a tiny fixed set of fields:",
+    "1. the parent of one root",
+    "2. the size or rank of the new parent root",
+    "",
+    "That is easy to push onto a stack and restore later.",
+    "",
+    "*What path compression breaks*",
+    "A single `find(x)` with path compression rewires parent pointers for many nodes on the search path, not just one root pair. Those mutations can happen during unions and even during read-only connectivity checks.",
+    "",
+    "If you want rollback to stay correct, you would have to log *every* parent rewrite caused by every compressed `find()`. That makes the history stack much larger, complicates the implementation, and destroys the clean rollback discipline that offline dynamic connectivity relies on.",
+    "",
+    "So the standard rollback-DSU recipe is:",
+    "1. *No path compression*",
+    "2. *Use union by size or rank*",
+    "3. *Store each union change on a stack*",
+    "4. *Rollback to the saved snapshot when leaving a segment-tree node*",
+    "",
+    "*Bottom line:* path compression is great for normal DSU, but rollback DSU needs mutations to be small, explicit, and reversible. Path compression spreads hidden parent-pointer updates across many nodes, which is exactly what rollback tries to avoid.",
+  ].join("\n");
+}
+
+function buildRollbackDsuDynamicConnectivityReply(message: string) {
+  const normalized = normalizeClawCloudUnderstandingMessage(message)
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const isOfflineDynamicConnectivityPrompt =
+    /\b(graph|edge|edges|connected|connectivity|dsu|disjoint set|union[- ]find)\b/.test(normalized)
+    && (
+      /\boffline\s+dynamic\s+connectivity\b/.test(normalized)
+      || /\bdynamic\s+connectivity\b/.test(normalized)
+      || /\brollback\s+dsu\b/.test(normalized)
+      || /\bsegment\s+tree\s+over\s+time\b/.test(normalized)
+      || (
+        /\badd\s+edge\b/.test(normalized)
+        && /\bremove\s+edge\b/.test(normalized)
+        && /\b(query|queries|connected\s+at\s+that\s+time)\b/.test(normalized)
+      )
+    )
+    && /\b(algorithm|explain|approach|complexity|provide code|write code|typescript|implementation|operations?|queries?)\b/.test(normalized);
+  if (!isOfflineDynamicConnectivityPrompt) {
+    return null;
+  }
+
+  return [
+    "*Offline Dynamic Connectivity With Rollback DSU*",
+    "",
+    "*Core idea:* Treat every edge as active over time intervals, place those intervals on a segment tree over operation indices, then DFS the tree while applying and rolling back DSU unions.",
+    "",
+    "A normal DSU with path compression is not suitable because path compression mutates many parent pointers and is hard to undo. Use union by size/rank only, store each union change on a stack, and roll back to a saved snapshot when leaving a segment-tree node.",
+    "",
+    "*Approach*",
+    "1. Scan the operations once and map each edge to the time it was added.",
+    "2. When an edge is removed at time `t`, add its active interval `[start, t)` to a segment tree over time.",
+    "3. After the scan, any still-active edge gets interval `[start, q)`.",
+    "4. DFS the segment tree. At each node, snapshot the DSU, union all edges stored at that node, answer leaf queries, then roll back to the snapshot.",
+    "",
+    "*Complexity*",
+    "Time: `O(Q log Q * alpha(N))` because each active interval is stored in `O(log Q)` segment-tree nodes and each DSU operation is near-constant.",
+    "Space: `O(N + Q log Q)` for DSU state, rollback history, and segment-tree edge buckets.",
+    "",
+    "*TypeScript code*",
+    "```ts",
+    "type Operation =",
+    "  | { type: \"add\"; u: number; v: number }",
+    "  | { type: \"remove\"; u: number; v: number }",
+    "  | { type: \"query\"; u: number; v: number };",
+    "",
+    "type Edge = { u: number; v: number };",
+    "type Change = { child: number; parentRoot: number; parentRootSize: number } | null;",
+    "",
+    "class RollbackDSU {",
+    "  private parent: number[];",
+    "  private size: number[];",
+    "  private history: Change[] = [];",
+    "",
+    "  constructor(n: number) {",
+    "    this.parent = Array.from({ length: n }, (_, i) => i);",
+    "    this.size = Array(n).fill(1);",
+    "  }",
+    "",
+    "  find(x: number): number {",
+    "    while (this.parent[x] !== x) x = this.parent[x];",
+    "    return x;",
+    "  }",
+    "",
+    "  snapshot(): number {",
+    "    return this.history.length;",
+    "  }",
+    "",
+    "  union(a: number, b: number): void {",
+    "    let ra = this.find(a);",
+    "    let rb = this.find(b);",
+    "",
+    "    if (ra === rb) {",
+    "      this.history.push(null);",
+    "      return;",
+    "    }",
+    "",
+    "    if (this.size[ra] > this.size[rb]) [ra, rb] = [rb, ra];",
+    "",
+    "    this.history.push({",
+    "      child: ra,",
+    "      parentRoot: rb,",
+    "      parentRootSize: this.size[rb],",
+    "    });",
+    "    this.parent[ra] = rb;",
+    "    this.size[rb] += this.size[ra];",
+    "  }",
+    "",
+    "  connected(a: number, b: number): boolean {",
+    "    return this.find(a) === this.find(b);",
+    "  }",
+    "",
+    "  rollback(snapshot: number): void {",
+    "    while (this.history.length > snapshot) {",
+    "      const change = this.history.pop()!;",
+    "      if (change === null) continue;",
+    "",
+    "      this.parent[change.child] = change.child;",
+    "      this.size[change.parentRoot] = change.parentRootSize;",
+    "    }",
+    "  }",
+    "}",
+    "",
+    "function edgeKey(u: number, v: number): string {",
+    "  return u < v ? `${u}#${v}` : `${v}#${u}`;",
+    "}",
+    "",
+    "function addInterval(",
+    "  tree: Edge[][],",
+    "  node: number,",
+    "  left: number,",
+    "  right: number,",
+    "  ql: number,",
+    "  qr: number,",
+    "  edge: Edge,",
+    "): void {",
+    "  if (qr <= left || right <= ql) return;",
+    "  if (ql <= left && right <= qr) {",
+    "    tree[node].push(edge);",
+    "    return;",
+    "  }",
+    "",
+    "  const mid = left + Math.floor((right - left) / 2);",
+    "  addInterval(tree, node * 2, left, mid, ql, qr, edge);",
+    "  addInterval(tree, node * 2 + 1, mid, right, ql, qr, edge);",
+    "}",
+    "",
+    "export function offlineDynamicConnectivity(",
+    "  n: number,",
+    "  operations: Operation[],",
+    "): boolean[] {",
+    "  const q = operations.length;",
+    "  const tree: Edge[][] = Array.from({ length: Math.max(4 * q, 1) }, () => []);",
+    "  const active = new Map<string, { start: number; edge: Edge }>();",
+    "",
+    "  for (let t = 0; t < q; t += 1) {",
+    "    const op = operations[t];",
+    "    if (op.type === \"query\") continue;",
+    "",
+    "    const key = edgeKey(op.u, op.v);",
+    "    const edge = { u: op.u, v: op.v };",
+    "",
+    "    if (op.type === \"add\") {",
+    "      if (!active.has(key)) active.set(key, { start: t, edge });",
+    "    } else {",
+    "      const opened = active.get(key);",
+    "      if (!opened) continue; // Or throw if invalid removes are not allowed.",
+    "      addInterval(tree, 1, 0, q, opened.start, t, opened.edge);",
+    "      active.delete(key);",
+    "    }",
+    "  }",
+    "",
+    "  for (const { start, edge } of active.values()) {",
+    "    addInterval(tree, 1, 0, q, start, q, edge);",
+    "  }",
+    "",
+    "  const dsu = new RollbackDSU(n);",
+    "  const answers: boolean[] = [];",
+    "",
+    "  function dfs(node: number, left: number, right: number): void {",
+    "    const snap = dsu.snapshot();",
+    "",
+    "    for (const edge of tree[node]) {",
+    "      dsu.union(edge.u, edge.v);",
+    "    }",
+    "",
+    "    if (right - left === 1) {",
+    "      const op = operations[left];",
+    "      if (op?.type === \"query\") answers.push(dsu.connected(op.u, op.v));",
+    "    } else {",
+    "      const mid = left + Math.floor((right - left) / 2);",
+    "      dfs(node * 2, left, mid);",
+    "      dfs(node * 2 + 1, mid, right);",
+    "    }",
+    "",
+    "    dsu.rollback(snap);",
+    "  }",
+    "",
+    "  if (q > 0) dfs(1, 0, q);",
+    "  return answers;",
+    "}",
+    "",
+    "// Example: 0-1 is active, then 1-2 is active, then 0-1 is removed.",
+    "const result = offlineDynamicConnectivity(3, [",
+    "  { type: \"add\", u: 0, v: 1 },",
+    "  { type: \"query\", u: 0, v: 1 }, // true",
+    "  { type: \"add\", u: 1, v: 2 },",
+    "  { type: \"query\", u: 0, v: 2 }, // true",
+    "  { type: \"remove\", u: 0, v: 1 },",
+    "  { type: \"query\", u: 0, v: 2 }, // false",
+    "]);",
+    "console.log(result); // [true, true, false]",
+    "```",
+    "",
+    "*Bottom line:* For offline add/remove/connectivity queries, rollback DSU plus a segment tree over time is the professional choice. It avoids rebuilding the graph for every query and preserves correctness without path compression.",
+  ].join("\n");
+}
+
 function buildDeterministicCodingPromptReply(message: string) {
   const understoodMessage = normalizeClawCloudUnderstandingMessage(message);
   if (!KNOWN_SIMPLE_CODING_PROMPT_RE.test(understoodMessage)) {
@@ -6502,10 +7111,29 @@ function buildDeterministicMathReply(message: string) {
 function buildDeterministicCodingReply(message: string) {
   return (
     buildDeterministicCodingPromptReply(message)
+    || buildCountSmallerAfterSelfReply(message)
+    || buildNegativeWeightShortestPathReply(message)
+    || buildRollbackDsuPathCompressionFollowUpReply(message)
+    || buildRollbackDsuDynamicConnectivityReply(message)
     || buildKDistinctSlidingWindowReply(message)
     || buildObstacleRemovalShortestPathReply(message)
     || solveCodingArchitectureQuestion(message)
   );
+}
+
+export function buildFastDeterministicAgentReplyForRoute(message: string): RouteInboundAgentMessageResult | null {
+  const normalizedMessage = normalizeInboundMessageForConsent(message) || message;
+  const routingMessage = stripWhatsAppRoutingContextPrefix(normalizedMessage) || normalizedMessage;
+  const deterministicCodingReply = buildDeterministicCodingReply(routingMessage);
+  if (!deterministicCodingReply) {
+    return null;
+  }
+
+  return {
+    response: normalizeReplyForClawCloudDisplay(deterministicCodingReply),
+    liveAnswerBundle: null,
+    modelAuditTrail: null,
+  };
 }
 
 function tryBuildTradingRiskMathFallback(message: string) {
@@ -8955,7 +9583,15 @@ function looksLikeAlgorithmicCodingQuestion(text: string): boolean {
   }
 
   return (
-    /\b(shortest path|dijkstra|bellman[- ]ford|floyd[- ]warshall|a\*|astar|union[- ]find|disjoint set|topological sort|segment tree|fenwick tree|binary indexed tree|knapsack|memoi[sz]ation|state compression|breadth[- ]first search|depth[- ]first search|graph traversal)\b/.test(normalized)
+    /\b(shortest path|dijkstra|bellman[- ]ford|floyd[- ]warshall|a\*|astar|union[- ]find|disjoint set|rollback dsu|dynamic connectivity|offline dynamic connectivity|segment tree over time|topological sort|segment tree|fenwick tree|binary indexed tree|knapsack|memoi[sz]ation|state compression|breadth[- ]first search|depth[- ]first search|graph traversal)\b/.test(normalized)
+    || (
+      /\b(path compression|compress(?:ing)? paths?)\b/.test(normalized)
+      && /\b(rollback|dsu|disjoint set|union[- ]find|dynamic connectivity|segment tree over time)\b/.test(normalized)
+    )
+    || (
+      /\b(add\s+edge|remove\s+edge|query\s+whether|connected\s+at\s+that\s+time)\b/.test(normalized)
+      && /\b(graph|edge|connected|connectivity|dsu|union[- ]find|disjoint set|operations?|queries?)\b/.test(normalized)
+    )
     || /\b(longest|shortest)\s+(?:subarray|substring|subsequence|window)\b/.test(normalized)
     || (
       /\b(grid|matrix|graph|tree|array|string|subarray|substring|window|source|destination|obstacle|constraints?)\b/.test(normalized)
@@ -9444,6 +10080,7 @@ function hasCrossSurfacePersonalLookupConflict(text: string) {
 
 function looksLikeWhatsAppContactConversationLookup(text: string) {
   const lower = text.toLowerCase().trim();
+  const hasMultilingualConversationPattern = matchesMultilingualWhatsAppHistoryContactPattern(text);
   const hasExplicitWhatsAppSurface =
     /\bwhats?\s*app\b/.test(lower)
     || /\bwa\b/.test(lower);
@@ -9480,12 +10117,14 @@ function looksLikeWhatsAppContactConversationLookup(text: string) {
     || /\b(?:phone|mobile|whatsapp\s*number|wa\s*number)\b/.test(lower)
     || /\+?\d[\d\s().-]{6,}\d\b/.test(lower)
     || hasNamedConversationPattern
+    || hasMultilingualConversationPattern
     || Boolean(resolveWhatsAppHistoryContactHint(lower));
 
   return (
     (
       hasStrongConversationSurface
       || hasNamedConversationPattern
+      || hasMultilingualConversationPattern
       || (hasWeakSingleMessageSurface && (hasExplicitWhatsAppSurface || hasMutualConversationCue))
     )
     && hasContactAnchor
@@ -9893,6 +10532,24 @@ function looksLikeMultilingualTechnicalArchitecturePrompt(text: string): boolean
     return false;
   }
 
+  const localeAwareArchitectureSignal =
+    (
+      /[\u3040-\u30ff\u4e00-\u9fff]/u.test(trimmed)
+      && /(?:\u30b7\u30b9\u30c6\u30e0|\u8a2d\u8a08|\u30a2\u30fc\u30ad\u30c6\u30af\u30c1\u30e3|\u5206\u6563\u578b|\u9023\u5408\u5b66\u7fd2|\u60a3\u8005|\u533b\u7642\u30c7\u30fc\u30bf|\u30ea\u30a2\u30eb\u30bf\u30a4\u30e0|\u4e88\u6e2c|\u91cd\u75c7\u5316|\u898f\u5236|\u30c7\u30fc\u30bf\u504f\u308a|\u5dee\u5206\u30d7\u30e9\u30a4\u30d0\u30b7\u30fc)/u.test(trimmed)
+    )
+    || (
+      /[\u4e00-\u9fff]/u.test(trimmed)
+      && /(?:\u7cfb\u7edf|\u7cfb\u7d71|\u67b6\u6784|\u67b6\u69cb|\u5206\u5e03\u5f0f|\u8054\u90a6\u5b66\u4e60|\u806f\u90a6\u5b78\u7fd2|\u5dee\u5206\u9690\u79c1|\u5dee\u5206\u96b1\u79c1|\u60a3\u8005|\u533b\u7597\u6570\u636e|\u91ab\u7642\u6578\u64da|\u5b9e\u65f6|\u5be6\u6642|\u9884\u6d4b|\u9810\u6e2c|\u91cd\u75c7|\u76d1\u7ba1|\u76e3\u7ba1|\u6570\u636e\u504f\u5dee|\u6578\u64da\u504f\u5dee)/u.test(trimmed)
+    )
+    || (
+      /[\uac00-\ud7af]/u.test(trimmed)
+      && /(?:\uc2dc\uc2a4\ud15c|\uc124\uacc4|\uc544\ud0a4\ud14d\ucc98|\ubd84\uc0b0\ud615|\uc5f0\ud569\ud559\uc2b5|\ud658\uc790|\uc758\ub8cc\s*\ub370\uc774\ud130|\uc2e4\uc2dc\uac04|\uc608\uce21|\uc911\uc99d\ud654|\uaddc\uc81c|\ub370\uc774\ud130\s*\ud3b8\ud5a5|\ucc28\ub4f1\s*\ud504\ub77c\uc774\ubc84\uc2dc)/u.test(trimmed)
+    );
+
+  if (localeAwareArchitectureSignal) {
+    return true;
+  }
+
   return (
     (
       /[\u3040-\u30ff\u4e00-\u9fff]/u.test(trimmed)
@@ -10000,6 +10657,15 @@ function detectStrictIntentRoute(text: string): StrictIntentRoute | null {
     };
   }
 
+  if (looksLikePlainEmailWritingRequest(trimmed)) {
+    return {
+      intent: { type: "email", category: "draft_email" },
+      confidence: "high",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
   if (isArchitectureCodingRouteCandidate(trimmed)) {
     return {
       intent: { type: "coding", category: "coding" },
@@ -10037,6 +10703,15 @@ function detectStrictIntentRoute(text: string): StrictIntentRoute | null {
     };
   }
 
+  if (extractActiveContactStartCommand(trimmed)) {
+    return {
+      intent: { type: "send_message", category: "send_message" },
+      confidence: "high",
+      locked: true,
+      clarificationReply: null,
+    };
+  }
+
   if (looksLikeLockedWhatsAppHistoryRoute(trimmed)) {
     return {
       intent: { type: "send_message", category: "whatsapp_history" },
@@ -10056,10 +10731,24 @@ function detectStrictIntentRoute(text: string): StrictIntentRoute | null {
     };
   }
 
+  const operationalClarification = buildUnhandledWhatsAppOperationalClarification(trimmed);
+  if (operationalClarification) {
+    return {
+      intent: {
+        type: "send_message",
+        category: operationalClarification.kind === "whatsapp_history"
+          ? "whatsapp_history"
+          : "send_message",
+      },
+      confidence: "medium",
+      locked: true,
+      clarificationReply: operationalClarification.reply,
+    };
+  }
+
   if (
     parseSaveContactCommand(trimmed)
-    || /\bmy contacts\b|\blist contacts\b|\bshow contacts\b/.test(lower)
-    || lower === "contacts"
+    || looksLikeListContactsCommand(trimmed)
   ) {
     return {
       intent: { type: "save_contact", category: "save_contact" },
@@ -10174,16 +10863,36 @@ function detectUnhandledWhatsAppOperationalIntent(
 
   const sendNearMiss =
     !isQuestionLike
-    && /\b(?:send|sned|snd|message|mesage|msg|tell|reply|respond|text|whatsapp|whatsap|whatsaap|wa)\b/i.test(lower)
-    && /\bto\b/i.test(lower);
+    && (
+      (
+        /\b(?:send|sned|snd|forward|fwd|message|mesage|msg|tell|inform|notify|reply|respond|text|whatsapp|whatsap|whatsaap|wa)\b/i.test(lower)
+        && /\bto\b/i.test(lower)
+      )
+      || (
+        /\b(?:send|sned|snd|forward|fwd|message|mesage|msg|tell|inform|notify|reply|respond|text|whatsapp|whatsap|whatsaap|wa|bhej|likh|bata|bol|bolo|batao)\b/i.test(lower)
+        && /\b(?:ko|k)\b/i.test(lower)
+      )
+      || (
+        /\b(?:let)\b/i.test(lower)
+        && /\b(?:know)\b/i.test(lower)
+      )
+      || (
+        /\b(?:ask)\b/i.test(lower)
+        && /\b(?:to|about|if|whether)\b/i.test(lower)
+      )
+      || (
+        /\b(?:convey)\b/i.test(lower)
+        && /\b(?:to)\b/i.test(lower)
+      )
+    );
   if (sendNearMiss) {
     return "send_message";
   }
 
   const historyNearMiss =
-    /\b(?:read|show|check|review|see|summari[sz]e|recap|overview|find|look\s+up)\b/i.test(lower)
-    && /\b(?:messages?|chat|conversation|history|texts?)\b/i.test(lower)
-    && /\b(?:with|from|of|between)\b/i.test(lower);
+    /\b(?:read|show|check|review|see|summari[sz]e|recap|overview|find|look\s+up|dikhao|batao|padho)\b/i.test(lower)
+    && /\b(?:messages?|chat|conversation|history|texts?|msg|msgs)\b/i.test(lower)
+    && /\b(?:with|from|of|between|ke\s+saath|ka|ki|ke)\b/i.test(lower);
   if (historyNearMiss) {
     return "whatsapp_history";
   }
@@ -10248,6 +10957,11 @@ export function buildUnhandledWhatsAppOperationalClarificationForTest(text: stri
 }
 
 const PERSONAL_LOOKUP_BOUNDARY_STOPWORDS = new Set([
+  "aap",
+  "app",
+  "ap",
+  "tum",
+  "tu",
   "with",
   "me",
   "my",
@@ -10343,6 +11057,39 @@ const WHATSAPP_HISTORY_HINT_BLOCKLIST = new Set([
   "people",
 ]);
 
+const MULTILINGUAL_WHATSAPP_HISTORY_CONTACT_PATTERNS = [
+  /\b(?:show|tell me|read|check|see|summari[sz]e|review|dikhao|dikhado|batao|btado)\s+(?:mujhe\s+)?(.+?)\s+ke\s+(?:latest\s+|recent\s+|last\s+)?(?:message|messages|msg|msgs|chat|conversation|history|texts?)\b/iu,
+  /\b(?:mujhe\s+)?(.+?)\s+ke\s+(?:latest\s+|recent\s+|last\s+)?(?:message|messages|msg|chat|conversation|history|texts?)\s+(?:batao|btado|dikhao|dikhado|padh(?:\s*ke)?\s*(?:batao|btado)?|summary\s+do|summari[sz]e\s+karo|recap\s+do)\b/iu,
+  /\b(.+?)\s+ne\s+mujhe\s+kya\s+(?:message|messages|msg|texts?)\s+(?:bhej(?:a|e|i)|send(?:\s+kiy[ae])?)\b/iu,
+  /\b(?:mu[eé]strame|ens[eé]ñame|lee|resume|res[uú]melo|revisa)\s+(?:el\s+)?(?:chat|historial|conversaci[oó]n|mensajes?)\s+(?:con|de)\s+(.+?)(?=\s+\b(?:hoy|ayer|esta\s+semana|la\s+semana\s+pasada)\b|$)/iu,
+  /\bqu[eé]\s+(?:mensajes?|textos?)\s+me\s+(?:mand[oó]|envi[oó]|escribi[oó])\s+(.+?)(?=\s+\b(?:hoy|ayer|esta\s+semana|la\s+semana\s+pasada)\b|$)/iu,
+  /\b(?:montre(?:-moi)?|lis|r[eé]sume|r[eé]capitule|v[eé]rifie)\s+(?:la\s+)?(?:conversation|discussion|historique|chat|messages?)\s+(?:avec|de)\s+(.+?)(?=\s+\b(?:aujourd'hui|hier|cette\s+semaine|la\s+semaine\s+derni[eè]re)\b|$)/iu,
+  /\bquels?\s+(?:messages?|textes?)\s+(.+?)\s+m['’]a\s+(?:envoy[eé]s?|[eé]crits?)\b/iu,
+  /\b(?:zeige|lies|fass(?:e)?\s+zusammen|pr[uü]fe)\s+(?:den\s+)?(?:chat|verlauf|nachrichten|gespr[aä]ch)\s+(?:mit|von)\s+(.+?)(?=\s+\b(?:heute|gestern|diese\s+woche|letzte\s+woche)\b|$)/iu,
+  /\bwelche\s+(?:nachrichten|texte)\s+hat\s+(.+?)\s+mir\s+(?:geschickt|gesendet)\b/iu,
+  /\b(?:mostra|mostre|leia|resume|resuma|revise|veja)\s+(?:a\s+)?(?:conversa|chat|hist[oó]rico|mensagens?)\s+(?:com|de)\s+(.+?)(?=\s+\b(?:hoje|ontem|esta\s+semana|semana\s+passada)\b|$)/iu,
+  /\bquais\s+(?:mensagens?|textos?)\s+(.+?)\s+me\s+(?:mandou|enviou|escreveu)\b/iu,
+  /\b(?:mostra|leggi|riassumi|controlla|vedi)\s+(?:la\s+)?(?:conversazione|chat|cronologia|messaggi?)\s+(?:con|di)\s+(.+?)(?=\s+\b(?:oggi|ieri|questa\s+settimana|la\s+settimana\s+scorsa)\b|$)/iu,
+  /\b(?:g[oö]ster|oku|özetle|ozetle|kontrol\s*et)\s+(.+?)\s+(?:ile|la|le)\s+(?:sohbeti|mesajlar[ıi]|konu[sş]may[ıi]|ge[çc]mi[sş]i)\b/iu,
+  /\b(.+?)\s+bana\s+hangi\s+(?:mesajlar[ıi]?|yaz[ıi]lar[ıi]?)\s+(?:g[oö]nderdi|yazd[ıi])\b/iu,
+  /\b(?:покажи|прочитай|суммируй|проверь)\s+(?:чат|историю|сообщения)\s+(?:с|от)\s+(.+?)(?=\s+\b(?:сегодня|вчера|на\s+этой\s+неделе|на\s+прошлой\s+неделе)\b|$)/u,
+  /\bкакие\s+сообщения\s+(.+?)\s+мне\s+(?:отправил|прислал|написал)\b/u,
+  /\b(?:اعرض|أظهر|اظهر|اقرأ|لخص|راجع)\s+(?:لي\s+)?(?:محادثة|دردشة|رسائل)\s+(?:مع|من)\s+(.+?)(?=\s+\b(?:اليوم|أمس|هذا\s+الأسبوع|الاسبوع\s+الماضي)\b|$)/u,
+  /\b(?:ما|أي|اي)\s+(?:الرسائل|رسائل)\s+التي\s+(?:أرسلها|ارسلها|بعثها|كتبها)\s+(.+?)\s+(?:لي|إلي|الي)\b/u,
+  /(?:查看|看看|显示|顯示|读取|讀取|总结|總結|概括)\s*(?:和|跟)\s*(.+?)\s*的?(?:聊天|對話|对话|消息|訊息|记录|記錄)/u,
+  /(.+?)(?:给我|給我|跟我)\s*(?:发了什么消息|發了什麼訊息|传了什么消息|傳了什麼訊息|说了什么|說了什麼|回了什么|回了什麼)/u,
+  /(?:見せて|表示|読んで|要約して|確認して)\s*(.+?)(?:との|と)\s*(?:チャット|会話|履歴|メッセージ)/u,
+  /(.+?)(?:が|から)\s*(?:私に|僕に)?(?:どんな|何の)?(?:メッセージ|連絡|返信)\s*(?:を)?(?:送った|くれた|書いた)/u,
+  /(?:보여줘|읽어줘|요약해줘|확인해줘)\s*(.+?)(?:와|과|랑|이랑)\s*(?:채팅|대화|메시지|기록)/u,
+  /(.+?)(?:이|가|한테|에게)\s*(?:나한테|저한테)?\s*(?:무슨|어떤)\s*(?:메시지|문자|답장)\s*(?:보냈어|보냈는지|했어|썼어)/u,
+  /(?:แสดง|ดู|อ่าน|สรุป|ตรวจดู)\s*(?:แชต|ข้อความ|ประวัติ|บทสนทนา)\s*(?:กับ|ของ|จาก)\s*(.+?)(?=\s*(?:วันนี้|เมื่อวาน|สัปดาห์นี้|สัปดาห์ที่แล้ว)?$)/u,
+  /(.+?)\s*(?:ส่ง|ทัก|ตอบ)\s*ข้อความ(?:อะไร|อะไรมา)?\s*(?:ให้|หา)\s*(?:ฉัน|ผม|เรา)?/u,
+];
+
+function matchesMultilingualWhatsAppHistoryContactPattern(text: string) {
+  return MULTILINGUAL_WHATSAPP_HISTORY_CONTACT_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 function isPlausibleWhatsAppHistoryContactHint(value: string | null | undefined) {
   const normalized = normalizePersonalLookupHint(value);
   if (!normalized) {
@@ -10375,11 +11122,12 @@ function isPlausibleWhatsAppHistoryContactHint(value: string | null | undefined)
 function extractWhatsAppHistoryContactHint(raw: string) {
   const normalizedRaw = stripClawCloudConversationalLeadIn(raw);
   const patterns = [
+    ...MULTILINGUAL_WHATSAPP_HISTORY_CONTACT_PATTERNS,
     /\b(?:show|tell me|read|check|see|summari[sz]e|review|dikhao|dikhado|batao|btado)\s+(?:mujhe\s+)?(?:meri\s+)?(?:conversation|chat|history|messages?|texts?)\s+(?:with|ke\s+saath)\s+(.+?)(?=\s+\b(?:about|regarding|today|yesterday|this week|last week|last \d+\s+days?|in|on|ka|ki|ke)\b|$)/i,
     /\b(?:show|tell me|read|check|see|summari[sz]e|review)(?:\s+and\s+tell me)?\s+(?:the\s+)?(?:message|messages?|msg|msgs|chat|conversation|history|texts?)\s+of\s+(?:me|myself)\s+with\s+(.+?)(?=\s+\b(?:about|regarding|today|yesterday|this week|last week|last \d+\s+days?|in|on)\b|$)/i,
     /\b(?:show|tell me|read|check|see|summari[sz]e|review)(?:\s+and\s+tell me)?\s+(?:the\s+)?(?:message|messages?|msg|msgs|chat|conversation|history|texts?)\s+of\s+(.+?)(?=\s+\b(?:with\s+(?:me|myself)|about|regarding|today|yesterday|this week|last week|last \d+\s+days?|in|on)\b|$)/i,
     /\b(?:show|tell me|read|check|see|summari[sz]e|review|dikhao|dikhado|batao|btado)\s+(.+?)\s+ke\s+(?:message|messages|msg|msgs)\b/i,
-    /\b(.+?)\s+ke\s+(?:message|messages|msg|msgs)\s+(?:dikhao|dikhado|batao|btado|summary|summari[sz]e|recap)\b/i,
+    /\b(.+?)\s+ke\s+(?:message|messages|msg|msgs)\s+(?:read(?:\s+karke)?(?:\s+(?:batao|btado|tell\s+me))?|padh(?:\s*ke)?\s*(?:batao|btado)?|dikhao|dikhado|batao|btado|summary|summari[sz]e|recap)\b/i,
     /\b(.+?)\s+ke\s+saath\s+(?:meri\s+)?(?:conversation|chat|history|messages?|texts?)\b/i,
     /\b(?:meri\s+)?(?:conversation|chat|history|messages?|texts?)\s+(.+?)\s+ke\s+saath\b/i,
     /\b(?:show|tell me|read|check|see|summari[sz]e|review)\s+(?:the\s+)?(?:conversation|chat|history|messages?|texts?)\s+of\s+(.+?)\s+with\s+(?:me|myself)\b/i,
@@ -10492,10 +11240,38 @@ export function extractWhatsAppHistoryHintsForTest(raw: string) {
 
 function detectWhatsAppHistoryDirection(raw: string): "inbound" | "outbound" | null {
   const lower = raw.toLowerCase();
-  if (/\b(i sent|sent to|my sent|outgoing)\b/.test(lower)) {
+  if (
+    /\b(i sent|sent to|my sent|outgoing)\b/.test(lower)
+    || /\b(?:maine|main ne)\b.*\b(?:bhej(?:a|e|i)|send\s+kiy[ae]?|likh(?:a|e|i)?)\b/.test(lower)
+    || /\b(?:yo|eu|io)\s+(?:envi[eé]|enviei|inviato)\b/.test(lower)
+    || /\bj['’]ai\s+envoy[ée]?\b/.test(lower)
+    || /\bich\s+habe\s+(?:geschickt|gesendet)\b/.test(lower)
+    || /\bben\s+(?:g[oö]nderdim|yazd[ıi]m)\b/.test(lower)
+    || /\bя\s+(?:отправил|отправила|написал|написала)\b/u.test(raw)
+    || /\b(?:أرسلت|ارسلت|كتبت)\b/u.test(raw)
+    || /(?:我发给|我傳給|我传给)/u.test(raw)
+    || /(?:私が|僕が).*(?:送った|書いた)/u.test(raw)
+    || /(?:내가|제가).*(?:보냈어|보냈다|썼어|썼다)/u.test(raw)
+    || /(?:ฉัน|ผม).*(?:ส่ง|เขียน)/u.test(raw)
+  ) {
     return "outbound";
   }
-  if (/\b(from|got|received|incoming)\b/.test(lower)) {
+  if (
+    /\b(from|got|received|incoming)\b/.test(lower)
+    || /\bmujhe\b/.test(lower)
+    || /\bme\s+(?:mand[oó]|envi[oó]|escribi[oó])\b/.test(lower)
+    || /\bm['’]a\s+(?:envoy[eé]|[eé]crit)\b/.test(lower)
+    || /\bmir\s+(?:geschickt|gesendet)\b/.test(lower)
+    || /\bme\s+(?:mandou|enviou|escreveu)\b/.test(lower)
+    || /\bmi\s+ha\s+(?:mandato|inviato|scritto)\b/.test(lower)
+    || /\bbana\s+(?:hangi\s+)?(?:mesaj|yaz[ıi])/.test(lower)
+    || /\bмне\b/u.test(raw)
+    || /\b(?:لي|إلي|الي)\b/u.test(raw)
+    || /(?:给我|給我|跟我)/u.test(raw)
+    || /(?:私に|僕に)/u.test(raw)
+    || /(?:나한테|저한테)/u.test(raw)
+    || /(?:ให้ฉัน|ให้ผม|ให้เรา)/u.test(raw)
+  ) {
     return "inbound";
   }
   return null;
@@ -11683,6 +12459,7 @@ async function buildWhatsAppHistoryReply(
         const historyMatchConfidence = classifyResolvedContactMatchConfidence({
           requestedName: contactHint,
           resolvedName: fuzzyResult.contact.name,
+          matchedAlias: fuzzyResult.contact.matchedAlias ?? null,
           exact: Boolean(fuzzyResult.contact.exact),
           score: normalizeResolvedContactMatchScore(fuzzyResult.contact.score) ?? 0.8,
           matchBasis: fuzzyResult.contact.matchBasis ?? null,
@@ -11955,6 +12732,18 @@ function detectIntentLegacy(text: string): DetectedIntent {
     return { type: "email", category: "draft_email" };
   }
 
+  // Contact operations — check EARLY to prevent misrouting to general/web_search
+  if (parseSendMessageCommand(understoodText)) {
+    return { type: "send_message", category: "send_message" };
+  }
+
+  if (
+    parseSaveContactCommand(understoodText)
+    || looksLikeListContactsCommand(understoodText)
+  ) {
+    return { type: "save_contact", category: "save_contact" };
+  }
+
   if (looksLikePublicAffairsMeetingQuestion(t)) {
     return { type: "research", category: "news" };
   }
@@ -11985,18 +12774,6 @@ function detectIntentLegacy(text: string): DetectedIntent {
 
   if (looksLikeConceptualTechnologyQuestion(t)) {
     return { type: "technology", category: "technology" };
-  }
-
-  if (parseSendMessageCommand(understoodText)) {
-    return { type: "send_message", category: "send_message" };
-  }
-
-  if (
-    parseSaveContactCommand(understoodText)
-    || /\bmy contacts\b|\blist contacts\b|\bshow contacts\b/.test(t)
-    || t === "contacts"
-  ) {
-    return { type: "save_contact", category: "save_contact" };
   }
 
   if (hasWeatherIntent(understoodText)) {
@@ -12153,6 +12930,18 @@ function detectIntent(text: string): DetectedIntent {
     return { type: "email", category: "draft_email" };
   }
 
+  // Contact operations — check EARLY to prevent misrouting to general/web_search
+  if (parseSendMessageCommand(understoodText)) {
+    return { type: "send_message", category: "send_message" };
+  }
+
+  if (
+    parseSaveContactCommand(understoodText)
+    || looksLikeListContactsCommand(understoodText)
+  ) {
+    return { type: "save_contact", category: "save_contact" };
+  }
+
   if (looksLikePublicAffairsMeetingQuestion(t)) {
     return { type: "research", category: "news" };
   }
@@ -12183,18 +12972,6 @@ function detectIntent(text: string): DetectedIntent {
 
   if (looksLikeConceptualTechnologyQuestion(t)) {
     return { type: "technology", category: "technology" };
-  }
-
-  if (parseSendMessageCommand(understoodText)) {
-    return { type: "send_message", category: "send_message" };
-  }
-
-  if (
-    parseSaveContactCommand(understoodText)
-    || /\bmy contacts\b|\blist contacts\b|\bshow contacts\b/.test(t)
-    || t === "contacts"
-  ) {
-    return { type: "save_contact", category: "save_contact" };
   }
 
   if (hasWeatherIntent(understoodText)) {
@@ -14239,6 +15016,14 @@ function buildInboundAgentTimeoutResult(
     ?? detectStrictIntentRoute(normalizedMessage)?.intent
     ?? detectIntent(timeoutRoutingMessage);
 
+  const timeoutLooksLikeCoding =
+    detected.type === "coding"
+    || detected.category === "coding"
+    || looksLikeAlgorithmicCodingQuestion(timeoutRoutingMessage)
+    || isArchitectureCodingRouteCandidate(timeoutRoutingMessage);
+  const timeoutRequiresStrictFreshness =
+    !timeoutLooksLikeCoding && shouldFailClosedWithoutFreshData(timeoutRoutingMessage);
+
   if (detected.category === "email_search" || isLockedGmailReadIntentMessage(timeoutRoutingMessage)) {
     return {
       response: buildGmailSearchUnavailableReply(timeoutRoutingMessage),
@@ -14247,9 +15032,9 @@ function buildInboundAgentTimeoutResult(
     };
   }
 
-  let response = shouldFailClosedWithoutFreshData(timeoutRoutingMessage)
+  let response = timeoutRequiresStrictFreshness
     ? buildStrictFreshnessReply(timeoutRoutingMessage)
-    : buildTimeboxedProfessionalReply(timeoutRoutingMessage, detected.type);
+    : buildTimeboxedProfessionalReply(timeoutRoutingMessage, timeoutLooksLikeCoding ? "coding" : detected.type);
 
   if (
     !response
@@ -14257,7 +15042,7 @@ function buildInboundAgentTimeoutResult(
     || isLowQualityTemplateReply(response)
     || response.trim().length < 20
   ) {
-    response = shouldFailClosedWithoutFreshData(timeoutRoutingMessage)
+    response = timeoutRequiresStrictFreshness
       ? buildStrictFreshnessReply(timeoutRoutingMessage)
       : buildGuaranteedServerRecoveryReply(timeoutRoutingMessage);
   }
@@ -14350,6 +15135,152 @@ async function buildExplicitMultilingualReplySections(input: {
   }
 
   return sections.join("\n").trim();
+}
+
+const LANGUAGE_CONFUSION_CLARIFICATION_PATTERNS = [
+  /\bnot in a language i can understand directly\b/i,
+  /\bi want to make sure i['’]m following you correctly\b/i,
+  /\bcould you please rephrase\b/i,
+  /\bplease rephrase or provide more context\b/i,
+  /\btell me what this\/that refers to\b/i,
+  /\bi can['’]?t understand(?: this)? language\b/i,
+  /\bi cannot understand(?: this)? language\b/i,
+];
+
+function looksLikeLanguageConfusionClarificationReply(reply: string) {
+  const trimmed = normalizeReplyForClawCloudDisplay(reply).trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  return LANGUAGE_CONFUSION_CLARIFICATION_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+export function looksLikeLanguageConfusionClarificationReplyForTest(reply: string) {
+  return looksLikeLanguageConfusionClarificationReply(reply);
+}
+
+async function recoverSameLanguageDirectAnswer(input: {
+  question: string;
+  answer: string;
+  intent: IntentType;
+  languageResolution: ClawCloudReplyLanguageResolution;
+  history?: Array<{ role: "user" | "assistant"; content: string }>;
+}) {
+  const candidate = normalizeReplyForClawCloudDisplay(input.answer).trim();
+  if (!candidate || input.languageResolution.locale === "en") {
+    return "";
+  }
+
+  const currentLanguageCheck = verifyReplyLanguageMatch({
+    userMessage: input.question,
+    aiReply: candidate,
+    resolution: input.languageResolution,
+  });
+  const shouldForceRecovery =
+    !currentLanguageCheck.verified
+    || looksLikeLanguageConfusionClarificationReply(candidate)
+    || looksLikeWrongModeAnswer(input.question, candidate)
+    || isVisibleFallbackReply(candidate)
+    || isLowQualityTemplateReply(candidate);
+
+  if (!shouldForceRecovery) {
+    return "";
+  }
+
+  const isUsableRecovery = (value: string) => {
+    const normalized = normalizeReplyForClawCloudDisplay(value).trim();
+    if (!normalized) {
+      return false;
+    }
+
+    return (
+      !looksLikeLanguageConfusionClarificationReply(normalized)
+      && !isVisibleFallbackReply(normalized)
+      && !isLowQualityTemplateReply(normalized)
+      && verifyReplyLanguageMatch({
+        userMessage: input.question,
+        aiReply: normalized,
+        resolution: input.languageResolution,
+      }).verified
+    );
+  };
+
+  const recovered = await recoverDirectAnswer({
+    question: input.question,
+    answer: candidate,
+    intent: input.intent,
+    failureReason: [
+      "The candidate answer slipped into a wrong-language or language-confusion clarification.",
+      `Expected reply language: ${input.languageResolution.targetLanguageName ?? input.languageResolution.locale}.`,
+      "Answer the original question directly in that same language.",
+      "Do not answer in English unless the user explicitly asked for English.",
+      "Do not say you cannot understand the language.",
+      "Do not ask the user to rephrase or provide more context unless the original request is still genuinely ambiguous after understanding it.",
+    ].join(" "),
+    history: input.history ?? [],
+    extraInstruction: buildClawCloudReplyLanguageInstruction(input.languageResolution),
+  }).catch(() => "");
+  const normalizedRecovered = normalizeReplyForClawCloudDisplay(recovered).trim();
+  if (isUsableRecovery(normalizedRecovered)) {
+    return normalizedRecovered;
+  }
+
+  const englishGloss = await buildRobustEnglishGloss(
+    input.question,
+    input.languageResolution.detectedLocale ?? input.languageResolution.locale,
+    8_000,
+  ).catch(() => "");
+  const normalizedGloss = normalizeReplyForClawCloudDisplay(englishGloss).trim();
+  const canPivotThroughEnglish =
+    normalizedGloss
+    && normalizedGloss.toLowerCase() !== input.question.trim().toLowerCase()
+    && inferClawCloudMessageLocale(normalizedGloss) === "en";
+  if (!canPivotThroughEnglish) {
+    return "";
+  }
+
+  const pivotIntent = detectStrictIntentRoute(normalizedGloss)?.intent ?? detectIntent(normalizedGloss);
+  const recoveredEnglish = await recoverDirectAnswer({
+    question: normalizedGloss,
+    answer: candidate,
+    intent: pivotIntent.type,
+    failureReason: [
+      "This English gloss was derived from the user's non-English question.",
+      "Answer the gloss directly in English with no clarification or language confusion.",
+      "Then the system will mirror the answer back into the user's original language.",
+    ].join(" "),
+    history: input.history ?? [],
+    extraInstruction: "Answer the English gloss directly in English. Do not ask for clarification or say you cannot understand the language.",
+  }).catch(() => "");
+  const normalizedRecoveredEnglish = normalizeReplyForClawCloudDisplay(recoveredEnglish).trim();
+  if (
+    !normalizedRecoveredEnglish
+    || looksLikeLanguageConfusionClarificationReply(normalizedRecoveredEnglish)
+    || isVisibleFallbackReply(normalizedRecoveredEnglish)
+    || isLowQualityTemplateReply(normalizedRecoveredEnglish)
+  ) {
+    return "";
+  }
+
+  const localizedPivotReply = await enforceClawCloudReplyLanguage({
+    message: normalizedRecoveredEnglish,
+    locale: input.languageResolution.locale,
+    preserveRomanScript: input.languageResolution.preserveRomanScript,
+    targetLanguageName: input.languageResolution.targetLanguageName,
+  }).catch(() => translateMessage(
+    normalizedRecoveredEnglish,
+    input.languageResolution.locale,
+    {
+      force: true,
+      preserveRomanScript: input.languageResolution.preserveRomanScript,
+      targetLanguageName: input.languageResolution.targetLanguageName,
+    },
+  ).catch(() => ""));
+  const normalizedLocalizedPivotReply = normalizeReplyForClawCloudDisplay(localizedPivotReply).trim();
+  return isUsableRecovery(normalizedLocalizedPivotReply)
+    ? normalizedLocalizedPivotReply
+    : "";
 }
 
 async function applyEndToEndReplyLanguageLock(input: {
@@ -14490,26 +15421,49 @@ async function applyEndToEndReplyLanguageLock(input: {
     && !isLowQualityTemplateReply(responseForLanguageLock)
       ? normalizeReplyForClawCloudDisplay(responseForLanguageLock)
       : lockedResponse;
+  const finalLockedLanguageCheck = verifyReplyLanguageMatch({
+    userMessage: normalizedMessage,
+    aiReply: finalLockedResponse,
+    resolution: replyLanguageResolution,
+  });
+  let finalResponse = finalLockedResponse;
+  if (
+    !finalLockedLanguageCheck.verified
+    || looksLikeLanguageConfusionClarificationReply(finalLockedResponse)
+  ) {
+    const fallbackIntent =
+      detectStrictIntentRoute(normalizedMessage)?.intent
+      ?? detectIntent(normalizedMessage);
+    const repairedSameLanguageReply = await recoverSameLanguageDirectAnswer({
+      question: normalizedMessage,
+      answer: finalLockedResponse,
+      intent: fallbackIntent.type,
+      languageResolution: replyLanguageResolution,
+    }).catch(() => "");
+    if (repairedSameLanguageReply) {
+      finalResponse = repairedSameLanguageReply;
+    }
+  }
 
   return {
     ...input.result,
-    response: finalLockedResponse,
+    response: finalResponse,
     liveAnswerBundle: input.result.liveAnswerBundle
       ? {
         ...input.result.liveAnswerBundle,
-        answer: finalLockedResponse,
+        answer: finalResponse,
       }
       : null,
     consentRequest: input.result.consentRequest
       ? {
         ...input.result.consentRequest,
-        prompt: finalLockedResponse,
+        prompt: finalResponse,
       }
       : null,
     styleRequest: input.result.styleRequest
       ? {
         ...input.result.styleRequest,
-        prompt: finalLockedResponse,
+        prompt: finalResponse,
       }
       : null,
   };
@@ -14529,7 +15483,8 @@ async function applyEndToEndReplyLanguageLockWithinBudget(input: {
   const invalidResponse =
     !rawResponse
     || isInternalRecoverySignalReply(rawResponse)
-    || isVisibleFallbackReply(rawResponse);
+    || isVisibleFallbackReply(rawResponse)
+    || looksLikeLanguageConfusionClarificationReply(rawResponse);
   const safeFallbackResponse = invalidResponse
     ? normalizeReplyForClawCloudDisplay(
       buildDeterministicExplainReply(input.message)
@@ -14586,6 +15541,11 @@ export async function routeInboundAgentMessageResult(
     conversationStyle?: ClawCloudConversationStyle;
   },
 ): Promise<RouteInboundAgentMessageResult> {
+  const deterministicRouteReply = buildFastDeterministicAgentReplyForRoute(message);
+  if (deterministicRouteReply) {
+    return deterministicRouteReply;
+  }
+
   const timeoutPolicy = resolveInboundRouteTimeoutPolicy(message);
   const routeDeadlineMs = Date.now() + timeoutPolicy.timeoutMs + INBOUND_AGENT_TIMEOUT_RECOVERY_MS + INBOUND_AGENT_LANGUAGE_LOCK_TIMEOUT_MS;
   const result = await Promise.race([
@@ -14600,7 +15560,13 @@ export async function routeInboundAgentMessageResult(
   // Safety net: if the response is empty, falback-like, or too short for a complex question,
   // make one last emergency AI call rather than sending garbage to the user
   const resp = result.response?.trim() ?? "";
-  if (!resp || isVisibleFallbackReply(resp) || isLowQualityTemplateReply(resp) || resp.length < 20) {
+  if (
+    !resp
+    || isVisibleFallbackReply(resp)
+    || isLowQualityTemplateReply(resp)
+    || looksLikeLanguageConfusionClarificationReply(resp)
+    || resp.length < 20
+  ) {
     const activeContactStatusRecovery = await resolveWhatsAppActiveContactStatusRecoveryResult({
       userId,
       message,
@@ -14697,10 +15663,10 @@ export async function routeInboundAgentMessageResult(
           emergencyUserPrompt = `[${langName}] ${message}\n[Romanized] ${emergencyRomanized}`;
           emergencyLanguageHint = `\nIMPORTANT: The user wrote in ${langName}. Use the romanized reading to understand the question. Answer in ${langName}, NOT in English.`;
         } else {
-          const emergencyGloss = await withSoftTimeout(
-            translateMessage(message, "en", { force: true }).catch(() => ""),
-            "",
-            Math.min(1_500, emergencyBudgetMs),
+          const emergencyGloss = await buildRobustEnglishGloss(
+            message,
+            emergencyLocale,
+            Math.min(2_500, emergencyBudgetMs),
           );
           if (emergencyGloss?.trim() && emergencyGloss.trim().toLowerCase() !== message.trim().toLowerCase()) {
             emergencyUserPrompt = emergencyGloss.trim();
@@ -15196,6 +16162,7 @@ async function routeInboundAgentMessageCore(
     if (!isProfessionallyCommittedRecipientMatch({
       requestedName: activeContactSessionCommand.contactName,
       resolvedName: resolved.contact.name,
+      matchedAlias: resolved.contact.matchedAlias,
       exact: resolved.contact.exact,
       score: resolved.contact.score,
       matchBasis: resolved.contact.matchBasis,
@@ -15638,6 +16605,7 @@ async function routeInboundAgentMessageCore(
           `Respond in ${indicLangName} (the same language the user wrote in), NOT in English.`,
           `Use WhatsApp formatting: *bold* for headings, numbered lists where appropriate.`,
           `Do NOT say you cannot understand. Do NOT ask for clarification. Answer directly.`,
+          `Use recent conversation context first. If multiple interpretations still fit after using that context, ask one brief clarification instead of guessing.`,
         ].join("\n"),
         user: [
           `[${indicLangName} original]: ${trimmed}`,
@@ -15718,6 +16686,13 @@ async function routeInboundAgentMessageCore(
         8_000,
       ).then((g) => g.trim()).catch(() => "");
     }
+    if (!multilingualGloss) {
+      multilingualGloss = await buildRobustEnglishGloss(
+        trimmed,
+        earlyReplyLanguageResolution.detectedLocale ?? earlyReplyLanguageResolution.locale,
+        8_000,
+      );
+    }
     const multilingualInstruction = [
       buildIntentSpecificInstruction(earlyMultilingualRoutingBridge.intent.type, multilingualGloss || multilingualRomanized || trimmed),
       buildConversationStyleInstruction(selectedConversationStyle),
@@ -15797,7 +16772,7 @@ async function routeInboundAgentMessageCore(
     // ROMANIZED text to English â€” models translate romanized Indic text far better
     // than native script, especially when told to use Hindi/Sanskrit cognates.
     const hasNonLatinScript = /[^\u0000-\u024F\u1E00-\u1EFF\u2C60-\u2C7F\uA720-\uA7FF]/u.test(trimmed);
-    let inlineGloss = "";
+    let inlineGloss = earlyMultilingualRoutingBridge.gloss || "";
     if (hasNonLatinScript && !earlyMultilingualRoutingBridge.gloss && nativeRomanized) {
       inlineGloss = await withSoftTimeout(
         completeClawCloudPrompt({
@@ -15819,6 +16794,13 @@ async function routeInboundAgentMessageCore(
       if (!inlineGloss || inlineGloss.toLowerCase() === nativeRomanized.toLowerCase()) {
         inlineGloss = "";
       }
+    }
+    if (!inlineGloss && hasNonLatinScript) {
+      inlineGloss = await buildRobustEnglishGloss(
+        trimmed,
+        earlyReplyLanguageResolution.detectedLocale ?? earlyReplyLanguageResolution.locale,
+        8_000,
+      );
     }
 
     const nativeLanguageInstruction = [
@@ -16907,6 +17889,11 @@ async function routeInboundAgentMessageCore(
         liveAnswerBundle: null,
       }));
       const normalizedSearch = searchResult.answer.trim();
+      const promotedBundleReply = extractPromotableLiveBundleResponse(
+        webSearchQuestion,
+        searchResult.liveAnswerBundle,
+      );
+      const hasPromotableBundleReply = promotedBundleReply.trim().length > 0;
       const freshnessGuardedBundle = searchResult.liveAnswerBundle?.metadata?.freshness_guarded === true;
       const countryMetricFallbackReply =
         freshnessGuardedBundle
@@ -16918,7 +17905,9 @@ async function routeInboundAgentMessageCore(
             await fetchWorldBankCountryMetricComparisonAnswer(webSearchQuestion).catch(() => "")
           ) || await fetchWorldBankCountryMetricAnswer(webSearchQuestion).catch(() => "")
           : "";
-      const webSearchReply = freshnessGuardedBundle && searchResult.liveAnswerBundle
+      const webSearchReply = hasPromotableBundleReply
+        ? promotedBundleReply
+        : freshnessGuardedBundle && searchResult.liveAnswerBundle
         ? (
           countryMetricFallbackReply
             ? countryMetricFallbackReply
@@ -16929,7 +17918,8 @@ async function routeInboundAgentMessageCore(
         )
         : normalizedSearch;
       if (
-        isAcceptableLiveAnswer(normalizedSearch, webSearchQuestion)
+        hasPromotableBundleReply
+        || isAcceptableLiveAnswer(normalizedSearch, webSearchQuestion)
         || isAcceptableNewsCoverageAnswer(normalizedSearch, webSearchQuestion)
         || isAcceptableAiModelWebAnswer(normalizedSearch, webSearchQuestion)
         || /\bcurrent-affairs clarification\b/i.test(normalizedSearch)
@@ -18419,6 +19409,24 @@ function buildLocalizedDeterministicKnownStoryReply(
   question: string,
   locale: SupportedLocale,
 ): string | null {
+  if (locale === "ja" && /\bharry\s*potter\b|\u30cf\u30ea\u30fc(?:\u30fb|\s*)\u30dd\u30c3\u30bf\u30fc/iu.test(question)) {
+    return [
+      "\u300e\u30cf\u30ea\u30fc\u30fb\u30dd\u30c3\u30bf\u30fc\u300f\u306f\u3001\u5b64\u5150\u306e\u30cf\u30ea\u30fc\u304c11\u6b73\u306e\u8a95\u751f\u65e5\u306b\u81ea\u5206\u304c\u9b54\u6cd5\u4f7f\u3044\u3060\u3068\u77e5\u308a\u3001\u30db\u30b0\u30ef\u30fc\u30c4\u9b54\u6cd5\u9b54\u8853\u5b66\u6821\u306b\u5165\u5b66\u3059\u308b\u7269\u8a9e\u3067\u3059\u3002",
+      "\u30db\u30b0\u30ef\u30fc\u30c4\u3067\u30cf\u30ea\u30fc\u306f\u30ed\u30f3\u3068\u30cf\u30fc\u30de\u30a4\u30aa\u30cb\u30fc\u3068\u89aa\u53cb\u306b\u306a\u308a\u3001\u4e21\u89aa\u3092\u6bba\u3057\u305f\u95c7\u306e\u9b54\u6cd5\u4f7f\u3044\u30f4\u30a9\u30eb\u30c7\u30e2\u30fc\u30c8\u3068\u81ea\u5206\u306e\u904e\u53bb\u3092\u5c11\u3057\u305a\u3064\u77e5\u3063\u3066\u3044\u304d\u307e\u3059\u3002",
+      "\u30b7\u30ea\u30fc\u30ba\u5168\u4f53\u3067\u306f\u3001\u53cb\u60c5\u3001\u52c7\u6c17\u3001\u9078\u629e\u3001\u72a0\u7272\u3001\u305d\u3057\u3066\u611b\u306e\u529b\u3092\u901a\u3058\u3066\u3001\u30cf\u30ea\u30fc\u305f\u3061\u304c\u30f4\u30a9\u30eb\u30c7\u30e2\u30fc\u30c8\u306e\u5fa9\u6d3b\u3068\u652f\u914d\u306b\u7acb\u3061\u5411\u304b\u3044\u307e\u3059\u3002",
+      "\u6700\u5f8c\u306b\u30cf\u30ea\u30fc\u306f\u81ea\u5206\u306e\u4e2d\u306b\u30f4\u30a9\u30eb\u30c7\u30e2\u30fc\u30c8\u306e\u9b42\u306e\u6b20\u7247\u304c\u3042\u308b\u3068\u77e5\u308a\u3001\u4ef2\u9593\u3092\u5b88\u308b\u305f\u3081\u306b\u72a0\u7272\u3092\u899a\u609f\u3057\u307e\u3059\u3002\u305d\u306e\u7d50\u679c\u3001\u6700\u7d42\u6c7a\u6226\u3067\u30f4\u30a9\u30eb\u30c7\u30e2\u30fc\u30c8\u306f\u6557\u308c\u307e\u3059\u3002",
+    ].join("\n\n");
+  }
+
+  if (locale === "ko" && /\bmy\s*demon\b|\ub9c8\uc774\s*\ub370\ubaac/iu.test(question)) {
+    return [
+      "\u300a\ub9c8\uc774 \ub370\ubaac\u300b\uc740 \uc7ac\ubc8c \uc0c1\uc18d\ub140 \ub3c4\ub3c4\ud76c\uc640 \uc624\ub7ab\ub3d9\uc548 \uc778\uac04\uacfc \uacc4\uc57d\ud574 \uc628 \uc545\ub9c8 \uc815\uad6c\uc6d0\uc774 \uc5ee\uc774\uba74\uc11c \uc2dc\uc791\ub418\ub294 \ub85c\ub9e8\uc2a4 \ud310\ud0c0\uc9c0 \uc774\uc57c\uae30\uc785\ub2c8\ub2e4.",
+      "\ub3c4\ub3c4\ud76c\ub294 \ubbf8\ub798\uadf8\ub8f9 \uac00\ubb38\uc758 \uad8c\ub825 \ub2e4\ud23c\uc5d0\uc11c \uc0b4\uc544\ub0a8\uc544\uc57c \ud558\uace0, \uc815\uad6c\uc6d0\uc740 \uc0ac\uac74 \uc774\ud6c4 \uc790\uc2e0\uc758 \uc545\ub9c8 \ub2a5\ub825\uc744 \uc783\uc5b4 \ub3c4\ub3c4\ud76c\uc640 \uc6b4\uba85\uc801\uc73c\ub85c \ubb36\uc785\ub2c8\ub2e4.",
+      "\ub450 \uc0ac\ub78c\uc740 \uacc4\uc57d \uacb0\ud63c\uc744 \ud1b5\ud574 \uc11c\ub85c\ub97c \uc9c0\ud0a4\uae30 \uc2dc\uc791\ud558\uace0, \uc801\ub4e4\uc758 \uc74c\ubaa8\uc640 \uac00\ubb38\uc758 \uc9c4\uc2e4\uc744 \ub9c8\uc8fc\ud558\uba74\uc11c \uc810\uc810 \uc9c4\uc2ec\uc73c\ub85c \uc0ac\ub791\ud558\uac8c \ub429\ub2c8\ub2e4.",
+      "\uacb0\uad6d \uc774\uc57c\uae30\uc758 \uc911\uc2ec\uc740 \uc545\ub9c8\uc640 \uc778\uac04\uc774\ub77c\ub294 \ub300\ub9bd\ubcf4\ub2e4 \uc120\ud0dd, \ud76c\uc0dd, \uc0ac\ub791, \uc6b4\uba85\uc774 \ub450 \uc0ac\ub78c\uc744 \ubc14\uafb8\ub294 \uacfc\uc815\uc785\ub2c8\ub2e4.",
+    ].join("\n\n");
+  }
+
   if (locale === "ja" && /\bharry\s*potter\b|\u30cf\u30ea\u30fc\u30fb\u30dd\u30c3\u30bf\u30fc/iu.test(question)) {
     return [
       "ã€Žãƒãƒªãƒ¼ãƒ»ãƒãƒƒã‚¿ãƒ¼ã€ã¯ã€å­¤å…ã®ãƒãƒªãƒ¼ãŒæ„åœ°æ‚ªãªãƒ€ãƒ¼ã‚ºãƒªãƒ¼å®¶ã§è‚²ã£ãŸã‚ã¨ã€11æ­³ã®èª•ç”Ÿæ—¥ã«è‡ªåˆ†ãŒé­”æ³•ä½¿ã„ã ã¨çŸ¥ã‚‹ã¨ã“ã‚ã‹ã‚‰å§‹ã¾ã‚‹ã‚·ãƒªãƒ¼ã‚ºã§ã™ã€‚",
@@ -19028,6 +20036,7 @@ async function handleSendMessageToContact(
   if (!isProfessionallyCommittedRecipientMatch({
     requestedName: contactName,
     resolvedName,
+    matchedAlias: resolved.contact.matchedAlias,
     exact: resolved.contact.exact,
     score: resolved.contact.score,
     matchBasis: resolved.contact.matchBasis,
@@ -19260,6 +20269,7 @@ async function loadLikelyWhatsAppSelfPhones(userId: string) {
 function isConfidentRecipientNameMatch(input: {
   requestedName: string;
   resolvedName: string;
+  matchedAlias?: string | null;
   exact: boolean;
   score: number;
   matchBasis: "exact" | "prefix" | "word" | "fuzzy" | null;
@@ -19270,6 +20280,7 @@ function isConfidentRecipientNameMatch(input: {
 function isProfessionallyCommittedRecipientMatch(input: {
   requestedName: string;
   resolvedName: string;
+  matchedAlias?: string | null;
   exact: boolean;
   score: number;
   matchBasis: "exact" | "prefix" | "word" | "fuzzy" | null;
@@ -19285,6 +20296,7 @@ function normalizeRecipientNameTokens(value: string) {
 export function isConfidentRecipientNameMatchForTest(input: {
   requestedName: string;
   resolvedName: string;
+  matchedAlias?: string | null;
   exact: boolean;
   score: number;
   matchBasis: "exact" | "prefix" | "word" | "fuzzy" | null;
@@ -19295,6 +20307,7 @@ export function isConfidentRecipientNameMatchForTest(input: {
 export function isProfessionallyCommittedRecipientMatchForTest(input: {
   requestedName: string;
   resolvedName: string;
+  matchedAlias?: string | null;
   exact: boolean;
   score: number;
   matchBasis: "exact" | "prefix" | "word" | "fuzzy" | null;
@@ -19394,6 +20407,7 @@ async function resolveWhatsAppRecipientWithRetry(
     const matchConfidence = classifyResolvedContactMatchConfidence({
       requestedName,
       resolvedName: found.name,
+      matchedAlias: found.matchedAlias,
       exact: found.exact,
       score: found.score,
       matchBasis:
@@ -19445,6 +20459,7 @@ async function resolveWhatsAppRecipientWithRetry(
     jid?: string | null;
     exact?: boolean;
     score?: number;
+    matchedAlias?: string | null;
     matchBasis?: "exact" | "prefix" | "word" | "fuzzy" | null;
     source?: "live" | "fuzzy";
   }): WhatsAppResolvedRecipientContact => ({
@@ -19453,7 +20468,7 @@ async function resolveWhatsAppRecipientWithRetry(
     jid: contact.jid ?? null,
     exact: Boolean(contact.exact),
     score: normalizeResolvedContactMatchScore(contact.score) ?? 0.82,
-    matchedAlias: contact.name,
+    matchedAlias: contact.matchedAlias ?? contact.name,
     matchBasis: contact.matchBasis ?? null,
     source: contact.source === "fuzzy" ? "fuzzy" : "live",
   });
@@ -19522,7 +20537,7 @@ async function resolveWhatsAppRecipientWithRetry(
           aliases: [match.name],
           score: normalizeResolvedContactMatchScore(match.score) ?? 0.9,
           exact: Boolean(match.exact),
-          matchedAlias: match.name,
+          matchedAlias: match.matchedAlias ?? match.name,
           matchBasis: match.matchBasis ?? "fuzzy",
         }));
       }
@@ -19540,6 +20555,7 @@ async function resolveWhatsAppRecipientWithRetry(
             score: typeof liveContact.score === "number" && Number.isFinite(liveContact.score)
               ? liveContact.score
               : undefined,
+            matchedAlias: liveContact.matchedAlias ?? null,
             matchBasis: liveContact.matchBasis ?? null,
             source: liveContact.source === "fuzzy" ? "fuzzy" : "live",
           }));
@@ -19791,9 +20807,9 @@ function looksLikeAbstractStyledWhatsAppDraftRequest(originalRequest: string, re
   }
 
   const hasMessageSurface =
-    /\b(?:message|note|wish|greeting|reply|text|prompt)\b/.test(normalizedMessage);
+    /\b(?:message|note|wish|greeting|reply|text|prompt|paragraph)\b/.test(normalizedMessage);
   const hasStyleCue =
-    /\b(?:professional|formal|polite|warm|sweet|heartfelt|brief|short|kind|nice|casual|beautiful|detailed|detail|elaborate|lovely)\b/.test(`${normalizedRequest} ${normalizedMessage}`);
+    /\b(?:professional|formal|polite|warm|sweet|heartfelt|brief|short|kind|nice|casual|beautiful|detailed|detail|elaborate|lovely|sundar|sunder|pyara|pyari|khubsurat|refreshing|fresh)\b/.test(`${normalizedRequest} ${normalizedMessage}`);
   const hasLanguageCue =
     /\b(?:in|into)\s+(?:english|hindi|hinglish|roman hindi|punjabi|urdu|arabic|korean|japanese|spanish|french|german|italian|portuguese|turkish)\b/.test(normalizedRequest);
   const hasGreetingCue =
@@ -19806,6 +20822,7 @@ function looksLikeAbstractStyledWhatsAppDraftRequest(originalRequest: string, re
 
   return (
     hasDescriptorIntent
+    || (hasMessageSurface && hasStyleCue)
     || (hasStructuredActCue && (hasStyleCue || hasLanguageCue))
     || (hasGreetingCue && hasMessageSurface && (hasStyleCue || hasLanguageCue))
   );
@@ -20224,7 +21241,7 @@ function sanitizeStyledWhatsAppDraftForHumanDelivery(text: string) {
 const STYLED_WHATSAPP_DRAFT_META_LANGUAGE_RE =
   /\b(?:message|text|reply|wish|greeting|note|prompt)\b.{0,24}\b(?:in|into)\s+(?:english|hindi|hinglish|roman hindi|punjabi|urdu|arabic|korean|japanese|spanish|french|german|italian|portuguese|turkish)\b/i;
 const STYLED_WHATSAPP_DRAFT_DESCRIPTOR_ONLY_RE =
-  /^(?:a|an)\s+(?:(?:very|really|beautiful|detailed|detail|professional|formal|polite|warm|sweet|heartfelt|brief|short|kind|nice|casual|proper|lovely)\s+){0,10}(?:(?:good morning|good afternoon|good evening|good night|hello|hi|hey)\s+)?(?:message|text|reply|wish|greeting|note|prompt)\b(?:.*)$/i;
+  /^(?:a|an)\s+(?:(?:very|really|beautiful|detailed|detail|professional|formal|polite|warm|sweet|heartfelt|brief|short|kind|nice|casual|proper|lovely|sundar|sunder|pyara|pyari|khubsurat|refreshing|fresh)\s+){0,10}(?:(?:good morning|good afternoon|good evening|good night|hello|hi|hey)\s+)?(?:message|text|reply|wish|greeting|note|prompt|paragraph)\b(?:.*)$/i;
 
 function normalizeStyledWhatsAppDraftCandidateText(value: string) {
   return String(value ?? "")
@@ -20308,8 +21325,8 @@ function extractStyledGreetingTemplateSeed(requestedMessage: string) {
     /(?:^|\b)(good morning|good afternoon|good evening|good night|hello|hi|hey)(?:\b|$)/,
   );
   const looksTemplate =
-    /\b(?:professional|formal|polite|beautiful|detailed|detail|warm|sweet|heartfelt|lovely)\b/.test(normalized)
-    && /\b(?:message|text|wish|greeting|prompt)\b/.test(normalized);
+    /\b(?:professional|formal|polite|beautiful|detailed|detail|warm|sweet|heartfelt|lovely|sundar|sunder|pyara|pyari|khubsurat|refreshing|fresh)\b/.test(normalized)
+    && /\b(?:message|text|wish|greeting|prompt|paragraph)\b/.test(normalized);
   if (!looksTemplate || !greetingMatch?.[1]) {
     return null;
   }
@@ -20417,6 +21434,22 @@ function maybeBuildDeterministicProfessionalGreetingDraft(input: {
 
   if (input.locale === "hi") {
     if (/^(?:hi+|hello+|hey+|hlo+|helo+|namaste)$/.test(normalized)) {
+      return `\u0928\u092e\u0938\u094d\u0924\u0947${recipientSuffix}\u0964 \u0906\u0936\u093e \u0939\u0948 \u0906\u092a \u0915\u0941\u0936\u0932\u092a\u0942\u0930\u094d\u0935\u0915 \u0939\u094b\u0902\u0917\u0947\u0964 \u0906\u092a\u0915\u093e \u0926\u093f\u0928 \u0936\u0941\u092d \u0930\u0939\u0947\u0964`;
+    }
+    if (/^good\s*morning$/.test(normalized)) {
+      return `\u0938\u0941\u092a\u094d\u0930\u092d\u093e\u0924${recipientSuffix}\u0964 \u0906\u0936\u093e \u0939\u0948 \u0906\u092a\u0915\u093e \u0926\u093f\u0928 \u0938\u0941\u0916, \u0936\u093e\u0902\u0924\u093f \u0914\u0930 \u092a\u094d\u0930\u0938\u0928\u094d\u0928\u0924\u093e \u0938\u0947 \u092d\u0930\u093e \u0930\u0939\u0947\u0964`;
+    }
+    if (/^good\s*afternoon$/.test(normalized)) {
+      return `\u0936\u0941\u092d \u0926\u094b\u092a\u0939\u0930${recipientSuffix}\u0964 \u0906\u0936\u093e \u0939\u0948 \u0906\u092a\u0915\u093e \u0926\u093f\u0928 \u0936\u093e\u0902\u0924\u093f\u092a\u0942\u0930\u094d\u0923 \u0914\u0930 \u0938\u0941\u0916\u0926 \u091a\u0932 \u0930\u0939\u093e \u0939\u094b\u0917\u093e\u0964`;
+    }
+    if (/^good\s*evening$/.test(normalized)) {
+      return `\u0936\u0941\u092d \u0938\u0902\u0927\u094d\u092f\u093e${recipientSuffix}\u0964 \u0906\u0936\u093e \u0939\u0948 \u0906\u092a\u0915\u093e \u0926\u093f\u0928 \u0905\u091a\u094d\u091b\u093e \u0930\u0939\u093e \u0939\u094b\u0917\u093e \u0914\u0930 \u0936\u093e\u092e \u0938\u0941\u0916\u0926 \u092c\u0940\u0924\u0947\u0964`;
+    }
+    if (/^good\s*night$/.test(normalized)) {
+      return `\u0936\u0941\u092d \u0930\u093e\u0924\u094d\u0930\u093f${recipientSuffix}\u0964 \u0906\u0936\u093e \u0939\u0948 \u0906\u092a\u0915\u094b \u0938\u0941\u0915\u0942\u0928\u092d\u0930\u0940 \u0914\u0930 \u0936\u093e\u0902\u0924 \u0928\u0940\u0902\u0926 \u092e\u093f\u0932\u0947\u0964`;
+    }
+
+    if (/^(?:hi+|hello+|hey+|hlo+|helo+|namaste)$/.test(normalized)) {
       return `à¤¨à¤®à¤¸à¥à¤¤à¥‡${recipientSuffix}à¥¤ à¤†à¤¶à¤¾ à¤¹à¥ˆ à¤†à¤ª à¤•à¥à¤¶à¤²à¤ªà¥‚à¤°à¥à¤µà¤• à¤¹à¥‹à¤‚à¤—à¥‡à¥¤ à¤†à¤ªà¤•à¤¾ à¤¦à¤¿à¤¨ à¤¶à¥à¤­ à¤°à¤¹à¥‡à¥¤`;
     }
     if (/^good\s*morning$/.test(normalized)) {
@@ -20505,7 +21538,7 @@ function cleanWhatsAppActiveContactSessionContactName(value: string) {
   const cleanupPatterns = [
     /^(?:ab\s+(?=(?:meri|mere)\s+(?:taraf\s+se|behalf\b)))+/i,
     /^(?:ab\s+se\s+)+/i,
-    /^(?:(?:aap|app|tum|tu|please)\s+)+/i,
+    /^(?:(?:aap|app|ap|tum|tu|please)\s+)+/i,
     /^(?:(?:meri|mere)\s+(?:(?:taraf|tarf)\s+se|behalf\s+(?:me|mai|mein|par|pe))\s+)+/i,
     /^(?:from\s+now\s+on\s+)+/i,
     /^(?:on\s+my\s+behalf\s+)+/i,
@@ -20802,20 +21835,30 @@ function buildWhatsAppPendingContactResumePrompt(
         parsed?.kind === "contacts"
           ? parsed.contactNames[0] ?? parsed.contactName
           : parsed?.contactName;
+      const looseRequestedName =
+        stripWhatsAppRecipientLanguageSuffix(requestedName)
+        || extractLooseWhatsAppSendRecipientFromPrompt(originalPrompt);
       const shouldPreviewFirst = shouldPreviewRecipientTargetedWhatsAppDraft(originalPrompt);
+      const looseMessageText = extractLooseWhatsAppSendMessageFromPrompt(originalPrompt);
+      if ((!parsed || /^just\s+send\b/i.test(originalPrompt.trim())) && looseMessageText) {
+        return `Send message to ${selectedReference}: ${looseMessageText}`;
+      }
+
+      const resumePrompt = replaceRequestedContactInPrompt(
+        originalPrompt,
+        looseRequestedName ?? "",
+        selectedReference,
+      );
+      if (resumePrompt.trim() && resumePrompt !== originalPrompt) {
+        return resumePrompt;
+      }
+
       if (!messageText) {
         return `Send message to ${selectedLabel}: Hello`;
       }
 
-      if (shouldPreviewFirst) {
-        const resumePrompt = replaceRequestedContactInPrompt(
-          originalPrompt,
-          requestedName ?? "",
-          selectedReference,
-        );
-        if (resumePrompt.trim()) {
-          return resumePrompt;
-        }
+      if (shouldPreviewFirst && resumePrompt.trim()) {
+        return resumePrompt;
       }
 
       return `Send message to ${selectedReference}: ${messageText}`;
@@ -21229,6 +22272,7 @@ function parseWhatsAppPendingContactOptionLine(line: string): WhatsAppPendingCon
     : body;
 
   name = name
+    .replace(/\s+[-\u2013\u2014]+\s*$/u, "")
     .replace(/[-–—,(]+$/g, "")
     .replace(/\((?:exact alias|close alias|shared name word|similar alias)[^)]*\)\s*$/i, "")
     .replace(/\s+/g, " ")
@@ -21274,6 +22318,47 @@ function extractQuotedRequestedWhatsAppContactName(text: string) {
   return quotedMatch?.[1]?.trim() || null;
 }
 
+function extractLooseWhatsAppSendRecipientFromPrompt(text: string) {
+  const normalized = normalizeClawCloudUnderstandingMessage(String(text ?? ""))
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized || !/\b(?:send|message|msg|text|tell|reply)\b/i.test(normalized)) {
+    return null;
+  }
+
+  const match = normalized.match(
+    /\bto\s+([a-z][a-z0-9' .-]{1,60}?)(?:\s+(?:in|on)\s+(?:whatsapp|hindi|hinglish|english|chinese|japanese|korean|thai|spanish|french|german|arabic|urdu|punjabi|tamil|telugu|bengali|marathi|gujarati|malayalam|kannada)\b|$)/i,
+  );
+  const candidate = match?.[1]?.trim().replace(/[.,!?]+$/g, "").trim();
+  if (!candidate || candidate.split(/\s+/).filter(Boolean).length > 6) {
+    return null;
+  }
+
+  return candidate;
+}
+
+function stripWhatsAppRecipientLanguageSuffix(value: string | null | undefined) {
+  return String(value ?? "")
+    .replace(/\s+(?:in|into)\s+(?:hindi|hinglish|english|chinese|japanese|korean|thai|spanish|french|german|arabic|urdu|punjabi|tamil|telugu|bengali|marathi|gujarati|malayalam|kannada)\s*$/i, "")
+    .trim();
+}
+
+function extractLooseWhatsAppSendMessageFromPrompt(text: string) {
+  const normalized = normalizeClawCloudUnderstandingMessage(String(text ?? ""))
+    .replace(/\s+/g, " ")
+    .trim();
+  const match = normalized.match(
+    /^(?:just\s+)?(?:send|message|msg|text|tell)\s+(.+?)\s+to\s+([a-z][a-z0-9' .-]{1,60}?)(?:\s+(?:in|into)\s+(hindi|hinglish|english|chinese|japanese|korean|thai|spanish|french|german|arabic|urdu|punjabi|tamil|telugu|bengali|marathi|gujarati|malayalam|kannada))?$/i,
+  );
+  const body = match?.[1]?.trim();
+  if (!body) {
+    return null;
+  }
+
+  const language = match?.[3]?.trim();
+  return language ? `${body} in ${language}` : body;
+}
+
 function inferWhatsAppPendingContactKindFromRecentTurnContext(input: {
   previousUserTurn: string;
   assistantTurn: string;
@@ -21288,6 +22373,10 @@ function inferWhatsAppPendingContactKindFromRecentTurnContext(input: {
   }
 
   if (parseSendMessageCommand(input.previousUserTurn) !== null) {
+    return "send_message";
+  }
+
+  if (extractLooseWhatsAppSendRecipientFromPrompt(input.previousUserTurn)) {
     return "send_message";
   }
 
@@ -21311,14 +22400,14 @@ function extractRequestedContactNameFromWhatsAppPrompt(
 
   const parsed = parseSendMessageCommand(prompt);
   if (!parsed) {
-    return null;
+    return extractLooseWhatsAppSendRecipientFromPrompt(prompt);
   }
 
   if (parsed.kind === "contacts") {
-    return parsed.contactNames[0] ?? parsed.contactName;
+    return stripWhatsAppRecipientLanguageSuffix(parsed.contactNames[0] ?? parsed.contactName);
   }
 
-  return parsed.contactName ?? null;
+  return stripWhatsAppRecipientLanguageSuffix(parsed.contactName ?? null) || null;
 }
 
 function matchWhatsAppPendingContactSelectionByIndex(
@@ -21544,7 +22633,15 @@ function recoverWhatsAppPendingContactSelectionFromRecentTurns(input: {
   recentTurns: Array<{ role: "user" | "assistant"; content: string }>;
 }): RecentWhatsAppPendingContactSelectionRecovery {
   const normalizedMessage = normalizeWhatsAppPendingContactSelectionText(input.message);
-  if (!normalizedMessage || looksLikeClawCloudDirectedRequestDuringPendingWhatsAppAction(normalizedMessage)) {
+  const looksLikeExplicitSelectionFollowUp =
+    /^(?:go\s+for|go\s+with|choose|pick|select|use|take|option\s*\d+|the\s+(?:first|second|third|fourth)\s+one)\b/i.test(normalizedMessage);
+  if (
+    !normalizedMessage
+    || (
+      !looksLikeExplicitSelectionFollowUp
+      && looksLikeClawCloudDirectedRequestDuringPendingWhatsAppAction(normalizedMessage)
+    )
+  ) {
     return { type: "none" };
   }
 
@@ -22556,7 +23653,15 @@ function shouldBypassWhatsAppActiveContactSessionRouting(message: string) {
     return true;
   }
 
-  if (parseSendMessageCommand(trimmed) || parseSaveContactCommand(trimmed)) {
+  const parsedSendMessage = parseSendMessageCommand(trimmed);
+  if (
+    parsedSendMessage
+    && !/^(?:please\s+)?(?:tell|say|inform|let|reply|respond)\s+(?:her|him|them|usko|unko|isko|inko)\b/i.test(trimmed)
+  ) {
+    return true;
+  }
+
+  if (parseSaveContactCommand(trimmed)) {
     return true;
   }
 
@@ -23583,7 +24688,7 @@ function shouldPreviewRecipientTargetedWhatsAppDraft(originalRequest: string) {
   const explicitImmediateSend =
     /\b(?:send|sned|snd|reply|replly|tell)\b/i.test(normalized)
     || /^(?:message|mesage|msg|whatsapp|whatsap|whatsaap|wa)\b/i.test(normalized)
-    || /\b(?:bhej(?:\s*(?:do|de|dena|dijiye|na))|send\s*(?:kar(?:o|do|na)?))\b/i.test(normalized);
+    || /\b(?:bhej(?:\s*(?:do|de|dena|dijiye|na|o))|send\s*(?:(?:kar|kr)(?:\s*(?:do|de|dena|dijiye|na))?|kro|karo|do|de|dena|dijiye|na))\b/i.test(normalized);
   const parsed = parseSendMessageCommand(originalRequest);
   const requestedMessage = parsed?.message?.trim() ?? "";
   if (requestedMessage && resolveWhatsAppDraftingMode(originalRequest, requestedMessage) === "styled") {
@@ -23598,7 +24703,7 @@ function shouldPreviewRecipientTargetedWhatsAppDraft(originalRequest: string) {
     /\bprepare\b.{0,48}\b(?:draft|message|text|reply|wish)\b/,
     /\bwrite\b.{0,48}\b(?:message|text|reply|wish|note)\b/,
     /\b(?:message|text|reply|wish|note)\b.{0,48}\bwrite\b/,
-    /\blikh(?:\s*(?:ke|kar))?\s*(?:do|de|dena|dijiye|kar(?:o|na)?)\b/,
+    /\blikh(?:\s*(?:ke|kar))?\s*(?:do|de|dena|dijiye|kar(?:o|na)?|o)\b/,
     /\bfor\s+approval\b/,
     /\bbefore\s+sending\b/,
   ].some((pattern) => pattern.test(normalized)) && !explicitImmediateSend;
@@ -23900,6 +25005,7 @@ async function handleSendMessageToContactProfessional(
       if (isProfessionallyCommittedRecipientMatch({
         requestedName,
         resolvedName: resolved.contact.name,
+        matchedAlias: resolved.contact.matchedAlias,
         exact: resolved.contact.exact,
         score: resolved.contact.score,
         matchBasis: resolved.contact.matchBasis,
@@ -24150,8 +25256,7 @@ async function handleSaveContactCommand(
   text: string,
   locale: SupportedLocale,
 ): Promise<string> {
-  const normalized = text.toLowerCase().trim();
-  if (/\b(list|show|my)\s+contacts\b/.test(normalized) || normalized === "contacts") {
+  if (looksLikeListContactsCommand(text)) {
     const list = await listContactsFormatted(userId);
     return translateMessage(list, locale);
   }
@@ -24383,6 +25488,11 @@ function buildGuaranteedContextualRecoveryReply(question: string) {
 
   if (!cleaned) {
     return "Reply with the exact question or task and I will answer that directly.";
+  }
+
+  const deterministicCodingReply = buildDeterministicCodingReply(cleaned);
+  if (deterministicCodingReply) {
+    return deterministicCodingReply;
   }
 
   const definitionMatch = cleaned.match(/^(?:what is|what are|define|meaning of|explain)\s+(.+?)(?:\?|$)/i);

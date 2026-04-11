@@ -28,7 +28,7 @@ type SetupPageProps = {
 };
 
 type ConnectionStatus = "idle" | "connecting" | "done";
-type TaskId = "morning" | "drafts" | "calendar" | "search" | "evening" | "remind";
+type TaskId = "remind" | "contacts" | "spend";
 type StepNumber = 1 | 2 | 3;
 type ScanPhase = "waiting" | "verifying" | "connected";
 type GoogleWorkspaceConnectProvider = "gmail" | "google_calendar" | "google_drive";
@@ -83,69 +83,40 @@ const WHATSAPP_QR_DISPLAY_TTL_SECONDS = 75;
 
 const onboardingTasks: readonly TaskDefinition[] = [
   {
-    id: "morning",
-    icon: "☀️",
-    title: "Morning email briefing",
-    description: "Every morning your agent summarises your inbox and sends a briefing to WhatsApp",
-    tags: ["📧 Gmail", "💬 WhatsApp"],
-    badge: "free",
-    hasSchedule: true,
-  },
-  {
-    id: "drafts",
-    icon: "✍️",
-    title: "Draft email replies",
-    description: 'Say "draft reply to [name]" on WhatsApp and your agent writes it to Gmail drafts',
-    tags: ["📧 Gmail", "💬 WhatsApp", "⚡ On demand"],
-    badge: "free",
-  },
-  {
-    id: "calendar",
-    icon: "📅",
-    title: "Meeting reminders",
-    description:
-      "Get a WhatsApp reminder 30 minutes before each meeting with a context briefing from your last emails with that person",
-    tags: ["📅 Calendar", "💬 WhatsApp", "⏰ 30 min before"],
-    badge: "free",
-  },
-  {
-    id: "search",
-    icon: "🔍",
-    title: "Email search via WhatsApp",
-    description:
-      'Ask "what did Priya say about the budget?" and get an instant plain-English answer from your inbox',
-    tags: ["📧 Gmail", "💬 WhatsApp", "⚡ On demand"],
-    badge: "free",
-  },
-  {
-    id: "evening",
-    icon: "🌙",
-    title: "Evening summary",
-    description: "End-of-day recap sent to WhatsApp — what happened, what needs attention tomorrow",
-    tags: ["📧 Gmail", "📅 Calendar", "💬 WhatsApp"],
-    badge: "starter",
-  },
-  {
     id: "remind",
     icon: "⏰",
-    title: "Custom reminders",
+    title: "Smart reminders",
     description:
-      'Set any reminder via WhatsApp: "Remind me at 5pm to follow up with Vikram" — done',
-    tags: ["💬 WhatsApp", "⚡ On demand"],
+      'Set any reminder from WhatsApp, like "Remind me at 5pm to call Raj".',
+    tags: ["WhatsApp", "On demand"],
+    badge: "free",
+  },
+  {
+    id: "contacts",
+    icon: "👥",
+    title: "Contact memory",
+    description:
+      "Recall chats, summarize conversation history, and stay accurate about the right person.",
+    tags: ["WhatsApp", "Chat memory", "Read history"],
+    badge: "free",
+  },
+  {
+    id: "spend",
+    icon: "💳",
+    title: "Weekly spend summary",
+    description: "Get a WhatsApp summary of recent spending activity every week.",
+    tags: ["WhatsApp", "Weekly"],
     badge: "free",
   },
 ] as const;
 
 const taskChipLabels: Record<TaskId, string> = {
-  morning: "☀️ Morning briefing",
-  drafts: "✍️ Draft replies",
-  calendar: "📅 Meeting reminders",
-  search: "🔍 Email search",
-  evening: "🌙 Evening summary",
-  remind: "⏰ Custom reminders",
+  remind: "⏰ Smart reminders",
+  contacts: "👥 Contact memory",
+  spend: "💳 Weekly spend summary",
 };
 
-const unifiedActivationTaskIds: TaskId[] = ["morning", "drafts", "calendar"];
+const unifiedActivationTaskIds: TaskId[] = ["remind", "contacts", "spend"];
 
 const googleWorkspaceRolloutMessage =
   "Google Workspace connect is unavailable for this account right now. Continue setup now and reconnect Google later from Settings once this deployment is fully configured.";
@@ -553,7 +524,7 @@ export function SetupPage({ config }: SetupPageProps) {
 
   const [isCheckingSession, setIsCheckingSession] = useState(Boolean(supabase));
   const [sessionNotice, setSessionNotice] = useState("");
-  const [currentStep, setCurrentStep] = useState<StepNumber>(1);
+  const [currentStep, setCurrentStep] = useState<StepNumber>(2);
   const [signedInEmail, setSignedInEmail] = useState("");
   const [signedInWithGoogle, setSignedInWithGoogle] = useState(false);
   const [googleConnectTarget, setGoogleConnectTarget] = useState<GoogleWorkspaceConnectProvider | null>(null);
@@ -579,7 +550,7 @@ export function SetupPage({ config }: SetupPageProps) {
   const [qrSeed, setQrSeed] = useState(1);
   const [qrSeconds, setQrSeconds] = useState(WHATSAPP_QR_DISPLAY_TTL_SECONDS);
   const [scanPhase, setScanPhase] = useState<ScanPhase>("waiting");
-  const [selectedTasks, setSelectedTasks] = useState<TaskId[]>(["morning", "drafts"]);
+  const [selectedTasks, setSelectedTasks] = useState<TaskId[]>(["remind", "contacts"]);
   const [driveConnected, setDriveConnected] = useState(false);
   const [unifiedActivationPending, setUnifiedActivationPending] = useState(false);
   const [autoLaunchingAgent, setAutoLaunchingAgent] = useState(false);
@@ -1515,7 +1486,7 @@ export function SetupPage({ config }: SetupPageProps) {
       if (driveConnectedFromSearch) {
         setDriveConnected(true);
       }
-      setCurrentStep(nextStep === "2" ? 2 : 1);
+      setCurrentStep(nextStep === "3" ? 3 : 2);
       shouldRefreshLiveSnapshot = true;
       handled = true;
     }
@@ -1575,7 +1546,7 @@ export function SetupPage({ config }: SetupPageProps) {
     }
 
     autoAdvancedFromGoogleRef.current = true;
-    showToast("Google connected. Continue when you're ready for the WhatsApp QR step.");
+    setCurrentStep(2);
   }, [currentStep, googleConnecting, googleWorkspaceConnected]);
 
   useEffect(() => {
@@ -1608,64 +1579,6 @@ export function SetupPage({ config }: SetupPageProps) {
     }
 
     const autoLaunch = async () => {
-      const preferredScopeSet = googleWorkspaceExtendedEnabledForUser
-        ? "extended"
-        : googleWorkspaceEnabledForUser
-          ? "core"
-          : null;
-
-      if ((!gmailConnected || !calendarConnected || (preferredScopeSet === "extended" && !driveConnected))
-        && !googleConnecting) {
-        if (!preferredScopeSet) {
-          if (!unifiedAutoFinishStartedRef.current) {
-            unifiedAutoFinishStartedRef.current = true;
-            setAutoLaunchingAgent(true);
-            setAutoRedirectToDashboard(true);
-            setCurrentStep(3);
-            setSelectedTasks(unifiedActivationTaskIds);
-            showToast(
-              "WhatsApp is linked. Google Workspace is unavailable for this account right now, so ClawCloud finished the rest of setup with the supported features.",
-            );
-            try {
-              await handleFinishSetupAction(unifiedActivationTaskIds);
-            } finally {
-              setAutoLaunchingAgent(false);
-              setUnifiedActivationPending(false);
-            }
-          }
-          return;
-        }
-
-        if (!authAccessToken || unifiedGoogleRedirectStartedRef.current) {
-          return;
-        }
-
-        unifiedGoogleRedirectStartedRef.current = true;
-        setGoogleConnecting(true);
-        setGmailStatus("connecting");
-        setCalendarStatus("connecting");
-        showToast(
-          preferredScopeSet === "extended"
-            ? "WhatsApp linked. Finishing activation with Google Workspace and Drive..."
-            : "WhatsApp linked. Finishing activation with Google Workspace...",
-        );
-
-        try {
-          await startGoogleWorkspaceConnect(preferredScopeSet, "setup_unified");
-        } catch (error) {
-          unifiedGoogleRedirectStartedRef.current = false;
-          setGoogleConnecting(false);
-          setGmailStatus((current) => (current === "done" ? current : "idle"));
-          setCalendarStatus((current) => (current === "done" ? current : "idle"));
-          showToast(
-            error instanceof Error
-              ? error.message
-              : "Unable to continue automatic Google activation.",
-          );
-        }
-        return;
-      }
-
       if (unifiedAutoFinishStartedRef.current) {
         return;
       }
@@ -1675,7 +1588,7 @@ export function SetupPage({ config }: SetupPageProps) {
       setAutoRedirectToDashboard(true);
       setCurrentStep(3);
       setSelectedTasks(unifiedActivationTaskIds);
-      showToast("All supported connections are ready. Launching your ClawCloud agent...");
+      showToast("WhatsApp is linked. Launching your WhatsApp workspace now...");
 
       try {
         await handleFinishSetupAction(unifiedActivationTaskIds);
@@ -1687,14 +1600,7 @@ export function SetupPage({ config }: SetupPageProps) {
 
     void autoLaunch();
   }, [
-    authAccessToken,
-    calendarConnected,
     currentStep,
-    driveConnected,
-    gmailConnected,
-    googleConnecting,
-    googleWorkspaceEnabledForUser,
-    googleWorkspaceExtendedEnabledForUser,
     setupComplete,
     stepTwoComplete,
     unifiedActivationPending,
@@ -1702,21 +1608,13 @@ export function SetupPage({ config }: SetupPageProps) {
   ]);
 
   function handleGoToStep(step: StepNumber) {
-    setCurrentStep(step);
+    setCurrentStep(step === 1 ? 2 : step);
   }
 
   function getCurrentSetupGuideHref() {
-    if (currentStep === 1) {
-      return googleWorkspaceEnabledForUser
-        ? "/setup-guide?topic=workspace-connect"
-        : "/setup-guide?topic=global-connect";
-    }
-
-    if (currentStep === 2) {
-      return "/setup-guide?topic=whatsapp-connect";
-    }
-
-    return "/setup-guide?topic=task-picks";
+    return currentStep === 3
+      ? "/setup-guide?topic=task-picks"
+      : "/setup-guide?topic=whatsapp-connect";
   }
 
   function handleOpenSetupHelp() {
@@ -2157,18 +2055,15 @@ export function SetupPage({ config }: SetupPageProps) {
   const selectedCount = selectedTasks.length;
   const qrMinutes = Math.floor(qrSeconds / 60);
   const qrRemainingSeconds = qrSeconds % 60;
+  const activeSetupStep: 2 | 3 = currentStep === 3 ? 3 : 2;
+  const visibleSteps: readonly StepNumber[] = [2, 3];
   const summaryChips = [
-    gmailConnected ? "📧 Gmail connected" : null,
-    calendarConnected ? "📅 Calendar connected" : null,
-    driveConnected ? "🗂️ Drive connected" : null,
-    waConnected ? "💬 WhatsApp linked" : null,
+    waConnected ? "WhatsApp linked" : null,
     ...onboardingTasks
       .filter((task) => selectedTasks.includes(task.id))
       .map((task) => taskChipLabels[task.id]),
   ].filter((value): value is string => Boolean(value));
 
-  const previewHasMorningBrief = selectedTasks.includes("morning");
-  const previewHasMeetings = selectedTasks.includes("calendar");
   const previewTaskCount = (
     <b>
       {selectedCount} task{selectedCount === 1 ? "" : "s"} ready
@@ -2233,9 +2128,8 @@ export function SetupPage({ config }: SetupPageProps) {
 
       <div className={styles.stepper}>
         <div className={styles.stepperTrack}>
-          {[1, 2, 3].map((stepNumber, index) => {
-            const step = stepNumber as StepNumber;
-            const state = getStepState(step, currentStep, setupComplete);
+          {visibleSteps.map((step, index) => {
+            const state = getStepState(step, activeSetupStep, setupComplete);
 
             return (
               <div key={step} className={styles.stepperSegment}>
@@ -2260,21 +2154,15 @@ export function SetupPage({ config }: SetupPageProps) {
                     {state === "done" ? "✓" : step}
                   </div>
                   <div className={styles.stepLabel}>
-                    {step === 1
-                      ? googleWorkspaceEnabledForUser
-                        ? "Connect Google"
-                        : "Connect Gmail"
-                      : step === 2
-                        ? "Link WhatsApp"
-                        : "Pick tasks"}
+                    {step === 2 ? "Link WhatsApp" : "Pick WhatsApp tasks"}
                   </div>
                 </div>
 
-                {index < 2 ? (
+                {index < visibleSteps.length - 1 ? (
                   <div className={styles.stepLine}>
                     <div
                       className={`${styles.stepLineFill} ${
-                        currentStep > step || setupComplete ? styles.stepLineFillActive : ""
+                        activeSetupStep > step || setupComplete ? styles.stepLineFillActive : ""
                       }`}
                     />
                   </div>
@@ -2311,26 +2199,8 @@ export function SetupPage({ config }: SetupPageProps) {
             <div className={styles.waPreviewMsg}>
               <div className={styles.waPreviewSender}>ClawCloud AI · just now</div>
               <div>
-                Hey! Your AI agent is now live 🎉{" "}
-                {previewHasMorningBrief ? (
-                  <>
-                    I&apos;ll send your first briefing tomorrow morning at <b>{morningTime}</b>.
-                  </>
-                ) : (
-                  <>
-                    I&apos;ve got {previewTaskCount}.
-                  </>
-                )}{" "}
-                {previewHasMeetings ? (
-                  <>
-                    You have <b>2 meetings</b> today — I&apos;ll remind you before each one.
-                  </>
-                ) : previewHasMorningBrief ? (
-                  <>
-                    I&apos;ve got {previewTaskCount}.
-                  </>
-                ) : null}{" "}
-                Just message me here anytime you need something!
+                Hey! Your WhatsApp workspace is now live. I&apos;ve got {previewTaskCount}. Message
+                me here anytime to send updates, read chats, analyze media, or set reminders.
               </div>
             </div>
 
@@ -2338,7 +2208,7 @@ export function SetupPage({ config }: SetupPageProps) {
               Go to dashboard <span>→</span>
             </button>
           </div>
-        ) : currentStep === 1 ? (
+        ) : false ? (
           <div className={styles.panel}>
             {shouldHoldGlobalConnectUi ? (
               <div>
@@ -2728,15 +2598,15 @@ export function SetupPage({ config }: SetupPageProps) {
           </div>
             */}
           </div>
-        ) : currentStep === 2 ? (
+        ) : activeSetupStep === 2 ? (
           <div className={styles.panel}>
             <div className={styles.stepHead}>
-              <div className={styles.stepNumTag}>Step 2 of 3</div>
-              <h2>Connect your WhatsApp or AI number 💬</h2>
+              <div className={styles.stepNumTag}>Step 2</div>
+              <h2>Connect your WhatsApp workspace</h2>
               <p>
                 Scan the QR with the WhatsApp account you want ClawCloud to run on. Use your own
-                number for the fastest setup, or use a second number if you want ClawCloud to appear
-                as a separate chat contact.
+                number for the fastest setup, or a second number if you want ClawCloud to appear as
+                a dedicated WhatsApp contact.
               </p>
             </div>
 
@@ -3020,8 +2890,8 @@ export function SetupPage({ config }: SetupPageProps) {
             </div>
 
             <div className={styles.stepFoot}>
-              <button type="button" className={styles.footHint} onClick={() => handleGoToStep(1)}>
-                ← Back
+              <button type="button" className={styles.footHint} onClick={handleOpenSetupHelp}>
+                WhatsApp help →
               </button>
               <div className={styles.btnRow}>
                 <button type="button" className={styles.btnSkip} onClick={handleSkipWhatsApp}>
@@ -3041,11 +2911,11 @@ export function SetupPage({ config }: SetupPageProps) {
         ) : (
           <div className={styles.panel}>
             <div className={styles.stepHead}>
-              <div className={styles.stepNumTag}>Step 3 of 3</div>
-              <h2>Choose your AI tasks ⚡</h2>
+              <div className={styles.stepNumTag}>Step 3</div>
+              <h2>Choose your WhatsApp tasks</h2>
               <p>
-                Pick what you want your agent to do. You can change these anytime from your
-                dashboard.
+                Pick the WhatsApp abilities you want active on day one. You can change these later
+                from the dashboard.
               </p>
             </div>
 

@@ -20,12 +20,9 @@ export type ClawCloudProvider =
   | "slack";
 
 export type FrontendSetupTaskId =
-  | "morning"
-  | "drafts"
-  | "calendar"
-  | "search"
-  | "evening"
-  | "remind";
+  | "remind"
+  | "contacts"
+  | "spend";
 
 export type ClawCloudTaskConfig = Record<string, unknown>;
 
@@ -37,12 +34,9 @@ export type ClawCloudTaskSeed = {
 };
 
 export const clawCloudFrontendTaskMap: Record<FrontendSetupTaskId, ClawCloudTaskType> = {
-  morning: "morning_briefing",
-  drafts: "draft_replies",
-  calendar: "meeting_reminders",
-  search: "email_search",
-  evening: "evening_summary",
   remind: "custom_reminder",
+  contacts: "user_contacts",
+  spend: "weekly_spend_summary",
 };
 
 export const clawCloudRunLimits: Record<ClawCloudPlan, number> = {

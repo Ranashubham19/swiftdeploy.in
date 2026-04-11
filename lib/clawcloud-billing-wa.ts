@@ -53,30 +53,30 @@ const TECHNICAL_BILLING_PATTERNS = [
   /\b(exactly-?once|eventual consistency|transaction boundaries|reconciliation|projection|balance mutation)\b/i,
 ];
 
-const PLAN_FEATURES: Record<ClawCloudPlan, string[]> = {
+const WHATSAPP_PLAN_FEATURES: Record<ClawCloudPlan, string[]> = {
   free: [
-    "✅ 3 active tasks",
-    "✅ WhatsApp support",
-    "✅ Gmail access",
-    "✅ 10 runs per day",
-    "❌ Telegram support",
-    "❌ Drive and Sheets access",
+    "✅ WhatsApp agent setup",
+    "✅ 3 active WhatsApp tasks",
+    "✅ 10 AI runs per day",
+    "✅ Chat, reminders, and media Q&A",
+    "❌ Advanced task capacity",
+    "❌ Priority support",
   ],
   starter: [
-    "✅ 10 active tasks",
-    "✅ WhatsApp + Telegram",
-    "✅ Gmail + Calendar",
-    "✅ 100 runs per day",
-    "✅ Drive and Sheets access",
-    "✅ Draft replies",
+    "✅ WhatsApp agent setup",
+    "✅ 10 active WhatsApp tasks",
+    "✅ 100 AI runs per day",
+    "✅ Contact memory and chat summaries",
+    "✅ Media, PDF, and voice understanding",
+    "❌ Priority support",
   ],
   pro: [
-    "✅ Unlimited active tasks",
-    "✅ Unlimited runs",
-    "✅ All integrations",
+    "✅ Unlimited WhatsApp tasks",
+    "✅ Unlimited AI runs",
+    "✅ Advanced contact and history controls",
+    "✅ Deep answers and stronger live-source checks",
     "✅ Priority support",
-    "✅ Custom workflows",
-    "✅ Advanced automation",
+    "✅ Analytics dashboard",
   ],
 };
 
@@ -173,7 +173,7 @@ function formatPlanStatus(info: UserPlanInfo) {
   }
 
   lines.push("", "*Your plan includes:*");
-  for (const feature of PLAN_FEATURES[info.plan]) {
+  for (const feature of WHATSAPP_PLAN_FEATURES[info.plan]) {
     lines.push(feature);
   }
 
@@ -212,7 +212,7 @@ async function buildUpgradeReply(userId: string, message: string) {
     return [
       `🚀 *Upgrade to ${targetLabel} - ${periodLabel}*`,
       "",
-      ...PLAN_FEATURES[targetPlan],
+      ...WHATSAPP_PLAN_FEATURES[targetPlan],
       "",
       "*Pay securely here:*",
       subscription.paymentUrl,
@@ -224,7 +224,7 @@ async function buildUpgradeReply(userId: string, message: string) {
     return [
       `💳 *Upgrade to ${targetLabel}*`,
       "",
-      ...PLAN_FEATURES[targetPlan],
+      ...WHATSAPP_PLAN_FEATURES[targetPlan],
       "",
       "I couldn't create the payment link right now.",
       "Please use *swift-deploy.in/pricing* or try again in a moment.",

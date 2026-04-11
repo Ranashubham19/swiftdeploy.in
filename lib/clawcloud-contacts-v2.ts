@@ -268,6 +268,7 @@ export function normalizeResolvedContactNameTokens(value: string) {
 function hasAnchoredSpecificNameOverlap(input: {
   requestedName: string;
   resolvedName: string;
+  matchedAlias?: string | null;
 }) {
   const requestedSpecificTokens = normalizeResolvedContactNameTokens(input.requestedName);
   const requestedRawTokens = String(input.requestedName ?? "")
@@ -281,8 +282,10 @@ function hasAnchoredSpecificNameOverlap(input: {
   }
 
   const requestedSpecific = requestedSpecificTokens[0]!;
-  const resolvedTokens = normalizeResolvedContactNameTokens(input.resolvedName);
-  return resolvedTokens.some((resolvedToken) => namesShareTokenLoosely(requestedSpecific, resolvedToken));
+  return uniqueStrings([input.matchedAlias, input.resolvedName]).some((candidate) => {
+    const resolvedTokens = normalizeResolvedContactNameTokens(candidate);
+    return resolvedTokens.some((resolvedToken) => namesShareTokenLoosely(requestedSpecific, resolvedToken));
+  });
 }
 
 function normalizeRelationshipSafeContactName(name: string) {
@@ -436,6 +439,12 @@ function hasLiteralRelationshipTokenOverlap(requestedName: string, resolvedName:
     resolvedTokens.some((resolvedToken) => namesShareTokenLoosely(requestedToken, resolvedToken)));
 }
 
+function hasCanonicalRelationshipAliasOverlap(requestedName: string, resolvedName: string) {
+  const requestedAlias = getSingleCanonicalRelationshipAlias(requestedName);
+  const resolvedAlias = getSingleCanonicalRelationshipAlias(resolvedName);
+  return Boolean(requestedAlias && resolvedAlias && requestedAlias === resolvedAlias);
+}
+
 function isSpecificNamedRelationshipVariant(
   resolvedName: string,
   requestedRelationshipAlias: string,
@@ -471,17 +480,41 @@ function isSpecificNamedRelationshipVariant(
 function requiresStrictRelationshipAliasConfirmation(input: {
   requestedName: string;
   resolvedName: string;
+  matchedAlias?: string | null;
+  exact?: boolean;
 }) {
   const requestedRelationshipAlias = getSingleCanonicalRelationshipAlias(input.requestedName);
   if (!requestedRelationshipAlias) {
     return false;
   }
 
-  if (isSpecificNamedRelationshipVariant(input.resolvedName, requestedRelationshipAlias)) {
+  const exactPlainMatchedAlias =
+    input.exact
+    && Boolean(input.matchedAlias)
+    && hasCanonicalRelationshipAliasOverlap(input.requestedName, input.matchedAlias ?? "")
+    && !isSpecificNamedRelationshipVariant(input.matchedAlias ?? "", requestedRelationshipAlias);
+  if (exactPlainMatchedAlias) {
+    return false;
+  }
+
+  for (const candidate of uniqueStrings([input.matchedAlias, input.resolvedName])) {
+    const hasRelationshipOverlap =
+      hasLiteralRelationshipTokenOverlap(input.requestedName, candidate)
+      || hasCanonicalRelationshipAliasOverlap(input.requestedName, candidate);
+    if (!hasRelationshipOverlap) {
+      continue;
+    }
+
+    const normalizedRequested = normalizeRelationshipSafeContactName(input.requestedName);
+    const normalizedCandidate = normalizeRelationshipSafeContactName(candidate);
+    if (normalizedRequested && normalizedCandidate && normalizedRequested === normalizedCandidate) {
+      continue;
+    }
+
     return true;
   }
 
-  return !hasLiteralRelationshipTokenOverlap(input.requestedName, input.resolvedName);
+  return false;
 }
 
 export function normalizeResolvedContactMatchScore(score: number | null | undefined) {
@@ -496,6 +529,7 @@ export function normalizeResolvedContactMatchScore(score: number | null | undefi
 export function isConfidentResolvedContactMatch(input: {
   requestedName: string;
   resolvedName: string;
+  matchedAlias?: string | null;
   exact: boolean;
   score: number;
   matchBasis: ContactMatchBasis | null;
@@ -510,45 +544,52 @@ export function isConfidentResolvedContactMatch(input: {
 
   const normalizedScore = normalizeResolvedContactMatchScore(input.score) ?? 0;
   const requestedTokens = normalizeResolvedContactNameTokens(input.requestedName);
-  const resolvedTokens = normalizeResolvedContactNameTokens(input.resolvedName);
-  if (!requestedTokens.length || !resolvedTokens.length) {
+  const resolvedCandidates = uniqueStrings([input.matchedAlias, input.resolvedName]);
+  if (!requestedTokens.length || !resolvedCandidates.length) {
     return normalizedScore >= 0.9;
   }
 
-  const requestedJoined = requestedTokens.join(" ");
-  const resolvedJoined = resolvedTokens.join(" ");
-  if (requestedJoined === resolvedJoined || resolvedJoined.startsWith(`${requestedJoined} `)) {
-    return true;
-  }
+  for (const candidate of resolvedCandidates) {
+    const resolvedTokens = normalizeResolvedContactNameTokens(candidate);
+    if (!resolvedTokens.length) {
+      continue;
+    }
 
-  const overlapCount = requestedTokens.filter((token) => resolvedTokens.includes(token)).length;
-  if (overlapCount === requestedTokens.length) {
-    return true;
-  }
+    const requestedJoined = requestedTokens.join(" ");
+    const resolvedJoined = resolvedTokens.join(" ");
+    if (requestedJoined === resolvedJoined || resolvedJoined.startsWith(`${requestedJoined} `)) {
+      return true;
+    }
 
-  if (
-    hasAnchoredSpecificNameOverlap(input)
-    && normalizedScore >= 0.88
-    && (input.matchBasis === "exact" || input.matchBasis === "prefix" || input.matchBasis === "word")
-  ) {
-    return true;
-  }
+    const overlapCount = requestedTokens.filter((token) => resolvedTokens.includes(token)).length;
+    if (overlapCount === requestedTokens.length) {
+      return true;
+    }
 
-  if (input.matchBasis === "word" && normalizedScore >= 0.9 && overlapCount >= 1) {
-    return requestedTokens.length === 1;
-  }
+    if (
+      hasAnchoredSpecificNameOverlap(input)
+      && normalizedScore >= 0.88
+      && (input.matchBasis === "exact" || input.matchBasis === "prefix" || input.matchBasis === "word")
+    ) {
+      return true;
+    }
 
-  if (
-    input.matchBasis === "prefix"
-    && requestedTokens[0]
-    && requestedTokens[0].length >= 4
-    && normalizedScore >= 0.93
-  ) {
-    return requestedTokens.length === 1;
-  }
+    if (input.matchBasis === "word" && normalizedScore >= 0.9 && overlapCount >= 1) {
+      return requestedTokens.length === 1;
+    }
 
-  if (input.matchBasis === "fuzzy" && normalizedScore >= 0.97 && requestedTokens.length > 1) {
-    return true;
+    if (
+      input.matchBasis === "prefix"
+      && requestedTokens[0]
+      && requestedTokens[0].length >= 4
+      && normalizedScore >= 0.93
+    ) {
+      return requestedTokens.length === 1;
+    }
+
+    if (input.matchBasis === "fuzzy" && normalizedScore >= 0.97 && requestedTokens.length > 1) {
+      return true;
+    }
   }
 
   return false;
@@ -557,6 +598,7 @@ export function isConfidentResolvedContactMatch(input: {
 export function isProfessionallyCommittedResolvedContactMatch(input: {
   requestedName: string;
   resolvedName: string;
+  matchedAlias?: string | null;
   exact: boolean;
   score: number;
   matchBasis: ContactMatchBasis | null;
@@ -611,6 +653,7 @@ export function isProfessionallyCommittedResolvedContactMatch(input: {
 export function classifyResolvedContactMatchConfidence(input: {
   requestedName: string;
   resolvedName: string;
+  matchedAlias?: string | null;
   exact: boolean;
   score: number;
   matchBasis: ContactMatchBasis | null;

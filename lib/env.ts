@@ -168,6 +168,15 @@ export const env = {
   ),
   OPENAI_API_KEY: readString("OPENAI_API_KEY"),
   OPENAI_MODEL: readString("OPENAI_MODEL", "gpt-4o-mini"),
+  GOOGLE_GEMINI_API_KEY: readFirstString([
+    "GOOGLE_GEMINI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_AI_API_KEY",
+  ]),
+  GOOGLE_GEMINI_LIVE_MODEL: readString(
+    "GOOGLE_GEMINI_LIVE_MODEL",
+    "models/gemini-2.5-flash",
+  ),
   STRIPE_SECRET_KEY: readString("STRIPE_SECRET_KEY"),
   STRIPE_WEBHOOK_SECRET: readString("STRIPE_WEBHOOK_SECRET"),
   STRIPE_PRICE_STARTER_MONTHLY_USD: readString("STRIPE_PRICE_STARTER_MONTHLY_USD"),

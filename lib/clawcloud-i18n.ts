@@ -867,8 +867,30 @@ export function resolveClawCloudReplyLanguage(input: {
   const isLatinOnlyMessage = LATIN_SCRIPT_MESSAGE_RE.test(normalized);
   const looksOperationalEnglish =
     /^(?:ok(?:ay)?\s+)?(?:send|message|msg|text|reply|read|save|sync|connect|disconnect|search|open|create|draft|email|gmail|calendar|drive|whatsapp|start|stop|turn\s+on|turn\s+off)\b/i.test(normalized);
+  const currentMessagePreserveRomanScript = shouldPreserveRomanScriptForLocale(
+    currentMessageLocale,
+    normalized,
+  );
 
-  if (!currentMessageLocale && isLatinOnlyMessage && looksOperationalEnglish) {
+  if (currentMessageLocale) {
+    if (currentMessageLocale !== input.preferredLocale) {
+      return {
+        locale: currentMessageLocale,
+        source: "mirrored_message",
+        detectedLocale: currentMessageLocale,
+        preserveRomanScript: currentMessagePreserveRomanScript,
+      };
+    }
+
+    return {
+      locale: input.preferredLocale,
+      source: "mirrored_message",
+      detectedLocale: currentMessageLocale,
+      preserveRomanScript: currentMessagePreserveRomanScript,
+    };
+  }
+
+  if (isLatinOnlyMessage && looksOperationalEnglish) {
     return {
       locale: "en",
       source: "mirrored_message",
@@ -896,7 +918,7 @@ export function resolveClawCloudReplyLanguage(input: {
     && isLatinOnlyMessage
     && input.preferredLocale !== "en"
     && !looksOperationalEnglish
-    && (!currentMessageLocale || currentMessageLocale === "en")
+    && !currentMessageLocale
   ) {
     return {
       locale: input.preferredLocale,
@@ -1026,7 +1048,7 @@ export function verifyReplyLanguageMatch(input: {
   }
 
   if (expectedLocale === "en") {
-    const replyIsEnglish = !replyLocale || replyLocale === "en" || looksLikeLikelyEnglishReply(normalizedReply);
+    const replyIsEnglish = replyLocale === "en" || looksLikeLikelyEnglishReply(normalizedReply);
     return { verified: replyIsEnglish, expected: "en", detected: replyLocale };
   }
 
@@ -1262,7 +1284,7 @@ export function buildLocalePreferenceStatusReply(locale: SupportedLocale) {
     `Your current reply language is *${label}*.`,
     "",
     "You can change it anytime with messages like _reply in English_ or _set language to Hindi_.",
-    "If you clearly switch languages in a message, I'll usually mirror that message naturally too.",
+    "I will stay aligned with your current message language, and I will only switch when you explicitly ask for another output language.",
   ].join("\n");
 }
 
@@ -1452,11 +1474,25 @@ export async function enforceClawCloudReplyLanguage(input: {
     }
 
     const romanTargetLocale: SupportedLocale = input.locale === "en" ? "hi" : input.locale;
-    return translateMessage(input.message, romanTargetLocale, {
+    const romanizedTranslation = await translateMessage(input.message, romanTargetLocale, {
       force: true,
       preserveRomanScript: true,
       targetLanguageName: input.targetLanguageName,
     });
+    const normalizedRomanizedTranslation = normalizeMessageForLanguageDetection(romanizedTranslation);
+    if (LATIN_SCRIPT_MESSAGE_RE.test(normalizedRomanizedTranslation)) {
+      return romanizedTranslation;
+    }
+
+    const forcedRomanization = romanizeIfIndicScript(romanizedTranslation, romanTargetLocale);
+    if (forcedRomanization) {
+      const normalizedForcedRomanization = normalizeMessageForLanguageDetection(forcedRomanization);
+      if (LATIN_SCRIPT_MESSAGE_RE.test(normalizedForcedRomanization)) {
+        return forcedRomanization;
+      }
+    }
+
+    return input.message;
   }
 
   const detectedLocale = inferClawCloudMessageLocale(normalized);

@@ -314,11 +314,15 @@ export function buildClawCloudCasualTalkInstruction(input: {
   const emotion = inferClawCloudEmotionalContext(input.message, input.recentTurns ?? []);
   const lines = [
     "CASUAL CONVERSATION ADAPTATION:",
+    "Classify the user's message as a NEW question, a FOLLOW-UP, or a CLARIFICATION before answering.",
     "Match the user's writing rhythm, formality, and energy naturally without sounding scripted.",
     "Continue the thread like a thoughtful human teammate, not a feature list or an AI brochure.",
     "Read the user's emotional state from the current and recent messages before answering.",
     "Use recent conversation context before assuming the user started a brand-new topic.",
+    "Resolve words like it, this, that, why, when, and how against the latest logical subject from recent turns.",
+    "Stay on the same topic unless the user clearly changes it.",
     "If the user's wording is vague, infer from recent context first. Only ask one brief clarification question if the context is still genuinely unclear.",
+    "If more than one earlier topic still fits, ask that one brief clarification instead of guessing.",
     "When you ask for clarification, sound natural and professional, not robotic or legalistic.",
     "Do not mention being an AI assistant unless the user asks about it directly.",
     `Observed user style: ${profile.summary}.`,

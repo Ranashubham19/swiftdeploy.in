@@ -124,81 +124,26 @@ const ICONS = {
 const EVERY_DAY_SCHEDULE = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
 
 const TASK_TYPE_ORDER = [
-  "morning_briefing",
-  "draft_replies",
-  "meeting_reminders",
-  "email_search",
-  "evening_summary",
   "custom_reminder",
+  "user_contacts",
   "weekly_spend",
 ] as const;
 
 const TASK_LABELS: Record<string, TaskTemplate> = {
-  morning_briefing: {
-    name: "Morning email briefing",
-    description: "Summarises your inbox and sends a daily briefing to WhatsApp at 7:00 AM",
-    icon: ICONS.sun,
-    tags: [`${ICONS.mail} Gmail`, `${ICONS.chat} WhatsApp`, "\u{1F556} 7:00 AM daily"],
-    requirements: ["gmail", "whatsapp"],
-    minimumPlan: "free",
-    installDefaults: {
-      scheduleTime: "07:00",
-      scheduleDays: [...EVERY_DAY_SCHEDULE],
-      config: { briefing_time: "7:00 AM" },
-      summary: "\u{1F556} 7:00 AM every day",
-    },
-  },
-  draft_replies: {
-    name: "Draft email replies",
-    description: 'Say "draft reply to [name]" on WhatsApp and your AI writes it to Gmail drafts',
-    icon: ICONS.pencil,
-    tags: [`${ICONS.mail} Gmail`, `${ICONS.chat} WhatsApp`, `${ICONS.zap} On demand`],
-    requirements: ["gmail", "whatsapp"],
-    minimumPlan: "free",
-    installDefaults: null,
-  },
-  meeting_reminders: {
-    name: "Meeting reminders",
-    description: "Sends a WhatsApp reminder 30 mins before each meeting with email context",
-    icon: ICONS.calendar,
-    tags: [`${ICONS.calendar} Calendar`, `${ICONS.chat} WhatsApp`, `${ICONS.alarm} 30min before`],
-    requirements: ["google_calendar", "whatsapp"],
-    minimumPlan: "free",
-    installDefaults: {
-      scheduleTime: null,
-      scheduleDays: null,
-      config: { minutes_before: 30, include_context: true },
-      summary: `${ICONS.alarm} 30 minutes before each meeting`,
-    },
-  },
-  email_search: {
-    name: "Search my email",
-    description: 'Ask "what did [person] say about [topic]?" and get an instant summary',
-    icon: ICONS.search,
-    tags: [`${ICONS.mail} Gmail`, `${ICONS.chat} WhatsApp`, `${ICONS.zap} On demand`],
-    requirements: ["gmail", "whatsapp"],
-    minimumPlan: "free",
-    installDefaults: null,
-  },
-  evening_summary: {
-    name: "Evening summary",
-    description: "End-of-day recap: what you did, what needs attention tomorrow",
-    icon: ICONS.moon,
-    tags: [`${ICONS.mail} Gmail`, `${ICONS.calendar} Calendar`, "\u{1F558} 9:00 PM daily"],
-    requirements: ["gmail", "google_calendar", "whatsapp"],
-    minimumPlan: "starter",
-    installDefaults: {
-      scheduleTime: "21:00",
-      scheduleDays: [...EVERY_DAY_SCHEDULE],
-      config: {},
-      summary: "\u{1F558} 9:00 PM every day",
-    },
-  },
   custom_reminder: {
     name: "Smart reminders",
     description: 'Say "Remind me at 5pm to call Priya" on WhatsApp',
     icon: ICONS.alarm,
     tags: [`${ICONS.chat} WhatsApp`, `${ICONS.zap} On demand`],
+    requirements: ["whatsapp"],
+    minimumPlan: "free",
+    installDefaults: null,
+  },
+  user_contacts: {
+    name: "Contact memory",
+    description: "Keeps contact summaries, chat context, and recent-message recall ready inside WhatsApp.",
+    icon: "\u{1F465}",
+    tags: [`${ICONS.chat} WhatsApp`, "Chat memory", `${ICONS.zap} On demand`],
     requirements: ["whatsapp"],
     minimumPlan: "free",
     installDefaults: null,
@@ -219,7 +164,7 @@ const TASK_LABELS: Record<string, TaskTemplate> = {
   },
 };
 
-const STARTER_TASKS = new Set(["evening_summary"]);
+const STARTER_TASKS = new Set<string>([]);
 
 const compactDateFormatter = new Intl.DateTimeFormat("en-US", {
   month: "short",
@@ -231,24 +176,24 @@ const integerFormatter = new Intl.NumberFormat("en-US");
 
 const suggestionButtons = [
   {
-    value: "Draft a reply to my last email from Priya",
-    label: "Draft reply to Priya",
+    value: 'Send "Running 10 minutes late" to Rajnish',
+    label: "Send a message",
   },
   {
-    value: "What meetings do I have tomorrow?",
-    label: "Tomorrow's meetings",
+    value: "Summarize the chat with Papa ji",
+    label: "Summarize a chat",
   },
   {
-    value: "Summarise unread emails from today",
-    label: "Today's emails",
+    value: "Tell me my latest messages with Hansraj",
+    label: "Read recent messages",
   },
   {
     value: "Remind me at 5pm to review the proposal",
     label: "Set a reminder",
   },
   {
-    value: "Search for emails about the Q4 budget",
-    label: "Search emails",
+    value: "Explain this image in detail",
+    label: "Analyze media",
   },
 ];
 
@@ -552,15 +497,15 @@ function createSeedActivity(): ActivityItem[] {
     {
       id: "activity-1",
       tone: "green",
-      title: "Morning briefing sent",
-      detail: "Summary delivered to WhatsApp",
+      title: "WhatsApp workspace linked",
+      detail: "Session is ready for commands and chat history tasks",
       time: "Today, 7:00 AM",
     },
     {
       id: "activity-2",
       tone: "blue",
-      title: "Draft replies",
-      detail: "Saved to Gmail drafts",
+      title: "Reminder task ready",
+      detail: "ClawCloud can now create reminder workflows in WhatsApp",
       time: "Today, 7:01 AM",
     },
   ];
@@ -1348,108 +1293,6 @@ export function DashboardShell({ config }: DashboardShellProps) {
   };
 
   const agentConnections = [
-    connectedProviders.has("gmail")
-      ? {
-          label: "Gmail",
-          status: googleNeedsWriteReconnect ? "Reconnect required" : "Connected",
-          detail: googleNeedsWriteReconnect
-            ? (googleCapabilities?.reconnectReason
-              || "Reconnect Google to restore Gmail inbox access.")
-            : gmailAccount?.account_email || "Connected and ready for inbox tasks.",
-          tone: googleNeedsWriteReconnect ? "neutral" as const : "good" as const,
-        }
-      : showLiteFallbackStatus && gmailLiteAccount
-        ? {
-            label: "Gmail",
-            status: "Lite connected",
-            detail: describeGlobalLiteConnection(gmailLiteAccount),
-            tone: "neutral" as const,
-          }
-      : featureStatus?.google_workspace_connect.available
-        ? {
-            label: "Gmail",
-            status: "Ready to connect",
-            detail: "Open settings to connect Gmail for inbox summaries, search, and drafts.",
-            tone: "neutral" as const,
-          }
-        : {
-            label: "Gmail",
-            status: "Unavailable",
-            detail:
-              featureStatus?.google_workspace_connect.reason
-              || "Google Workspace connect is unavailable.",
-            tone: "warn" as const,
-          },
-    connectedProviders.has("google_calendar")
-      ? {
-          label: "Google Calendar",
-          status: googleNeedsWriteReconnect ? "Reconnect required" : "Connected",
-          detail: googleNeedsWriteReconnect
-            ? (googleCapabilities?.reconnectReason
-              || "Reconnect Google to restore Calendar access.")
-            : (
-              calendarAccount?.account_email
-              || "Live calendar events are available for reminders and summaries."
-            ),
-          tone: googleNeedsWriteReconnect ? "neutral" as const : "good" as const,
-        }
-      : showLiteFallbackStatus && calendarLiteAccount
-        ? {
-            label: "Google Calendar",
-            status: "Lite connected",
-            detail: describeGlobalLiteConnection(calendarLiteAccount),
-            tone: "neutral" as const,
-          }
-      : featureStatus?.google_workspace_connect.available
-        ? {
-            label: "Google Calendar",
-            status: "Ready to connect",
-            detail: "Open settings to connect Calendar for meeting reminders.",
-            tone: "neutral" as const,
-          }
-        : {
-            label: "Google Calendar",
-            status: "Unavailable",
-            detail:
-              featureStatus?.google_workspace_connect.reason
-              || "Google Workspace connect is unavailable.",
-            tone: "warn" as const,
-          },
-    connectedProviders.has("google_drive")
-      ? {
-          label: "Google Drive",
-          status: googleNeedsWriteReconnect ? "Reconnect required" : "Connected",
-          detail: googleNeedsWriteReconnect
-            ? (googleCapabilities?.reconnectReason
-              || "Reconnect Google to restore Drive and Sheets access.")
-            : (
-              driveAccount?.account_email
-              || "Drive files are available for richer workspace workflows."
-            ),
-          tone: googleNeedsWriteReconnect ? "neutral" as const : "good" as const,
-        }
-      : showLiteFallbackStatus && driveLiteAccount
-        ? {
-            label: "Google Drive",
-            status: "Lite connected",
-            detail: describeGlobalLiteConnection(driveLiteAccount),
-            tone: "neutral" as const,
-          }
-      : featureStatus?.google_workspace_extended_connect.available
-        ? {
-            label: "Google Drive",
-            status: "Ready to connect",
-            detail: "Open settings to connect Drive for file retrieval and richer workspace context.",
-            tone: "neutral" as const,
-          }
-        : {
-            label: "Google Drive",
-            status: "Unavailable",
-            detail:
-              featureStatus?.google_workspace_extended_connect.reason
-              || "Extended Google Workspace connect is unavailable.",
-            tone: "warn" as const,
-          },
     isWhatsAppConnected
       ? {
           label: "WhatsApp",
@@ -1468,29 +1311,6 @@ export function DashboardShell({ config }: DashboardShellProps) {
             label: "WhatsApp",
             status: "Unavailable",
             detail: featureStatus?.whatsapp_agent.reason || "WhatsApp agent is unavailable.",
-            tone: "warn" as const,
-          },
-    connectedProviders.has("telegram")
-      ? {
-          label: "Telegram",
-          status: "Connected",
-          detail:
-            telegramAccount?.account_email
-            || telegramAccount?.display_name
-            || "Telegram bot linked.",
-          tone: "good" as const,
-        }
-      : featureStatus?.telegram_bot.available
-        ? {
-            label: "Telegram",
-            status: "Ready to connect",
-            detail: "Telegram bot is available when you want a second chat surface.",
-            tone: "neutral" as const,
-          }
-        : {
-            label: "Telegram",
-            status: "Unavailable",
-            detail: featureStatus?.telegram_bot.reason || "Telegram bot is unavailable.",
             tone: "warn" as const,
           },
   ];
@@ -1519,19 +1339,6 @@ export function DashboardShell({ config }: DashboardShellProps) {
             || "configured provider"
           }.`
         : featureStatus?.image_generation.reason || "Unavailable right now.",
-    },
-    {
-      label: "Extended Google access",
-      available:
-        Boolean(connectedProviders.has("google_drive"))
-        || Boolean(featureStatus?.google_workspace_extended_connect.available),
-      detail: connectedProviders.has("google_drive")
-        ? driveAccount?.account_email || "Google Drive is connected and ready for richer workspace workflows."
-        : showLiteFallbackStatus && driveLiteAccount
-        ? describeGlobalLiteConnection(driveLiteAccount)
-        : featureStatus?.google_workspace_extended_connect.available
-        ? "Drive-ready access is available for richer workspace workflows."
-        : featureStatus?.google_workspace_extended_connect.reason || "Unavailable right now.",
     },
   ];
 
@@ -1562,78 +1369,6 @@ export function DashboardShell({ config }: DashboardShellProps) {
 
   const accounts = [
     {
-      id: "gmail",
-      icon: ICONS.mail,
-      name: "Gmail",
-      detail: connectedProviders.has("gmail")
-        ? googleNeedsWriteReconnect
-          ? (googleCapabilities?.reconnectReason || "Reconnect Google to restore Gmail access.")
-          : gmailAccount?.account_email || disconnectedAccountDetail
-        : showLiteFallbackStatus && gmailLiteAccount
-          ? describeGlobalLiteConnection(gmailLiteAccount)
-          : disconnectedAccountDetail,
-      connected: connectedProviders.has("gmail") || Boolean(showLiteFallbackStatus && gmailLiteAccount),
-      stateLabel: connectedProviders.has("gmail")
-        ? googleNeedsWriteReconnect
-          ? "Reconnect needed"
-          : "Connected"
-        : showLiteFallbackStatus && gmailLiteAccount
-          ? "Lite connected"
-          : null,
-      actionLabel: "Open settings",
-      actionCopy: previewMode
-        ? "Connect Gmail in settings to replace preview data"
-        : "Connect Gmail in settings",
-    },
-    {
-      id: "calendar",
-      icon: ICONS.calendar,
-      name: "Google Calendar",
-      detail: connectedProviders.has("google_calendar")
-        ? googleNeedsWriteReconnect
-          ? (googleCapabilities?.reconnectReason || "Reconnect Google to restore Calendar access.")
-          : calendarAccount?.account_email || "Connected"
-        : showLiteFallbackStatus && calendarLiteAccount
-          ? describeGlobalLiteConnection(calendarLiteAccount)
-          : disconnectedAccountDetail,
-      connected: connectedProviders.has("google_calendar") || Boolean(showLiteFallbackStatus && calendarLiteAccount),
-      stateLabel: connectedProviders.has("google_calendar")
-        ? googleNeedsWriteReconnect
-          ? "Reconnect needed"
-          : "Connected"
-        : showLiteFallbackStatus && calendarLiteAccount
-          ? "Lite connected"
-          : null,
-      actionLabel: "Open settings",
-      actionCopy: previewMode
-        ? "Connect Calendar in settings to replace preview data"
-        : "Connect Calendar in settings",
-    },
-    {
-      id: "drive",
-      icon: ICONS.clipboard,
-      name: "Google Drive",
-      detail: connectedProviders.has("google_drive")
-        ? googleNeedsWriteReconnect
-          ? (googleCapabilities?.reconnectReason || "Reconnect Google to restore Drive access.")
-          : driveAccount?.account_email || "Connected"
-        : showLiteFallbackStatus && driveLiteAccount
-          ? describeGlobalLiteConnection(driveLiteAccount)
-          : disconnectedAccountDetail,
-      connected: connectedProviders.has("google_drive") || Boolean(showLiteFallbackStatus && driveLiteAccount),
-      stateLabel: connectedProviders.has("google_drive")
-        ? googleNeedsWriteReconnect
-          ? "Reconnect needed"
-          : "Connected"
-        : showLiteFallbackStatus && driveLiteAccount
-          ? "Lite connected"
-          : null,
-      actionLabel: "Open settings",
-      actionCopy: previewMode
-        ? "Connect Drive in settings to replace preview data"
-        : "Connect Drive in settings",
-    },
-    {
       id: "whatsapp",
       icon: ICONS.chat,
       name: "WhatsApp",
@@ -1642,28 +1377,6 @@ export function DashboardShell({ config }: DashboardShellProps) {
       stateLabel: isWhatsAppConnected ? "Connected" : null,
       actionLabel: "Open settings",
       actionCopy: isWhatsAppConnected ? "Open WhatsApp controls" : "Connect WhatsApp in settings",
-    },
-    {
-      id: "telegram",
-      icon: ICONS.phone,
-      name: "Telegram",
-      detail: connectedProviders.has("telegram")
-        ? "Connected"
-        : "Available on Starter plan",
-      connected: connectedProviders.has("telegram"),
-      stateLabel: connectedProviders.has("telegram") ? "Connected" : null,
-      actionLabel: "Upgrade",
-      actionCopy: "Upgrade to Starter to connect Telegram",
-    },
-    {
-      id: "slack",
-      icon: ICONS.bell,
-      name: "Slack",
-      detail: "Available on Pro plan",
-      connected: false,
-      stateLabel: null,
-      actionLabel: "Upgrade",
-      actionCopy: "Upgrade to Pro to connect Slack",
     },
   ];
   const connectedSurfaceCount = accounts.filter((account) => account.connected).length;
@@ -1675,12 +1388,10 @@ export function DashboardShell({ config }: DashboardShellProps) {
   ).length;
   const accountsSummaryTitle = connectedSurfaceCount > 0
     ? `${connectedSurfaceCount} surface${connectedSurfaceCount === 1 ? "" : "s"} ready`
-    : "Complete your workspace setup";
+    : "Connect your WhatsApp workspace";
   const accountsSummaryText = connectedSurfaceCount > 0
-    ? isWhatsAppConnected
-      ? "Your live surfaces are connected and the WhatsApp workspace is ready for commands, sync, and inbox review."
-      : "Your connected surfaces are ready. Add WhatsApp next to unlock the live operator workspace."
-    : "Connect Gmail, Calendar, and WhatsApp to turn this dashboard into a real operator workspace instead of a static panel.";
+    ? "Your WhatsApp workspace is ready for commands, sync, contact recall, and media understanding."
+    : "Connect WhatsApp to turn this dashboard into your live control surface.";
 
   const recentActivity: ActivityItem[] = (dashboardData?.recent_activity ?? [])
     .slice(0, 5)
@@ -2841,52 +2552,14 @@ export function DashboardShell({ config }: DashboardShellProps) {
           <button
             type="button"
             className={styles.navItem}
-            onClick={openAgentPanel}
-          >
-            <span className={styles.navIcon}>{ICONS.robot}</span>
-            My Agent
-          </button>
-          <button
-            type="button"
-            className={styles.navItem}
             onClick={openTaskLibraryPanel}
           >
             <span className={styles.navIcon}>{ICONS.zap}</span>
-            Tasks
+            WhatsApp tasks
             {hasLiveDashboardData ? <span className={styles.navBadge}>{liveTasks.length}</span> : null}
           </button>
 
-          <div className={styles.navSectionLabel}>Connections</div>
-          <button
-            type="button"
-            className={styles.navItem}
-            onClick={openGmailWorkspace}
-          >
-            <span className={styles.navIcon}>{ICONS.mail}</span>
-            Gmail
-            <span
-              className={`${styles.navBadge} ${
-                connectedProviders.has("gmail") ? styles.navBadgeGreen : ""
-              }`}
-            >
-              {gmailNavLabel}
-            </span>
-          </button>
-          <button
-            type="button"
-            className={styles.navItem}
-            onClick={openCalendarWorkspace}
-          >
-            <span className={styles.navIcon}>{ICONS.calendar}</span>
-            Calendar
-            <span
-              className={`${styles.navBadge} ${
-                connectedProviders.has("google_calendar") ? styles.navBadgeGreen : ""
-              }`}
-            >
-              {calendarNavLabel}
-            </span>
-          </button>
+          <div className={styles.navSectionLabel}>Workspace</div>
           <button
             type="button"
             className={styles.navItem}
@@ -2902,15 +2575,6 @@ export function DashboardShell({ config }: DashboardShellProps) {
               {whatsappNavLabel}
             </span>
           </button>
-          <button
-            type="button"
-            className={styles.navItem}
-            onClick={openSettings}
-          >
-            <span className={styles.navIcon}>{ICONS.link}</span>
-            Add account
-          </button>
-
           <div className={styles.navSectionLabel}>Analytics</div>
           <button
             type="button"
@@ -3080,48 +2744,45 @@ export function DashboardShell({ config }: DashboardShellProps) {
 
             <div className={styles.statCard}>
               <div className={styles.statTop}>
-                <div className={`${styles.statIcon} ${styles.statIconBlue}`}>{ICONS.mail}</div>
+                <div className={`${styles.statIcon} ${styles.statIconBlue}`}>{ICONS.check}</div>
                 <div className={`${styles.statChange} ${styles.statChangeUp}`}>today</div>
               </div>
               <div className={styles.statNumber}>
                 {dashboardLoading
                   ? "-"
                   : hasLiveDashboardData
-                    ? (analytics?.emails_processed ?? 0)
+                    ? (whatsappSummary?.pendingApprovalCount ?? 0)
                     : "\u2014"}
               </div>
-              <div className={styles.statLabel}>Emails processed</div>
+              <div className={styles.statLabel}>Pending approvals</div>
             </div>
 
             <div className={styles.statCard}>
               <div className={styles.statTop}>
-                <div className={`${styles.statIcon} ${styles.statIconAccent}`}>{ICONS.clock}</div>
+                <div className={`${styles.statIcon} ${styles.statIconAccent}`}>{ICONS.phone}</div>
               </div>
               <div className={styles.statNumber}>
                 {dashboardLoading
                   ? "-"
                   : hasLiveDashboardData
-                    ? Math.round(((analytics?.minutes_saved ?? 0) / 60) * 10) / 10
+                    ? (whatsappRuntime?.contactCount ?? 0)
                     : "\u2014"}
-                {hasLiveDashboardData && !dashboardLoading ? (
-                  <span className={styles.statUnit}>hr</span>
-                ) : null}
               </div>
-              <div className={styles.statLabel}>Time saved today</div>
+              <div className={styles.statLabel}>Synced contacts</div>
             </div>
 
             <div className={styles.statCard}>
               <div className={styles.statTop}>
-                <div className={`${styles.statIcon} ${styles.statIconAmber}`}>{ICONS.check}</div>
+                <div className={`${styles.statIcon} ${styles.statIconAmber}`}>{ICONS.chat}</div>
               </div>
               <div className={styles.statNumber}>
                 {dashboardLoading
                   ? "-"
                   : hasLiveDashboardData
-                    ? (analytics?.drafts_created ?? 0)
+                    ? (whatsappRuntime?.historyMessageCount ?? 0)
                     : "\u2014"}
               </div>
-              <div className={styles.statLabel}>Drafts created today</div>
+              <div className={styles.statLabel}>History messages</div>
             </div>
 
             <div className={styles.statCard}>
@@ -3141,14 +2802,14 @@ export function DashboardShell({ config }: DashboardShellProps) {
               <div id="tasks-section" className={styles.sectionCard}>
                 <div className={styles.cardHeader}>
                   <div className={styles.cardTitle}>
-                    {ICONS.link} Connected accounts
+                    {ICONS.link} WhatsApp connection
                   </div>
                   <button
                     type="button"
                     className={styles.cardAction}
                     onClick={openSettings}
                   >
-                    + Add account
+                    Open settings
                   </button>
                 </div>
 
@@ -3232,9 +2893,9 @@ export function DashboardShell({ config }: DashboardShellProps) {
                       <button
                         type="button"
                         className={styles.accountsOverviewButton}
-                        onClick={connectedSurfaceCount > 0 ? focusQuickCommand : openSettings}
+                        onClick={connectedSurfaceCount > 0 ? openWhatsAppWorkspace : openSettings}
                       >
-                        {connectedSurfaceCount > 0 ? "Send a command" : "Finish setup"}
+                        {connectedSurfaceCount > 0 ? "Open WhatsApp workspace" : "Finish setup"}
                       </button>
                     </div>
                   </div>
@@ -3714,316 +3375,6 @@ export function DashboardShell({ config }: DashboardShellProps) {
               <div className={styles.sectionCard}>
                 <div className={styles.cardHeader}>
                   <div className={styles.cardTitle}>
-                    {ICONS.chat} Daily ClawCloud journal
-                  </div>
-                  <button type="button" className={styles.cardAction} onClick={handleSendQuickMessage}>
-                    Ask hello -&gt;
-                  </button>
-                </div>
-
-                <div className={styles.waMessages}>
-                  <div className={styles.waHeaderBar}>
-                    <div className={styles.waAvatar}>{ICONS.robot}</div>
-                    <div>
-                      <div className={styles.waHeaderName}>ClawCloud dashboard</div>
-                      {journalMessages.length > 0 ? (
-                        <div className={styles.waHeaderStatus}>{cleanJournalHeaderStatus}</div>
-                      ) : null}
-                    </div>
-                  </div>
-
-                  {visibleJournalThreads.length > 0 ? (
-                    <div className={styles.journalTabs}>
-                      {visibleJournalThreads.map((thread) => (
-                        <button
-                          key={thread.id}
-                          type="button"
-                          className={`${styles.journalTab} ${
-                            thread.id === activeJournalId ? styles.journalTabActive : ""
-                          }`}
-                          onClick={() => handleJournalDaySelect(thread.id)}
-                        >
-                          <span className={styles.journalTabLabel}>
-                            {formatDashboardJournalLabel(thread.dateKey, todayJournalDateKey)}
-                          </span>
-                          <span className={styles.journalTabMeta}>
-                            {thread.messages.length} msg{thread.messages.length === 1 ? "" : "s"}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-
-                  <div className={styles.waBody}>
-                    {journalMessages.length > 0 ? (
-                      journalMessages.map((message) => (
-                        <div
-                          key={message.id}
-                          className={`${styles.waMessage} ${
-                            message.role === "bot" ? styles.waMessageBot : styles.waMessageUser
-                          }`}
-                        >
-                          <div className={styles.waMessageText}>{renderMessageText(message.text)}</div>
-                          {message.liveAnswerBundle ? (
-                            <div className={styles.waEvidenceBox}>
-                              <div className={styles.waEvidenceHeader}>
-                                <span className={styles.waEvidenceLabel}>
-                                  {buildLiveAnswerBundleStrategyLabel(message.liveAnswerBundle)} live evidence
-                                </span>
-                                {formatLiveAnswerBundleGeneratedAt(message.liveAnswerBundle.generatedAt) ? (
-                                  <span className={styles.waEvidenceMeta}>
-                                    {formatLiveAnswerBundleGeneratedAt(message.liveAnswerBundle.generatedAt)}
-                                  </span>
-                                ) : null}
-                              </div>
-                              {message.liveAnswerBundle.sourceSummary.length ? (
-                                <div className={styles.waEvidenceSources}>
-                                  {message.liveAnswerBundle.sourceSummary.join(" • ")}
-                                </div>
-                              ) : null}
-                              {message.liveAnswerBundle.sourceNote ? (
-                                <div className={styles.waEvidenceNote}>
-                                  {message.liveAnswerBundle.sourceNote}
-                                </div>
-                              ) : null}
-                              {message.liveAnswerBundle.evidence.length ? (
-                                <>
-                                  <button
-                                    type="button"
-                                    className={styles.waEvidenceToggle}
-                                    onClick={() => toggleEvidenceInspector(message.id)}
-                                  >
-                                    {expandedEvidenceMessageIds.includes(message.id)
-                                      ? "Hide evidence details"
-                                      : `Inspect ${message.liveAnswerBundle.evidence.length} source${message.liveAnswerBundle.evidence.length === 1 ? "" : "s"}`}
-                                  </button>
-                                  {expandedEvidenceMessageIds.includes(message.id) ? (
-                                    <div className={styles.waEvidenceInspector}>
-                                      {message.liveAnswerBundle.question ? (
-                                        <div className={styles.waEvidenceQuestion}>
-                                          <span className={styles.waEvidenceInspectorLabel}>Question</span>
-                                          <div>{message.liveAnswerBundle.question}</div>
-                                        </div>
-                                      ) : null}
-                                      <div className={styles.waEvidenceList}>
-                                        {message.liveAnswerBundle.evidence.map((item, index) => (
-                                          <div key={`${message.id}-${item.domain}-${index}`} className={styles.waEvidenceItem}>
-                                            <div className={styles.waEvidenceItemHeader}>
-                                              <span className={styles.waEvidenceItemTitle}>{item.title}</span>
-                                              <span className={styles.waEvidenceItemKind}>
-                                                {formatLiveAnswerEvidenceKind(item.kind)}
-                                              </span>
-                                            </div>
-                                            <div className={styles.waEvidenceItemMeta}>
-                                              {item.domain}
-                                              {formatLiveAnswerEvidencePublishedAt(item.publishedAt)
-                                                ? ` • ${formatLiveAnswerEvidencePublishedAt(item.publishedAt)}`
-                                                : ""}
-                                            </div>
-                                            {item.snippet ? (
-                                              <div className={styles.waEvidenceItemSnippet}>{item.snippet}</div>
-                                            ) : null}
-                                            {item.url ? (
-                                              <a
-                                                className={styles.waEvidenceItemLink}
-                                                href={item.url}
-                                                target="_blank"
-                                                rel="noreferrer"
-                                              >
-                                                Open source
-                                              </a>
-                                            ) : null}
-                                          </div>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  ) : null}
-                                </>
-                              ) : null}
-                            </div>
-                          ) : null}
-                          {message.modelAuditTrail ? (
-                            <div className={styles.waTraceBox}>
-                              <div className={styles.waTraceHeader}>
-                                <span className={styles.waTraceLabel}>Model audit</span>
-                                <span className={styles.waTraceMeta}>
-                                  {message.modelAuditTrail.responseMode} • {formatModelAuditSelection(message.modelAuditTrail.selectedBy)}
-                                </span>
-                              </div>
-                              <div className={styles.waTraceSummary}>
-                                {formatModelAuditIntent(message.modelAuditTrail.intent)} • {formatModelAuditStrategy(message.modelAuditTrail.planner.strategy)}
-                                {message.modelAuditTrail.selectedModel ? ` • ${message.modelAuditTrail.selectedModel}` : ""}
-                              </div>
-                              <button
-                                type="button"
-                                className={styles.waTraceToggle}
-                                onClick={() => toggleModelAuditInspector(message.id)}
-                              >
-                                {expandedModelAuditMessageIds.includes(message.id)
-                                  ? "Hide model audit"
-                                  : `Inspect ${message.modelAuditTrail.candidates.length} model${message.modelAuditTrail.candidates.length === 1 ? "" : "s"}`}
-                              </button>
-                              {expandedModelAuditMessageIds.includes(message.id) ? (
-                                <div className={styles.waTraceInspector}>
-                                  <div className={styles.waTraceInspectorSection}>
-                                    <span className={styles.waTraceInspectorLabel}>Planner</span>
-                                    <div className={styles.waTraceInspectorText}>
-                                      {formatModelAuditStrategy(message.modelAuditTrail.planner.strategy)} • target {message.modelAuditTrail.planner.targetResponses} • batch {message.modelAuditTrail.planner.generatorBatchSize}
-                                    </div>
-                                  </div>
-                                  <div className={styles.waTraceInspectorSection}>
-                                    <span className={styles.waTraceInspectorLabel}>Decision</span>
-                                    <div className={styles.waTraceInspectorText}>
-                                      {formatModelAuditSelection(message.modelAuditTrail.selectedBy)}
-                                      {message.modelAuditTrail.selectedModel ? ` • ${message.modelAuditTrail.selectedModel}` : ""}
-                                    </div>
-                                  </div>
-                                  {message.modelAuditTrail.judge ? (
-                                    <div className={styles.waTraceInspectorSection}>
-                                      <span className={styles.waTraceInspectorLabel}>Judge</span>
-                                      <div className={styles.waTraceInspectorText}>
-                                        {message.modelAuditTrail.judge.used
-                                          ? `${message.modelAuditTrail.judge.model ?? "Judge"} • ${message.modelAuditTrail.judge.confidence ?? "n/a"} confidence`
-                                          : "Not invoked"}
-                                        {message.modelAuditTrail.judge.materialDisagreement ? " • disagreement detected" : ""}
-                                        {message.modelAuditTrail.judge.needsClarification ? " • clarification needed" : ""}
-                                      </div>
-                                      {message.modelAuditTrail.judge.reason ? (
-                                        <div className={styles.waTraceJudgeReason}>
-                                          {message.modelAuditTrail.judge.reason}
-                                        </div>
-                                      ) : null}
-                                    </div>
-                                  ) : null}
-                                  <div className={styles.waTraceCandidateList}>
-                                    {message.modelAuditTrail.candidates.map((candidate, index) => (
-                                      <div key={`${message.id}-${candidate.model}-${index}`} className={styles.waTraceCandidate}>
-                                        <div className={styles.waTraceCandidateHeader}>
-                                          <span className={styles.waTraceCandidateModel}>{candidate.model}</span>
-                                          <span className={styles.waTraceCandidateMeta}>
-                                            {candidate.tier} • {candidate.status} • {candidate.latencyMs}ms
-                                          </span>
-                                        </div>
-                                        {candidate.heuristicScore !== null ? (
-                                          <div className={styles.waTraceCandidateScore}>
-                                            score {candidate.heuristicScore}
-                                          </div>
-                                        ) : null}
-                                        {candidate.preview ? (
-                                          <div className={styles.waTraceCandidatePreview}>{candidate.preview}</div>
-                                        ) : null}
-                                      </div>
-                                    ))}
-                                  </div>
-                                </div>
-                              ) : null}
-                            </div>
-                          ) : null}
-                          {message.appAccessConsent ? (
-                            <div className={styles.waConsentBox}>
-                              {message.appAccessConsent.status === "pending" ? (
-                                <div className={styles.waConsentActions}>
-                                  <button
-                                    type="button"
-                                    className={`${styles.waConsentButton} ${styles.waConsentButtonApprove}`}
-                                    disabled={consentSubmittingToken === message.appAccessConsent.token}
-                                    onClick={() =>
-                                      void handleJournalConsentDecision(
-                                        message.appAccessConsent!,
-                                        "approve",
-                                      )
-                                    }
-                                  >
-                                    {consentSubmittingToken === message.appAccessConsent.token
-                                      ? "Working..."
-                                      : message.appAccessConsent.yesLabel}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className={`${styles.waConsentButton} ${styles.waConsentButtonDeny}`}
-                                    disabled={consentSubmittingToken === message.appAccessConsent.token}
-                                    onClick={() =>
-                                      void handleJournalConsentDecision(
-                                        message.appAccessConsent!,
-                                        "deny",
-                                      )
-                                    }
-                                  >
-                                    {message.appAccessConsent.noLabel}
-                                  </button>
-                                </div>
-                              ) : (
-                                <div className={styles.waConsentResolved}>
-                                  {message.appAccessConsent.status === "approved"
-                                    ? "Access approved"
-                                    : "Access denied"}
-                                </div>
-                              )}
-                            </div>
-                          ) : null}
-                          {message.conversationStyleRequest ? (
-                            <div className={styles.waConsentBox}>
-                              {message.conversationStyleRequest.status === "pending" ? (
-                                <div className={styles.waConsentActions}>
-                                  <button
-                                    type="button"
-                                    className={`${styles.waConsentButton} ${styles.waConsentButtonApprove}`}
-                                    disabled={consentSubmittingToken === message.conversationStyleRequest.token}
-                                    onClick={() =>
-                                      void handleJournalConversationStyleDecision(
-                                        message.conversationStyleRequest!,
-                                        "professional",
-                                      )
-                                    }
-                                  >
-                                    {consentSubmittingToken === message.conversationStyleRequest.token
-                                      ? "Working..."
-                                      : message.conversationStyleRequest.professionalLabel}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className={`${styles.waConsentButton} ${styles.waConsentButtonDeny}`}
-                                    disabled={consentSubmittingToken === message.conversationStyleRequest.token}
-                                    onClick={() =>
-                                      void handleJournalConversationStyleDecision(
-                                        message.conversationStyleRequest!,
-                                        "casual",
-                                      )
-                                    }
-                                  >
-                                    {message.conversationStyleRequest.casualLabel}
-                                  </button>
-                                </div>
-                              ) : (
-                                <div className={styles.waConsentResolved}>
-                                  {message.conversationStyleRequest.status === "professional"
-                                    ? "Professional mode selected"
-                                    : "Casual mode selected"}
-                                </div>
-                              )}
-                            </div>
-                          ) : null}
-                          <div className={styles.waMessageTime}>{message.time}</div>
-                        </div>
-                      ))
-                    ) : (
-                      <div className={styles.waEmpty}>{journalEmptyText}</div>
-                    )}
-
-                    {typingVisible ? (
-                      <div className={styles.waTyping}>
-                        <span />
-                        <span />
-                        <span />
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              </div>
-
-              <div className={styles.sectionCard}>
-                <div className={styles.cardHeader}>
-                  <div className={styles.cardTitle}>
                     {ICONS.clipboard} Recent activity
                   </div>
                   <button
@@ -4064,123 +3415,6 @@ export function DashboardShell({ config }: DashboardShellProps) {
             </div>
           </div>
 
-          <div className={styles.quickCommand}>
-            <div className={styles.quickCommandHeader}>
-              {ICONS.zap} Quick command - send to your agent
-            </div>
-            <div className={styles.commandInputRow}>
-              <input
-                ref={commandInputRef}
-                type="text"
-                className={styles.commandInput}
-                value={commandInput}
-                disabled={sendingCommand}
-                onChange={(event) => setCommandInput(event.target.value)}
-                onKeyDown={handleCommandKeyDown}
-                placeholder='Try: "Summarise emails from last week" or "Remind me tomorrow at 9am about project review"'
-              />
-              <button
-                type="button"
-                className={styles.commandButton}
-                onClick={() => void handleCommandSubmit()}
-                disabled={sendingCommand}
-              >
-                {sendingCommand ? "Sending..." : "Send -&gt;"}
-              </button>
-            </div>
-            <div className={styles.commandSuggestions}>
-              {suggestionButtons.map((suggestion) => (
-                <button
-                  key={suggestion.value}
-                  type="button"
-                  className={styles.commandChip}
-                  onClick={() => focusCommandInputWithValue(suggestion.value)}
-                >
-                  {suggestion.label}
-                </button>
-              ))}
-            </div>
-
-            <div className={styles.commandStarterPanel}>
-              <div className={styles.commandStarterHead}>
-                <div>
-                  <div className={styles.commandStarterEyebrow}>What can I ask?</div>
-                  <div className={styles.commandStarterTitle}>
-                    Starter prompts for your connected apps
-                  </div>
-                </div>
-                <div className={styles.commandStarterMeta}>
-                  {connectedStarterPromptCount} live
-                </div>
-              </div>
-
-              <div className={styles.commandStarterGrid}>
-                {dashboardStarterPromptSections.map((section) => {
-                  const sectionState = starterPromptDashboardState[section.id];
-                  const connected = sectionState.connected;
-
-                  return (
-                    <div
-                      key={section.id}
-                      className={`${styles.commandStarterCard} ${
-                        connected ? styles.commandStarterCardActive : styles.commandStarterCardMuted
-                      }`}
-                    >
-                      <div className={styles.commandStarterCardHeader}>
-                        <div>
-                          <div className={styles.commandStarterLabel}>{section.label}</div>
-                          <div className={styles.commandStarterDescription}>
-                            {sectionState.description}
-                          </div>
-                        </div>
-                        <span
-                          className={`${styles.commandStarterStatus} ${
-                            connected
-                              ? styles.commandStarterStatusActive
-                              : styles.commandStarterStatusMuted
-                          }`}
-                        >
-                          {sectionState.statusLabel}
-                        </span>
-                      </div>
-
-                      {sectionState.note ? (
-                        <div className={styles.commandStarterNote}>{sectionState.note}</div>
-                      ) : null}
-
-                      <div className={styles.commandStarterExamples}>
-                        {section.examples.map((example) => (
-                          <button
-                            key={example.prompt}
-                            type="button"
-                            className={styles.commandStarterExample}
-                            disabled={!connected}
-                            onClick={() => focusCommandInputWithValue(example.prompt)}
-                          >
-                            {example.label}
-                          </button>
-                        ))}
-                      </div>
-
-                      <button
-                        type="button"
-                        className={styles.commandStarterAction}
-                        onClick={() =>
-                          void handleStarterPromptSectionAction(
-                            section.id,
-                            sectionState.actionIntent,
-                          )
-                        }
-                      >
-                        {sectionState.actionLabel}
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-
           {plan === "free" && hasLiveDashboardData ? (
             <div className={styles.upgradeBanner}>
               <div className={styles.upgradeInfo}>
@@ -4190,7 +3424,7 @@ export function DashboardShell({ config }: DashboardShellProps) {
                   }`}
                 </h3>
                 <p className={styles.upgradeText}>
-                  Upgrade to Starter for unlimited runs, Telegram, draft sending, and more -
+                  Upgrade to Starter for higher run limits, more WhatsApp automations, and more -
                   just {" \u20B9"}799/month
                 </p>
               </div>
@@ -4365,8 +3599,8 @@ export function DashboardShell({ config }: DashboardShellProps) {
                   <section className={styles.drawerSection}>
                     <div className={styles.drawerSectionTitle}>Quick actions</div>
                     <div className={styles.drawerActionGrid}>
-                      <button type="button" className={styles.drawerActionButton} onClick={focusQuickCommand}>
-                        Send a command
+                      <button type="button" className={styles.drawerActionButton} onClick={openWhatsAppWorkspace}>
+                        Open WhatsApp workspace
                       </button>
                       <button type="button" className={styles.drawerActionButton} onClick={openTaskLibraryPanel}>
                         Open task library

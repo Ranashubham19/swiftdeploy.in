@@ -7,7 +7,7 @@ import {
 
 export const metadata: Metadata = {
   title: "ClawCloud - Setup guide",
-  description: "Step-by-step help for connecting Gmail, WhatsApp, Calendar, Drive, and tasks in ClawCloud setup.",
+  description: "Step-by-step help for linking WhatsApp and choosing WhatsApp tasks in ClawCloud setup.",
 };
 
 type SetupGuideRouteProps = {
@@ -18,7 +18,7 @@ type SetupGuideRouteProps = {
 
 export default async function SetupGuideRoute({ searchParams }: SetupGuideRouteProps) {
   const params = await searchParams;
-  const topic = isSetupGuideTopic(params.topic) ? params.topic : "global-connect";
+  const topic = isSetupGuideTopic(params.topic) ? params.topic : "whatsapp-connect";
 
   return <SetupGuidePage topic={topic} />;
 }

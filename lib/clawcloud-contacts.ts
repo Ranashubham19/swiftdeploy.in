@@ -201,6 +201,23 @@ export type ParsedSendMessageAction =
     riskSummary: "direct_phone";
   };
 
+const LIST_CONTACTS_COMMAND_PATTERNS = [
+  /\b(?:my\s+(?:whatsapp\s+)?contacts|list\s+(?:my\s+)?(?:whatsapp\s+)?contacts|show\s+(?:my\s+)?(?:whatsapp\s+)?contacts|show\s+(?:all\s+)?(?:my\s+)?(?:whatsapp\s+)?contacts)\b/i,
+  /\b(?:mis\s+contactos(?:\s+de\s+whatsapp)?|muestra\s+(?:mis\s+)?contactos(?:\s+de\s+whatsapp)?|lista\s+(?:mis\s+)?contactos(?:\s+de\s+whatsapp)?)\b/iu,
+  /\b(?:mes\s+contacts|montre\s+(?:mes\s+)?contacts|liste\s+(?:mes\s+)?contacts)\b/iu,
+  /\b(?:meine\s+kontakte|zeige\s+(?:meine\s+)?kontakte|liste\s+(?:meine\s+)?kontakte)\b/iu,
+  /\b(?:meus\s+contatos|mostra\s+(?:meus\s+)?contatos|liste\s+(?:meus\s+)?contatos)\b/iu,
+  /\b(?:i\s+miei\s+contatti|mostra\s+(?:i\s+miei\s+)?contatti|elenca\s+(?:i\s+miei\s+)?contatti)\b/iu,
+  /\b(?:kişilerimi|kişilerimi\s+g[oö]ster|kişi\s+listemi\s+g[oö]ster|kişi(?:ler)?\s+listesi(?:ni)?\s+listele)\b/iu,
+  /\b(?:мои\s+контакты|покажи\s+(?:мои\s+)?контакты|список\s+контактов)\b/u,
+  /\b(?:جهات\s+اتصالي|جهات\s+الاتصال|اعرض\s+جهات\s+الاتصال|قائمة\s+جهات\s+الاتصال)\b/u,
+  /(?:显示|顯示|查看|看看)(?:我的)?(?:联系人|聯絡人)(?:列表)?/u,
+  /(?:我的)?(?:联系人|聯絡人)(?:列表)?/u,
+  /(?:連絡先|コンタクト)(?:一覧)?(?:を)?(?:見せて|表示|確認|一覧)/u,
+  /(?:연락처|주소록)(?:를)?(?:보여줘|목록|리스트|확인해줘)/u,
+  /(?:รายชื่อผู้ติดต่อ|ผู้ติดต่อ)(?:ของฉัน)?(?:แสดง|ดู|รายการ)/u,
+];
+
 const AMBIGUOUS_RECIPIENT_PLACEHOLDERS = new Set([
   ...AMBIGUOUS_DIRECT_RECIPIENTS,
   "him",
@@ -249,8 +266,8 @@ const CONDITIONAL_SEND_CUE_PATTERN =
 const SCHEDULED_SEND_CUE_PATTERN =
   /\b(?:tomorrow|tonight|later|today|this\s+(?:morning|afternoon|evening|night)|next\s+(?:week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|on\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:at|around|by)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|in\s+\d+\s+(?:minutes?|hours?|days?|weeks?)|after\s+\d+\s+(?:minutes?|hours?|days?|weeks?))\b/i;
 
-const SEND_VERB_SOURCE = "(?:send|sned|snd)";
-const REPLY_VERB_SOURCE = "(?:reply|replly)";
+const SEND_VERB_SOURCE = "(?:send|sned|snd|forward|fwd)";
+const REPLY_VERB_SOURCE = "(?:reply|replly|respond)";
 const MESSAGE_SURFACE_SOURCE = "(?:(?:(?:whatsapp|whatsap|whatsaap|wa)\\s+)?(?:message|mesage|msg)|whatsapp|whatsap|whatsaap|wa)";
 const SEND_SEPARATOR_SOURCE = "(?:saying|sayng|sayin|that|with)";
 const SEND_COMMAND_SOFT_PREFIX_SOURCE = "(?:(?:please|pls|plz|just|juat|simply|only|ok|okay)\\s+)*";
@@ -258,13 +275,40 @@ const CLAWCLOUD_STYLE_PREFIX_RE = /^(?:\[\[clawcloud-style:(?:professional|casua
 const ABSTRACT_MESSAGE_TEMPLATE_KEYWORD_RE =
   /\b(?:thank(?:s| you)?|thanku|gratitude|appreciation|note|wish|greeting|reply|text|apology|sorry|birthday|congrat(?:s|ulations)?|farewell|welcome|invitation|invite|follow[\s-]?up|reminder)\b/i;
 const ABSTRACT_MESSAGE_TEMPLATE_STYLE_RE =
-  /\b(?:professional|formal|polite|warm|sweet|heartfelt|brief|short|nice|proper|kind)\b/i;
+  /\b(?:professional|formal|polite|warm|sweet|heartfelt|brief|short|nice|proper|kind|beautiful|lovely|sundar|sunder|pyara|pyari|khubsurat|refreshing|fresh)\b/i;
 
 const RECIPIENT_TRAILING_OPERATIONAL_NOISE_PATTERNS = [
   /\b(?:on\s+my\s+behalf|for\s+me|in\s+my\s+name|from\s+my\s+side)\s*$/i,
   /\b(?:mere?\s+behalf(?:\s+(?:me|mai|mein|par|pe))?|meri\s+taraf\s+se|meri\s+or\s+se)\s*$/i,
   /\b(?:please|pls|plz|na)\s*$/i,
 ] as const;
+
+const RECIPIENT_LEADING_ADDRESS_TOKENS = new Set([
+  "aap",
+  "app",
+  "ap",
+  "tum",
+  "tu",
+  "please",
+  "pls",
+  "plz",
+]);
+
+function stripLeadingRecipientAddressTerms(value: string) {
+  const tokens = cleanupNamePunctuation(value)
+    .split(/\s+/)
+    .filter(Boolean);
+
+  while (tokens.length > 1 && RECIPIENT_LEADING_ADDRESS_TOKENS.has(tokens[0]!.toLowerCase())) {
+    tokens.shift();
+  }
+
+  return tokens.join(" ").trim();
+}
+
+function isRecipientSpeakerAddressToken(value: string) {
+  return RECIPIENT_LEADING_ADDRESS_TOKENS.has(String(value ?? "").trim().toLowerCase());
+}
 
 function cleanupNamePunctuation(value: string) {
   return value
@@ -278,7 +322,7 @@ function cleanupNamePunctuation(value: string) {
 }
 
 function stripRecipientTrailingOperationalNoise(value: string) {
-  let cleaned = cleanupNamePunctuation(value);
+  let cleaned = cleanupNamePunctuation(stripLeadingRecipientAddressTerms(value));
   if (!cleaned) {
     return "";
   }
@@ -295,7 +339,7 @@ function stripRecipientTrailingOperationalNoise(value: string) {
     }
   }
 
-  return cleaned;
+  return stripLeadingRecipientAddressTerms(cleaned);
 }
 
 function normalizeSendMessageBodyForSafety(message: string) {
@@ -343,6 +387,23 @@ function stripClawCloudInternalCommandPrefixes(value: string) {
   return String(value ?? "")
     .replace(CLAWCLOUD_STYLE_PREFIX_RE, "")
     .trim();
+}
+
+export function looksLikeListContactsCommand(text: string) {
+  const normalized = normalizeClawCloudUnderstandingMessage(
+    stripClawCloudConversationalLeadIn(
+      stripClawCloudInternalCommandPrefixes(String(text ?? "")),
+    ),
+  ).trim();
+  if (!normalized) {
+    return false;
+  }
+
+  if (normalized.toLowerCase() === "contacts") {
+    return true;
+  }
+
+  return LIST_CONTACTS_COMMAND_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
 function looksLikeActiveContactHandoffCommand(value: string) {
@@ -449,11 +510,13 @@ function buildParsedSendCommand(
   message: string,
 ): ParsedSendMessageCommand | null {
   const cleanedRecipients = stripRecipientTrailingOperationalNoise(
-    rawRecipients
+    stripLeadingRecipientAddressTerms(
+      rawRecipients
       .trim()
       .replace(/^[,:-]+|[,:-]+$/g, "")
       .replace(/,\s*/g, " and ")
       .trim(),
+    ),
   );
   const cleanedMessage = message.trim().replace(/^["']|["']$/g, "").trim();
   if (!cleanedRecipients || !cleanedMessage) {
@@ -503,7 +566,7 @@ const NON_CONTACT_TELL_RECIPIENT_PATTERN =
   /\b(?:conversation|chat|history|summary|recap|overview|message|messages|text|texts|email|emails|mail|number|details?|story|plot|paragraph|note|greeting|wish|draft|letter|caption|poem|essay|richest|poorest|largest|smallest|best|worst|top|latest|news|weather|price|prices|capital|math|maths|coding|code)\b/i;
 
 function looksLikeTellMessageRecipient(rawRecipient: string) {
-  const cleaned = cleanupNamePunctuation(rawRecipient);
+  const cleaned = cleanupNamePunctuation(stripLeadingRecipientAddressTerms(rawRecipient));
   if (!cleaned) {
     return false;
   }
@@ -544,7 +607,7 @@ function looksLikeAbstractTemplateMessageDescriptor(value: string) {
   }
 
   const hasIntentKeyword = ABSTRACT_MESSAGE_TEMPLATE_KEYWORD_RE.test(cleaned);
-  const hasMessageSurface = /\b(?:note|message|wish|greeting|reply|text)\b/.test(cleaned);
+  const hasMessageSurface = /\b(?:note|message|wish|greeting|reply|text|paragraph)\b/.test(cleaned);
   const hasStyleCue = ABSTRACT_MESSAGE_TEMPLATE_STYLE_RE.test(cleaned);
 
   return hasIntentKeyword || (hasMessageSurface && hasStyleCue);
@@ -681,6 +744,117 @@ export function parseSaveContactCommand(text: string): { name: string; phone: st
   );
   if (p6) return { name: cleanupNamePunctuation(p6[1] ?? ""), phone: p6[2]?.trim() ?? "" };
 
+  const localizedPatterns = [
+    new RegExp(
+      `^(?:guardar?|guarda|agrega|agregar|ajouter|enregistrer|enregistre|speichere|speichern|salva|salvar|salve|aggiungi|memorizza|kaydet|сохрани|добавь)\\s+(?:el\\s+|le\\s+|o\\s+|il\\s+)?(?:contacto|contact|contato|contatto|kontakt|контакт)?[:\\s]+${namePattern}\\s*(?:como|comme|als|come|=|:)\\s*${phonePattern}$`,
+      "iu",
+    ),
+    /^(?:احفظ|أضف|اضف)\s+(?:جهة\s+الاتصال\s+)?(.{1,50}?)\s*(?:=|:)\s*([\d\s+\-()]{7,20})$/u,
+    /^(?:保存|儲存)(?:联系人|聯絡人)?[:：]?\s*(.{1,50}?)\s*(?:=|:|：)\s*([\d\s+\-()]{7,20})$/u,
+    /^(?:連絡先)?\s*(.{1,50}?)\s*(?:を)?\s*(?:保存|登録)\s*(?:=|:|：)?\s*([\d\s+\-()]{7,20})$/u,
+    /^(?:연락처)?\s*(.{1,50}?)\s*(?:을|를)?\s*저장\s*(?:=|:|：)?\s*([\d\s+\-()]{7,20})$/u,
+    /^(?:บันทึก)(?:ผู้ติดต่อ)?\s*(.{1,50}?)\s*(?:=|:|：)\s*([\d\s+\-()]{7,20})$/u,
+  ];
+
+  for (const pattern of localizedPatterns) {
+    const match = t.match(pattern);
+    if (match?.[1] && match[2]) {
+      return {
+        name: cleanupNamePunctuation(match[1]),
+        phone: match[2].trim(),
+      };
+    }
+  }
+
+  return null;
+}
+
+function parseLocalizedSendMessageCommandCandidate(t: string): ParsedSendMessageCommand | null {
+  const localizedPatterns: Array<{
+    pattern: RegExp;
+    recipientGroup: number;
+    messageGroup: number;
+  }> = [
+    {
+      pattern: /^(?:por favor\s+)?(?:env[ií]a|manda|responde|escribe)(?:\s+(?:un\s+)?)?(?:mensaje|texto|whatsapp)?\s*(?:a|para)\s+(.+?)\s*(?:diciendo|que\s+diga|:|：)\s+(.+)$/iu,
+      recipientGroup: 1,
+      messageGroup: 2,
+    },
+    {
+      pattern: /^(?:s'il\s+te\s+pla[iî]t\s+)?(?:envoie|envoie-moi|écris|ecris|réponds?|reponds?)\s+(?:un\s+)?(?:message|texto?|whatsapp)?\s*(?:à|a)\s+(.+?)\s*(?:en\s+disant|avec|:|：)\s+(.+)$/iu,
+      recipientGroup: 1,
+      messageGroup: 2,
+    },
+    {
+      pattern: /^(?:bitte\s+)?(?:sende|schick(?:e)?|antworte|schreibe)\s+(?:eine\s+)?(?:nachricht|whatsapp|text)?\s*(?:an)\s+(.+?)\s*(?:mit|:|：)\s+(.+)$/iu,
+      recipientGroup: 1,
+      messageGroup: 2,
+    },
+    {
+      pattern: /^(?:por favor\s+)?(?:envia|envie|manda|mande|responde|responda|escreve|escreva)\s+(?:uma\s+)?(?:mensagem|texto|whatsapp)?\s*(?:para|a|ao)\s+(.+?)\s*(?:dizendo|com|:|：)\s+(.+)$/iu,
+      recipientGroup: 1,
+      messageGroup: 2,
+    },
+    {
+      pattern: /^(?:per favore\s+)?(?:invia|manda|scrivi|rispondi)\s+(?:un\s+)?(?:messaggio|testo|whatsapp)?\s*(?:a)\s+(.+?)\s*(?:dicendo|con|:|：)\s+(.+)$/iu,
+      recipientGroup: 1,
+      messageGroup: 2,
+    },
+    {
+      pattern: /^(?:l[uü]tfen\s+)?(?:g[oö]nder|gonder|yaz|yan[ıi]tla|yanitla)\s+(?:bir\s+)?(?:mesaj|whatsapp|metin)?\s*(?:ile|la|le|için|icin)?\s+(.+?)\s*(?:diye|şöyle|soyle|:|：)\s+(.+)$/iu,
+      recipientGroup: 1,
+      messageGroup: 2,
+    },
+    {
+      pattern: /^(?:пожалуйста\s+)?(?:отправь|отправить|напиши|ответь)\s+(?:сообщение\s+)?(?:в\s+whatsapp\s+)?(?:к|для)\s+(.+?)\s*(?:со\s+словами|с\s+текстом|:|：)\s+(.+)$/u,
+      recipientGroup: 1,
+      messageGroup: 2,
+    },
+    {
+      pattern: /^(?:من\s+فضلك\s+)?(?:أرسل|ارسل|ابعث|اكتب|رد|ردي)\s+(?:رسالة|نص|واتساب)?\s*(?:إلى|الى|ل)\s+(.+?)\s*(?:تقول|مفادها|:|：)\s+(.+)$/u,
+      recipientGroup: 1,
+      messageGroup: 2,
+    },
+    {
+      pattern: /^(?:请|請)?(?:帮我|幫我)?给\s*(.+?)\s*(?:发|傳|传|回|回复|回覆)(?:个|則|则|一条|一則|一则)?(?:消息|訊息|信息|短信|whatsapp)?\s*(?::|：)?\s*(.+)$/u,
+      recipientGroup: 1,
+      messageGroup: 2,
+    },
+    {
+      pattern: /^(.+?)(?:に|へ)\s*(?:メッセージ|返信|連絡)(?:して|を送って)\s*(?::|：)?\s*(.+)$/u,
+      recipientGroup: 1,
+      messageGroup: 2,
+    },
+    {
+      pattern: /^(.+?)(?:한테|에게|께)\s*(?:메시지|답장|카톡|왓츠앱)?\s*(?:보내|써|전해|답장해)\s*(?::|：)?\s*(.+)$/u,
+      recipientGroup: 1,
+      messageGroup: 2,
+    },
+    {
+      pattern: /^(?:ส่ง|ตอบ|บอก|เขียน)(?:ข้อความ|ข้อความวอทส์แอป|แชต)?(?:ให้|หา)\s*(.+?)\s*(?:ว่า|:|：)\s*(.+)$/u,
+      recipientGroup: 1,
+      messageGroup: 2,
+    },
+  ];
+
+  for (const { pattern, recipientGroup, messageGroup } of localizedPatterns) {
+    const match = t.match(pattern);
+    if (!match) {
+      continue;
+    }
+
+    const recipient = match[recipientGroup] ?? "";
+    const message = match[messageGroup] ?? "";
+    if (!looksLikeTellMessageRecipient(recipient)) {
+      continue;
+    }
+
+    const parsed = buildParsedSendCommand(recipient, message);
+    if (parsed) {
+      return parsed;
+    }
+  }
+
   return null;
 }
 
@@ -750,6 +924,7 @@ function parseSendMessageCommandCandidate(t: string): ParsedSendMessageCommand |
     return buildParsedSendCommand(recipientFirst[1] ?? "", recipientFirst[2] ?? "");
   }
 
+  // "tell X that Y" / "tell X I'll be late" / "tell X to come" / "tell X about the meeting"
   const tellPattern = t.match(new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}tell\\s+(.+?)\\s+that\\s+(.+)$`, "i"));
   if (tellPattern && looksLikeTellMessageRecipient(tellPattern[1] ?? "")) {
     return buildParsedSendCommand(tellPattern[1] ?? "", tellPattern[2] ?? "");
@@ -758,6 +933,49 @@ function parseSendMessageCommandCandidate(t: string): ParsedSendMessageCommand |
   const tellColonPattern = t.match(new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}tell\\s+(.+?)\\s*:\\s*(.+)$`, "i"));
   if (tellColonPattern && looksLikeTellMessageRecipient(tellColonPattern[1] ?? "")) {
     return buildParsedSendCommand(tellColonPattern[1] ?? "", tellColonPattern[2] ?? "");
+  }
+
+  // "tell X I'll be late" / "tell X I'm coming" / "tell X it's done" / "tell X we need to talk"
+  // Also handles full forms: "tell X I will be late" / "tell X I am coming" / "tell X he is here"
+  const tellImplicit = t.match(new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}tell\\s+(.+?)\\s+((?:i['']?(?:m|ll|ve|d)|i\\s+(?:will|am|have|had|would|could|should|shall|might|need|want|got)|we(?:['']?(?:re|ll|ve|d))?|we\\s+(?:will|are|have|had|would|could|should|shall|need|want|got)|it['']?s|it\\s+is|it\\s+was|he['']?s|he\\s+(?:is|was|will|has|had|would|could|should|can)|she['']?s|she\\s+(?:is|was|will|has|had|would|could|should|can)|they['']?(?:re|ll|ve|d)|they\\s+(?:are|were|will|have|had|would|could|should|can)|there['']?s|there\\s+(?:is|are|was|were)|that['']?s|that\\s+(?:is|was)|the\\s|to\\s|about\\s|not\\s|don['']?t|do\\s+not|can['']?t|cannot|won['']?t|will\\s+not|isn['']?t|is\\s+not|aren['']?t|are\\s+not|wasn['']?t|was\\s+not|haven['']?t|have\\s+not|hasn['']?t|has\\s+not|couldn['']?t|could\\s+not|shouldn['']?t|should\\s+not|wouldn['']?t|would\\s+not|yes|no|ok|thanks|sorry|congrat|happy|good|great|nice|well\\s+done).+)$`, "i"));
+  if (tellImplicit && looksLikeTellMessageRecipient(tellImplicit[1] ?? "")) {
+    return buildParsedSendCommand(tellImplicit[1] ?? "", tellImplicit[2] ?? "");
+  }
+
+  // "inform X that Y" / "inform X about Y" / "inform X I'll be late"
+  const informPattern = t.match(new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}(?:inform|notify|convey\\s+to|let)\\s+(.+?)\\s+(?:that|about|regarding|:)\\s+(.+)$`, "i"));
+  if (informPattern && looksLikeTellMessageRecipient(informPattern[1] ?? "")) {
+    return buildParsedSendCommand(informPattern[1] ?? "", informPattern[2] ?? "");
+  }
+
+  // "let X know that Y" / "let X know I'm coming"
+  const letKnowPattern = t.match(new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}let\\s+(.+?)\\s+know\\s+(.+)$`, "i"));
+  if (letKnowPattern && looksLikeTellMessageRecipient(letKnowPattern[1] ?? "")) {
+    return buildParsedSendCommand(letKnowPattern[1] ?? "", letKnowPattern[2] ?? "");
+  }
+
+  // "ask X to Y" / "ask X about Y" / "ask X if Y"
+  const askPattern = t.match(new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}ask\\s+(.+?)\\s+(?:to|about|if|whether|regarding)\\s+(.+)$`, "i"));
+  if (askPattern && looksLikeTellMessageRecipient(askPattern[1] ?? "")) {
+    return buildParsedSendCommand(askPattern[1] ?? "", askPattern[2] ?? "");
+  }
+
+  // "message X saying Y" / "message X that Y"
+  const messageSayingPattern = t.match(new RegExp(`^${SEND_COMMAND_SOFT_PREFIX_SOURCE}(?:message|mesage|msg)\\s+(.+?)\\s+${SEND_SEPARATOR_SOURCE}\\s+(.+)$`, "i"));
+  if (messageSayingPattern && looksLikeTellMessageRecipient(messageSayingPattern[1] ?? "")) {
+    return buildParsedSendCommand(messageSayingPattern[1] ?? "", messageSayingPattern[2] ?? "");
+  }
+
+  // Hinglish implicit: "bata do X ko ki Y" / "bolo X ko Y" / "bol do X ko Y"
+  const hinglishTellPattern = t.match(/^(?:(?:please|pls|plz)\s+)?(?:bata|bola?|bol|keh|kah|batao|bolo|bolna|kehna|kahna|batana)\s*(?:do|de|dena|dijiye|na|o)?\s+(.+?)\s+(?:ko|k)\s+(?:ki|ke|that)?\s*(.+)$/i);
+  if (hinglishTellPattern && looksLikeTellMessageRecipient(hinglishTellPattern[1] ?? "")) {
+    return buildParsedSendCommand(hinglishTellPattern[1] ?? "", hinglishTellPattern[2] ?? "");
+  }
+
+  // Hinglish: "X ko bata do ki Y" / "X ko bol do Y"
+  const hinglishRecipientTellPattern = t.match(/^(?:(?:please|pls|plz)\s+)?(.+?)\s+(?:ko|k)\s+(?:bata|bola?|bol|keh|kah|batao|bolo|bolna|kehna|kahna|batana)\s*(?:do|de|dena|dijiye|na|o)?\s+(?:ki|ke|that)?\s*(.+)$/i);
+  if (hinglishRecipientTellPattern && looksLikeTellMessageRecipient(hinglishRecipientTellPattern[1] ?? "")) {
+    return buildParsedSendCommand(hinglishRecipientTellPattern[1] ?? "", hinglishRecipientTellPattern[2] ?? "");
   }
 
   const templateSendPattern = t.match(
@@ -797,7 +1015,7 @@ function parseSendMessageCommandCandidate(t: string): ParsedSendMessageCommand |
   // Hindi/Hinglish send patterns:
   // "X likh do maa ko" / "X likh ke bhej do maa ko" / "X bhej do maa ko"
   // "maa ko X likh do" / "maa ko X bhej do"
-  const hindiSendVerbs = "(?:likh(?:\\s*(?:ke|kar))?\\s*(?:bhej|send)?\\s*(?:do|de|dena|dijiye|kar(?:o|na)?)|bhej(?:\\s*(?:do|de|dena|dijiye|na))|send\\s*(?:(?:kar|kr)(?:\\s*(?:do|de|dena|dijiye|na))?|do|de))";
+  const hindiSendVerbs = "(?:likh(?:\\s*(?:ke|kar))?\\s*(?:bhej|send)?\\s*(?:do|de|dena|dijiye|kar(?:o|na)?|kr(?:o|na)?|kro|o)|bhej(?:\\s*(?:do|de|dena|dijiye|na|o))|send\\s*(?:(?:kar|kr)(?:\\s*(?:do|de|dena|dijiye|na))?|kro|karo|do|de|dena|dijiye|na))";
 
   // Pattern: "ek badiya sa good afternoon message likh do maa ko"
   // Matches: <message description> <hindi send verb> <recipient> ko
@@ -806,6 +1024,26 @@ function parseSendMessageCommandCandidate(t: string): ParsedSendMessageCommand |
   );
   if (hindiMessageFirst) {
     return buildParsedSendCommand(hindiMessageFirst[2] ?? "", hindiMessageFirst[1] ?? "");
+  }
+
+  const hindiMessageFirstWithTrailingContext = t.match(
+    new RegExp(
+      `^(?:(?:kripiya|kripya|please|pls|plz)(?:\\s+(?:kr(?:\\s*ke)?|kar(?:\\s*ke)?|karke|krke))?\\s+)?(?:(?:aap|app|ap|tum|tu)\\s+)?(.+?)\\s+${hindiSendVerbs}\\s+(.+?)\\s+(?:ko|k)(?:\\s+(.+))?$`,
+      "i",
+    ),
+  );
+  if (
+    hindiMessageFirstWithTrailingContext
+    && looksLikeTellMessageRecipient(hindiMessageFirstWithTrailingContext[2] ?? "")
+  ) {
+    const messagePrefix = String(hindiMessageFirstWithTrailingContext[1] ?? "")
+      .replace(/^(?:(?:aap|app|ap|tum|tu)\s+)+/i, "")
+      .trim();
+    const trailingContext = String(hindiMessageFirstWithTrailingContext[3] ?? "").trim();
+    const message = [messagePrefix, trailingContext].filter(Boolean).join(" ").trim();
+    if (message) {
+      return buildParsedSendCommand(hindiMessageFirstWithTrailingContext[2] ?? "", message);
+    }
   }
 
   const hindiEmbeddedRecipientWithTrailingMessage = t.match(
@@ -830,7 +1068,7 @@ function parseSendMessageCommandCandidate(t: string): ParsedSendMessageCommand |
         continue;
       }
 
-      if ((messageTokens[messageTokens.length - 1] ?? "").toLowerCase() === "aap") {
+      if (isRecipientSpeakerAddressToken(messageTokens[messageTokens.length - 1] ?? "")) {
         messageTokens = messageTokens.slice(0, -1);
       }
 
@@ -848,13 +1086,25 @@ function parseSendMessageCommandCandidate(t: string): ParsedSendMessageCommand |
   // Pattern: "maa ko ek good afternoon message likh do"
   // Matches: <recipient> ko <message description> <hindi send verb>
   const hindiRecipientFirst = t.match(
-    new RegExp(`^(.+?)\\s+(?:ko|k)\\s+(.+?)\\s+${hindiSendVerbs}$`, "i"),
+    new RegExp(
+      `^(?:(?:kripiya|kripya|please|pls|plz)(?:\\s+(?:kr(?:\\s*ke)?|kar(?:\\s*ke)?|karke|krke))?\\s+)?(?:(?:aap|app|ap|tum|tu)\\s+)?(.+?)\\s+(?:ko|k)\\s+(.+?)\\s+${hindiSendVerbs}(?:\\s+(.+))?$`,
+      "i",
+    ),
   );
   if (
     hindiRecipientFirst
     && looksLikeTellMessageRecipient(hindiRecipientFirst[1] ?? "")
   ) {
-    return buildParsedSendCommand(hindiRecipientFirst[1] ?? "", hindiRecipientFirst[2] ?? "");
+    const message = [
+      String(hindiRecipientFirst[2] ?? "").trim(),
+      String(hindiRecipientFirst[3] ?? "").trim(),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+    if (message) {
+      return buildParsedSendCommand(hindiRecipientFirst[1] ?? "", message);
+    }
   }
 
   // Pattern: "maa ko bhej do good morning" / "maa ko send karo hi"
@@ -868,12 +1118,13 @@ function parseSendMessageCommandCandidate(t: string): ParsedSendMessageCommand |
     return buildParsedSendCommand(hindiRecipientVerb[1] ?? "", hindiRecipientVerb[2] ?? "");
   }
 
-  return null;
+  return parseLocalizedSendMessageCommandCandidate(t);
 }
 
 function repairSendMessageCommandCandidate(value: string) {
   return String(value ?? "")
     .replace(/\bt\s*=\s*(in|to|on)\b/gi, "$1")
+    .replace(/\bmess+age\b/gi, "message")
     .replace(/\bmsgg?\b/gi, "msg")
     .replace(/\s+/g, " ")
     .trim();

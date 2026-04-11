@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import {
+  buildFastDeterministicAgentReplyForRoute,
   buildInboundAgentTimeoutResultForRouteFallback,
   routeInboundAgentMessageResult,
 } from "@/lib/clawcloud-agent";
@@ -12,6 +13,10 @@ import {
   clearLatestAppAccessConsent,
   verifyAppAccessConsentToken,
 } from "@/lib/clawcloud-app-access-consent";
+import {
+  getClawCloudEphemeralConversationTurns,
+  rememberClawCloudEphemeralConversationExchange,
+} from "@/lib/clawcloud-ephemeral-conversation";
 import {
   getClawCloudErrorMessage,
   isValidSharedSecret,
@@ -29,6 +34,7 @@ async function proxyAgentMessageToRailway(input: {
   skipAppAccessConsent?: boolean;
   skipConversationStyleChoice?: boolean;
   conversationStyle?: import("@/lib/clawcloud-conversation-style").ClawCloudConversationStyle;
+  conversationContext?: import("@/lib/clawcloud-ephemeral-conversation").ClawCloudEphemeralConversationTurn[];
 }) {
   const agentServerUrl =
     env.AGENT_SERVER_URL?.trim().replace(/\/+$/, "")
@@ -90,7 +96,15 @@ async function resolveAgentMessageResult(input: {
   skipConversationStyleChoice?: boolean;
   conversationStyle?: import("@/lib/clawcloud-conversation-style").ClawCloudConversationStyle;
 }) {
-  const proxied = await proxyAgentMessageToRailway(input);
+  const deterministicReply = buildFastDeterministicAgentReplyForRoute(input.message);
+  if (deterministicReply) {
+    return deterministicReply;
+  }
+
+  const proxied = await proxyAgentMessageToRailway({
+    ...input,
+    conversationContext: getClawCloudEphemeralConversationTurns(input.userId, 16),
+  });
   if (proxied.kind === "success") {
     return proxied.result;
   }
@@ -104,6 +118,22 @@ async function resolveAgentMessageResult(input: {
   }
 
   return buildInboundAgentTimeoutResultForRouteFallback(input.message);
+}
+
+function rememberAgentConversationExchange(input: {
+  userId: string;
+  message: string;
+  result: {
+    response?: string | null;
+  };
+  source: string;
+}) {
+  rememberClawCloudEphemeralConversationExchange(
+    input.userId,
+    input.message,
+    input.result.response ?? null,
+    input.source,
+  );
 }
 
 async function recordAgentMessageObservability(input: {
@@ -227,6 +257,12 @@ export async function POST(request: NextRequest) {
           message: verified.originalMessage,
           skipAppAccessConsent: true,
         });
+        rememberAgentConversationExchange({
+          userId: verified.userId,
+          message: verified.originalMessage,
+          result,
+          source: "api_agent_consent_resolution",
+        });
         recordAgentMessageObservabilityLater({
           userId: verified.userId,
           message: verified.originalMessage,
@@ -258,6 +294,12 @@ export async function POST(request: NextRequest) {
       const result = await resolveAgentMessageResult({
         userId: body.userId,
         message: body.message,
+      });
+      rememberAgentConversationExchange({
+        userId: body.userId,
+        message: body.message,
+        result,
+        source: "api_agent_message_internal",
       });
       recordAgentMessageObservabilityLater({
         userId: body.userId,
@@ -357,6 +399,12 @@ export async function POST(request: NextRequest) {
         message: verified.originalMessage,
         skipAppAccessConsent: true,
       });
+      rememberAgentConversationExchange({
+        userId: auth.user.id,
+        message: verified.originalMessage,
+        result,
+        source: "api_agent_consent_resolution",
+      });
       recordAgentMessageObservabilityLater({
         userId: auth.user.id,
         message: verified.originalMessage,
@@ -393,6 +441,12 @@ export async function POST(request: NextRequest) {
     const result = await resolveAgentMessageResult({
       userId,
       message: body.message,
+    });
+    rememberAgentConversationExchange({
+      userId,
+      message: body.message,
+      result,
+      source: "api_agent_message_public",
     });
     recordAgentMessageObservabilityLater({
       userId,

@@ -18,6 +18,7 @@ type LocalWhatsAppResolveResult = {
   score?: number;
   matchBasis?: "exact" | "prefix" | "word" | "fuzzy" | null;
   source?: "live" | "fuzzy";
+  matchedAlias?: string | null;
 };
 
 type LocalWhatsAppAmbiguousMatch = {
@@ -28,6 +29,7 @@ type LocalWhatsAppAmbiguousMatch = {
   score?: number;
   matchBasis?: "exact" | "prefix" | "word" | "fuzzy" | null;
   source?: "live" | "fuzzy";
+  matchedAlias?: string | null;
 };
 
 export type ClawCloudWhatsAppResolveResult =
@@ -666,6 +668,7 @@ export async function resolveClawCloudWhatsAppContact(userId: string, contactNam
     score?: number;
     matchBasis?: "exact" | "prefix" | "word" | "fuzzy" | null;
     source?: "live" | "fuzzy";
+    matchedAlias?: string | null;
     matches?: Array<{
       name?: string;
       phone?: string | null;
@@ -674,6 +677,7 @@ export async function resolveClawCloudWhatsAppContact(userId: string, contactNam
       score?: number;
       matchBasis?: "exact" | "prefix" | "word" | "fuzzy" | null;
       source?: "live" | "fuzzy";
+      matchedAlias?: string | null;
     }>;
   };
 
@@ -700,6 +704,7 @@ export async function resolveClawCloudWhatsAppContact(userId: string, contactNam
               ? match.matchBasis
               : null,
           source: match.source === "fuzzy" ? "fuzzy" : "live",
+          matchedAlias: typeof match.matchedAlias === "string" ? match.matchedAlias : null,
         })),
     };
   }
@@ -724,6 +729,7 @@ export async function resolveClawCloudWhatsAppContact(userId: string, contactNam
           ? json.matchBasis
           : null,
       source: json.source === "fuzzy" ? "fuzzy" : "live",
+      matchedAlias: typeof json.matchedAlias === "string" ? json.matchedAlias : null,
     },
   };
 }

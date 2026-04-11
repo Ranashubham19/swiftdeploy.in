@@ -122,7 +122,8 @@ const KNOWLEDGE_PATTERNS: RegExp[] = [
   // Entertainment / fiction — story requests about movies, shows, books, games
   /\b(story|plot|storyline|synopsis)\b.*\b(avenger|marvel|dc|star\s*wars?|harry\s*potter|naruto|one\s*piece|game\s*of\s*thrones|lord\s*of\s*the\s*rings|infinity\s*war|end\s*game|endgame|civil\s*war|anime|movie|film|series|drama|kdrama)\b/i,
   /\b(avenger|marvel|dc|star\s*wars?|harry\s*potter|naruto|one\s*piece|game\s*of\s*thrones|lord\s*of\s*the\s*rings|infinity\s*war|end\s*game|endgame|civil\s*war)\b.*\b(story|plot|storyline|synopsis)\b/i,
-  // Product knowledge — release dates, features, specs are stable facts, not live data
+  // Older product knowledge can be stable, but current-generation device
+  // release/spec questions are handled separately as freshness-sensitive.
   /\b(when\s+(?:was|did|is)\b.{0,40}\b(?:released?|launched?|announced?))\b/i,
   /\b(features?\s+(?:of|in)\b.{0,30}\b(?:galaxy|iphone|pixel|oneplus|samsung|macbook|ipad|airpods))\b/i,
   /\b(galaxy\s+s\d+|iphone\s+\d+|pixel\s+\d+)\b.*\b(features?|specs?|specifications?|review|camera|battery|display|screen|processor|chip|ram|storage)\b/i,
@@ -188,6 +189,10 @@ const TRUSTED_LIVE_DOMAINS = [
   "ft.com",
   "wsj.com",
   "yahoo.com",
+  "economictimes.com",
+  "hindustantimes.com",
+  "business-standard.com",
+  "livemint.com",
   "intel.com",
   "apple.com",
   "openai.com",
@@ -219,13 +224,17 @@ const OFFICIAL_LIVE_DOMAINS = [
   "blog.google",
   "deepmind.google",
   "apple.com",
+  "samsung.com",
+  "news.samsung.com",
   "nvidia.com",
   "meta.com",
   "ai.meta.com",
+  "store.google.com",
   "mistral.ai",
   "docs.mistral.ai",
   "deepseek.com",
   "api-docs.deepseek.com",
+  "oneplus.com",
 ];
 const TIER_ONE_REPORT_DOMAINS = [
   "reuters.com",
@@ -475,6 +484,25 @@ function matchesAny(text: string, patterns: RegExp[]) {
 
 function normalizeQuestion(question: string) {
   return normalizeRegionalQuestion(question).toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function looksLikeStableCodingAlgorithmQuestion(normalizedQuestion: string) {
+  if (!normalizedQuestion) {
+    return false;
+  }
+
+  return (
+    /\b(algorithm|data structure|dsa|code|program|implementation|typescript|javascript|python|c\+\+|java|time complexity|space complexity|provide code|write code|explain your approach)\b/i.test(normalizedQuestion)
+    && /\b(graph|tree|array|string|matrix|grid|edge|node|queries?|operations?|shortest path|dynamic connectivity|rollback dsu|disjoint set|union[- ]find|segment tree|fenwick tree|binary indexed tree)\b/i.test(normalizedQuestion)
+  ) || (
+    /\b(offline\s+dynamic\s+connectivity|dynamic\s+connectivity|rollback\s+dsu|segment\s+tree\s+over\s+time)\b/i.test(normalizedQuestion)
+  ) || (
+    /\b(path compression|compress(?:ing)? paths?)\b/i.test(normalizedQuestion)
+    && /\b(rollback|dsu|disjoint set|union[- ]find|dynamic connectivity|segment tree over time)\b/i.test(normalizedQuestion)
+  ) || (
+    /\b(add\s+edge|remove\s+edge|query\s+whether|connected\s+at\s+that\s+time)\b/i.test(normalizedQuestion)
+    && /\b(graph|edge|connected|connectivity|dsu|union[- ]find)\b/i.test(normalizedQuestion)
+  );
 }
 
 function looksLikeAdvancedStableKnowledgeQuestion(normalizedQuestion: string) {
@@ -1130,6 +1158,7 @@ function isVolatileQuestion(normalizedQuestion: string) {
     || detectWorldBankCountryMetricQuestion(normalizedQuestion) !== null
     || detectWorldBankCountryMetricComparisonQuestion(normalizedQuestion) !== null
     || looksLikeBroadFreshnessSensitiveQuestion(normalizedQuestion)
+    || looksLikeFreshConsumerDeviceQuestion(normalizedQuestion)
     || (VOLATILE_RANKING_CUE.test(normalizedQuestion) && VOLATILE_ENTITY_CUE.test(normalizedQuestion))
   );
 }
@@ -1137,6 +1166,143 @@ function isVolatileQuestion(normalizedQuestion: string) {
 function isStableKnowledgeQuestion(normalizedQuestion: string) {
   return looksLikeAdvancedStableKnowledgeQuestion(normalizedQuestion)
     || matchesAny(normalizedQuestion, KNOWLEDGE_PATTERNS);
+}
+
+function looksLikePastTenseProductFactQuestion(question: string): boolean {
+  return /\bwhen\s+(?:was|did|were)\b.+\b(?:released?|launched?|announced?|unveiled)\b/i.test(question)
+    || /\b(?:was|were|did)\b.+\b(?:released?|launched?|announced?|unveiled)\b/i.test(question)
+    || /\b(?:released?|launched?|announced?)\s+(?:in|on|back|last|earlier)\b/i.test(question);
+}
+
+function looksLikeFreshConsumerDeviceQuestion(normalizedQuestion: string) {
+  if (!normalizedQuestion || hasPastYearScope(normalizedQuestion)) {
+    return false;
+  }
+
+  // Older release facts can be stable, but current-generation device prompts
+  // without an explicit historical year still need a fresh source check.
+  if (
+    looksLikePastTenseProductFactQuestion(normalizedQuestion)
+    && !/\b(?:s\d{2}(?:\s*(?:ultra|pro|plus|mini|lite))?|galaxy\s*s\d+)\b/i.test(normalizedQuestion)
+  ) {
+    return false;
+  }
+
+  const explicitYear = extractExplicitQuestionYear(normalizedQuestion);
+  if (explicitYear !== null && explicitYear < currentUtcYear()) {
+    return false;
+  }
+
+  const hasDeviceSignal =
+    /\b(phone|mobile|smartphone|handset|tablet|laptop|notebook|macbook|ipad|watch|smartwatch|airpods|headphones|earbuds|tv)\b/i.test(normalizedQuestion)
+    || /\b(samsung|galaxy|iphone|pixel|oneplus|xiaomi|poco|realme|vivo|oppo|huawei|motorola|nokia)\b/i.test(normalizedQuestion)
+    || /\b(s\d{2}(?:\s*(?:ultra|pro|plus|mini|lite))?|fold|flip|galaxy\s*s\d+|iphone\s*\d+|pixel\s*\d+|oneplus\s*\d+)\b/i.test(normalizedQuestion);
+
+  if (!hasDeviceSignal) {
+    return false;
+  }
+
+  const hasFreshFactCue =
+    /\b(released?|realeased|realesed|launch(?:ed|ing)?|announced?|unveiled|availability|available|features?|specs?|specifications?|price|cost|camera|battery|display|screen|processor|chip|ram|storage)\b/i.test(normalizedQuestion);
+
+  return hasFreshFactCue;
+}
+
+function capitalizeConsumerDeviceVariant(value: string) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized === "pro max") {
+    return "Pro Max";
+  }
+
+  return normalized
+    .split(/\s+/)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+type ConsumerDeviceSearchProfile = {
+  canonicalModel: string;
+  brand: "samsung" | "apple" | "google" | "oneplus" | "generic";
+};
+
+function detectConsumerDeviceSearchProfile(question: string): ConsumerDeviceSearchProfile | null {
+  const normalizedQuestion = normalizeQuestion(question);
+  if (!looksLikeFreshConsumerDeviceQuestion(normalizedQuestion)) {
+    return null;
+  }
+
+  const samsungMatch = normalizedQuestion.match(/\b(?:galaxy\s*)?s(\d{2})(?:\s*(ultra|pro|plus|mini|lite))?\b/i);
+  if (samsungMatch?.[1]) {
+    const suffix = capitalizeConsumerDeviceVariant(samsungMatch[2] ?? "");
+    return {
+      canonicalModel: `Samsung Galaxy S${samsungMatch[1]}${suffix ? ` ${suffix}` : ""}`,
+      brand: "samsung",
+    };
+  }
+
+  const iphoneMatch = normalizedQuestion.match(/\biphone\s*(\d{1,2})(?:\s*(pro\s*max|pro|plus|air|e))?\b/i);
+  if (iphoneMatch?.[1]) {
+    const suffix = capitalizeConsumerDeviceVariant(iphoneMatch[2] ?? "");
+    return {
+      canonicalModel: `Apple iPhone ${iphoneMatch[1]}${suffix ? ` ${suffix}` : ""}`,
+      brand: "apple",
+    };
+  }
+
+  const pixelMatch = normalizedQuestion.match(/\bpixel\s*(\d{1,2})(?:\s*(pro|a|xl|fold))?\b/i);
+  if (pixelMatch?.[1]) {
+    const suffix = capitalizeConsumerDeviceVariant(pixelMatch[2] ?? "");
+    return {
+      canonicalModel: `Google Pixel ${pixelMatch[1]}${suffix ? ` ${suffix}` : ""}`,
+      brand: "google",
+    };
+  }
+
+  const onePlusMatch = normalizedQuestion.match(/\boneplus\s*(\d{1,2})(?:\s*(pro|r|t))?\b/i);
+  if (onePlusMatch?.[1]) {
+    const suffix = capitalizeConsumerDeviceVariant(onePlusMatch[2] ?? "");
+    return {
+      canonicalModel: `OnePlus ${onePlusMatch[1]}${suffix ? ` ${suffix}` : ""}`,
+      brand: "oneplus",
+    };
+  }
+
+  if (/\bsamsung|galaxy\b/i.test(normalizedQuestion)) {
+    return {
+      canonicalModel: normalizeRegionalQuestion(question).trim(),
+      brand: "samsung",
+    };
+  }
+
+  if (/\biphone|apple\b/i.test(normalizedQuestion)) {
+    return {
+      canonicalModel: normalizeRegionalQuestion(question).trim(),
+      brand: "apple",
+    };
+  }
+
+  if (/\bpixel|google\b/i.test(normalizedQuestion)) {
+    return {
+      canonicalModel: normalizeRegionalQuestion(question).trim(),
+      brand: "google",
+    };
+  }
+
+  if (/\boneplus\b/i.test(normalizedQuestion)) {
+    return {
+      canonicalModel: normalizeRegionalQuestion(question).trim(),
+      brand: "oneplus",
+    };
+  }
+
+  return {
+    canonicalModel: normalizeRegionalQuestion(question).trim(),
+    brand: "generic",
+  };
 }
 
 function isFreshDataQuestionThatShouldBypassKnowledgeGate(normalizedQuestion: string) {
@@ -1156,6 +1322,7 @@ function isFreshDataQuestionThatShouldBypassKnowledgeGate(normalizedQuestion: st
     || looksLikeBitcoinPriceQuestion(normalizedQuestion)
     || looksLikeCurrentCeoQuestion(normalizedQuestion)
     || looksLikeLatestIphoneQuestion(normalizedQuestion)
+    || looksLikeFreshConsumerDeviceQuestion(normalizedQuestion)
     || looksLikeDirectWeatherQuestion(normalizedQuestion)
   );
 }
@@ -1181,6 +1348,10 @@ function looksLikeBroadFreshnessSensitiveQuestion(normalizedQuestion: string) {
 export function classifyClawCloudLiveSearchTier(question: string): ClawCloudLiveSearchTier {
   const normalizedQuestion = normalizeQuestion(question);
   if (!normalizedQuestion) return "knowledge";
+
+  if (looksLikeStableCodingAlgorithmQuestion(normalizedQuestion)) {
+    return "knowledge";
+  }
 
   if (looksLikeAdvancedStableKnowledgeQuestion(normalizedQuestion)) {
     return "knowledge";
@@ -1263,6 +1434,289 @@ export function buildFreshDataRequiredReply(question: string): string {
   }
 
   return buildStrictCurrentTimelineReply(question, route, null);
+}
+
+type GeminiGroundingWebChunk = {
+  web?: {
+    title?: string;
+    uri?: string;
+  };
+};
+
+type GeminiGroundingResponse = {
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{
+        text?: string;
+      }>;
+    };
+    groundingMetadata?: {
+      webSearchQueries?: string[];
+      groundingChunks?: GeminiGroundingWebChunk[];
+    };
+  }>;
+};
+
+function isGeminiGroundingConfigured() {
+  return Boolean(env.GOOGLE_GEMINI_API_KEY?.trim());
+}
+
+function looksLikeDomainLabel(value: string) {
+  return /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(value.trim());
+}
+
+function normalizeDomainLabel(value: string) {
+  return value.trim().toLowerCase().replace(/^www\./, "");
+}
+
+function safeHostnameFromUrl(value: string) {
+  try {
+    return normalizeDomainLabel(new URL(value).hostname);
+  } catch {
+    return "";
+  }
+}
+
+function resolveGeminiGroundingDomain(title: string | null | undefined, uri: string | null | undefined) {
+  const trimmedTitle = String(title ?? "").trim();
+  if (looksLikeDomainLabel(trimmedTitle)) {
+    return normalizeDomainLabel(trimmedTitle);
+  }
+
+  const hostname = safeHostnameFromUrl(String(uri ?? ""));
+  if (hostname && hostname !== "vertexaisearch.cloud.google.com") {
+    return hostname;
+  }
+
+  if (trimmedTitle) {
+    return normalizeDomainLabel(trimmedTitle.replace(/\s+/g, " "));
+  }
+
+  return hostname;
+}
+
+function inferGeminiGroundingEvidenceKind(domain: string): ClawCloudEvidenceItem["kind"] {
+  if (!domain) {
+    return "search_result";
+  }
+  if (isOfficialLiveDomain(domain)) {
+    return "official_page";
+  }
+  if (isTierOneReportDomain(domain) || isTrustedLiveDomain(domain)) {
+    return "report";
+  }
+  return "search_result";
+}
+
+function extractGeminiGroundedAnswerText(payload: GeminiGroundingResponse) {
+  return (payload.candidates?.[0]?.content?.parts ?? [])
+    .map((part) => part.text?.trim() ?? "")
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+}
+
+type ClawCloudLifecycleFocus = "launch" | "commission" | "release" | "announce" | null;
+
+function detectClawCloudLifecycleFocus(question: string): ClawCloudLifecycleFocus {
+  const normalized = normalizeQuestion(question);
+  if (/\b(launch(?:ed|ing)?|launched)\b/i.test(normalized)) {
+    return "launch";
+  }
+  if (/\b(commission(?:ed|ing)?|induct(?:ed|ion|ing)?)\b/i.test(normalized)) {
+    return "commission";
+  }
+  if (/\b(released?|release date|availability)\b/i.test(normalized)) {
+    return "release";
+  }
+  if (/\b(announced?|announcement|unveiled)\b/i.test(normalized)) {
+    return "announce";
+  }
+  return null;
+}
+
+function answerMentionsLifecycle(answer: string, focus: ClawCloudLifecycleFocus) {
+  if (!focus) {
+    return false;
+  }
+
+  switch (focus) {
+    case "launch":
+      return /\blaunch(?:ed|ing)?\b/i.test(answer);
+    case "commission":
+      return /\bcommission(?:ed|ing)?\b/i.test(answer) || /\binduct(?:ed|ion|ing)?\b/i.test(answer);
+    case "release":
+      return /\breleased?\b/i.test(answer) || /\bavailability\b/i.test(answer);
+    case "announce":
+      return /\bannounced?\b/i.test(answer) || /\bunveiled?\b/i.test(answer);
+    default:
+      return false;
+  }
+}
+
+function answerMentionsDifferentLifecycle(answer: string, focus: ClawCloudLifecycleFocus) {
+  if (!focus) {
+    return false;
+  }
+
+  const lifecycleChecks: Array<{ focus: Exclude<ClawCloudLifecycleFocus, null>; pattern: RegExp }> = [
+    { focus: "launch", pattern: /\blaunch(?:ed|ing)?\b/i },
+    { focus: "commission", pattern: /\bcommission(?:ed|ing)?\b/i },
+    { focus: "commission", pattern: /\binduct(?:ed|ion|ing)?\b/i },
+    { focus: "release", pattern: /\breleased?\b/i },
+    { focus: "release", pattern: /\bavailability\b/i },
+    { focus: "announce", pattern: /\bannounced?\b/i },
+    { focus: "announce", pattern: /\bunveiled?\b/i },
+  ];
+
+  return lifecycleChecks.some((entry) => entry.focus !== focus && entry.pattern.test(answer));
+}
+
+function buildGeminiGroundedLivePrompt(question: string, route: ClawCloudLiveSearchRoute) {
+  const lifecycleFocus = detectClawCloudLifecycleFocus(question);
+  const lifecycleInstruction =
+    lifecycleFocus === "launch"
+      ? "If the user asks about launched, answer the launch event specifically. Do not swap it with commissioned, inducted, or deployed."
+      : lifecycleFocus === "commission"
+        ? "If the user asks about commissioned or inducted, answer the commissioning/induction event specifically. Do not swap it with launch."
+        : lifecycleFocus === "release"
+          ? "If the user asks about released or availability, answer the release/availability event specifically. Do not swap it with announcement."
+          : lifecycleFocus === "announce"
+            ? "If the user asks about announced or unveiled, answer the announcement event specifically. Do not swap it with release or launch."
+            : "";
+
+  return [
+    "Answer the user's question directly using grounded Google Search results.",
+    "For freshness-sensitive questions, do not guess.",
+    "Name the exact latest/current item only if the grounded evidence supports it.",
+    "State exact dates or years when available.",
+    "If the topic can be confused with a nearby concept, distinguish it explicitly.",
+    lifecycleInstruction,
+    route.tier === "realtime"
+      ? "Prefer the newest confirmed update and keep the answer tight."
+      : "Keep the answer concise, factual, and current.",
+    `Question: ${question.trim()}`,
+  ].filter(Boolean).join("\n");
+}
+
+async function fetchGeminiGroundedLiveAnswerBundle(
+  question: string,
+  route: ClawCloudLiveSearchRoute,
+): Promise<ClawCloudAnswerBundle | null> {
+  const apiKey = env.GOOGLE_GEMINI_API_KEY?.trim() ?? "";
+  const model = env.GOOGLE_GEMINI_LIVE_MODEL?.trim() || "models/gemini-2.5-flash";
+  if (!route.requiresWebSearch || !apiKey) {
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), route.tier === "realtime" ? 10_000 : 14_000);
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                text: buildGeminiGroundedLivePrompt(question, route),
+              },
+            ],
+          },
+        ],
+        tools: [{ google_search: {} }],
+        generationConfig: {
+          temperature: 0.1,
+        },
+      }),
+      signal: controller.signal,
+    },
+  )
+    .catch(() => null)
+    .finally(() => clearTimeout(timer));
+
+  if (!response?.ok) {
+    return null;
+  }
+
+  const payload = await response.json().catch(() => null) as GeminiGroundingResponse | null;
+  if (!payload) {
+    return null;
+  }
+
+  const answer = extractGeminiGroundedAnswerText(payload);
+  if (!answer) {
+    return null;
+  }
+
+  const lifecycleFocus = detectClawCloudLifecycleFocus(question);
+  if (
+    lifecycleFocus
+    && !answerMentionsLifecycle(answer, lifecycleFocus)
+    && answerMentionsDifferentLifecycle(answer, lifecycleFocus)
+  ) {
+    return null;
+  }
+
+  const groundingMetadata = payload.candidates?.[0]?.groundingMetadata;
+  const evidence = (groundingMetadata?.groundingChunks ?? [])
+    .map((chunk) => {
+      const title = chunk.web?.title?.trim() || "";
+      const uri = chunk.web?.uri?.trim() || "";
+      const domain = resolveGeminiGroundingDomain(title, uri);
+      return {
+        title: title || domain || "Google Search source",
+        domain,
+        kind: inferGeminiGroundingEvidenceKind(domain),
+        url: uri || null,
+        snippet: null,
+        observedAt: new Date().toISOString(),
+      } satisfies ClawCloudEvidenceItem;
+    })
+    .filter((item) => item.domain || item.url)
+    .filter((item, index, all) =>
+      all.findIndex((candidate) =>
+        candidate.url === item.url
+        && candidate.domain === item.domain
+      ) === index,
+    )
+    .slice(0, 6);
+
+  if (!evidence.length) {
+    return null;
+  }
+
+  const bundle = buildClawCloudLiveAnswerBundle({
+    question,
+    answer,
+    route,
+    evidence,
+    strategy: "search_synthesis",
+  });
+
+  if (
+    !hasSufficientClawCloudLiveEvidenceSupport({ question, route, evidence: bundle.evidence })
+    && !bundle.evidence.some((item) => isStrongLiveEvidenceItem(item))
+    && bundle.metadata.freshness_guarded !== true
+  ) {
+    return null;
+  }
+
+  const queryCount = groundingMetadata?.webSearchQueries?.length ?? 0;
+  return {
+    ...bundle,
+    metadata: {
+      ...bundle.metadata,
+      provider: "google_gemini_grounding",
+      provider_model: model,
+      grounding_query_count: queryCount,
+    },
+  };
 }
 
 async function fetchJsonWithTimeout<T>(url: string, timeoutMs = 7000): Promise<T | null> {
@@ -1361,7 +1815,7 @@ function requiresStrictCurrentTimeline(question: string, route: ClawCloudLiveSea
     && (
       /\b(phone|mobile|smartphone|handset|tablet|laptop|notebook|macbook|ipad|watch|smartwatch|airpods|headphones|earbuds|tv)\b/i.test(normalized)
       || /\b(samsung|galaxy|iphone|pixel|oneplus|xiaomi|poco|realme|vivo|oppo|huawei|motorola|nokia)\b/i.test(normalized)
-      || /\b(s\d{2}\s*ultra|s\d{2}\s*pro|s\d{2}\s*plus|s\d{2}\s*mini|s\d{2}\s*lite|fold|flip)\b/i.test(normalized)
+      || /\b(s\d{2}(?:\s*(?:ultra|pro|plus|mini|lite))?|fold|flip)\b/i.test(normalized)
     );
 
   if (looksLikeConsumerDeviceQuestion) {
@@ -1406,6 +1860,20 @@ function isFreshOfficialAnnualMetricAnswer(question: string, answer: string) {
   }
 
   return answerFramesLatestOfficialAnnualActual(answer);
+}
+
+export function looksLikeLatestMilestoneQuestion(question: string) {
+  const normalized = normalizeQuestion(question);
+  if (
+    /\b(price|rate|worth|value|weather|forecast|score|news|update|updates|status|situation|stock|share|crypto|exchange rate|aqi|war|conflict|ceasefire)\b/i.test(normalized)
+  ) {
+    return false;
+  }
+
+  return (
+    /\b(latest|newest|current|most recent)\b/i.test(normalized)
+    && /\b(launch(?:ed|ing)?|commissioned|inducted|released?|announced?|unveiled|appointed)\b/i.test(normalized)
+  );
 }
 
 function extractReferencedYears(text: string) {
@@ -1472,6 +1940,7 @@ function guardStrictCurrentTimelineAnswer(input: {
   }
 
   const answer = input.answer.trim();
+  const evidence = input.evidence ?? [];
   if (isFreshOfficialAnnualMetricAnswer(input.question, answer)) {
     return {
       answer,
@@ -1480,13 +1949,30 @@ function guardStrictCurrentTimelineAnswer(input: {
   }
 
   const answerYears = extractReferencedYears(answer);
+  const answerDates = extractReferencedDates(answer);
   const strictEvidence = assessStrictCurrentTimelineEvidenceSupport({
     question: input.question,
     route: input.route,
-    evidence: input.evidence ?? [],
+    evidence,
   });
+  const evidenceQuality = assessClawCloudLiveEvidenceQuality(evidence);
 
   const hasPastYearInAnswer = answerYears.some((year) => year < currentUtcYear());
+
+  if (
+    looksLikeLatestMilestoneQuestion(input.question)
+    && (answerDates.length >= 1 || answerYears.length >= 1)
+    && (
+      evidenceQuality.officialCount >= 1
+      || evidenceQuality.reportCount >= 1
+      || evidenceQuality.uniqueStrongDomains >= 1
+    )
+  ) {
+    return {
+      answer,
+      freshnessGuarded: false,
+    };
+  }
 
   if (
     !hasPastYearInAnswer
@@ -2070,16 +2556,203 @@ async function buildLatestIphoneAnswerFromSerp(question: string) {
   ].filter(Boolean).join("\n");
 }
 
+function normalizeSamsungOfficialDateToken(value: string) {
+  const cleaned = String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) {
+    return "";
+  }
+
+  const isoParsed = new Date(cleaned);
+  if (Number.isFinite(isoParsed.getTime())) {
+    return isoParsed.toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+  }
+
+  const normalizedForWords = cleaned.replace(/\./g, " ");
+
+  const monthAliases: Record<string, string> = {
+    jan: "January",
+    january: "January",
+    januar: "January",
+    feb: "February",
+    february: "February",
+    februar: "February",
+    mar: "March",
+    march: "March",
+    apr: "April",
+    april: "April",
+    may: "May",
+    jun: "June",
+    june: "June",
+    jul: "July",
+    july: "July",
+    aug: "August",
+    august: "August",
+    sep: "September",
+    sept: "September",
+    september: "September",
+    oct: "October",
+    october: "October",
+    nov: "November",
+    november: "November",
+    dec: "December",
+    december: "December",
+  };
+
+  const dayFirst = normalizedForWords.match(/\b(\d{1,2})\s+([A-Za-z]+)\s+(20\d{2})\b/);
+  if (dayFirst?.[1] && dayFirst[2] && dayFirst[3]) {
+    const month = monthAliases[dayFirst[2].toLowerCase()];
+    if (month) {
+      return `${month} ${Number.parseInt(dayFirst[1], 10)}, ${dayFirst[3]}`;
+    }
+  }
+
+  const monthFirst = normalizedForWords.match(/\b([A-Za-z]+)\s+(\d{1,2}),?\s+(20\d{2})\b/);
+  if (monthFirst?.[1] && monthFirst[2] && monthFirst[3]) {
+    const month = monthAliases[monthFirst[1].toLowerCase()];
+    if (month) {
+      return `${month} ${Number.parseInt(monthFirst[2], 10)}, ${monthFirst[3]}`;
+    }
+  }
+
+  return "";
+}
+
+function extractSamsungOfficialFeatureSignals(pageText: string) {
+  const text = String(pageText ?? "");
+  const features: string[] = [];
+  if (/Galaxy AI/i.test(text) && (/Now Brief/i.test(text) || /Now Nudge/i.test(text))) {
+    features.push("Galaxy AI features including Now Brief and Now Nudge");
+  } else if (/Galaxy AI/i.test(text)) {
+    features.push("Galaxy AI features across the S26 lineup");
+  }
+  if (/One UI 8\.5/i.test(text)) {
+    features.push("One UI 8.5");
+  }
+  if (/Nightography/i.test(text)) {
+    features.push("Nightography camera improvements");
+  }
+  if (/Snapdragon(?:®|\u00ae)?\s*8 Elite Gen 5/i.test(text)) {
+    features.push("Snapdragon 8 Elite Gen 5 for Galaxy on the S26 and S26+");
+  }
+  if (/Privacy Display/i.test(text)) {
+    features.push("A built-in Privacy Display on the S26 Ultra");
+  }
+  return features.slice(0, 5);
+}
+
+type SamsungNewsPost = {
+  date?: string;
+  link?: string;
+  title?: { rendered?: string };
+};
+
+async function buildSamsungGalaxyOfficialAnswer(question: string) {
+  const profile = detectConsumerDeviceSearchProfile(question);
+  if (!profile || profile.brand !== "samsung" || !/^Samsung Galaxy S\d+/i.test(profile.canonicalModel)) {
+    return "";
+  }
+
+  const modelName = profile.canonicalModel.replace(/^Samsung\s+/i, "").trim();
+  const productSlug = modelName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!productSlug) {
+    return "";
+  }
+
+  const productUrl = `https://www.samsung.com/us/smartphones/${productSlug}/`;
+  const productHtml = await fetchTextWithTimeout(productUrl, 8_000);
+  if (!productHtml) {
+    return "";
+  }
+
+  const productText = loadHtml(productHtml).root().text().replace(/\s+/g, " ");
+  const features = extractSamsungOfficialFeatureSignals(productText);
+  if (!features.length) {
+    return "";
+  }
+
+  const newsTerms = [
+    `${modelName} available worldwide`,
+    `${modelName} pre-orders`,
+    modelName,
+  ];
+  const normalizedPosts = (
+    await Promise.all(
+      newsTerms.map(async (term) => {
+        const newsApiUrl = `https://news.samsung.com/us/wp-json/wp/v2/posts?search=${encodeURIComponent(term)}&per_page=6&_fields=link,title,date`;
+        const posts = await fetchJsonWithTimeout<SamsungNewsPost[]>(newsApiUrl, 8_000);
+        return Array.isArray(posts) ? posts : [];
+      }),
+    )
+  )
+    .flat()
+    .filter((post) => post?.link && post?.title?.rendered)
+    .filter((post, index, all) =>
+      all.findIndex((candidate) => candidate.link === post.link) === index,
+    );
+  const availabilityPost = normalizedPosts.find((post) =>
+    /available worldwide/i.test(post.title?.rendered ?? ""),
+  ) ?? null;
+  const preorderPost = normalizedPosts.find((post) =>
+    /pre-?orders?/i.test(post.title?.rendered ?? ""),
+  ) ?? null;
+  const article = availabilityPost ?? preorderPost;
+
+  let announcedLine = "";
+  let availabilityLine = "";
+  if (article?.link) {
+    const articleHtml = await fetchTextWithTimeout(article.link, 8_000);
+    const articleText = articleHtml
+      ? loadHtml(articleHtml).root().text().replace(/\s+/g, " ")
+      : "";
+    const unpackedDateRaw =
+      articleHtml?.match(/\bSamsung Unpacked\s+(\d{1,2}\.?\s*[A-Za-z]+\s+20\d{2})\b/i)?.[1]
+      ?? articleText.match(/\bSamsung Unpacked\s+(\d{1,2}\.?\s*[A-Za-z]+\s+20\d{2})\b/i)?.[1]
+      ?? articleHtml?.match(/\bUnpacked\s+(\d{1,2}\.?\s*[A-Za-z]+\s+20\d{2})\b/i)?.[1]
+      ?? articleText.match(/\bUnpacked\s+(\d{1,2}\.?\s*[A-Za-z]+\s+20\d{2})\b/i)?.[1]
+      ?? "";
+    const unpackedDate = normalizeSamsungOfficialDateToken(unpackedDateRaw);
+    if (unpackedDate) {
+      announcedLine = `${modelName} was introduced at Samsung Unpacked on ${unpackedDate}.`;
+    }
+
+    const articleDate = normalizeSamsungOfficialDateToken(article.date ?? "");
+    if (articleDate && /available worldwide/i.test(article.title?.rendered ?? "")) {
+      availabilityLine = `Samsung's U.S. newsroom said the ${modelName} lineup was available worldwide on ${articleDate}.`;
+    } else if (articleDate && /pre-?orders?/i.test(article.title?.rendered ?? "")) {
+      availabilityLine = `Samsung's U.S. newsroom reported strong U.S. pre-orders for the ${modelName} lineup on ${articleDate}.`;
+    }
+  }
+
+  return [
+    `*${modelName} official release snapshot*`,
+    announcedLine || `${modelName} is part of Samsung's 2026 Galaxy S26 lineup.`,
+    availabilityLine,
+    "",
+    "*Key official features*",
+    ...features.map((feature) => `- ${feature}`),
+    "",
+    "Sources: samsung.com, news.samsung.com",
+  ].filter(Boolean).join("\n");
+}
+
 function buildLiveSearchQueries(question: string, route: ClawCloudLiveSearchRoute) {
   const context = inferClawCloudRegionContext(question);
   const q = normalizeRegionalQuestion(question).trim() || question.trim();
+  const originalQ = question.trim() || q;
   const lower = q.toLowerCase();
   const year = new Date().getFullYear();
   const explicitYear = extractExplicitQuestionYear(q);
   const historicalYear = explicitYear !== null && explicitYear < year ? explicitYear : null;
-  const queries = new Set<string>([q]);
+  const queries = new Set<string>([originalQ]);
   const countryMetric = detectWorldBankCountryMetricQuestion(q);
   const retailFuel = detectRetailFuelPriceQuestion(q);
+  const consumerDeviceProfile = detectConsumerDeviceSearchProfile(q);
   const localityScopedMetric =
     !countryMetric
     && context.requestedRegionMatchType === "locality"
@@ -2198,6 +2871,25 @@ function buildLiveSearchQueries(question: string, route: ClawCloudLiveSearchRout
         queries.add(`Apple latest iPhone model ${year}`);
         queries.add(`Apple newsroom iPhone ${year}`);
       }
+    } else if (consumerDeviceProfile) {
+      const canonicalModel = consumerDeviceProfile.canonicalModel;
+      const modelYear = historicalYear ?? year;
+      queries.add(`${canonicalModel} release date ${modelYear}`);
+      if (consumerDeviceProfile.brand === "samsung") {
+        queries.add(`site:news.samsung.com ${canonicalModel} ${modelYear}`);
+        queries.add(`site:samsung.com ${canonicalModel}`);
+      } else if (consumerDeviceProfile.brand === "apple") {
+        queries.add(`site:apple.com/newsroom ${canonicalModel} ${modelYear}`);
+        queries.add(`site:apple.com ${canonicalModel}`);
+      } else if (consumerDeviceProfile.brand === "google") {
+        queries.add(`site:blog.google ${canonicalModel} ${modelYear}`);
+        queries.add(`site:store.google.com ${canonicalModel}`);
+      } else if (consumerDeviceProfile.brand === "oneplus") {
+        queries.add(`site:oneplus.com ${canonicalModel}`);
+        queries.add(`site:community.oneplus.com ${canonicalModel} ${modelYear}`);
+      }
+      queries.add(`${canonicalModel} features ${modelYear}`);
+      queries.add(`${canonicalModel} specifications ${modelYear}`);
     } else if (/\bopenai|gpt|chatgpt\b/.test(lower)) {
       queries.add(`OpenAI latest updates ${year}`);
       queries.add(`OpenAI announcements ${year}`);
@@ -2215,7 +2907,14 @@ function buildLiveSearchQueries(question: string, route: ClawCloudLiveSearchRout
   if (!historicalYear && !looksLikeHistoricalWealthQuestion(q)) {
     queries.add(`${q} latest`);
   }
-  return [...queries].slice(0, strictCurrentTimeline ? 8 : 5);
+  const maxQueries = consumerDeviceProfile
+    ? (strictCurrentTimeline ? 8 : 7)
+    : (strictCurrentTimeline ? 8 : 5);
+  return [...queries].slice(0, maxQueries);
+}
+
+export function buildLiveSearchQueriesForTest(question: string) {
+  return buildLiveSearchQueries(question, classifyClawCloudLiveSearchRoute(question));
 }
 
 function looksLikeTierOneLiveSource(source: ResearchSource) {
@@ -2471,6 +3170,14 @@ function hasSufficientClawCloudLiveEvidenceSupport(input: {
   }
 
   if (requiresStrictCurrentTimeline(input.question, input.route)) {
+    if (looksLikeLatestMilestoneQuestion(input.question)) {
+      return (
+        summary.officialCount >= 1
+        || summary.reportCount >= 1
+        || summary.uniqueStrongDomains >= 1
+      );
+    }
+
     const strictSupport = assessStrictCurrentTimelineEvidenceSupport(input);
     return strictSupport.freshStrongCount >= 1;
   }
@@ -2548,6 +3255,21 @@ function focusTokensForQuestion(question: string) {
   }
   if (/\biphone|apple\b/.test(lower)) {
     return ["iphone", "apple", "model", "launch"];
+  }
+  const consumerDeviceProfile = detectConsumerDeviceSearchProfile(question);
+  if (consumerDeviceProfile) {
+    const modelTokens = consumerDeviceProfile.canonicalModel
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 2);
+    return [...new Set([
+      ...modelTokens,
+      "release",
+      "features",
+      "specifications",
+      "launch",
+    ])].slice(0, 8);
   }
   return [];
 }
@@ -3498,6 +4220,8 @@ async function synthesizeLiveAnswerFromSources(
       "Never use training-cutoff language, and never invent values missing from sources.",
       "If data is unavailable in the sources, say exactly what is missing and still provide the best verified facts.",
       "For time-sensitive answers, do not present an older source publication date as if it were today's date.",
+      "For stable or historical facts inside the answer, authoritative official older sources remain valid and should not be discarded just because they predate the current year.",
+      "If sources conflict, mention the uncertainty briefly instead of pretending one unsupported value is settled.",
       "Use the explicit current timestamp from the prompt for the freshness line in the final answer.",
       "For volatile rankings, roles, and net-worth questions, lead with the direct current answer in the first sentence.",
       "For ranking questions, use a numbered list.",
@@ -3649,10 +4373,16 @@ function inferEvidenceFromRenderedAnswer(answer: string): ClawCloudEvidenceItem[
         continue;
       }
       seen.add(key);
+      const inferredKind: ClawCloudEvidenceItem["kind"] =
+        isOfficialLiveDomain(domain)
+          ? "official_page"
+          : isTierOneReportDomain(domain) || isTrustedLiveDomain(domain)
+            ? "report"
+            : "inferred";
       evidence.push({
         title: rawSource,
         domain,
-        kind: "inferred",
+        kind: inferredKind,
         observedAt: new Date().toISOString(),
       });
     }
@@ -3795,6 +4525,11 @@ export async function fetchLiveAnswerBundle(question: string): Promise<ClawCloud
     return null;
   }
 
+  const geminiBundle = await fetchGeminiGroundedLiveAnswerBundle(question, route);
+  if (geminiBundle) {
+    return geminiBundle;
+  }
+
   const deterministicResolvers: Array<() => Promise<string>> = looksLikeRichestRankingQuestion(question)
     ? [
       () => buildRichestPeopleAndCitiesAnswer(question),
@@ -3808,12 +4543,11 @@ export async function fetchLiveAnswerBundle(question: string): Promise<ClawCloud
       () => fetchWorldBankCountryMetricComparisonAnswer(question),
       () => fetchWorldBankCountryMetricAnswer(question),
       () => fetchOfficialPricingAnswer(question),
+      () => buildSamsungGalaxyOfficialAnswer(question),
       () => buildRichestPeopleAndCitiesAnswer(question),
       () => buildRichestPeopleAnswerFromForbes(question),
       () => buildRichestCitiesAnswerFromHenley(question),
       () => buildBitcoinPriceAnswer(question),
-      () => buildCurrentCeoAnswerFromSerp(question),
-      () => buildLatestIphoneAnswerFromSerp(question),
     ];
 
   let deterministic = "";
@@ -3831,6 +4565,10 @@ export async function fetchLiveAnswerBundle(question: string): Promise<ClawCloud
       route,
       strategy: "deterministic",
     });
+  }
+
+  if (isGeminiGroundingConfigured()) {
+    return null;
   }
 
   const queries = buildLiveSearchQueries(question, route);
